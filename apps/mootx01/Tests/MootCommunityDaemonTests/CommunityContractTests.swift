@@ -16,6 +16,7 @@
 
 import Testing
 import Foundation
+import GeniusLocusKit
 import CryptoKit
 @testable import MootCommunityDaemon
 import MootDaemonProvider
@@ -42,8 +43,6 @@ private var contractRoot: URL {
     repoRoot.appendingPathComponent("apps/mootx01/Contracts/community-1.1")
 }
 
-/// Plaintext key provider for test estates. No encryption, no Keychain.
-private let plaintextProvider: @Sendable (URL) throws -> EstateEncryptionConfig = { _ in .plaintext }
 
 /// Per-test scratch directory for estate files.
 private struct Scratch {
@@ -54,6 +53,9 @@ private struct Scratch {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
     var estateURL: URL { url.appendingPathComponent("estate.sqlite") }
+    /// A transient catalog record over this directory: plaintext, identity in
+    /// memory, never written to any catalog file. `estate.sqlite` sits inside it.
+    var record: EstateRecord { EstateRecord(name: url.lastPathComponent, directory: url, kind: .transient) }
     func remove() { try? FileManager.default.removeItem(at: url) }
 }
 
@@ -139,11 +141,7 @@ func identityEndpointReturnsLiveEstateID() async throws {
     defer { scratch.remove() }
 
     // Open a real estate to get a live estateID.
-    let host = CommunityEstateHost(
-        estateURL: scratch.estateURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    let host = CommunityEstateHost(record: scratch.record, kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
     let proof = try await host.openEstate()
 
     // Build the community-only dispatcher with the live estate UUID.

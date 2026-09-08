@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import QueueKit
 import SubstrateTypes   // HLCGenerator
 
@@ -32,7 +33,7 @@ public struct ShareInboxSpool: Sendable {
     /// The app group both app targets and both Share Extension targets join.
     /// NOTE (submission gate): verify this identifier against the developer
     /// account before shipping — it mirrors project.yml's application-groups.
-    public static let appGroupID = "group.com.codedaptive.mootx01"
+    public static let appGroupID = MootProductIdentity.Apple.appGroup
 
     /// One stream for the whole share inbox (a single ordered lane).
     private static let stream = StreamID(rawValue: "share-inbox")

@@ -85,13 +85,14 @@
 
 import CryptoKit
 import Foundation
+import MootProductIdentity
 import OSLog
 import AriaMCP
 import GeniusLocusKit
 import LocusKit
 import VaultKit
 
-private let log = Logger(subsystem: "com.mootx01", category: "CommunityTransferCoordinator")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.Transfer")
 
 // MARK: - Persisted plan (in-memory only)
 

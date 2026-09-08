@@ -32,11 +32,12 @@
 // Creating a new file would violate CORE-01 (empty path ≠ permission to replace).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import SQLCipher
 import MootDaemonProvider
 
-private let log = Logger(subsystem: "com.mootx01", category: "CommunitySourceEstateAccess")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.SourceEstateAccess")
 
 /// Production `SourceEstateAccess` conformer for the census identity tier.
 ///

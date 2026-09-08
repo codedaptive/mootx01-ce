@@ -67,13 +67,14 @@
 // from persisted fields — the receipt survives restarts.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import AriaMCP
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
 
-private let log = Logger(subsystem: "com.mootx01", category: "CommunityReviewCoordinator")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.Review")
 
 // MARK: - Persisted session state
 
@@ -121,39 +122,29 @@ public actor CommunityReviewCoordinator: Sendable {
 
     // MARK: - Properties
 
-    /// The layout directory — parent of estate.sqlite and review-state.json.
+    /// The daemon's shared estate host: the catalog record it names and the
+    /// one open every coordinator shares.
+    private let host: CommunityEstateHost
+
+    /// The daemon's state directory — parent of review-state.json.
     public let layoutURL: URL
 
-    /// Owner identifier threaded into OwnerCredentials for LocusKit.
-    private let ownerIdentifier: String
-
-    /// Key provider: returns the encryption config for the estate URL.
-    private let keyProvider: @Sendable (URL) throws -> EstateEncryptionConfig
-
-    // Derived paths.
-    private var estateURL: URL { layoutURL.appendingPathComponent("estate.sqlite") }
+    // Derived paths (computed lazily, never stored — paths are not state).
+    private var estateURL: URL { host.record.databaseURL }
     private var reviewStateURL: URL { layoutURL.appendingPathComponent("review-state.json") }
-
-    // Lazily-opened estate (same pattern as CommunityCaptureCoordinator).
-    private var openedEstate: Estate?
 
     // MARK: - Init
 
-    /// Construct a coordinator for the estate in `layoutURL`.
+    /// Construct a coordinator over the daemon's shared estate host.
     ///
     /// - Parameters:
-    ///   - layoutURL: The layout directory containing (or that will contain)
-    ///     `estate.sqlite` and `review-state.json`.
-    ///   - ownerIdentifier: Non-empty stable label for OwnerCredentials.
-    ///   - keyProvider: Returns the encryption config for the estate URL.
-    public init(
-        layoutURL: URL,
-        ownerIdentifier: String,
-        keyProvider: @Sendable @escaping (URL) throws -> EstateEncryptionConfig
-    ) {
+    ///   - host: The estate host; its record names the estate and its open is
+    ///     the one every coordinator shares.
+    ///   - layoutURL: The daemon's state directory, which contains (or will
+    ///     contain) `review-state.json`. Must already exist.
+    public init(host: CommunityEstateHost, layoutURL: URL) {
+        self.host = host
         self.layoutURL = layoutURL
-        self.ownerIdentifier = ownerIdentifier
-        self.keyProvider = keyProvider
     }
 
     // MARK: - Endpoint: moot_community_review_dashboard
@@ -547,39 +538,17 @@ public actor CommunityReviewCoordinator: Sendable {
 
     // MARK: - Estate access
 
-    /// Open the estate on first use and cache it for subsequent calls.
+    /// The shared estate, opened by the host on first use.
     ///
-    /// Fail-closed: throws `CommunityDaemonError.estateAbsent` if estate.sqlite
-    /// does not exist. This prevents `SQLiteStorage(configuration:)` — which uses
-    /// `SQLITE_OPEN_CREATE` — from silently creating the estate file as a side-
-    /// effect of a review call. Creating the estate here would bypass the
-    /// lifecycle `needsCreation` gate (F11 fix).
-    ///
-    /// Any further error from the key provider, storage backend, or LocusKit
-    /// propagates to the caller without wrapping — no silent fallback.
+    /// Fail-closed: throws `CommunityDaemonError.estateAbsent` if the record's
+    /// database does not exist, so a review call never creates the estate as
+    /// a side effect and the lifecycle `needsCreation` gate holds (F11 fix).
     private func requireEstate() async throws -> Estate {
-        if let estate = openedEstate { return estate }
-
-        // Fail-closed gate: the estate file must already exist.
-        let url = estateURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            log.error("review requireEstate: estate.sqlite not found at \(url.path, privacy: .public)")
-            throw CommunityDaemonError.estateAbsent(url)
+        guard host.databaseExists else {
+            log.error("review requireEstate: estate database not found at \(self.estateURL.path, privacy: .public)")
+            throw CommunityDaemonError.estateAbsent(estateURL)
         }
-
-        let config = EstateConfiguration(
-            estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-            encryptionConfig: try keyProvider(estateURL)
-        )
-        let storage = try SQLiteStorage(configuration: config)
-        let estate = try await Estate.open(
-            storage: storage,
-            owner: OwnerCredentials(ownerIdentifier: ownerIdentifier),
-            identityKeyStore: InMemoryEstateIdentityKeyStore()
-        )
-        self.openedEstate = estate
-        return estate
+        return try await host.estate()
     }
 
     // MARK: - Sidecar persistence

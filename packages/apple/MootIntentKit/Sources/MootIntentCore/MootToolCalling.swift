@@ -104,33 +104,58 @@ extension MootToolCalling {
 /// `DrawerEntity` when Siri or Shortcuts requires an AppEntity.
 public struct RecalledDrawer: Sendable, Equatable, Identifiable {
     public let id: String
-    public let content: String
-    public let room: String
+    /// The drawer's subject, the one text every admissible search row carries
+    /// (ARIA_MCP_SPEC § 8.3 base row). Redacted rows carry the server's marker.
+    public let subject: String?
+    /// The best content span the rerank picked, when the row has one distinct
+    /// from the subject.
+    public let bestSpan: String?
+    /// The room, when the server resolved the drawer's node name.
+    public let room: String?
+    /// The body. Present only on the memory-get depths that return it; a search
+    /// row never carries it (spec § 8 invariants), so a consumer that wants the
+    /// body hydrates by id.
+    public let content: String?
 
-    public init(id: String, content: String, room: String) {
+    public init(id: String, subject: String? = nil, bestSpan: String? = nil,
+                room: String? = nil, content: String? = nil) {
         self.id = id
-        self.content = content
+        self.subject = subject
+        self.bestSpan = bestSpan
         self.room = room
+        self.content = content
     }
+
+    /// The most complete text the row itself carries: the body when the surface
+    /// returned one, else the best span, else the subject. Never composed from
+    /// anything the row did not say; empty only for a row with no text at all.
+    public var excerpt: String { content ?? bestSpan ?? subject ?? "" }
 }
 
 public enum StructuredRecallResults {
     /// Decode `structuredContent.results` rows into recalled-drawer values.
     ///
-    /// Only rows carrying `id`, `room`, AND `content` become entities — the
-    /// same admissible set the text block renders as full rows. Gated rows
-    /// (which the server emits as opaque `{id, subject}` stubs) and anything
-    /// malformed are skipped, never guessed at. Restricted/secret rows arrive
-    /// with the server's redaction markers already in the content/subject
-    /// slots, so no body needs re-gating here.
+    /// A row is admissible when it carries text of its own: a `subject` (every
+    /// rendered search row) or a `content` (the memory-get depths). Gated rows,
+    /// which the server emits as opaque id-only stubs, and anything malformed
+    /// are skipped, never guessed at. Restricted/secret rows arrive with the
+    /// server's redaction markers already in the subject and content slots, so
+    /// no body needs re-gating here. Optional fields are absent, never null,
+    /// when the text column rendered the placeholder (spec § 8 invariants).
     public static func drawers(from structured: JSONValue?) -> [RecalledDrawer] {
         guard let results = structured?.objectValue?["results"]?.arrayValue else { return [] }
         return results.compactMap { row -> RecalledDrawer? in
             guard let object = row.objectValue,
-                  let id = object["id"]?.stringValue,
-                  let room = object["room"]?.stringValue,
-                  let content = object["content"]?.stringValue else { return nil }
-            return RecalledDrawer(id: id, content: content, room: room)
+                  let id = object["id"]?.stringValue else { return nil }
+            let subject = object["subject"]?.stringValue
+            let content = object["content"]?.stringValue
+            guard subject != nil || content != nil else { return nil }
+            return RecalledDrawer(
+                id: id,
+                subject: subject,
+                bestSpan: object["bestSpan"]?.stringValue,
+                room: object["room"]?.stringValue,
+                content: content)
         }
     }
 }
