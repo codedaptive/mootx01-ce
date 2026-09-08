@@ -120,8 +120,13 @@ unicode-normalization = "0.1"
 # binary by default: `mootx01 serve` activates it for estates provisioned with
 # embedding_provider = "encoder" and a bundled model directory. Build with
 # `--no-default-features` for a lexical-only binary without the ML crates.
-default = ["encoder"]
+default = ["encoder", "cross-encoder"]
 encoder = ["genius-locus-kit/encoder"]
+# The retrieval-time cross-encoder runtime (candle, ms-marco-MiniLM-L-6-v2)
+# ships in the product so an `apply` rerank directive can load the packaged
+# model directory; the kit default is off. Twin of the Swift product trait
+# `CrossEncoder` on GeniusLocusKit.
+cross-encoder = ["genius-locus-kit/cross-encoder"]
 
 [dev-dependencies]
 # genius-locus-kit/test-seams: EstateCatalog::set_configuration_directory_override,
