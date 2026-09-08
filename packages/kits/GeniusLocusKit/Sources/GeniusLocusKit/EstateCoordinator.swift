@@ -247,6 +247,7 @@ public extension GeniusLocusKit {
             vectorStores[handle] = nil
             spanEncoders[handle] = nil
             spanRerankSources[handle] = nil
+            pairScorers[handle] = nil
             // Derived-rebuild span depth (moot_rebuild_status): plain
             // counter — remove so a reopened same-estate handle never
             // inherits a stale span.
@@ -307,6 +308,7 @@ public extension GeniusLocusKit {
         vectorStores[handle] = nil
         spanEncoders[handle] = nil
         spanRerankSources[handle] = nil
+        pairScorers[handle] = nil
         derivedRebuildDepth[handle] = nil
         mountStates[handle] = nil
         // Drop the sync engine so no engine reference outlives the estate.

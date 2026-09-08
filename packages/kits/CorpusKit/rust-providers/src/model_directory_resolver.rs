@@ -50,8 +50,19 @@ fn known_tokenizer_hashes() -> HashMap<&'static str, &'static str> {
         "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
     );
     m.insert(EncoderModelSeed::MODEL_ID, EncoderModelSeed::TOKENIZER_HASH);
+    // The packaged cross encoder (ms-marco-MiniLM-L-6-v2 at revision
+    // 233902d25c440f23af6f7d6e94d2946bac0bee0a) ships the same uncased BERT
+    // vocabulary; its profile pins the same digest.
+    m.insert(CROSS_ENCODER_MODEL_ID, CROSS_ENCODER_TOKENIZER_HASH);
     m
 }
+
+/// `CrossEncoderProfile::minilm_l6().model_id`, spelled as a constant so the
+/// static tables above can name it; pinned equal by a test.
+pub const CROSS_ENCODER_MODEL_ID: &str = "ms-marco-minilm-l6-cross-v1";
+/// `CrossEncoderProfile::minilm_l6().tokenizer_hash`, likewise.
+const CROSS_ENCODER_TOKENIZER_HASH: &str =
+    "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3";
 
 /// Files that must be present in the Rust model directory for each model ID.
 /// These are the three files the candle provider loads.
@@ -68,6 +79,17 @@ fn required_files() -> HashMap<&'static str, &'static [&'static str]> {
     );
     m.insert(
         "arctic-embed-s-w60",
+        &[
+            "config.json",
+            "tokenizer.json",
+            "model.safetensors",
+            "vocab.txt",
+        ],
+    );
+    // Cross encoder: the same HF triple plus the vocabulary
+    // (tools/encoder-models, profile `minilm-cross`).
+    m.insert(
+        CROSS_ENCODER_MODEL_ID,
         &[
             "config.json",
             "tokenizer.json",
@@ -224,6 +246,21 @@ mod tests {
                 fs::write(model_dir.join(file), b"placeholder").unwrap();
             }
         }
+    }
+
+    /// The static table's cross-encoder identity is the profile's, both
+    /// strings; a drift here would make the resolver skip the packaged
+    /// classifier silently.
+    #[test]
+    fn cross_encoder_constants_equal_the_profile() {
+        let profile = corpus_kit::encoder::CrossEncoderProfile::minilm_l6();
+        assert_eq!(CROSS_ENCODER_MODEL_ID, profile.model_id);
+        assert_eq!(CROSS_ENCODER_TOKENIZER_HASH, profile.tokenizer_hash);
+        assert_eq!(
+            model_dir_for(CROSS_ENCODER_MODEL_ID, &tempdir()),
+            None,
+            "an empty data directory resolves nothing"
+        );
     }
 
     /// The active seed is discoverable from the 1.2 download slot without a
