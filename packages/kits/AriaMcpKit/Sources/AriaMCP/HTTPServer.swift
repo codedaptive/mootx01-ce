@@ -1,6 +1,7 @@
 import AriaMCPWire
 
 import Foundation
+import MootProductIdentity
 import GeniusLocusKit
 import LocusKit
 import Synchronization
@@ -618,7 +619,7 @@ public struct HTTPServer: Sendable {
                 }
             }
         }
-        thread.name = "com.mootx01.aria-mcp.http.accept"
+        thread.name = MootProductIdentity.Queues.ariaHTTPAccept
         thread.start()
         // Park this async function until the task is cancelled (process shutdown).
         // A cancellable sleep loop avoids leaked continuations that the Swift
@@ -707,7 +708,7 @@ public struct HTTPServer: Sendable {
                 }
             }
         }
-        thread.name = "com.mootx01.aria-mcp.http.accept"
+        thread.name = MootProductIdentity.Queues.ariaHTTPAccept
         thread.start()
         while !Task.isCancelled {
             do { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
@@ -1857,8 +1858,9 @@ public struct HTTPServer: Sendable {
     /// List all estates the kit is currently hosting: UUID, name, kind, backend,
     /// and mount state. ARIA_MCP always opens GLK estates via GeniusLocusKit.
     ///
-    /// Backend is inferred from the process environment: `ARIA_MCP_POSTGRES_URL`
-    /// → "PostgreSQL", `ARIA_MCP_SQLITE_PATH` → "SQLite", neither → "InMemory".
+    /// The backend label is the one the kit reports for each handle
+    /// (`storageBackend(for:)`: "SQLite", "PostgreSQL", "InMemory"), so estates
+    /// on different backends in one process are each labelled correctly.
     private static func adminEstatesSnapshot(dispatcher: ARIA_MCPDispatcher) async -> HTTPResponse {
         // Community-only mode has no GeniusLocusKit tooling; admin estates unavailable.
         guard let tooling = dispatcher.tooling else {
@@ -1868,15 +1870,6 @@ public struct HTTPServer: Sendable {
                 body: Data(#"{"error":"not_found"}"#.utf8)
             )
         }
-        let env = ProcessInfo.processInfo.environment
-        let backend: String
-        if env["ARIA_MCP_POSTGRES_URL"] != nil {
-            backend = "PostgreSQL"
-        } else if env["ARIA_MCP_SQLITE_PATH"] != nil {
-            backend = "SQLite"
-        } else {
-            backend = "InMemory"
-        }
 
         let kit = tooling.kit
         let handles = await kit.handles
@@ -1884,6 +1877,9 @@ public struct HTTPServer: Sendable {
         var entries: [ARIAAdminEstateEntry] = []
         for handle in handles {
             let mountStateRaw = await kit.mountState(for: handle)?.rawValue ?? "mounted"
+            // A handle that closed between `handles` and here has no backend;
+            // it is listed as closed rather than dropped.
+            let backend = await kit.storageBackend(for: handle)?.rawValue ?? "closed"
             entries.append(ARIAAdminEstateEntry(
                 estateUUID: handle.estateUUID.uuidString,
                 estateName: handle.estateName,
