@@ -96,7 +96,10 @@ pub use corpus::FloatLaneOutcome;
 pub use corpus::NamedInferenceFn;
 pub use corpus::TrainingPathDecision;
 pub use document_store::CorpusDocumentStore;
-pub use encoder::{EncoderError, EncoderModelSpec, SpanEncoder};
+pub use encoder::{
+    CrossEncoderProfile, EncoderError, EncoderModelSpec, PairScorer, RerankAction, RerankDirective,
+    SpanEncoder,
+};
 pub use index_state_store::{CorpusIndexState, CorpusIndexStateStore};
 pub use schema_profile::{
     attached_declaration, attached_excluded_tables, standalone_declaration,

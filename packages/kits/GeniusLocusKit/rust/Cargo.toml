@@ -150,6 +150,13 @@ test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
 # default (kit tests stay ML-free); the product crate (apps/mootx01/rust)
 # enables it in its default feature set.
 encoder = ["corpus-kit-providers/candle"]
+# cross-encoder: compile the candle pair-classifier runtime behind
+# PairScorerFactory so an `apply` rerank directive can load the packaged
+# ms-marco-MiniLM-L-6-v2 in-process. Off by default (kit tests stay ML-free);
+# the product crate enables it. With it off an apply degrades with reason
+# `capability_off`. Twin of the Swift package trait `CrossEncoder`
+# (MOOTX01_CROSS_ENCODER).
+cross-encoder = ["corpus-kit-providers/candle"]
 # dense-families: compiles the dark dense-family lane keys and presets (PPMI,
 # LSA, NMF, FDC — Encoder Rerank contract sheet §13) into RecallShape. Off by
 # default; Random Indexing is the only live family. Twin of the Swift package

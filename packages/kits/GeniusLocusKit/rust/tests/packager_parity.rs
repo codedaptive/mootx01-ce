@@ -166,6 +166,7 @@ fn make_result(hits: Vec<RecallHit>) -> GLKRecallResult {
         degraded_stages: vec![],
         lane_ranks: std::collections::HashMap::new(),
         query_lattice_anchor: None,
+        cross_encoder: None,
     }
 }
 

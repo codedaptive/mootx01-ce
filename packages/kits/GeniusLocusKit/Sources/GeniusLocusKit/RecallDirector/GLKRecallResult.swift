@@ -139,6 +139,13 @@ public struct GLKRecallResult: Sendable {
     /// trace-failure) carry it through unchanged.
     public let queryLatticeAnchor: QueryLatticeAnchor.Anchor?
 
+    /// What the cross-encoder stage did for this request
+    /// (`CrossEncoderStage`), or nil when the request carried no
+    /// `rerankDirective`. Bypass and degrade are reported here too; a
+    /// degraded apply also appends `recall.cross_encoder_degraded` to
+    /// `degradedStages`.
+    public let crossEncoder: CrossEncoderReport?
+
     /// Convenience accessor — the hydrated `Drawer` for each hit that has one.
     public var drawers: [LocusKit.Drawer] { hits.compactMap(\.drawer) }
 
@@ -155,7 +162,8 @@ public struct GLKRecallResult: Sendable {
         denseLaneStatus: String? = nil,
         degradedStages: [String],
         laneRanks: [String: [String: Int]],
-        queryLatticeAnchor: QueryLatticeAnchor.Anchor?
+        queryLatticeAnchor: QueryLatticeAnchor.Anchor?,
+        crossEncoder: CrossEncoderReport? = nil
     ) {
         self.request = request
         self.plan = plan
@@ -165,6 +173,7 @@ public struct GLKRecallResult: Sendable {
         self.degradedStages = degradedStages
         self.laneRanks = laneRanks
         self.queryLatticeAnchor = queryLatticeAnchor
+        self.crossEncoder = crossEncoder
     }
 #else
     public init(
@@ -174,7 +183,8 @@ public struct GLKRecallResult: Sendable {
         hits: [RecallHit],
         degradedStages: [String],
         laneRanks: [String: [String: Int]],
-        queryLatticeAnchor: QueryLatticeAnchor.Anchor?
+        queryLatticeAnchor: QueryLatticeAnchor.Anchor?,
+        crossEncoder: CrossEncoderReport? = nil
     ) {
         self.request = request
         self.plan = plan
@@ -183,31 +193,37 @@ public struct GLKRecallResult: Sendable {
         self.degradedStages = degradedStages
         self.laneRanks = laneRanks
         self.queryLatticeAnchor = queryLatticeAnchor
+        self.crossEncoder = crossEncoder
     }
 #endif
 
-    /// A copy of this result with `hits` and/or `degradedStages` replaced and
-    /// every other field (including the WholeRecordDense lane status, when
-    /// compiled) carried over. The director's filter, trace-failure and
-    /// degradation paths and the ARIA anchor-exclusion path derive results
-    /// through this so no caller has to spell the trait-dependent field.
+    /// A copy of this result with `request`, `hits`, `degradedStages` and/or
+    /// `crossEncoder` replaced and every other field (including the
+    /// WholeRecordDense lane status, when compiled) carried over. The
+    /// director's filter, cross-encoder, trace-failure and degradation paths
+    /// and the ARIA anchor-exclusion path derive results through this so no
+    /// caller has to spell the trait-dependent field.
     public func replacing(
+        request: GLKRecallRequest? = nil,
         hits: [RecallHit]? = nil,
-        degradedStages: [String]? = nil
+        degradedStages: [String]? = nil,
+        crossEncoder: CrossEncoderReport?? = nil
     ) -> GLKRecallResult {
 #if MOOTX01_WHOLE_RECORD_DENSE
         GLKRecallResult(
-            request: request, plan: plan, unionProfile: unionProfile,
+            request: request ?? self.request, plan: plan, unionProfile: unionProfile,
             hits: hits ?? self.hits,
             denseLaneStatus: denseLaneStatus,
             degradedStages: degradedStages ?? self.degradedStages,
-            laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor)
+            laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
+            crossEncoder: crossEncoder ?? self.crossEncoder)
 #else
         GLKRecallResult(
-            request: request, plan: plan, unionProfile: unionProfile,
+            request: request ?? self.request, plan: plan, unionProfile: unionProfile,
             hits: hits ?? self.hits,
             degradedStages: degradedStages ?? self.degradedStages,
-            laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor)
+            laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
+            crossEncoder: crossEncoder ?? self.crossEncoder)
 #endif
     }
 }
