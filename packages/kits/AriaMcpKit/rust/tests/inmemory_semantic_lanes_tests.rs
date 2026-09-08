@@ -16,8 +16,9 @@
 //!    (non-impatient) capture → drain → search. Proves the encode-queue path
 //!    on in-memory.
 //!
-//! 3. `postgres_wiring_shape_proof` — env-gated (skipped when
-//!    `ARIA_MCP_POSTGRES_URL` is absent). When the env var is set, the full
+//! 3. `postgres_wiring_shape_proof` — opt-in (skipped when
+//!    `PERSISTENCEKIT_PG_URL`, the PersistenceKit live-PostgreSQL test seam, is
+//!    absent). When it is set, the full
 //!    capture → search e2e runs against a live PG server using `new_postgres`.
 //!
 //! 5. `drained_estate_is_distilled` — the drain-stage distillation rider is
@@ -167,16 +168,17 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
 // 4. PostgreSQL wiring shape proof (env-gated)
 // ---------------------------------------------------------------------------
 
-/// Prove the PostgreSQL wiring shape. Skipped when `ARIA_MCP_POSTGRES_URL` is
-/// absent. When the env var is set, runs the full e2e capture → search against
-/// a live PG server using `new_postgres`.
+/// Prove the PostgreSQL wiring shape. Skipped when `PERSISTENCEKIT_PG_URL` (the
+/// PersistenceKit live-PostgreSQL test seam, as the Swift tests use) is absent.
+/// When it is set, runs the full e2e capture → search against a live PG server
+/// using `new_postgres`.
 ///
 /// Even when skipped, the proof is: `new_postgres` builds its `PostgresStorage`
 /// and hands it to the same GLK `wire_glk_substores` call as `new_sqlite` and
 /// `new_inmemory`. The in-memory tests (1–3) above cover the shared logic.
 #[test]
 fn postgres_wiring_shape_proof() {
-    let pg_url = std::env::var("ARIA_MCP_POSTGRES_URL").unwrap_or_default();
+    let pg_url = std::env::var("PERSISTENCEKIT_PG_URL").unwrap_or_default();
     if pg_url.is_empty() {
         // PG integration test skipped — not a failure.
         return;

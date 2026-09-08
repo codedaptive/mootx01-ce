@@ -26,10 +26,11 @@
 //      `floatNearest` on a corpus wired with `.deterministic` returns `.hits`,
 //      not `.unavailableProviderOptOut`. Dark-by-default is forbidden.
 //
-//   D. POSTGRESQL SHAPE-SHARED — a PostgreSQL-shaped test is env-gated (skipped
-//      when ARIA_MCP_POSTGRES_URL is absent) but shares the same wiring shape as
-//      the in-memory tests, proving wiring logic is portable. When the env var is
-//      set, the full e2e capture → search path runs against a live PG server.
+//   D. POSTGRESQL SHAPE-SHARED — a PostgreSQL-shaped test is gated on the test
+//      harness's live-server opt-in (PERSISTENCEKIT_PG_URL, the same key the
+//      PersistenceKit suites use; skipped when absent) but shares the same wiring
+//      shape as the in-memory tests, proving wiring logic is portable. When the
+//      key is set, the full e2e capture → search path runs against a live PG server.
 //
 // Tests A–C run unconditionally and are the primary gate for CI.
 
@@ -173,8 +174,8 @@ struct InMemorySemanticRecallTests {
     // MARK: - D. PostgreSQL shape-shared (env-gated)
 
     /// Prove the PostgreSQL wiring shape shares the same code path as in-memory.
-    /// This test is skipped when ARIA_MCP_POSTGRES_URL is absent; it runs the
-    /// full capture → search e2e when the env var is set.
+    /// This test is skipped when PERSISTENCEKIT_PG_URL is absent; it runs the
+    /// full capture → search e2e when the test harness names a live server.
     ///
     /// Even when skipped, the proof is: the PG and in-memory wiring call
     /// the same `kit.wireGLKSubstores(for:backingStorage:)` seam
@@ -182,8 +183,10 @@ struct InMemorySemanticRecallTests {
     /// The in-memory tests (A, B, C) above cover the shared logic.
     @Test func postgresCaptureThenSearchWhenEnvSet() async throws {
         // Skip when no live PG server is available — this test requires
-        // ARIA_MCP_POSTGRES_URL to be set to a connectable PostgreSQL server.
-        let pgURL = ProcessInfo.processInfo.environment["ARIA_MCP_POSTGRES_URL"] ?? ""
+        // PERSISTENCEKIT_PG_URL to name a connectable PostgreSQL server. A test
+        // harness opt-in, not a product setting: the product selects its
+        // PostgreSQL estate through the catalog record's connection string.
+        let pgURL = ProcessInfo.processInfo.environment["PERSISTENCEKIT_PG_URL"] ?? ""
         guard !pgURL.isEmpty else {
             // PG integration test skipped — not a failure.
             return
@@ -228,7 +231,7 @@ struct InMemorySemanticRecallTests {
         } catch {
             // If PG connectivity fails (server unreachable, bad credentials),
             // fail with a clear message rather than a cryptic assertion error.
-            Issue.record("PostgreSQL estate wiring failed (check ARIA_MCP_POSTGRES_URL): \(error)")
+            Issue.record("PostgreSQL estate wiring failed (check PERSISTENCEKIT_PG_URL): \(error)")
         }
     }
 }

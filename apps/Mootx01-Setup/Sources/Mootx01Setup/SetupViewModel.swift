@@ -7,6 +7,7 @@
 
 import Foundation
 import MootInstallerCore
+import MootProductIdentity
 
 /// The phases the setup assistant walks through.
 enum SetupPhase: Equatable {
@@ -85,13 +86,10 @@ final class SetupViewModel {
             self.binaryPath = Bundle.main.executablePath ?? placed.path
         }
 
-        // Resolve the daemon URL from the port file (if daemon is running)
-        // or fall back to the default.
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            homeDirectory: home
-        )
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        // Resolve the daemon URL from the port file in the configuration
+        // directory (if the daemon is running) or fall back to the default.
+        let port = MootPaths.resolvedResidentPort(
+            dataDir: MootProductIdentity.Storage.applicationSupportDirectory(homeDirectory: home))
         self.daemonURL = "http://127.0.0.1:\(port)"
     }
 

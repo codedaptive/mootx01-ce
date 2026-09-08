@@ -118,18 +118,21 @@ methodNotFound on the Swift side. The Rust server is ahead here: the coordinator
 
 ## Persistence
 
-The server selects its storage backend from environment variables at startup.
-Both vars are read without trimming — a whitespace-only value is non-empty and
-fails fast, not a silent fallback.
+The server never reads an estate path or connection string from the
+environment. The host resolves the estate through the estate catalog
+(`genius_locus_kit::EstateCatalog`) and passes a `RuntimeEstate` to
+`aria_mcp::runtime::run`:
 
-### Backend precedence table
+| Selection | Estate | Notes |
+|---|---|---|
+| `--db <name>` | The registered estate of that name | Federates; charters seeded; created encrypted unless its manifest declares plaintext |
+| `--db <dir>/<name>` | A transient estate at `<dir>/<name>/` | Plaintext, identity in memory, no charters; never written to the catalog |
+| (neither) | The catalog's active estate | |
+| `--in-memory` | In-memory | Ephemeral; discarded on exit |
 
-| `ARIA_MCP_POSTGRES_URL` | `ARIA_MCP_SQLITE_PATH` | Backend | Notes |
-|---|---|---|---|
-| Non-empty | Non-empty | — | Ambiguous config: exit 1, stderr names both vars |
-| Non-empty | Absent or empty | PostgreSQL estate | Pooled, lazy-connect, Swift-parity defaults |
-| Absent or empty | Non-empty | SQLite at that path | WAL-mode, durable across restarts |
-| Absent or empty | Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
+A record whose catalog entry names a PostgreSQL backend opens at the record's
+connection string. The `aria-mcp` dev binary takes the same flags as
+`mootx01 serve`.
 
 **PostgreSQL:** the Rust server opens a pooled PostgreSQL estate via
 `locus_kit::PostgresDrawerStore` backed by persistence-kit's `PostgresStorage`.

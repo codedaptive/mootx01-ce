@@ -105,12 +105,13 @@ into the secondary backend's vocabulary.
   },
   "backendB": {
     "name": "mootx01",
-    "command": "MOOTX01_DATA_DIR=/path/to/data mootx01 serve",
+    "command": "mootx01 serve --db /path/to/estates/bridge",
     "verbMap": {
       "write": "moot_file_memory",
       "query": "moot_memory_search",
       "contentArg": "content",
       "queryArg": "query",
+      "subjectArg": "subject",
       "constantArgs": {
         "location": "scratch/notes"
       },
