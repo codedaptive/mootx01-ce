@@ -59,7 +59,7 @@ fn passage_views_oversized_first_group_and_no_skipping() {
 fn passage_views_rejects_zero_budget() {
     assert!(build_views("", "", 0).is_err());
 }
-// Frozen directly from benchmark-ee/tokensaver-lab/views.py (Unicode 16).
+// Frozen directly from the TokenSaver lab's reference views.py (Unicode 16).
 const ORACLE: &str = r########"[
 {"body":"","query":"","budget":1,"expected":{"plain":{"version":"dependency-groups-utf8-v1","text":"","continuation":"","full_text":"","complete":true,"budget_honored":true,"budget":1,"returned_bytes":0,"spans":[],"group_order":[]},"ordered":{"version":"dependency-groups-utf8-v1","text":"","continuation":"","full_text":"","complete":true,"budget_honored":true,"budget":1,"returned_bytes":0,"spans":[],"group_order":[]}}},
 {"body":" \r\n\t","query":"x","budget":1,"expected":{"plain":{"version":"dependency-groups-utf8-v1","text":" \r\n\t","continuation":"","full_text":" \r\n\t","complete":true,"budget_honored":false,"budget":1,"returned_bytes":4,"spans":[[0,4]],"group_order":[0]},"ordered":{"version":"dependency-groups-utf8-v1","text":" \r\n\t","continuation":"","full_text":" \r\n\t","complete":true,"budget_honored":false,"budget":1,"returned_bytes":4,"spans":[[0,4]],"group_order":[0]}}},

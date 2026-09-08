@@ -42,7 +42,7 @@ struct PassageViewsTests {
         #expect(throws: PassageViewError.invalidBudget) { try PassageViews.build(body: "", query: "", budget: 0) }
         #expect(throws: PassageViewError.invalidBudget) { try PassageViews.build(body: "", query: "", budget: -1) }
     }
-    // Frozen directly from benchmark-ee/tokensaver-lab/views.py (Unicode 16).
+    // Frozen directly from the TokenSaver lab's reference views.py (Unicode 16).
     private static let oracle = #"""
 [
 {"body":"","query":"","budget":1,"expected":{"plain":{"version":"dependency-groups-utf8-v1","text":"","continuation":"","full_text":"","complete":true,"budget_honored":true,"budget":1,"returned_bytes":0,"spans":[],"group_order":[]},"ordered":{"version":"dependency-groups-utf8-v1","text":"","continuation":"","full_text":"","complete":true,"budget_honored":true,"budget":1,"returned_bytes":0,"spans":[],"group_order":[]}}},

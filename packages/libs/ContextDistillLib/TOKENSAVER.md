@@ -99,6 +99,6 @@ retained only for shared classifier/selection coverage, not an active v22 recipe
 
 Run `swift test --package-path packages/libs/ContextDistillLib` or
 `cargo test --manifest-path packages/libs/ContextDistillLib/rust/Cargo.toml`
-with an explicit task-owned build directory. The separate
-`benchmark-ee/tokensaver-lab/IMPLEMENTATION.md` gives the Make/subagent workflow
-for real semantic tests; synthetic native parity is not semantic qualification.
+with an explicit task-owned build directory. The separate TokenSaver lab
+implementation guide gives the qualification workflow for real semantic tests;
+synthetic native parity is not semantic qualification.
