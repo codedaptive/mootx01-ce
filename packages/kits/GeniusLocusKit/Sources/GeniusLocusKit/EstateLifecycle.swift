@@ -1,5 +1,6 @@
 import Darwin   // Darwin.getenv — live env read for the charter-skip seam
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import CorpusKit
@@ -38,7 +39,7 @@ import SynapseKit
 public extension GeniusLocusKit {
 
     private static var lifecycleLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - provision
@@ -186,7 +187,10 @@ public extension GeniusLocusKit {
         let identityKeyStore: (any EstateIdentityKeyStore)? = params.lifetime == .ephemeral
             ? InMemoryEstateIdentityKeyStore()
             : nil // nil → defaultIdentityKeyStore(for:storage) in LocusKit.Estate.open
-        let handle = try await open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
+        // A provisioned estate is one this install owns: it federates, so its
+        // identity is minted here into the caller's key store.
+        let handle = try await open(storage: storage, owner: owner,
+                                    identityKeyStore: identityKeyStore, federate: true)
 
         // Step 2a: a fresh estate is born with the span encoder as its default
         // recall stage. Written BEFORE wiring so this same open activates it
@@ -311,17 +315,10 @@ public extension GeniusLocusKit {
     /// - Throws: `GeniusLocusKitError.estateNotFound` if `handle` is stale;
     ///   substrate errors if a `seedWing` write fails.
     func seedDefaultWings(for handle: EstateHandle, now: Date) async throws {
-        // Benchmark-only bypass (MOOTX01_SKIP_CHARTERS): skip charter seeding
-        // entirely so measured estates contain exactly the imported corpus.
-        // Charter drawers are outside the benchmark spec, and their presence
-        // occupies candidate-pool slots in every recall (2026-08-24 ruling).
-        // Env-only seam — never on the MCP surface, never set by product code.
-        // Production estates always seed charters. Darwin.getenv (live) rather
-        // than ProcessInfo (a launch-time snapshot) so tests can toggle via
-        // setenv in-process. Twin of the Rust guard in `seed_default_wings`.
-        if Darwin.getenv("MOOTX01_SKIP_CHARTERS") != nil {
-            return
-        }
+        // Whether to seed charters at all is the caller's decision: a served
+        // registered estate seeds them, a transient estate (benchmark corpus,
+        // scratch) does not call this, so it holds exactly what was imported
+        // (2026-08-24 ruling). No environment variable decides it.
         let locusEstate = try estate(for: handle)
 
         // Read the existing drawers once — `allDrawers()` is a full corpus scan

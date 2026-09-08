@@ -63,12 +63,13 @@
 // Pairing and synchronization remain on-demand and explicitly authorized.
 
 import Foundation
+import MootProductIdentity
 import ConvergenceKit
 import os
 
 private let logger = Logger(
-    subsystem: "com.mootx01.synckit.federation",
-    category: "LANRelay"
+    subsystem: MootProductIdentity.Logging.subsystem,
+    category: "ConvergenceKitFederation.LANRelay"
 )
 
 // MARK: - LANRelayTransport (seam)

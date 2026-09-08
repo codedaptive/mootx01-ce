@@ -1,0 +1,269 @@
+// MootProductIdentity.swift
+//
+// The product's identity, spelled once. Everything that names the product on
+// disk, in logs, to launchd, to the Keychain or to the operating system reads
+// these; nothing else repeats the strings. Two roots and nothing else are
+// spelled by hand; every other value is a root plus a suffix, composed here.
+//
+// Two roots, two meanings (Bob, 2026-09-08):
+//
+// - `productRoot` (`com.mootx01`): what the product names for itself and
+//   controls outright: its configuration folder, its log subsystem, its
+//   launchd labels, the Keychain items it mints for its own state, its
+//   preference keys and its thread and queue labels. An Enterprise install
+//   beside a Community one takes a sibling folder (`com.mootx01.ee`).
+// - `vendorRoot` (`com.codedaptive.mootx01`): what Apple ties to the signing
+//   identity and the developer account: bundle identifiers, the app group,
+//   the shared Keychain access group, the Spotlight domain, background task
+//   identifiers, and the Keychain services registered before the product root
+//   existed and kept because existing items are keyed by them.
+//
+// Normalisation: every value is lowercase, dot-separated, and begins with a
+// root; hyphens appear only inside a suffix Apple or an existing Keychain
+// item already carries. `Fixtures/product_identity.json` lists every value
+// and the conformance test pins the constants to it; a second test scans the
+// repository's Swift sources and refuses any string literal that starts with
+// a root outside this library, so a new spelling cannot creep in.
+//
+// Apple reads bundle identifiers, the app group and the Bonjour service type
+// from `project.yml` and the entitlements as literals; `Apple` mirrors them
+// so code refers to them by name, and the fixture pins the mirror.
+//
+// No Rust twin exists yet: the Rust port keeps its own folder and labels
+// until the Rust estate catalog lands, when a twin crate is built against
+// this same fixture.
+
+import Foundation
+#if canImport(Security)
+import Security
+#endif
+
+public enum MootProductIdentity {
+
+    /// `com.mootx01`: the product's own name for itself.
+    public static let productRoot = "com.mootx01"
+
+    /// `com.codedaptive.mootx01`: the name Apple knows the product by.
+    public static let vendorRoot = "com.codedaptive.mootx01"
+
+    /// `<productRoot>.<suffix>`.
+    static func product(_ suffix: String) -> String { "\(productRoot).\(suffix)" }
+
+    /// `<vendorRoot>.<suffix>`.
+    static func vendor(_ suffix: String) -> String { "\(vendorRoot).\(suffix)" }
+
+    // MARK: Storage
+
+    /// Where the product keeps its configuration on this machine.
+    public enum Storage {
+        /// Folder name under Application Support: `com.mootx01.ce`. The
+        /// estate catalog and every install-wide file live under it; the
+        /// Enterprise edition's sibling would be `com.mootx01.ee`.
+        public static let applicationSupportFolder = product("ce")
+
+        /// The catalog file inside the configuration directory, the folder
+        /// that is the default database location on first run, the primary
+        /// estate's name and the estate database file name. GeniusLocusKit's
+        /// `EstateCatalogNames` reads these; the daemon provider's census,
+        /// which cannot depend on the kit, spells the canonical estate path
+        /// from them too, so the two cannot drift.
+        public static let catalogFile = "estatecatalog.json"
+        public static let databasesFolder = "databases"
+        public static let defaultEstateName = "default"
+        public static let estateDatabaseFile = "estate.sqlite"
+
+        /// Folder under Application Support for the lattice novel-token pool
+        /// (`com.mootx01.lattice`), a machine-wide resource shared across
+        /// installs rather than a per-install configuration file.
+        public static let latticeFolder = product("lattice")
+
+        /// `<home>/Library/Application Support/<applicationSupportFolder>`.
+        /// Pure path arithmetic; touches nothing.
+        public static func applicationSupportDirectory(homeDirectory: URL) -> URL {
+            homeDirectory
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Application Support", isDirectory: true)
+                .appendingPathComponent(applicationSupportFolder, isDirectory: true)
+                .standardizedFileURL
+        }
+
+        /// The home the configuration directory hangs off, decided by a fact
+        /// about the running process (DECISION_INSTALL_TAKEOVER_2026-09-08):
+        ///
+        /// - unsandboxed (the CLI, its resident, moot-mgr, the direct
+        ///   Developer ID provider shell): the user's home, so the CLI
+        ///   family shares one catalog under `~/Library`;
+        /// - sandboxed with the product's app group in its signed
+        ///   entitlements (the Community or Pro app and its nested helper):
+        ///   the group container, the one directory every member of a
+        ///   signed family can reach, so the app and its daemon share one
+        ///   catalog there;
+        /// - sandboxed without the group (a build signed without it): the
+        ///   process's own container, which is what `NSHomeDirectory()`
+        ///   returns inside a sandbox.
+        ///
+        /// Never a build flag, never an environment value the operator sets:
+        /// `APP_SANDBOX_CONTAINER_ID` is the marker the system itself places
+        /// in a sandboxed process's environment. The group identifier is read
+        /// from the process's own signed entitlement, expanded by the
+        /// signature with the team prefix, never composed from a constant
+        /// (a composed prefix would only hold on the machine it was written on).
+        public static func processHome(
+            environment: [String: String] = ProcessInfo.processInfo.environment,
+            entitledGroups: [String] = signedApplicationGroups(),
+            groupContainer: (String) -> URL? = { FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) }
+        ) -> URL {
+            let ownHome = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            guard environment["APP_SANDBOX_CONTAINER_ID"] != nil else { return ownHome }
+            guard let group = entitledGroups.first(where: { $0.hasSuffix(Apple.appGroup) }),
+                  let container = groupContainer(group) else { return ownHome }
+            return container.standardizedFileURL
+        }
+
+        /// `applicationSupportDirectory(homeDirectory: processHome())`: the
+        /// one configuration directory this process's family shares.
+        public static var configurationDirectory: URL {
+            applicationSupportDirectory(homeDirectory: processHome())
+        }
+
+        /// The `com.apple.security.application-groups` of this process's
+        /// signed entitlements, as the signature expanded them. Empty for an
+        /// unsigned or unentitled process and on platforms without Security.
+        public static func signedApplicationGroups() -> [String] {
+            #if canImport(Security)
+            guard let task = SecTaskCreateFromSelf(nil),
+                  let value = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString, nil),
+                  let groups = value as? [String] else { return [] }
+            return groups
+            #else
+            return []
+            #endif
+        }
+    }
+
+    // MARK: Logging
+
+    /// OSLog coordinates. One subsystem for the whole product, so one Console
+    /// filter shows every kit, daemon and app surface; the category names the
+    /// module, with an optional topic for a surface an operator filters on
+    /// separately (sync engines, key custody, migrations).
+    public enum Logging {
+        /// `com.mootx01.kit`: the subsystem every `Logger` in the product uses.
+        public static let subsystem = product("kit")
+
+        /// `Module` or `Module.Topic`. The module is the Swift target's name;
+        /// the topic, when given, is a CamelCase word for the surface.
+        public static func category(_ module: String, topic: String? = nil) -> String {
+            guard let topic, !topic.isEmpty else { return module }
+            return "\(module).\(topic)"
+        }
+    }
+
+    // MARK: Services
+
+    /// Names the product registers with the operating system for its own
+    /// processes and network presence.
+    public enum Services {
+        /// launchd label of the resident mootx01 daemon (`com.mootx01.daemon`).
+        public static let daemonLabel = product("daemon")
+        /// launchd label of the moot-mgr resident host (`com.mootx01.mgr`).
+        public static let managerLabel = product("mgr")
+        /// Owner identifier the daemon contract host files under.
+        public static let contractHostOwner = product("daemon.contract-host")
+        /// launchd label of the bundle-form daemon provider registration,
+        /// under the vendor root because it is the signed bundle's agent.
+        public static let daemonProviderLaunchAgentLabel = vendor("daemon")
+        /// Bonjour service type the resident advertises (`project.yml`
+        /// `NSBonjourServices`).
+        public static let bonjourServiceType = "_mootx01._tcp"
+        /// Bonjour service type of the federation relay.
+        public static let federationBonjourServiceType = "_mootx01-fed._tcp"
+        /// URL scheme the app registers (`project.yml` `CFBundleURLSchemes`).
+        public static let urlScheme = "mootx01"
+    }
+
+    // MARK: Keychain
+
+    /// Keychain coordinates. Services under the vendor root predate the
+    /// product root and stay: existing items are keyed by them, and a rename
+    /// would orphan every user's key.
+    public enum Keychain {
+        /// `kSecAttrService` of the per-estate SQLCipher key items. The
+        /// account is derived from the estate file path by
+        /// `KeychainKeyStore.estateAccount`.
+        public static let estateKeyService = vendorRoot
+        /// The shared access group the app and a separately spawned server
+        /// both read; requires the matching entitlement on a signed build.
+        public static let sharedAccessGroup = vendor("shared")
+        /// `kSecAttrService` of the per-estate Ed25519 identity key items.
+        public static let estateIdentityService = product("estate.identity")
+        /// The portable LAN server's credential.
+        public static let lanCredentialService = vendor("lan-credential")
+        /// The first-party daemon authentication secret.
+        public static let daemonAuthService = vendor("daemon-auth")
+        /// The daemon helper's custody proof item.
+        public static let daemonProofService = vendor("daemon-proof")
+        /// The cross-install custody proof item.
+        public static let crossInstallCustodyProofService = vendor("cross-install-custody-proof")
+        /// Secret-sync key handles and the protected head.
+        public static let secretSyncSigningHandleService = vendor("secret-sync.signing-handle")
+        public static let secretSyncAgreementHandleService = vendor("secret-sync.agreement-handle")
+        public static let secretSyncProtectedHeadService = vendor("secret-sync.protected-head")
+        /// The sync tier authorisation items: one service per tier, in the
+        /// vendor-root access group the app alone reads.
+        public static func syncTierService(_ tier: String) -> String { vendor("sync-tier.\(tier)") }
+        public static let syncTierAccessGroup = vendorRoot
+        /// The estate-surgery clone recipient key.
+        public static let estateSurgeryCloneRecipientService = vendor("estate-surgery.clone-recipient")
+    }
+
+    // MARK: Apple
+
+    /// Identifiers Apple registers for the signed products. Mirrors of
+    /// `project.yml` and the entitlements, pinned by the fixture.
+    public enum Apple {
+        /// The app group every process family shares (`group.<vendorRoot>`).
+        public static let appGroup = "group.\(vendorRoot)"
+        /// Spotlight domain for indexed memories.
+        public static let spotlightDomain = vendor("memory")
+        /// BGTaskScheduler identifier of the mining refresh.
+        public static let miningRefreshTaskIdentifier = vendor("mining.refresh")
+        /// NSError domain of the share extension.
+        public static let shareErrorDomain = vendor("share")
+
+        public enum BundleIdentifiers {
+            public static let macOSApp = vendor("macos")
+            public static let iOSApp = vendor("ios")
+            public static let communityMacOSApp = vendor("community.macos")
+            public static let daemonProvider = vendor("macos.daemonprovider")
+            public static let daemonHelper = vendor("macos.daemonhelper")
+            public static let daemonProofHost = vendor("macos.daemonproofhost")
+            public static let custodyProofSandboxHelper = vendor("macos.custodyproof.sandboxhelper")
+            public static let custodyProofDeveloperIDDaemon = vendor("macos.custodyproof.developeriddaemon")
+        }
+    }
+
+    // MARK: Preferences
+
+    /// UserDefaults keys, all under the product root.
+    public enum Preferences {
+        public static let residency = product("residency")
+        public static let gatewayHasCompletedOnboarding = product("gateway.hasCompletedOnboarding")
+        public static let gatewayIsAdvancedMode = product("gateway.isAdvancedMode")
+        public static let gatewayShowQuickCapture = product("gateway.showQuickCapture")
+        public static let portableOnPowerOnly = product("portable.onPowerOnly")
+        public static let portableServiceName = product("portable.serviceName")
+    }
+
+    // MARK: Queues
+
+    /// Thread and dispatch queue labels, all under the product root. Visible
+    /// only in a debugger or a crash report.
+    public enum Queues {
+        public static let ariaHTTPAccept = product("aria-mcp.http.accept")
+        public static let managerControlChannelAccept = product("mgr.control-channel.accept")
+        public static let managerHTTPReadAPIAccept = product("mgr.http-read-api.accept")
+        public static let lanDiscovery = product("lan-discovery")
+        public static let lanBrowser = product("lan-browser")
+    }
+}
