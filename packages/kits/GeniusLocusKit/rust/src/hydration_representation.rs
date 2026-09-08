@@ -39,11 +39,9 @@ impl HydrationRepresentation {
 }
 
 /// The inline distilled rendering of one item's content: the converter
-/// (`crate::DISTILLATION_CONVERTER`) receives the verbatim text and selects
-/// the exact source spans around operative intent. Pure — no I/O, no clock —
-/// and byte-identical across the Swift and Rust ports by conformance to the
-/// library's frozen oracle vectors. Measured at 17 ms per 4.9k-character
-/// record, which is why it runs at read time instead of being stored. Twin
+/// (`crate::DISTILLATION_CONVERTER`) receives the complete verbatim text and
+/// compacts eligible forms without selecting away passages. Pure — no I/O or
+/// clock. Runs at read time instead of changing stored content. Twin
 /// of Swift `GeniusLocusKit.distilledRendering(of:)`.
 pub fn distilled_rendering(content: &str) -> String {
     use context_distill_lib::distiller::ContextDistiller;

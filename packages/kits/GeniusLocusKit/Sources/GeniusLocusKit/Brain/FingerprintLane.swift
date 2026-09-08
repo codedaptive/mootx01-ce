@@ -43,7 +43,8 @@ public extension GeniusLocusKit {
             DistillationPipeline.run(
                 input: $0,
                 extractFeatures: DistillationPipeline.defaultExtractor,
-                intraItem: true)
+                intraItem: true,
+                renderText: false)
         }
     }
 
@@ -119,13 +120,8 @@ public extension GeniusLocusKit {
 
 extension GeniusLocusKit {
 
-    /// The short-cluster rendering ConsolidationCycle stores when a cluster
-    /// has fewer than three sentences: the token-compaction transform, with
-    /// the content itself as the last-resort rendering when compaction
-    /// eliminates everything (pathological all-stopword content), so every
-    /// consolidated item carries a non-empty rendering.
+    /// Compatibility entrypoint for complete source-preserving rendering.
     internal static func compactionRendering(of content: String) -> String {
-        let compacted = TokenCompaction.compact(content)
-        return compacted.isEmpty ? content : compacted
+        distilledRendering(of: content)
     }
 }
