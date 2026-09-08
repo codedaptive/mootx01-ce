@@ -29,6 +29,7 @@
 //   • Complexity: O(n²) per room — acceptable on the maintenance path
 
 import Foundation
+import MootProductIdentity
 import LocusKit
 import OSLog
 import SubstrateML
@@ -58,7 +59,7 @@ extension GeniusLocusKit {
 
     /// Logger for the anomaly-flag sweep, fleet-standard subsystem + category.
     private static var anomalyLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     /// Compute room-cohesion z-scores and set/clear the `isAnomalous` bit

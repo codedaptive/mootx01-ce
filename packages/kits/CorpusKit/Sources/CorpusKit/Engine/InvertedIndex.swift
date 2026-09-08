@@ -28,6 +28,7 @@
 // (SPARSE-1..4 in the retrieval algorithms reference §2.9).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
 // MARK: - Configuration
@@ -41,7 +42,7 @@ public let invertedIndexQuantScale: Int32 = 100
 /// Retrieval algorithms reference §2.7: "block_size is pinned config."
 public let invertedIndexBlockSize: Int = 128
 
-private let logger = Logger(subsystem: "com.mootx01.kit", category: "InvertedIndex")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit.InvertedIndex")
 
 // MARK: - Posting cursor (internal)
 

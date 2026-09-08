@@ -9,12 +9,13 @@
 
 import CorpusKit
 import Foundation
+import MootProductIdentity
 import LocusKit
 import OSLog
 import PersistenceKit
 import SubstrateLib
 
-private let compositionLog = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit.MerkleComposition")
+private let compositionLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit.MerkleComposition")
 
 public extension GeniusLocusKit {
 

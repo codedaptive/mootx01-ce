@@ -45,12 +45,13 @@
 //            REPLICATION_TRACK_PLAN.md §3 GLK estate-level hydrate integration.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 import PersistenceKit
 import PersistenceKitReplication
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
 // MARK: - Hydrate-on-open API
 

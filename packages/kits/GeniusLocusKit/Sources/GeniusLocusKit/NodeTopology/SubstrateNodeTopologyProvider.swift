@@ -19,10 +19,11 @@
 // estate→wing→room), so the walk is bounded and fast.
 
 import Foundation
+import MootProductIdentity
 import LocusKit
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit.SubstrateNodeTopologyProvider")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit.SubstrateNodeTopologyProvider")
 
 /// Adapter wrapping LocusKit's NodeStore to satisfy GLK's
 /// GLKNodeTopologyProvider protocol, converting String↔UUID at the
