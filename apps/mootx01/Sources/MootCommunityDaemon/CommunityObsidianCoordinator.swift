@@ -79,13 +79,14 @@
 // mid-write never corrupts them.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import AriaMCP
 import GeniusLocusKit
 import LocusKit
 import VaultKit
 
-private let log = Logger(subsystem: "com.mootx01", category: "CommunityObsidianCoordinator")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.Obsidian")
 
 // MARK: - Persisted types
 
