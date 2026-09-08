@@ -3,9 +3,9 @@
 // ContextDistillLib — deterministic distillation candidates for Model-Plus experiments.
 //
 // Ports distill_plus_converter.py and record_shape_classifier.py to Swift and Rust
-// so the same selection logic runs both on-device (Swift, Apple platforms) and
-// on PC/Linux (Rust). Neither port uses regex; all patterns are hand-written
-// scanners that mirror the Python reference byte-for-byte.
+// so the same logic runs both on-device (Swift, Apple platforms) and on
+// PC/Linux (Rust). Complete-form reducers and passage views are deterministic;
+// Foundation regex and local scanners implement the narrow supported grammars.
 //
 // Depends on nothing. Sits alongside AriaLexiconLib as a pure-vocabulary library.
 
