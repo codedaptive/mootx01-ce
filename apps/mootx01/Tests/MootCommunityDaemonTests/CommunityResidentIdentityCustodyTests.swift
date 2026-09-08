@@ -1,4 +1,5 @@
 import Foundation
+import GeniusLocusKit
 import Testing
 @testable import MootCommunityDaemon
 import LocusKit
@@ -18,12 +19,19 @@ struct CommunityResidentIdentityCustodyTests {
         try FileManager.default.createDirectory(at: layout, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: layout) }
 
+        // A transient record over the scratch directory with an injected identity
+        // store: the one estate the composition opens mints its one identity key
+        // into that store and nowhere else, so a proof or test host leaves no
+        // Keychain residue.
         let store = RecordingIdentityKeyStore()
-        _ = try await CommunityResidentMain.makeCommunityDispatch(
-            layoutURL: layout,
+        let host = CommunityEstateHost(
+            record: EstateRecord(name: layout.lastPathComponent, directory: layout, kind: .transient),
+            kit: GeniusLocusKit(),
             ownerIdentifier: "community-resident-test",
-            keyProvider: { _ in .plaintext },
-            identityKeyStore: store,
+            identityKeyStore: store)
+        _ = try await CommunityResidentMain.makeCommunityDispatch(
+            host: host,
+            layoutURL: layout,
             state: CommunityProviderState(
                 instanceIdentifier: UUID(),
                 estateIdentifier: UUID()
@@ -34,6 +42,7 @@ struct CommunityResidentIdentityCustodyTests {
         )
 
         #expect(store.storeCount == 1)
+        try await host.closeEstate()
     }
 }
 

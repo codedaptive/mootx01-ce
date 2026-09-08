@@ -43,6 +43,7 @@
 // classifications derived from typed Swift errors.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import MootDaemonProvider
 import LocusKit
@@ -50,7 +51,7 @@ import PersistenceKit
 import PersistenceKitSQLite
 import AriaMCP
 
-private let log = Logger(subsystem: "com.mootx01", category: "CommunityEstateLifecycle")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.EstateLifecycle")
 
 /// Manages the six estate-lifecycle endpoints for the community daemon.
 ///
@@ -65,41 +66,30 @@ public actor CommunityEstateLifecycleCoordinator: Sendable {
 
     // MARK: - Properties
 
-    /// The layout directory — parent of estate.sqlite and both sidecar files.
+    /// The daemon's shared estate host: the catalog record it names and the
+    /// one open every coordinator shares.
+    private let host: CommunityEstateHost
+
+    /// The daemon's state directory — parent of both sidecar files.
     public let layoutURL: URL
 
-    /// Owner identifier threaded into OwnerCredentials for LocusKit.
-    private let ownerIdentifier: String
-
-    /// Key provider: returns the encryption config for the estate URL.
-    private let keyProvider: @Sendable (URL) throws -> EstateEncryptionConfig
-
     // Derived paths (computed lazily, never stored — paths are not state).
-    private var estateURL: URL    { layoutURL.appendingPathComponent("estate.sqlite") }
+    private var estateURL: URL { host.record.databaseURL }
     private var metadataURL: URL  { layoutURL.appendingPathComponent("estate-metadata.json") }
     private var operationStateURL: URL { layoutURL.appendingPathComponent("operation-state.json") }
 
     // MARK: - Init
 
-    /// Construct a coordinator for the given layout directory.
+    /// Construct a coordinator over the daemon's shared estate host.
     ///
     /// - Parameters:
-    ///   - layoutURL: The directory that will contain (or already contains)
-    ///     `estate.sqlite`, `estate-metadata.json`, and `operation-state.json`.
-    ///     Must already exist (the coordinator does not create it).
-    ///   - ownerIdentifier: Non-empty label for OwnerCredentials; must be
-    ///     stable across restarts so the LocusKit manifest is consistent.
-    ///   - keyProvider: Returns the encryption config for the estate URL.
-    ///     Use `{ _ in .plaintext }` for tests; the production conformer
-    ///     reads from the data-protection Keychain.
-    public init(
-        layoutURL: URL,
-        ownerIdentifier: String,
-        keyProvider: @Sendable @escaping (URL) throws -> EstateEncryptionConfig
-    ) {
+    ///   - host: The estate host; its record names the estate and its open is
+    ///     the one every coordinator shares.
+    ///   - layoutURL: The daemon's state directory, which contains (or will
+    ///     contain) `estate-metadata.json` and `operation-state.json`. Must already exist.
+    public init(host: CommunityEstateHost, layoutURL: URL) {
+        self.host = host
         self.layoutURL = layoutURL
-        self.ownerIdentifier = ownerIdentifier
-        self.keyProvider = keyProvider
     }
 
     // MARK: - Endpoint: inspect
@@ -155,13 +145,8 @@ public actor CommunityEstateLifecycleCoordinator: Sendable {
             return LifecycleMCPResponse.wrap(LifecycleStateBuilder.blocked(reason: "action-refused"))
         }
 
-        // Open the estate via CommunityEstateHost. On a fresh path, LocusKit
+        // Open the estate through the shared host. On a fresh record the host
         // creates the file, seeds the schema, and seeds the manifest UUID.
-        let host = CommunityEstateHost(
-            estateURL: estateURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
         let proof: EstateReadyProof
         do {
             proof = try await host.openEstate()
@@ -179,8 +164,6 @@ public actor CommunityEstateLifecycleCoordinator: Sendable {
                 choices: defaultRecoveryChoices()
             ))
         }
-        // Close the host immediately — it was only needed to bootstrap the file.
-        try? await host.closeEstate()
 
         // Write metadata sidecar.
         let receiptID = UUID().uuidString.lowercased()
@@ -217,16 +200,10 @@ public actor CommunityEstateLifecycleCoordinator: Sendable {
             return LifecycleMCPResponse.wrap(LifecycleStateBuilder.blocked(reason: "estate-missing"))
         }
 
-        // Try to open the estate and read its proof.
-        let host = CommunityEstateHost(
-            estateURL: estateURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
+        // Read the proof from the shared host, opening the estate when needed.
         let proof: EstateReadyProof
         do {
             proof = try await host.openEstate()
-            try? await host.closeEstate()
         } catch {
             // Fail-closed: any open failure surfaces as corrupt, not as estate-missing.
             // An unreadable file is NOT absent; distinct error shapes.
@@ -356,15 +333,9 @@ public actor CommunityEstateLifecycleCoordinator: Sendable {
     /// Never creates the estate file (CORE-01): only called when the file
     /// already exists.
     private func tryOpenAndReport() async -> JSONValue {
-        let host = CommunityEstateHost(
-            estateURL: estateURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
         let proof: EstateReadyProof
         do {
             proof = try await host.openEstate()
-            try? await host.closeEstate()
         } catch {
             return LifecycleMCPResponse.wrap(corruptStateFromError(error))
         }
@@ -382,16 +353,9 @@ public actor CommunityEstateLifecycleCoordinator: Sendable {
         ))
     }
 
-    /// Read-only open of the estate, returning the proof without caching.
-    /// Closes the host immediately after reading. Used for estate-UUID extraction.
+    /// The estate's proof from the shared host, for estate-UUID extraction.
     private func openForRead() async throws -> EstateReadyProof {
-        let host = CommunityEstateHost(
-            estateURL: estateURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
         let proof = try await host.openEstate()
-        try? await host.closeEstate()
         return proof
     }
 
