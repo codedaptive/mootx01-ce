@@ -49,7 +49,7 @@ import Foundation
 // That is the whole point of the bridge — the AI's memory lands in MemPalace AND
 // mootx01 simultaneously. Both backends MUST therefore be writable targets the
 // operator intends to populate. For tests this means scratch backends only
-// (mempalace --palace /tmp/...; MOOTX01_DATA_DIR=/tmp/...).
+// (mempalace --palace /tmp/...; mootx01 serve --db /tmp/.../scratch).
 
 /// The classified call type for a tools/call, matched against a backend's
 /// verbMap. The bridge recognizes two verbs; everything else is unclassifiable and
@@ -313,12 +313,43 @@ final class BridgeServer {
 
         let mirrorStart = DispatchTime.now()
         do {
-            _ = try await secondaryBackend.transport.sendAndReceive(translated)
-            await stats.recordLatency(Self.elapsedSeconds(since: mirrorStart),
-                                      label: "\(secondaryBackend.name).tools/call.mirror")
+            let response = try await secondaryBackend.transport.sendAndReceive(translated)
+            // A backend that answered with a JSON-RPC error or an `isError` tool
+            // result did NOT store the write. Count it as a secondary failure,
+            // not as a completed mirror, so the stats never report a data gap
+            // as success.
+            if Self.isFailedToolResponse(response) {
+                await stats.recordSecondaryFailure()
+            } else {
+                await stats.recordLatency(Self.elapsedSeconds(since: mirrorStart),
+                                          label: "\(secondaryBackend.name).tools/call.mirror")
+            }
         } catch {
             await stats.recordSecondaryFailure()
         }
+    }
+
+    /// True when a backend's response line is a JSON-RPC `error` or a tool
+    /// result flagged `isError: true`. Exposed as `static` for unit testing.
+    static func isFailedToolResponse(_ response: Data) -> Bool {
+        guard let parsed = try? JSONDecoder().decode(JSONValue.self, from: response) else {
+            return true
+        }
+        if parsed["error"] != nil { return true }
+        if case .bool(true)? = parsed["result"]?["isError"] { return true }
+        return false
+    }
+
+    /// The subject the bridge derives for a write tool that requires one: the
+    /// content's first non-empty line, whitespace-trimmed, cut to the 120
+    /// characters mootx01 accepts. Exposed as `static` for unit testing.
+    static let derivedSubjectLimit = 120
+    static func derivedSubject(from content: String) -> String {
+        let firstLine = content
+            .split(omittingEmptySubsequences: true, whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? "memory"
+        return String(firstLine.prefix(derivedSubjectLimit))
     }
 
     /// Forwards an arbitrary id-bearing method (e.g. initialize) to the primary
@@ -433,6 +464,15 @@ final class BridgeServer {
             // secondary's. Without content there is nothing to mirror → nil.
             guard let value = clientArgs[primaryVerbMap.contentArg] else { return nil }
             secondaryArgs[secondaryVerbMap.contentArg] = value
+            // A write tool that requires a subject gets one derived from the
+            // content when the client's call carries none under that key.
+            if let subjectArg = secondaryVerbMap.subjectArg, secondaryArgs[subjectArg] == nil {
+                if let given = clientArgs[subjectArg], given.stringValue != nil {
+                    secondaryArgs[subjectArg] = given
+                } else if let text = value.stringValue {
+                    secondaryArgs[subjectArg] = .string(Self.derivedSubject(from: text))
+                }
+            }
             secondaryTool = secondaryVerbMap.write
         case .query:
             // Queries are not fanned out in normal operation (reads are

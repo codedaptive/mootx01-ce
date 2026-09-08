@@ -12,7 +12,7 @@
 //!
 //! # Per-backend wiring policy (mirrors Swift AriaMCPMain.swift)
 //!
-//! - SQLite (ARIA_MCP_SQLITE_PATH set): semantic recall wired via the DrawerStore's
+//! - SQLite (a SQLite catalog record): semantic recall wired via the DrawerStore's
 //!   shared `Storage` connection (the storage `EstateRegistry` hands to GLK
 //!   `wire_glk_substores`).
 //!   One connection for ALL sub-stores — LocusKit, Corpus, VectorStore. Matches the
