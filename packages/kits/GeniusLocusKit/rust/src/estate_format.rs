@@ -11,7 +11,9 @@ use persistence_kit::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Serialised as `{"major": 1, "minor": 7}`: the shape the estate manifest
+/// (`estate.json`) records and the Swift port's synthesized Codable writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EstateFormatVersion {
     pub major: u32,
     pub minor: u32,

@@ -29,10 +29,11 @@
 // remove) and reads (search) are serialised through the actor boundary.
 
 import Foundation
+import MootProductIdentity
 import EngramLib
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "SynapseKit")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "SynapseKit")
 
 /// The binary brute-force dense index. Exact Hamming top-k over a
 /// ResidentVectorArray. **The conformance oracle**: MIH and all other

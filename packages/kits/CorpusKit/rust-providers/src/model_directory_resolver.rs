@@ -13,9 +13,9 @@
 //! Slot 2 is where the release tarball (built with `fetch-release.sh linux`)
 //! and the installers place the four model files (`config.json`,
 //! `tokenizer.json`, `model.safetensors`, `vocab.txt`).
-//! On macOS development runs the binary lives beside the repo; the
+//! On development runs the binary lives beside the repo; the
 //! `../share/mootx01/models/` path will typically not exist and the function
-//! returns None unless `MOOTX01_DATA_DIR` points at a prepared directory.
+//! returns None unless the caller's `data_dir` holds a prepared directory.
 //!
 //! # Integrity check
 //!

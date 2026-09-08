@@ -21,6 +21,7 @@
 //   EpochFence.swift         — push-path heartbeat + epoch verification
 
 import Foundation
+import MootProductIdentity
 import CloudKit
 import ConvergenceKit
 import PersistenceKit
@@ -40,7 +41,7 @@ import PersistenceKit
 import SubstrateTypes
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.Engine")
 
 // MARK: - SyncRecord → DecodedRecord conversion (skew-queue replay, R9)
 

@@ -190,13 +190,12 @@ public actor Estate {
     ///     `InMemoryEstateIdentityKeyStore` explicitly (required when the
     ///     test estate lives on temp-dir SQLite storage).
     ///   - federate: whether this open establishes the estate's Ed25519
-    ///     federation identity. When nil (the default) the posture is read
-    ///     from the `MOOTX01_ESTATE_FEDERATE` environment variable — only
-    ///     the exact value "false" disables it. When false, the identity
-    ///     step is skipped entirely: no keypair, no key-store write, no
-    ///     manifest public key, no key-store read on reopen; grant issuance
-    ///     throws for the lifetime of this instance. Tests pass an explicit
-    ///     value instead of mutating shared process environment.
+    ///     federation identity. Off by default: minting is additive cost and
+    ///     a key-store write. When false the identity step is skipped
+    ///     entirely: no keypair, no key-store write, no manifest public key,
+    ///     no key-store read on reopen; grant issuance throws for the
+    ///     lifetime of this instance. The product passes true for a
+    ///     registered estate, the one this machine owns.
     /// - Throws:
     ///   - `EstateError.emptyOwnerIdentifier` if the owner identifier
     ///     is empty (raised before any storage call).
@@ -210,7 +209,7 @@ public actor Estate {
         storage: any Storage,
         owner: OwnerCredentials,
         identityKeyStore: (any EstateIdentityKeyStore)? = nil,
-        federate: Bool? = nil
+        federate: Bool = false
     ) async throws -> Estate {
         guard !owner.ownerIdentifier.isEmpty else {
             throw EstateError.emptyOwnerIdentifier
@@ -260,19 +259,17 @@ public actor Estate {
         //     ordinary metadata, unencrypted, visible to database and backup readers.
         //   - Only the public key is written to the manifest; it is safe to store
         //     there — a public key has no confidentiality requirement.
-        // Federation opt-out (MOOTX01_ESTATE_FEDERATE=false, 2026-08-28
-        // ruling): grant issuance is the ONLY consumer of the identity key,
-        // so an estate that will never issue federation grants (benchmark
-        // artifacts, bulk plaintext estates) skips the whole identity step —
-        // no keypair, no Keychain write, no manifest public key, no key-store
-        // read on reopen. Per-open declaration like MOOTX01_ESTATE_LIFETIME,
-        // never a persistent estate property: a federate-false estate opened
-        // later without the variable mints then. The optional parameter
-        // exists so tests inject the posture directly instead of mutating
-        // shared process environment under parallel test execution.
-        let federationEnabled = federate ?? Self.federationEnabledFromEnvironment()
+        // Federation is the caller's explicit choice, per open. Grant issuance
+        // is the ONLY consumer of the identity key, so an estate that will never
+        // issue federation grants (a transient estate: benchmark artifacts,
+        // scratch) skips the whole identity step — no keypair, no Keychain
+        // write, no manifest public key, no key-store read on reopen. Off by
+        // default because minting is additive cost and a Keychain write; the
+        // product passes true for a registered estate, which this machine owns.
+        // Never a persistent estate property: a non-federating open followed by
+        // a federating one mints then.
         var privateSigningKeyData: Data?
-        if !federationEnabled {
+        if !federate {
             // Declared non-federating open: zero identity-key-store contact
             // either direction. issueGrant throws invalidManifest when the
             // signing key is absent — the documented non-federating posture.
@@ -446,22 +443,6 @@ public actor Estate {
             return InMemoryEstateIdentityKeyStore()
         }
         return KeychainEstateIdentityKeyStore()
-    }
-
-    /// Whether estate opens establish the Ed25519 federation identity, read
-    /// from `MOOTX01_ESTATE_FEDERATE`. Only the exact value "false" (any
-    /// case) disables federation — absence and every other value keep the
-    /// default minting behavior, so the variable is a declaration, never an
-    /// inference (same contract as `MOOTX01_ESTATE_LIFETIME`).
-    static func federationEnabledFromEnvironment() -> Bool {
-        federationEnabled(
-            fromEnvironmentValue: ProcessInfo.processInfo.environment["MOOTX01_ESTATE_FEDERATE"])
-    }
-
-    /// Pure parse behind `federationEnabledFromEnvironment()`, split out so
-    /// tests cover the contract without mutating shared process environment.
-    static func federationEnabled(fromEnvironmentValue value: String?) -> Bool {
-        value?.lowercased() != "false"
     }
 
     // MARK: - Close
