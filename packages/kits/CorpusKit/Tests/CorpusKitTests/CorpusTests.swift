@@ -19,6 +19,8 @@
 
 import Foundation
 import PersistenceKit
+import QueueKit
+import SubstrateTypes
 import PersistenceKitSQLite
 import Testing
 
@@ -424,14 +426,29 @@ struct CorpusTests {
         }
     }
 
-    /// the encode drain claims only stream="encode" jobs and
-    /// does not disturb jobs on other streams sharing the same queue.sqlite.
+    /// The encode drain claims only stream="encode" jobs and does not disturb
+    /// jobs on other streams sharing the same queue.
+    ///
+    /// The mounted drain worker and a manual `drainIngestQueueOnce` both drain
+    /// the encode stream, so which of them claims the encode job is a race;
+    /// the property under test is that NEITHER claims a job on another
+    /// stream, so the assertion is on the foreign job staying claimable after
+    /// the encode stream has drained to empty.
     @Test func encodeDrainIsStreamScoped() async throws {
         try await GlobalTestLock.shared.withLock {
             // Build an in-memory corpus (no file I/O needed; stream isolation is
             // queue-level, not backend-level).
             let corpus = try await makeCorpus()
             try await corpus.mountIngestQueue()
+            let queue = try #require(await corpus.ingestQueue)
+
+            // A job on a stream the encode drain must never claim, sharing the
+            // queue with the encode job below.
+            let foreignStream = StreamID(rawValue: "signal")
+            let foreign = try IngestJob(
+                sourceID: "doc-foreign", text: "foreign stream content", capturedAt: fixedNow)
+                .toJob(streamID: foreignStream, submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1))
+            try await queue.send(foreign)
 
             // Enqueue on the encode stream via the public API.
             try await corpus.enqueueIngest(
@@ -439,14 +456,20 @@ struct CorpusTests {
                 sourceID: "doc-scoped",
                 now: fixedNow
             )
-            // Drain once — only encode jobs are drained.
-            let drained = try await corpus.drainIngestQueueOnce()
-            #expect(drained == 1)
-
-            // After the drain pass the content must be searchable.
+            // Drain the encode stream to empty: the worker or this pass claims
+            // the encode job, never the foreign one.
+            _ = try await corpus.drainIngestQueueOnce()
             try await corpus.awaitIngestDrain()
+            #expect(try await corpus.drainIngestQueueOnce() == 0)
+
+            // The encode job was ingested and is searchable.
             let results = try await corpus.recall("stream scoped encode", limit: 5, now: fixedNow)
             #expect(!results.isEmpty)
+
+            // The foreign job is still pending on its own stream.
+            let untouched = try await queue.drain(stream: foreignStream)
+            #expect(untouched.count == 1)
+            #expect(untouched.first?.job.id == foreign.id)
 
             await corpus.dropIngestQueue()
         }
