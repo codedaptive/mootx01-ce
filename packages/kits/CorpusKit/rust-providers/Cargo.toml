@@ -123,3 +123,9 @@ required-features = ["lsa"]
 [[test]]
 name = "trainable_embedding_basis_tests"
 required-features = ["dense-families"]
+
+# The cross-encoder candle tests name the candle types directly; without the
+# feature they would not compile.
+[[test]]
+name = "cross_encoder_candle_tests"
+required-features = ["candle"]
