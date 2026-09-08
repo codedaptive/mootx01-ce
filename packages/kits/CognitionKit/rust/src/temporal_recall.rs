@@ -262,6 +262,7 @@ pub fn run(
             // Sub-span scoring is an additive-cost stage this recipe does not
             // request; every caller names the switch (ruling 2026-09-07).
             sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
+            rerank_directive: None,
         };
         coord
             .recall_scored(handle, request, now)
