@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import Security
 
 /// Protocol for persisting the estate's Ed25519 private signing key outside the
@@ -61,7 +62,7 @@ public struct KeychainEstateIdentityKeyStore: EstateIdentityKeyStore {
     // The Keychain service name that scopes all estate identity keys.
     // kSecAttrAccount (the estate UUID string) distinguishes individual estates
     // within this service. Matching the service name used in data-movement privacy tiers.
-    private static let service = "com.mootx01.estate.identity"
+    private static let service = MootProductIdentity.Keychain.estateIdentityService
 
     public init() {}
 

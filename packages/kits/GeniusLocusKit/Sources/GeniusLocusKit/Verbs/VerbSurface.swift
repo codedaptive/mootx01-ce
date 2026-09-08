@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import CryptoKit
@@ -98,7 +99,7 @@ public extension GeniusLocusKit {
     /// actor is private; declaring a local computed accessor keeps the
     /// fleet-standard subsystem/category in one place per CLAUDE.md.
     private static var verbLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - Mount-state gate

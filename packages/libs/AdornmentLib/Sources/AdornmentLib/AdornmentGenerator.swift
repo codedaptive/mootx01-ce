@@ -19,9 +19,10 @@
 // synchronisation boundary; no mutable state is shared.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "AdornmentLib")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "AdornmentLib")
 
 // MARK: - Constants
 

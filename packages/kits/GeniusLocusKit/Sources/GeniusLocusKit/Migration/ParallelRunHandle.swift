@@ -6,6 +6,7 @@
 // prevent further writes.
 
 import Foundation
+import MootProductIdentity
 import LocusKit
 import OSLog
 
@@ -35,7 +36,7 @@ public actor ParallelRunHandle {
     /// The logger for migration routing decisions. Fleet-standard
     /// subsystem and category per CLAUDE.md.
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "GeniusLocusKit"
     )
 

@@ -28,6 +28,7 @@
 // tier rather than leaving callers to recount.
 
 import Foundation
+import MootProductIdentity
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -91,27 +92,19 @@ public enum TwentyRowEstateFixture {
 
     // MARK: - Production-path guard
 
-    /// The env var that overrides the resolved data directory, mirroring
-    /// `MootPaths.dataDirEnvVar`. Duplicated as a literal rather than imported
-    /// because LocusKit sits below the installer module that owns `MootPaths`,
-    /// and a test-support target must not drag an app module into the kit graph.
-    /// If the app-side name ever changes, this guard must change with it.
-    public static let dataDirEnvVar = "MOOTX01_DATA_DIR"
-
-    /// The real estate directory this fixture must never touch. Mirrors
-    /// `MootPaths.resolveDataDirectory`: the env override wins when set and
-    /// non-empty, otherwise the macOS Application Support location.
+    /// The real configuration directory this fixture must never touch: the
+    /// product's Application Support folder, where the estate catalog and the
+    /// default database location live. The folder name is duplicated as a
+    /// literal rather than imported because LocusKit sits below the modules
+    /// that own the product identity, and a test-support target must not drag
+    /// them into the kit graph. No environment value moves it.
     public static func productionDataDirectory(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> URL {
-        if let override = environment[dataDirEnvVar], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
-        }
         return homeDirectory
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("com.mootx01.ce", isDirectory: true)
+            .appendingPathComponent(MootProductIdentity.Storage.applicationSupportFolder, isDirectory: true)
             .standardizedFileURL
     }
 
@@ -124,11 +117,9 @@ public enum TwentyRowEstateFixture {
     /// so a link into the data directory cannot smuggle a write past the check.
     public static func assertNotProductionPath(
         _ target: URL,
-        environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) throws {
-        let dataDirectory = productionDataDirectory(
-            environment: environment, homeDirectory: homeDirectory)
+        let dataDirectory = productionDataDirectory(homeDirectory: homeDirectory)
 
         // resolvingSymlinksInPath() on a not-yet-existing file still resolves
         // the existing parent components, which is the part that matters: a
@@ -292,12 +283,10 @@ public enum TwentyRowEstateFixture {
     @discardableResult
     public static func generate(
         at estateURL: URL,
-        environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) async throws -> Manifest {
         // Step zero, before any filesystem write.
-        try assertNotProductionPath(
-            estateURL, environment: environment, homeDirectory: homeDirectory)
+        try assertNotProductionPath(estateURL, homeDirectory: homeDirectory)
 
         try FileManager.default.createDirectory(
             at: estateURL.deletingLastPathComponent(),

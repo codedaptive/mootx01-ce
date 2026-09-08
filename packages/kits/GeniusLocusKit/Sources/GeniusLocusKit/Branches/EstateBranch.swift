@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import SubstrateTypes
 import OSLog
 import LocusKit
@@ -75,7 +76,7 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
 
     // MARK: - Private
 
-    private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+    private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
     /// Lock protecting the `status` field. `OSAllocatedUnfairLock`
     /// stores the protected value inside itself, avoiding a separate

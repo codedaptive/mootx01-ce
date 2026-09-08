@@ -63,13 +63,14 @@
 // the awkward property-based wiring that value-type existentials make difficult.
 
 import Foundation
+import MootProductIdentity
 import Network
 import Crypto
 import os
 
 private let logger = Logger(
-    subsystem: "com.mootx01.convergencekit.federation",
-    category: "LANDiscovery"
+    subsystem: MootProductIdentity.Logging.subsystem,
+    category: "ConvergenceKitFederation.LANDiscovery"
 )
 
 // MARK: - Service Type Constant
@@ -524,7 +525,7 @@ public final class LANDiscovery: @unchecked Sendable {
 public final class NWLANDiscoverySession: LANDiscoverySession, @unchecked Sendable {
     private var listener: NWListener?
     private var browser: NWBrowser?
-    private let queue = DispatchQueue(label: "com.mootx01.lan-discovery", qos: .utility)
+    private let queue = DispatchQueue(label: MootProductIdentity.Queues.lanDiscovery, qos: .utility)
 
     public init() {}
 

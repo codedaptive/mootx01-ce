@@ -140,19 +140,4 @@ struct SeedHintEncodeTests {
                     "charter filedAt must be the fixed 2000-01-01 sentinel")
         }
     }
-
-    @Test("MOOTX01_SKIP_CHARTERS suppresses charter seeding entirely")
-    func skipEnvSuppressesCharters() async throws {
-        // Failure mode: without the seedDefaultWings guard the estate carries
-        // 7 charter drawers and the zero-count assertion fails.
-        setenv("MOOTX01_SKIP_CHARTERS", "1", 1)
-        defer { unsetenv("MOOTX01_SKIP_CHARTERS") }
-        let (kit, handle) = try await provisionGLKEstate()
-        let estate = try await kit.estate(for: handle)
-        let all = try await estate.allDrawers()
-        let names = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
-        let charters = all.filter { names[$0.parentNodeId]?.room == LocusKit.hintRoom }
-        #expect(charters.isEmpty,
-                "no charter drawers may exist when the skip seam is set")
-    }
 }

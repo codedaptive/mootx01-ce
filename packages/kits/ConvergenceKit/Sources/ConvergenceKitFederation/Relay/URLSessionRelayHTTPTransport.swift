@@ -14,10 +14,11 @@
 // remove this bridge; for v1.0 the synchronous contract is the law.
 
 import Foundation
+import MootProductIdentity
 import os
 
 private let logger = Logger(
-    subsystem: "com.mootx01.synckit.federation",
+    subsystem: MootProductIdentity.Logging.subsystem,
     category: "URLSessionRelayTransport"
 )
 

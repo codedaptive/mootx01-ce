@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import CryptoKit
 import OSLog
 import LocusKit
@@ -571,7 +572,7 @@ public struct JsonSeedFile: Sendable, Equatable {
 public struct JsonImportBridge: Sendable {
 
     let kit: GeniusLocusKit
-    private let log = Logger(subsystem: "com.mootx01.kit", category: "VaultKit")
+    private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "VaultKit")
 
     /// The ceilings this bridge enforces on an untrusted seed file.
     public var limits: JsonImportLimits
