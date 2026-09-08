@@ -215,96 +215,94 @@ struct DataRetentionTests {
     func inventoryContents() throws {
         let dir = try makeDataDir("inventory")
         defer { try? FileManager.default.removeItem(at: dir) }
-        #expect(DataRetention.dataInventory(in: dir.appendingPathComponent("missing")) == nil)
-        #expect(DataRetention.dataInventory(in: dir) == nil)
+        let defaultDB = dir.appendingPathComponent("databases/default/estate.sqlite")
+        let workDB = dir.appendingPathComponent("databases/work/estate.sqlite")
+        #expect(DataRetention.dataInventory(
+            defaultDatabaseURL: defaultDB, namedDatabaseURLs: [workDB],
+            configurationDirectory: dir.appendingPathComponent("missing")) == nil)
+        #expect(DataRetention.dataInventory(
+            defaultDatabaseURL: defaultDB, namedDatabaseURLs: [workDB], configurationDirectory: dir) == nil)
 
         let fm = FileManager.default
-        fm.createFile(atPath: dir.appendingPathComponent("estate.sqlite").path, contents: Data("x".utf8))
-        try fm.createDirectory(
-            at: dir.appendingPathComponent("databases/work"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: defaultDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        fm.createFile(atPath: defaultDB.path, contents: Data("x".utf8))
+        try fm.createDirectory(at: workDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+        fm.createFile(atPath: workDB.path, contents: Data("x".utf8))
+        // A registered estate whose database was never created does not count.
+        let emptyDB = dir.appendingPathComponent("databases/empty/estate.sqlite")
         try fm.createDirectory(
             at: dir.appendingPathComponent("moot-mgr"), withIntermediateDirectories: true)
         fm.createFile(
             atPath: dir.appendingPathComponent("moot-mgr/stats.sqlite").path, contents: Data("x".utf8))
 
-        let inv = try #require(DataRetention.dataInventory(in: dir))
+        let inv = try #require(DataRetention.dataInventory(
+            defaultDatabaseURL: defaultDB, namedDatabaseURLs: [workDB, emptyDB], configurationDirectory: dir))
         #expect(inv.contains("default estate database"))
         #expect(inv.contains("1 named estate(s)"))
         #expect(inv.contains("moot-mgr history database"))
     }
 
-    @Test("default-estate detection covers both layouts")
-    func defaultEstateDetection() throws {
+    @Test("estate detection is the record's database file")
+    func estateDetection() throws {
         let dir = try makeDataDir("detect")
         defer { try? FileManager.default.removeItem(at: dir) }
-        #expect(!DataRetention.defaultEstateExists(in: dir))
-        // Swift flat layout.
+        let db = dir.appendingPathComponent("databases/default/estate.sqlite")
+        #expect(!DataRetention.estateExists(databaseURL: db))
         let fm = FileManager.default
-        fm.createFile(atPath: dir.appendingPathComponent("estate.sqlite").path, contents: Data("x".utf8))
-        #expect(DataRetention.defaultEstateExists(in: dir))
-        try fm.removeItem(at: dir.appendingPathComponent("estate.sqlite"))
-        // Rust databases/default layout (a migrated data directory).
-        try fm.createDirectory(
-            at: dir.appendingPathComponent("databases/default"), withIntermediateDirectories: true)
-        fm.createFile(
-            atPath: dir.appendingPathComponent("databases/default/estate.sqlite").path,
-            contents: Data("x".utf8))
-        #expect(DataRetention.defaultEstateExists(in: dir))
+        try fm.createDirectory(at: db.deletingLastPathComponent(), withIntermediateDirectories: true)
+        fm.createFile(atPath: db.path, contents: Data("x".utf8))
+        #expect(DataRetention.estateExists(databaseURL: db))
     }
 
     // MARK: - Apply actions (injected mover; never the real Trash)
 
-    @Test("applyReplace moves estate files + mgr store, keeps named estates")
+    @Test("applyReplace moves the estate's files + mgr store, keeps the directory and other estates")
     func applyReplaceScope() throws {
         let dir = try makeDataDir("replace")
         defer { try? FileManager.default.removeItem(at: dir) }
         let fm = FileManager.default
-        for name in ["estate.sqlite", "estate.sqlite-wal", "estate.vectors.vec",
-                     "estate.queue.sqlite"] {
-            fm.createFile(atPath: dir.appendingPathComponent(name).path, contents: Data("x".utf8))
+        let estateDir = dir.appendingPathComponent("databases/default", isDirectory: true)
+        try fm.createDirectory(at: estateDir, withIntermediateDirectories: true)
+        let present = ["estate.sqlite", "estate.sqlite-wal", "estate.vectors.vec", "estate.queue.sqlite", "no-encrypt"]
+        for name in present {
+            fm.createFile(atPath: estateDir.appendingPathComponent(name).path, contents: Data("x".utf8))
         }
-        try fm.createDirectory(
-            at: dir.appendingPathComponent("databases/default"), withIntermediateDirectories: true)
+        let estateFiles = (present + ["estate.json", "estate.pid"]).map { estateDir.appendingPathComponent($0) }
         try fm.createDirectory(
             at: dir.appendingPathComponent("databases/work"), withIntermediateDirectories: true)
+        fm.createFile(atPath: dir.appendingPathComponent("databases/work/estate.sqlite").path, contents: Data("x".utf8))
         try fm.createDirectory(
             at: dir.appendingPathComponent("moot-mgr"), withIntermediateDirectories: true)
 
         let recorder = MoveRecorder()
-        try DataRetention.applyReplace(in: dir) { url in
+        try DataRetention.applyReplace(estateFiles: estateFiles, configurationDirectory: dir) { url in
             recorder.record(url.lastPathComponent)
             try FileManager.default.removeItem(at: url)
         }
         let moved = recorder.moved
-        #expect(moved.contains("estate.sqlite"))
-        #expect(moved.contains("estate.sqlite-wal"))
-        #expect(moved.contains("estate.vectors.vec"))
-        #expect(moved.contains("estate.queue.sqlite"))
-        #expect(moved.contains("default"), "databases/default must move")
-        #expect(moved.contains("moot-mgr"), "the mgr store must reset")
-        #expect(!moved.contains("work"), "named estates are untouched by replace")
-        // The active-estate pointer converges on default.
-        #expect(try DatabaseManager.activeEstateName(in: dir) == "default")
+        #expect(Set(moved) == Set(present + ["moot-mgr"]), "every present estate file and the mgr store move; absent files are skipped")
+        #expect(fm.fileExists(atPath: estateDir.path), "the estate directory stays for the first serve")
+        #expect(fm.fileExists(atPath: dir.appendingPathComponent("databases/work/estate.sqlite").path),
+                "other estates are untouched by replace")
     }
 
-    @Test("applyReuse resets only the mgr store and repoints default")
+    @Test("applyReuse resets only the mgr store")
     func applyReuseScope() throws {
         let dir = try makeDataDir("reuse")
         defer { try? FileManager.default.removeItem(at: dir) }
         let fm = FileManager.default
-        fm.createFile(atPath: dir.appendingPathComponent("estate.sqlite").path, contents: Data("x".utf8))
+        let db = dir.appendingPathComponent("databases/default/estate.sqlite")
+        try fm.createDirectory(at: db.deletingLastPathComponent(), withIntermediateDirectories: true)
+        fm.createFile(atPath: db.path, contents: Data("x".utf8))
         try fm.createDirectory(
             at: dir.appendingPathComponent("moot-mgr"), withIntermediateDirectories: true)
-        try DatabaseManager.setActiveEstate("work", in: dir)
 
         let recorder = MoveRecorder()
-        try DataRetention.applyReuse(in: dir) { url in
+        try DataRetention.applyReuse(configurationDirectory: dir) { url in
             recorder.record(url.lastPathComponent)
             try FileManager.default.removeItem(at: url)
         }
         #expect(recorder.moved == ["moot-mgr"], "reuse must move ONLY the mgr store")
-        #expect(fm.fileExists(atPath: dir.appendingPathComponent("estate.sqlite").path),
-                "the adopted estate must stay in place")
-        #expect(try DatabaseManager.activeEstateName(in: dir) == "default")
+        #expect(fm.fileExists(atPath: db.path), "the adopted estate must stay in place")
     }
 }
