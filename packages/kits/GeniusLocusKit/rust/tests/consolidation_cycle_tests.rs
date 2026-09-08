@@ -130,6 +130,13 @@ fn sweep_consolidates_cluster_and_marks_constituents() {
         assert_eq!(d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE, 0);
         assert!(!d.content.is_empty());
     }
+    let rows = coord.estate_for(&handle).expect("estate").all_drawers().expect("drawers");
+    let vague = rows.iter().find(|d| d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE != 0)
+        .expect("consolidated drawer");
+    // Complete source bodies retain grammar and document boundaries.
+    let rendered: std::collections::BTreeSet<&str> = vague.content.split("\n\n").collect();
+    let original: std::collections::BTreeSet<&str> = CLUSTER_BODIES.into_iter().collect();
+    assert_eq!(rendered, original);
 }
 
 #[test]
