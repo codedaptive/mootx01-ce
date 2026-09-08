@@ -45,7 +45,7 @@ public struct WidgetSnapshot: Codable, Sendable, Equatable {
     /// snapshot entries, preserving recall order.
     public static func from(drawers: [RecalledDrawer], updatedAt: Date) -> WidgetSnapshot {
         WidgetSnapshot(
-            entries: drawers.map { Entry(id: $0.id, content: $0.content, room: $0.room) },
+            entries: drawers.map { Entry(id: $0.id, content: $0.excerpt, room: $0.room ?? "") },
             updatedAt: updatedAt)
     }
 }

@@ -41,7 +41,7 @@
 // (ContractDaemonHarness) spawns mootx01-daemon-contract-host, not mootx01-daemon.
 //
 // SHARED COMPOSITION (F2):
-// makeCommunityDispatch(layoutURL:ownerIdentifier:keyProvider:state:) constructs
+// makeCommunityDispatch(host:layoutURL:state:) constructs
 // all six coordinator families and returns a fully-wired CommunityContractDispatch.
 // It is called by runProduction() (production layout + Keychain key provider, AFTER
 // activation) and by mootx01-daemon-contract-host (temp layout + plaintext keys).
@@ -150,9 +150,14 @@ public enum CommunityResidentMain {
         // This is NOT the FirstPartyRootProviding conformer — that is constructed
         // below (step 4) after activation, using the eligibility-derived access group.
         let keychainAuthority = DataProtectionKeychainAuthority()
-        let estateHost = try? buildEstateHost()
-        guard let estate = estateHost else {
-            let out = encodedFailure("estate-host-init-failed")
+        // The daemon's estate is the catalog's active record, opened once through
+        // GeniusLocusKit by this host; the provider's activate() opens it for the
+        // readiness proof and every coordinator below shares the same open.
+        let estate: CommunityEstateHost
+        do {
+            estate = try buildEstateHost()
+        } catch {
+            let out = encodedFailure("estate-host-init-failed: \(error)")
             return (DaemonShellMain.ExitCode.failure.rawValue, out)
         }
         let bind = ProductionBind(reservedFD: preBound.fd, reservedPort: preBound.port)
@@ -216,35 +221,20 @@ public enum CommunityResidentMain {
         // Build all six coordinator families via the shared composition function.
         // The same function is called by mootx01-daemon-contract-host so the
         // harness certifies the composition production runs.
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let productionLayoutURL = home
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("MOOTx01", isDirectory: true)
-        let productionOwnerID: String
-        if let identity = try? SecCodeEntitlementReadback().processIdentity() {
-            productionOwnerID = identity.teamIdentifier ?? "unknown"
-        } else {
-            productionOwnerID = "unknown"
-        }
-        // Production key provider: per-estate AES-256 key in the Keychain.
-        // The Keychain access group and service name match the values used by
-        // buildEstateHost() so both the DaemonProvider estate host and the
-        // coordinator estate accesses use the same key.
-        let productionKeyProvider: @Sendable (URL) throws -> EstateEncryptionConfig = { url in
-            let key = try KeychainKeyStore(
-                service: "com.codedaptive.mootx01",
-                estateURL: url,
-                accessGroup: "com.codedaptive.mootx01.shared"
-            ).loadOrCreateKey()
-            return EstateEncryptionConfig.fullDatabase(key: key)
+        // The daemon's own state (sidecar JSON files) lives beside the catalog,
+        // in the configuration directory, as moot-mgr's stats store does.
+        let productionLayoutURL = Self.daemonStateDirectory
+        do {
+            try FileManager.default.createDirectory(at: productionLayoutURL, withIntermediateDirectories: true)
+        } catch {
+            let out = encodedFailure("daemon-state-directory-unavailable: \(error)")
+            return (DaemonShellMain.ExitCode.failure.rawValue, out)
         }
         let communityDispatch: CommunityContractDispatch
         do {
             communityDispatch = try await CommunityResidentMain.makeCommunityDispatch(
+                host: estate,
                 layoutURL: productionLayoutURL,
-                ownerIdentifier: productionOwnerID,
-                keyProvider: productionKeyProvider,
                 state: providerState
             )
         } catch {
@@ -313,49 +303,34 @@ public enum CommunityResidentMain {
         return (DaemonShellMain.ExitCode.success.rawValue, String(decoding: encoded, as: UTF8.self))
     }
 
-    /// Build the CommunityEstateHost using the production canonical estate path.
+    /// The daemon's state directory: `<configuration directory>/community-daemon`,
+    /// beside `estatecatalog.json`. Sidecar JSON files (capture ledger, review
+    /// state, Obsidian authorization and state, LAN state, estate metadata and
+    /// operation state) live here; the estate lives where its catalog record says.
+    static var daemonStateDirectory: URL {
+        EstateCatalog.configurationDirectory.appendingPathComponent("community-daemon", isDirectory: true)
+    }
+
+    /// Build the CommunityEstateHost over the catalog's active record.
     ///
-    /// The estate path is derived from the process home directory — never from
-    /// argv — following the same convention as DaemonShellMain.runCensus().
+    /// The catalog, not a path, is the authority: `EstateCatalog.open()` finds
+    /// (or on first run creates) the family's catalog in the configuration
+    /// directory and its active record is the daemon's estate. The record is
+    /// registered, so the host creates it encrypted under the estate key
+    /// service and shared access group every other opener on this machine
+    /// reads, loads the EXISTING key on reopen and fails closed when that key
+    /// is missing rather than minting a wrong one. The owner identifier is the
+    /// signed team identifier. Called before DaemonProvider.activate(), whose
+    /// step 6 opens the estate through this host under the provider lock.
     private static func buildEstateHost() throws -> CommunityEstateHost {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let estateURL = home
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("MOOTx01", isDirectory: true)
-            .appendingPathComponent("estate.sqlite", isDirectory: false)
+        let record = try EstateCatalog.open().active
         let ownerIdentifier: String
         if let identity = try? SecCodeEntitlementReadback().processIdentity() {
             ownerIdentifier = identity.teamIdentifier ?? "unknown"
         } else {
             ownerIdentifier = "unknown"
         }
-        return CommunityEstateHost(
-            estateURL: estateURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: { url in
-                // Production estate encryption key: per-estate 32-byte AES-256 key
-                // stored in the data-protection Keychain under the shared access group
-                // "com.codedaptive.mootx01.shared" (mirroring EstateKeyProvider and
-                // Rust's ensure_install_key). KeychainKeyStore.loadOrCreateKey() is
-                // idempotent: it returns the existing key on subsequent opens and
-                // mints a fresh key only on the very first open of a new estate.
-                //
-                // Service name is the well-known "com.codedaptive.mootx01" shared by
-                // the CLI, the managed server, and Mootx01-App — matching the key
-                // to what any other estate opener on this machine would find.
-                //
-                // Note: This is called from inside DaemonProvider.activate() (step 6),
-                // which already holds the exclusive provider lock. No additional
-                // serialisation is required at this site.
-                let key = try KeychainKeyStore(
-                    service: "com.codedaptive.mootx01",
-                    estateURL: url,
-                    accessGroup: "com.codedaptive.mootx01.shared"
-                ).loadOrCreateKey()
-                return EstateEncryptionConfig.fullDatabase(key: key)
-            }
-        )
+        return CommunityEstateHost(record: record, kit: GeniusLocusKit(), ownerIdentifier: ownerIdentifier)
     }
 
     private static func encodedFailure(_ reason: String) -> String {
@@ -384,19 +359,16 @@ public enum CommunityResidentMain {
     /// any bug in coordinator wiring is caught before it reaches a user machine.
     ///
     /// - Parameters:
-    ///   - layoutURL: The directory that contains (or will contain) `estate.sqlite`,
-    ///     `glk-estate.sqlite`, and all sidecar JSON files. In production this is
-    ///     `~/Library/Application Support/MOOTx01/`; in contract tests it is a temp dir.
-    ///   - ownerIdentifier: The team-ID or arbitrary owner string embedded in estate
-    ///     metadata. Production uses the signed team identifier from entitlements;
-    ///     contract tests use a fixed string.
-    ///   - keyProvider: Maps an estate file URL to its encryption config. Production
-    ///     uses `KeychainKeyStore`-backed full-database encryption; contract tests use
-    ///     `.plaintext`.
-    ///   - identityKeyStore: Optional custody override for the GLK estate identity.
-    ///     Production leaves this nil so durable SQLite resolves to Keychain custody.
-    ///     Test and proof hosts must inject an in-memory store so temporary estates
-    ///     cannot leave orphaned `com.mootx01.estate.identity` items behind.
+    ///   - host: The daemon's estate host over the catalog record. Opened here
+    ///     once (Obsidian sync and transfer need the open handle at
+    ///     construction); the lifecycle, capture and review coordinators share
+    ///     the same open. A transient record (contract tests, proof hosts) is
+    ///     plaintext with its identity in memory, so a terminated test host
+    ///     leaves no Keychain residue; a registered record (production) is the
+    ///     machine's own.
+    ///   - layoutURL: The daemon's state directory for the sidecar JSON files.
+    ///     In production `<configuration directory>/community-daemon/`; in
+    ///     contract tests a temp dir.
     ///   - state: The provider state (instance + estate UUIDs). In production, sourced
     ///     from `ProviderActivation.descriptor`; in contract tests, synthetic UUIDs.
     ///   - obsidianWatcherPollSeconds: Watcher poll interval for `CommunityObsidianCoordinator`.
@@ -405,65 +377,28 @@ public enum CommunityResidentMain {
     ///   - obsidianEstatePollSeconds: Estate poll interval for obsidian. Same intent.
     ///   - obsidianHealthCheckSeconds: Health-check interval for obsidian. Same intent.
     public static func makeCommunityDispatch(
+        host: CommunityEstateHost,
         layoutURL: URL,
-        ownerIdentifier: String,
-        keyProvider: @Sendable @escaping (URL) throws -> EstateEncryptionConfig,
-        identityKeyStore: (any EstateIdentityKeyStore)? = nil,
         state: CommunityProviderState,
         obsidianWatcherPollSeconds: Int = 10,
         obsidianEstatePollSeconds: Int = 60,
         obsidianHealthCheckSeconds: Int = 30
     ) async throws -> CommunityContractDispatch {
-        // lifecycle + capture + review share the layout directory and key provider.
-        // None of these coordinators perform IO at init time; they open the estate
-        // lazily on first tool call.
-        let lifecycle = CommunityEstateLifecycleCoordinator(
-            layoutURL: layoutURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
-        let capture = CommunityCaptureCoordinator(
-            layoutURL: layoutURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
-        let review = CommunityReviewCoordinator(
-            layoutURL: layoutURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
-
-        // obsidian + transfer need a GeniusLocusKit estate. Use a SQLite-backed
-        // estate at glk-estate.sqlite in the layout directory. In production this
-        // is a fully encrypted estate; in contract tests it is plaintext (both
-        // paths share this same code — the key provider handles the difference).
-        let glkEstateURL = layoutURL.appendingPathComponent("glk-estate.sqlite")
-        let glkOwner = OwnerCredentials(ownerIdentifier: ownerIdentifier)
-        let kit = GeniusLocusKit()
-
-        let glkEncryption: EstateEncryptionConfig
+        // lifecycle + capture + review share the host and the state directory.
+        // None of them perform IO at init time; they reach the estate through
+        // the host on first tool call.
+        let lifecycle = CommunityEstateLifecycleCoordinator(host: host, layoutURL: layoutURL)
+        let capture = CommunityCaptureCoordinator(host: host, layoutURL: layoutURL)
+        let review = CommunityReviewCoordinator(host: host, layoutURL: layoutURL)
+        // obsidian + transfer compose on GeniusLocusKit and need the open handle
+        // now: one estate, the same the coordinators above read and write.
+        let handle: EstateHandle
         do {
-            glkEncryption = try keyProvider(glkEstateURL)
+            handle = try await host.handle()
         } catch {
-            throw CommunityResidentError.glkKeyProviderFailed(error)
+            throw CommunityResidentError.estateOpenFailed(error)
         }
-        let glkStorage = try SQLiteStorage(
-            configuration: EstateConfiguration(
-                estateID: UUID(),
-                backend: .sqlite(url: glkEstateURL, busyTimeout: 5.0),
-                encryptionConfig: glkEncryption
-            )
-        )
-        _ = try await Estate.create(storage: glkStorage, owner: glkOwner)
-        let handle = try await kit.open(
-            storage: glkStorage,
-            owner: glkOwner,
-            identityKeyStore: identityKeyStore
-        )
-        // Create-time default: the span encoder is the recall stage of an
-        // estate that names no embedding provider (see ServeCommand).
-        try await kit.provisionDefaultEncoderIfAbsent(for: handle)
-
+        let kit = host.kit
         let obsidian = CommunityObsidianCoordinator(
             layoutURL: layoutURL,
             kit: kit,
@@ -477,7 +412,6 @@ public enum CommunityResidentMain {
             kit: kit,
             handle: handle
         )
-
         // LAN coordinator with no authority: the daemon honestly reports that
         // lan_start requires authority when the daemon is not configured for LAN
         // serving. Both production and contract tests use the no-authority init
@@ -508,7 +442,7 @@ public enum CommunityResidentMain {
 /// Errors thrown by `CommunityResidentMain.makeCommunityDispatch`.
 public enum CommunityResidentError: Error {
     /// The key provider failed when deriving the GeniusLocusKit estate encryption key.
-    case glkKeyProviderFailed(Error)
+    case estateOpenFailed(Error)
 }
 
 // MARK: - Production authorities (macOS only)
