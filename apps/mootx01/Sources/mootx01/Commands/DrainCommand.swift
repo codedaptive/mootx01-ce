@@ -29,7 +29,7 @@ struct DrainCommand: AsyncParsableCommand {
         abstract: "Finish draining an estate's encode queue, then exit (detached background finisher)."
     )
 
-    @Option(name: .long, help: "Named estate to drain. Default: active estate.")
+    @Option(name: .long, help: "Estate to drain: a registered name, or <dir>/<name> for a transient estate. Default: the active estate.")
     var db: String?
 
     /// Hard cap on total wait so a wedged drain can never hang forever.
@@ -42,22 +42,17 @@ struct DrainCommand: AsyncParsableCommand {
         // death on Unix; `setsid` hardens against group signals.
         setsid()
 
-        let environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
-
-        let estateName: String
-        if let dbFlag = db {
-            estateName = dbFlag
-        } else {
-            estateName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
+        // The catalog resolves `--db` exactly as serve did when it launched us:
+        // a registered name, or a transient estate by its directory.
+        let estate: EstateRecord
+        do {
+            estate = try (db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()).active
+        } catch {
+            Logging.stderr.log("mootx01 drain fatal: \(error)")
+            throw ExitCode.failure
         }
-        let estateURL: URL
-        if let envPath = environment["ARIA_MCP_SQLITE_PATH"], !envPath.isEmpty {
-            estateURL = URL(fileURLWithPath: envPath)
-        } else {
-            estateURL = DatabaseManager.estateURL(for: estateName, in: dataDir)
-        }
+        let estateName = estate.name
+        let estateURL = estate.databaseURL
         // Nothing to drain if the estate file does not exist.
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
 
@@ -67,7 +62,7 @@ struct DrainCommand: AsyncParsableCommand {
         // either the existing-ciphertext or the existing-plaintext branch.
         let encryption: EstateEncryptionConfig
         do {
-            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            let resolved = try EstateOpenPosture.resolve(for: estate)
             encryption = resolved.encryption
         } catch {
             Logging.stderr.log("mootx01 drain fatal: estate encryption key unavailable: \(error)")
@@ -91,9 +86,20 @@ struct DrainCommand: AsyncParsableCommand {
         let kit = GeniusLocusKit()
         let handle: EstateHandle
         do {
-            handle = try await kit.open(storage: storage, owner: owner)
-            _ = try await GLKMigrationCatalog.prepare(
+            // A transient estate never touches the Keychain: identity in memory,
+            // no federation. A registered one resolves its store per backend.
+            handle = try await kit.open(
+                storage: storage, owner: owner,
+                identityKeyStore: estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore(),
+                federate: estate.kind == .registered)
+            let preparation = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
+            // The manifest must say what is on disk: after a migration, or for an
+            // estate that predates manifests, rewrite estate.json.
+            if try EstateManifestRefresh.afterPrepare(
+                preparation, estate: estate, encryption: encryption, now: Date()) {
+                Logging.stderr.log("mootx01 drain: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
+            }
             // Wire the semantic layer so the corpus + its lease-gated drain worker
             // mount; the worker drains the persisted queue (taking the T3 lease
             // unless a resident holds it). Idempotent on reopen.

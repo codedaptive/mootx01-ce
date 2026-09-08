@@ -124,6 +124,9 @@ default = ["encoder"]
 encoder = ["genius-locus-kit/encoder"]
 
 [dev-dependencies]
+# genius-locus-kit/test-seams: EstateCatalog::set_configuration_directory_override,
+# so the db command tests run on a scratch catalog instead of the machine's.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust", features = ["test-seams"] }
 # tempfile: temporary directories for sensitivity_hashes unit tests.
 tempfile = "3"
 # context-distill-lib: the upgrade convergence test stamps rows with the

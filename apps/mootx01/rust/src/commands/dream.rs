@@ -28,12 +28,12 @@
 //! THETA/BETA/OMEGA cycles (T11/T12/T13) are NOT implemented. Seam comments in
 //! `dream_runner.rs` mark where they would plug in.
 
-use std::path::Path;
 use std::process::ExitCode;
 
+use aria_mcp::estate_registry::SqliteOpening;
+use genius_locus_kit::{EstateBackend, EstateCatalog, EstateOpenPosture};
 use queuekit::DrainLease;
 
-use crate::core::paths;
 use crate::exit;
 
 /// Host identity used when opening the estate. Cosmetic only — the dream
@@ -50,37 +50,49 @@ pub fn run(db: Option<String>) -> ExitCode {
         libc::setsid();
     }
 
-    // Resolve the estate path: ARIA_MCP_SQLITE_PATH override (inherited from the
-    // spawning serve) wins; else resolve the named/active estate (mirrors drain.rs).
-    let data = paths::data_dir();
-    let estate = match std::env::var("ARIA_MCP_SQLITE_PATH") {
-        Ok(p) if !p.is_empty() => p,
-        _ => {
-            let name = db.unwrap_or_else(|| paths::active_estate(&data));
-            paths::estate_sqlite_path(&data, &name)
-                .to_string_lossy()
-                .into_owned()
+    // The estate is the catalog's: the `--db` value the spawning serve was
+    // launched with (a registered name or a transient path), else the active
+    // estate. Nothing here computes a path.
+    let catalog = match db.as_deref() {
+        Some(value) => EstateCatalog::open_selecting(value),
+        None => EstateCatalog::open(),
+    };
+    let record = match catalog {
+        Ok(catalog) => catalog.active().clone(),
+        Err(e) => {
+            eprintln!("mootx01 dream: {e}");
+            return ExitCode::from(exit::FAILURE);
         }
     };
+    if record.backend != EstateBackend::Sqlite {
+        eprintln!("mootx01 dream: estate '{}' is not a SQLite estate — exiting", record.name);
+        return ExitCode::from(exit::OK);
+    }
+    let estate_path = record.database_path();
+    let estate = estate_path.to_string_lossy().into_owned();
 
     // Nothing to dream on if the estate file does not exist.
-    if !Path::new(&estate).exists() {
+    if !estate_path.exists() {
         eprintln!("mootx01 dream: estate file does not exist — exiting");
         return ExitCode::from(exit::OK);
     }
+    // The at-rest posture is decided before the open and fails closed, as in
+    // serve: a ciphertext file whose key is missing is never reopened plaintext.
+    let open_posture = match EstateOpenPosture::resolve(&record) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("mootx01 dream: estate encryption posture unavailable: {e}");
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+    // The record's kind decides federation; a dreamer never seeds charters.
+    let opening = SqliteOpening { seed_charters: false, ..SqliteOpening::for_record(&record) };
 
     // The dreaming lease file lives beside queue.sqlite (parent directory of the
     // estate SQLite file), keyed by "dreaming". This is fully independent of the
     // encode drain lease ("encode.drain.lease") — both can be held simultaneously
     // Drain leases are scoped by estate and stream.
-    let estate_path = Path::new(&estate);
-    let lease_dir = match estate_path.parent() {
-        Some(d) => d.to_path_buf(),
-        None => {
-            eprintln!("mootx01 dream: cannot derive lease directory from estate path — exiting");
-            return ExitCode::from(exit::FAILURE);
-        }
-    };
+    let lease_dir = record.directory.clone();
 
     // Per-process instance token: UUID v4 nonce so a reused PID after a crash
     // cannot impersonate the prior lease holder.
@@ -102,7 +114,13 @@ pub fn run(db: Option<String>) -> ExitCode {
     // Delegate all dreaming logic to aria_mcp::dream_runner. The epoch-seconds
     // timestamp is read ONCE here (the command boundary) and threaded through
     // deterministically — no SystemTime reads inside the cycle path.
-    let result = aria_mcp::dream_runner::run_one_dreaming_cycle(&estate, OWNER, now_secs);
+    let result = aria_mcp::dream_runner::run_one_dreaming_cycle(&estate, OWNER, opening, now_secs);
+    // The manifest must say what is on disk after the migration chain ran
+    // inside the open.
+    let now_millis = (now_secs * 1000.0) as i64;
+    if let Err(e) = genius_locus_kit_migrations::refresh_after_chain(&record, open_posture.manifest_encryption(), now_millis) {
+        eprintln!("mootx01 dream: estate manifest could not be written: {e}");
+    }
     match result {
         Ok(r) if r.cycle_ran => {
             eprintln!(

@@ -1,215 +1,25 @@
 // Paths.swift
 //
-// Resolves the user data directory that mootx01 opens. Pure
-// path math — no filesystem touching — so the logic is unit-testable
-// without spawning a process or writing under the user's home. Two
-// exceptions: `isResidentEstate` resolves symlinks so a link to the
-// resident directory compares equal to it, and
-// `residentDataDirectory(homeDirectory:)` reads the resident daemon's
-// LaunchAgent plist, because the daemon serves whatever directory its
-// registration names (the pure form, `registeredResidentDataDirectory`,
-// takes the plist bytes as an argument).
+// Install-side path constants: the installed binaries and symlinks, the
+// client config files, the launchd labels and plists, the logs directory,
+// and the resident daemon's port file. Pure path math over an injected home
+// directory, so the logic is unit-testable without writing under the user's
+// home.
 //
-// macOS-only per LAUNCH_PLAN.md §"The Monday cut". The single
-// supported location is the standard Application Support directory:
-//   ~/Library/Application Support/com.mootx01.ce/
-// The estate database lives at:
-//   ~/Library/Application Support/com.mootx01.ce/estate.sqlite
-//
-// MOOTX01_DATA_DIR overrides the resolved directory when set and
-// non-empty. The override exists for the installer's bash smoke
-// test (Installer/tests/test_install_sh.sh) and for any developer
-// who wants to point a separate MOOT at a sandboxed path; it is not
-// documented for end users.
+// Estates are not located here. The estate catalog (GeniusLocusKit
+// `EstateCatalog`) names every estate directory; the configuration
+// directory it lives in is computed from the platform and is the `dataDir`
+// the port-file and stats-store helpers below take.
 
 import Foundation
+import MootProductIdentity
 
 public enum MootPaths {
-
-    /// Environment variable name read in `resolveDataDirectory`.
-    /// Kept public so the bash smoke test and any future tooling
-    /// can refer to one canonical symbol rather than a literal.
-    public static let dataDirEnvVar: String = "MOOTX01_DATA_DIR"
-
-    /// File name of the persistent estate database inside the data
-    /// directory. SQLite + sqlite-vec WAL files (`-wal`, `-shm`) are
-    /// created alongside by the SQLite backend.
-    public static let estateFileName: String = "estate.sqlite"
 
     /// Default user-visible owner identifier stamped into the
     /// manifest at first-run. Surfaces in audit rows; the substrate
     /// only requires it be non-empty (LocusKit.Estate.create).
     public static let defaultOwnerIdentifier: String = "mootx01-user"
-
-    /// Resolve the data directory for this user. Reads
-    /// `MOOTX01_DATA_DIR` from `environment` when set and non-empty;
-    /// otherwise returns the macOS Application Support path under
-    /// the supplied `homeDirectory`.
-    ///
-    /// - Parameters:
-    ///   - environment: process environment dictionary. Inject in
-    ///     tests; pass `ProcessInfo.processInfo.environment` in the
-    ///     executable.
-    ///   - homeDirectory: the user's home directory. Inject in tests;
-    ///     pass `FileManager.default.homeDirectoryForCurrentUser` in
-    ///     the executable.
-    /// - Returns: the resolved data directory URL. Does not touch
-    ///   the filesystem.
-    public static func resolveDataDirectory(
-        environment: [String: String],
-        homeDirectory: URL
-    ) -> URL {
-        if let override = environment[dataDirEnvVar], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return homeDirectory
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("com.mootx01.ce", isDirectory: true)
-    }
-
-    /// Estate database URL inside `dataDirectory`. Pure path
-    /// concatenation; the SQLite backend creates the file on first
-    /// open (PersistenceKitSQLite.SQLiteConnection makes parent dirs).
-    public static func estateURL(in dataDirectory: URL) -> URL {
-        dataDirectory.appendingPathComponent(estateFileName, isDirectory: false)
-    }
-
-    /// The resident daemon's data directory as `mootx01 upgrade` needs
-    /// it: a directory to compare an estate against, or a registration
-    /// that exists but could not be read. Twin of the Rust
-    /// `core::paths::ResidentDataDir`.
-    public enum ResidentDataDirectory: Equatable, Sendable {
-        /// The daemon serves this directory: the `MOOTX01_DATA_DIR` its
-        /// LaunchAgent registration carries, or the platform default when
-        /// no registration exists or the registration carries no override.
-        case directory(URL)
-        /// A daemon registration exists at this plist path but its
-        /// contents could not be parsed. Nothing can prove which estate
-        /// the daemon has open, so every estate is treated as resident.
-        case unreadableRegistration(URL)
-
-        /// One operator-facing line explaining why a step is about to
-        /// quiesce the daemon for `dataDirectory` although the directory
-        /// may not be the one the daemon serves; `nil` when the resident
-        /// directory is known and no explanation is owed.
-        public func registrationWarning(for dataDirectory: URL) -> String? {
-            switch self {
-            case .directory:
-                return nil
-            case let .unreadableRegistration(plistURL):
-                return "  daemon registration at \(plistURL.path) could not be read; "
-                    + "treating \(dataDirectory.path) as the resident estate"
-            }
-        }
-    }
-
-    /// The data directory the resident daemon serves, read from its
-    /// launchd registration. `mootx01 install` bakes the directory it
-    /// resolved (environment override included) into the daemon plist's
-    /// `EnvironmentVariables["MOOTX01_DATA_DIR"]`, so the registration —
-    /// not the platform default — says which estate the daemon has open.
-    ///
-    /// Reads `daemonPlistURL(homeDirectory:)`: absent → the platform
-    /// default under `homeDirectory`; present → `registeredResidentDataDirectory`
-    /// over its bytes (a file that exists but cannot be read is handed over
-    /// as empty bytes, which parse as an unreadable registration).
-    ///
-    /// - Parameter homeDirectory: the user's home directory. Inject in
-    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`
-    ///   in the executable.
-    /// - Returns: the resident data directory, or the unreadable
-    ///   registration.
-    public static func residentDataDirectory(homeDirectory: URL) -> ResidentDataDirectory {
-        let plistURL = daemonPlistURL(homeDirectory: homeDirectory)
-        guard FileManager.default.fileExists(atPath: plistURL.path) else {
-            return registeredResidentDataDirectory(homeDirectory: homeDirectory, daemonPlist: nil)
-        }
-        let bytes = (try? Data(contentsOf: plistURL)) ?? Data()
-        return registeredResidentDataDirectory(homeDirectory: homeDirectory, daemonPlist: bytes)
-    }
-
-    /// Pure form of `residentDataDirectory(homeDirectory:)`: decide the
-    /// resident directory from the daemon plist's bytes. Tests inject the
-    /// bytes; the executable reads them from `daemonPlistURL(homeDirectory:)`.
-    ///
-    /// - `daemonPlist == nil` (no registration): the platform default
-    ///   under `homeDirectory`.
-    /// - A plist dictionary whose `EnvironmentVariables` carry a
-    ///   non-empty `MOOTX01_DATA_DIR`: that directory.
-    /// - A plist dictionary with no `EnvironmentVariables`, or with the
-    ///   variable absent or empty: the platform default (the daemon
-    ///   started with no override).
-    /// - Anything else — bytes that are not a plist, a plist that is not
-    ///   a dictionary, `EnvironmentVariables` that is not a string
-    ///   dictionary: `.unreadableRegistration`. SECURITY: a registration
-    ///   we cannot read is never assumed to serve some other directory;
-    ///   the upgrade quiesces the daemon rather than migrate an estate the
-    ///   daemon may hold open.
-    ///
-    /// - Parameters:
-    ///   - homeDirectory: the user's home directory, for the platform
-    ///     default and the plist path named in the unreadable case.
-    ///   - daemonPlist: the daemon LaunchAgent plist bytes, or `nil` when
-    ///     no registration exists.
-    public static func registeredResidentDataDirectory(
-        homeDirectory: URL,
-        daemonPlist: Data?
-    ) -> ResidentDataDirectory {
-        let platformDefault = resolveDataDirectory(environment: [:], homeDirectory: homeDirectory)
-        guard let daemonPlist else { return .directory(platformDefault) }
-        let plistURL = daemonPlistURL(homeDirectory: homeDirectory)
-        guard let object = try? PropertyListSerialization.propertyList(from: daemonPlist, format: nil),
-              let dictionary = object as? [String: Any]
-        else {
-            return .unreadableRegistration(plistURL)
-        }
-        guard let rawEnvironment = dictionary["EnvironmentVariables"] else {
-            return .directory(platformDefault)
-        }
-        guard let environment = rawEnvironment as? [String: String] else {
-            return .unreadableRegistration(plistURL)
-        }
-        return .directory(resolveDataDirectory(environment: environment, homeDirectory: homeDirectory))
-    }
-
-    /// Whether `dataDirectory` refers to the resident estate — the one
-    /// the resident daemon has open. `mootx01 upgrade` quiesces the
-    /// daemon around a step only when this is true; a cloned estate
-    /// reached through `MOOTX01_DATA_DIR` is upgraded with the daemon
-    /// left running, because the daemon has no stake in it.
-    ///
-    /// `.directory`: both paths are canonicalised before comparison:
-    /// symlinks resolved (`/var` becomes `/private/var`, a link into
-    /// Application Support becomes its target), `.` and `..` collapsed,
-    /// trailing separators dropped. A path that does not exist cannot be
-    /// symlink-resolved and compares by its standardized form.
-    ///
-    /// `.unreadableRegistration`: always `true`. SAFETY: with the
-    /// registration unreadable no directory can be ruled out, so every
-    /// estate is treated as the daemon's and the step quiesces it.
-    ///
-    /// - Parameters:
-    ///   - dataDirectory: the directory an upgrade step is about to open.
-    ///   - residentDataDirectory: the daemon's directory, from
-    ///     `residentDataDirectory(homeDirectory:)`.
-    public static func isResidentEstate(
-        dataDirectory: URL,
-        residentDataDirectory: ResidentDataDirectory
-    ) -> Bool {
-        switch residentDataDirectory {
-        case let .directory(resident):
-            return canonicalPath(dataDirectory) == canonicalPath(resident)
-        case .unreadableRegistration:
-            return true
-        }
-    }
-
-    /// Symlink-resolved, standardized path with no trailing separator.
-    private static func canonicalPath(_ url: URL) -> String {
-        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
-        return path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
-    }
 
     /// URL of the Claude Code project-local MCP config file.
     ///
@@ -393,7 +203,7 @@ public enum MootPaths {
     /// launchd job label for the moot-mgr resident-host LaunchAgent. Used as
     /// the plist `Label`, the plist filename stem, and the `launchctl`
     /// bootstrap/bootout target (`gui/<uid>/<label>`).
-    public static let launchAgentLabel: String = "com.mootx01.mgr"
+    public static let launchAgentLabel: String = MootProductIdentity.Services.managerLabel
 
     /// Path of the moot-mgr LaunchAgent property list. Per-user LaunchAgents
     /// live under `~/Library/LaunchAgents`; launchd loads them into the user's
@@ -412,7 +222,7 @@ public enum MootPaths {
     /// launchd job label for the resident mootx01 daemon (the headless HTTP MCP
     /// server + autonomic governor). Distinct from the moot-mgr agent so the two services
     /// load independently.
-    public static let daemonLabel: String = "com.mootx01.daemon"
+    public static let daemonLabel: String = MootProductIdentity.Services.daemonLabel
 
     /// Path of the resident mootx01 daemon LaunchAgent property list.
     ///
@@ -504,7 +314,7 @@ public enum DaemonBundle {
     /// Distinct from the SANDBOXED nested helper
     /// (`com.codedaptive.mootx01.macos.daemonproviderhelper` in project.yml)
     /// — same provider module, different packaging and registration channel.
-    public static let bundleIdentifier = "com.codedaptive.mootx01.macos.daemonprovider"
+    public static let bundleIdentifier = MootProductIdentity.Apple.BundleIdentifiers.daemonProvider
 
     /// The LaunchAgent label for the BUNDLE-form daemon registration.
     /// Deliberately NOT `MootPaths.daemonLabel` (`com.mootx01.daemon`, the
@@ -512,7 +322,7 @@ public enum DaemonBundle {
     /// label, and running job untouched — until the bundle provider proves
     /// authenticated readiness (MACD-3), so the two registrations coexist
     /// under the arbiter rather than replacing each other blindly.
-    public static let launchAgentLabel = "com.codedaptive.mootx01.daemon"
+    public static let launchAgentLabel = MootProductIdentity.Services.daemonProviderLaunchAgentLabel
 
     /// The shell mode the LaunchAgent invokes. Until MACD-3 activates
     /// estate hosting, the mode fail-closes honestly (exit 4) and the plist

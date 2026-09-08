@@ -52,7 +52,7 @@ struct DreamCommand: AsyncParsableCommand {
         abstract: "Run one REM-ALPHA dreaming cycle for an estate, then exit (detached background finisher)."
     )
 
-    @Option(name: .long, help: "Named estate to dream on. Default: active estate.")
+    @Option(name: .long, help: "Estate to dream on: a registered name, or <dir>/<name> for a transient estate. Default: the active estate.")
     var db: String?
 
     func run() async throws {
@@ -61,34 +61,28 @@ struct DreamCommand: AsyncParsableCommand {
         // so a SIGKILL aimed at the spawning stdio serve does not reach us.
         setsid()
 
-        let environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
-
-        // Estate resolution (mirrors DrainCommand and ServeCommand).
-        let estateName: String
-        if let dbFlag = db {
-            estateName = dbFlag
-        } else {
-            estateName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
+        // The catalog resolves `--db` exactly as serve did when it launched us:
+        // a registered name, or a transient estate by its directory.
+        let estate: EstateRecord
+        do {
+            estate = try (db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()).active
+        } catch {
+            Logging.stderr.log("mootx01 dream fatal: \(error)")
+            throw ExitCode.failure
         }
-        let estateURL: URL
-        if let envPath = environment["ARIA_MCP_SQLITE_PATH"], !envPath.isEmpty {
-            estateURL = URL(fileURLWithPath: envPath)
-        } else {
-            estateURL = DatabaseManager.estateURL(for: estateName, in: dataDir)
-        }
+        let estateName = estate.name
+        let estateURL = estate.databaseURL
         // No estate file → nothing to dream on.
         guard FileManager.default.fileExists(atPath: estateURL.path) else {
             Logging.stderr.log("mootx01 dream: estate file does not exist — exiting")
             return
         }
 
-        // The dreaming lease file lives beside queue.sqlite (parent of the estate
-        // SQLite file), keyed by stream name "dreaming". This is independent of
-        // the encode ("encode.drain.lease") lease — both can be held simultaneously
-        // (recall-driven dreaming: per-(estate, stream) leases).
-        let leaseDir = estateURL.deletingLastPathComponent()
+        // The dreaming lease file lives in the estate directory, keyed by stream
+        // name "dreaming". This is independent of the encode ("encode.drain.lease")
+        // lease — both can be held simultaneously (recall-driven dreaming:
+        // per-(estate, stream) leases).
+        let leaseDir = estate.directory
         let instanceToken = UUID().uuidString
         let lease = DrainLease(
             directory: leaseDir,
@@ -115,7 +109,7 @@ struct DreamCommand: AsyncParsableCommand {
         // three commands cannot drift.
         let encryption: EstateEncryptionConfig
         do {
-            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            let resolved = try EstateOpenPosture.resolve(for: estate)
             encryption = resolved.encryption
         } catch {
             Logging.stderr.log("mootx01 dream fatal: estate encryption key unavailable: \(error)")
@@ -139,9 +133,20 @@ struct DreamCommand: AsyncParsableCommand {
         let kit = GeniusLocusKit()
         let handle: EstateHandle
         do {
-            handle = try await kit.open(storage: storage, owner: owner)
-            _ = try await GLKMigrationCatalog.prepare(
+            // A transient estate never touches the Keychain: identity in memory,
+            // no federation. A registered one resolves its store per backend.
+            handle = try await kit.open(
+                storage: storage, owner: owner,
+                identityKeyStore: estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore(),
+                federate: estate.kind == .registered)
+            let preparation = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
+            // The manifest must say what is on disk: after a migration, or for an
+            // estate that predates manifests, rewrite estate.json.
+            if try EstateManifestRefresh.afterPrepare(
+                preparation, estate: estate, encryption: encryption, now: Date()) {
+                Logging.stderr.log("mootx01 dream: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
+            }
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         } catch {
             Logging.stderr.log("mootx01 dream fatal: estate open/wiring failed: \(error)")

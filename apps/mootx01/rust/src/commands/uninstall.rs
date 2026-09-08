@@ -16,7 +16,9 @@ use std::process::ExitCode;
 
 use crate::cli::Location;
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
-use crate::core::{merge, paths, permissions};
+use genius_locus_kit::EstateCatalog;
+
+use crate::core::{merge, permissions};
 use crate::exit;
 
 pub fn run(
@@ -232,26 +234,22 @@ pub(crate) fn trash_name() -> &'static str {
     }
 }
 
-/// One-line inventory of what lives under the data directory, so the user
-/// knows what the confirmation destroys. Pure over the filesystem.
-pub(crate) fn data_inventory(data: &Path) -> Option<String> {
-    if !data.exists() {
+/// One-line inventory of what the uninstall confirmation destroys, so the
+/// user knows before typing yes. `None` when there is no user data worth
+/// prompting about. The caller passes the catalog's view: the default
+/// estate's database file and the named estates' database files; an estate
+/// counts only when its database file exists. Pure over the filesystem.
+pub(crate) fn data_inventory(
+    default_database: Option<&Path>,
+    named_databases: &[PathBuf],
+    configuration: &Path,
+) -> Option<String> {
+    if !configuration.exists() {
         return None;
     }
-    // Default estate: the Rust layout keeps it under databases/default/,
-    // but a flat <data>/estate.sqlite (the Swift legacy layout) is also
-    // recognized so a migrated data directory is still reported honestly.
-    let default_estate = paths::estate_sqlite_path(data, "default").exists()
-        || data.join("estate.sqlite").exists();
-    let named: usize = std::fs::read_dir(data.join("databases"))
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|e| e.path().is_dir() && e.file_name() != "default")
-                .count()
-        })
-        .unwrap_or(0);
-    let mgr = data.join("moot-mgr").join("stats.sqlite").exists();
+    let default_estate = default_database.map(|p| p.exists()).unwrap_or(false);
+    let named = named_databases.iter().filter(|p| p.exists()).count();
+    let mgr = configuration.join("moot-mgr").join("stats.sqlite").exists();
     if !default_estate && named == 0 && !mgr {
         return None;
     }
@@ -268,12 +266,25 @@ pub(crate) fn data_inventory(data: &Path) -> Option<String> {
     Some(parts.join(", "))
 }
 
-/// Offer/confirm/trash the data directory. See the module doc for the
-/// policy; `decide_data_removal` holds the testable matrix.
+/// Offer/confirm/trash the configuration directory. See the module doc for
+/// the policy; `decide_data_removal` holds the testable matrix. The inventory
+/// is the catalog's: a missing or unreadable catalog means no estates to
+/// report, and the directory is offered on the strength of the mgr store
+/// alone.
 fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
     use std::io::IsTerminal;
-    let data = paths::data_dir();
-    let Some(inventory) = data_inventory(&data) else {
+    let data = EstateCatalog::configuration_directory();
+    let records = EstateCatalog::load().map(|c| c.records().to_vec()).unwrap_or_default();
+    let default_database = records
+        .iter()
+        .find(|r| r.name == EstateCatalog::DEFAULT_NAME)
+        .map(|r| r.database_path());
+    let named_databases: Vec<PathBuf> = records
+        .iter()
+        .filter(|r| r.name != EstateCatalog::DEFAULT_NAME)
+        .map(|r| r.database_path())
+        .collect();
+    let Some(inventory) = data_inventory(default_database.as_deref(), &named_databases, &data) else {
         return ExitCode::from(exit::OK);
     };
     let interactive = io::stdin().is_terminal();
@@ -507,8 +518,7 @@ mod tests {
             "mcpServers": {
                 "mootx01": {
                     "command": "/Users/dev/build/mootx01",
-                    "args": ["proxy"],
-                    "env": {"ARIA_MCP_SQLITE_PATH": "/Users/dev/rig-a/estate.sqlite"},
+                    "args": ["serve", "--db=rig-a"],
                 }
             }
         });
@@ -520,8 +530,8 @@ mod tests {
         let bytes = std::fs::read(&config).unwrap();
         let root: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
-            root["mcpServers"]["mootx01"]["env"]["ARIA_MCP_SQLITE_PATH"],
-            "/Users/dev/rig-a/estate.sqlite",
+            root["mcpServers"]["mootx01"]["args"],
+            serde_json::json!(["serve", "--db=rig-a"]),
             "non-default entry must survive uninstall untouched"
         );
 
@@ -651,14 +661,21 @@ mod tests {
     #[test]
     fn inventory_reports_default_named_and_mgr() {
         let data = tmp_home("inventory");
-        assert_eq!(data_inventory(&data.join("missing")), None);
+        let default_db = data.join("databases").join("default").join("estate.sqlite");
+        let work_db = data.join("databases").join("work").join("estate.sqlite");
+        let elsewhere_db = data.join("elsewhere").join("scratch").join("estate.sqlite");
+        let named = vec![work_db.clone(), elsewhere_db];
+        assert_eq!(data_inventory(Some(&default_db), &named, &data.join("missing")), None);
         // Empty dir → nothing worth prompting about.
-        assert_eq!(data_inventory(&data), None);
-        std::fs::write(data.join("estate.sqlite"), b"x").unwrap();
-        std::fs::create_dir_all(data.join("databases").join("work")).unwrap();
+        assert_eq!(data_inventory(Some(&default_db), &named, &data), None);
+        std::fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        std::fs::write(&default_db, b"x").unwrap();
+        // A registered estate counts only when its database file exists.
+        std::fs::create_dir_all(work_db.parent().unwrap()).unwrap();
+        std::fs::write(&work_db, b"x").unwrap();
         std::fs::create_dir_all(data.join("moot-mgr")).unwrap();
         std::fs::write(data.join("moot-mgr").join("stats.sqlite"), b"x").unwrap();
-        let inv = data_inventory(&data).unwrap();
+        let inv = data_inventory(Some(&default_db), &named, &data).unwrap();
         assert!(inv.contains("default estate database"), "{inv}");
         assert!(inv.contains("1 named estate(s)"), "{inv}");
         assert!(inv.contains("moot-mgr history database"), "{inv}");

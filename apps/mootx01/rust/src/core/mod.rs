@@ -11,7 +11,6 @@ pub mod depth;
 pub mod desktop_ext;
 /// The `no-encrypt` opt-out marker and the shared at-rest open posture
 /// (Rust twin of Swift MootInstallerCore's EstateOpenPosture).
-pub mod encrypt_optout;
 pub mod mcp_ownership;
 pub mod merge;
 pub mod paths;

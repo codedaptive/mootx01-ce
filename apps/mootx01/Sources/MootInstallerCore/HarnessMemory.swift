@@ -41,9 +41,10 @@
 //   harness.hook.fire.rate        — hook fire rate over time (teaching-decay curve)
 
 import Foundation
+import MootProductIdentity
 import os
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "HarnessMemory")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootInstallerCore.HarnessMemory")
 
 // MARK: - Paths
 

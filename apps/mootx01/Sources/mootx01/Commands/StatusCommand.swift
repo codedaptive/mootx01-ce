@@ -8,6 +8,7 @@
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct StatusCommand: AsyncParsableCommand {
@@ -19,7 +20,7 @@ struct StatusCommand: AsyncParsableCommand {
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let env = ProcessInfo.processInfo.environment
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
+        let dataDir = EstateCatalog.configurationDirectory
 
         print("mootx01 status")
         print("─────────────────────────────────")
@@ -77,18 +78,21 @@ struct StatusCommand: AsyncParsableCommand {
             }
         }
 
-        // Active estate.
-        let activeName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
-        print("Active estate: \(activeName)")
-
-        // Estate file info.
-        let estateURL = DatabaseManager.estateURL(for: activeName, in: dataDir)
-        if FileManager.default.fileExists(atPath: estateURL.path) {
-            let attrs = try? FileManager.default.attributesOfItem(atPath: estateURL.path)
-            let size = attrs?[.size] as? Int ?? 0
-            print("Estate file: \(estateURL.path) (\(formatBytes(size)))")
-        } else {
-            print("Estate file: not yet created (run `mootx01 serve` to initialise)")
+        // Active estate, from the catalog. Status reports; it does not create
+        // the catalog, so a machine that has never run install or serve says so.
+        switch Result(catching: { try EstateCatalog.load().active }) {
+        case .success(let active):
+            print("Active estate: \(active.name)")
+            let estateURL = active.databaseURL
+            if FileManager.default.fileExists(atPath: estateURL.path) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: estateURL.path)
+                let size = attrs?[.size] as? Int ?? 0
+                print("Estate file: \(estateURL.path) (\(formatBytes(size)))")
+            } else {
+                print("Estate file: not yet created (run `mootx01 serve` to initialise)")
+            }
+        case .failure(let error):
+            print("Active estate: none (\(error))")
         }
 
         // Wired clients.
