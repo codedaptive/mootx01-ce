@@ -146,24 +146,20 @@ public enum DataRetention {
 
     // MARK: - Filesystem inventory
 
-    /// One-line inventory of what lives under the data directory, so the
-    /// user knows what the confirmation destroys. `nil` when there is no
-    /// user data worth prompting about. Mirrors `data_inventory` (Rust).
-    public static func dataInventory(in dataDirectory: URL) -> String? {
+    /// One-line inventory of what the uninstall confirmation destroys, so
+    /// the user knows before typing yes. `nil` when there is no user data
+    /// worth prompting about. The caller passes the catalog's view: the
+    /// default estate's database URL and the named estates' database URLs;
+    /// an estate counts only when its database file exists. Mirrors
+    /// `data_inventory` (Rust).
+    public static func dataInventory(
+        defaultDatabaseURL: URL?, namedDatabaseURLs: [URL], configurationDirectory: URL
+    ) -> String? {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: dataDirectory.path) else { return nil }
-        let defaultEstate = defaultEstateExists(in: dataDirectory)
-        let databasesDir = dataDirectory.appendingPathComponent("databases", isDirectory: true)
-        let named = ((try? fm.contentsOfDirectory(atPath: databasesDir.path)) ?? [])
-            .filter { name in
-                guard name != "default" else { return false }
-                var isDir: ObjCBool = false
-                return fm.fileExists(
-                    atPath: databasesDir.appendingPathComponent(name).path, isDirectory: &isDir)
-                    && isDir.boolValue
-            }
-            .count
-        let mgr = fm.fileExists(atPath: managerStoreDirectory(in: dataDirectory)
+        guard fm.fileExists(atPath: configurationDirectory.path) else { return nil }
+        let defaultEstate = defaultDatabaseURL.map { estateExists(databaseURL: $0) } ?? false
+        let named = namedDatabaseURLs.filter { estateExists(databaseURL: $0) }.count
+        let mgr = fm.fileExists(atPath: managerStoreDirectory(in: configurationDirectory)
             .appendingPathComponent("stats.sqlite").path)
         guard defaultEstate || named > 0 || mgr else { return nil }
         var parts: [String] = []
@@ -173,24 +169,18 @@ public enum DataRetention {
         return parts.joined(separator: ", ")
     }
 
-    /// True when a default estate database already exists in the data
-    /// directory, in either layout: the Swift flat `<data>/estate.sqlite`
-    /// or the Rust `databases/default/estate.sqlite` (a migrated data
-    /// directory). Mirrors `default_estate_exists` (Rust).
-    public static func defaultEstateExists(in dataDirectory: URL) -> Bool {
-        let fm = FileManager.default
-        return fm.fileExists(atPath: MootPaths.estateURL(in: dataDirectory).path)
-            || fm.fileExists(atPath: dataDirectory
-                .appendingPathComponent("databases", isDirectory: true)
-                .appendingPathComponent("default", isDirectory: true)
-                .appendingPathComponent("estate.sqlite", isDirectory: false).path)
+    /// True when an estate's database file exists at `databaseURL` (the
+    /// catalog record's `databaseURL`). Mirrors `default_estate_exists` (Rust).
+    public static func estateExists(databaseURL: URL) -> Bool {
+        FileManager.default.fileExists(atPath: databaseURL.path)
     }
 
-    /// The moot-mgr history store directory (<data>/moot-mgr). The name is
-    /// the manager's `ManagerConfig.storeSubdirectory` convention; the two
-    /// binaries do not share a module, so the constant is mirrored here.
-    public static func managerStoreDirectory(in dataDirectory: URL) -> URL {
-        dataDirectory.appendingPathComponent("moot-mgr", isDirectory: true)
+    /// The moot-mgr history store directory (`<configuration>/moot-mgr`).
+    /// The name is the manager's `ManagerConfig.storeSubdirectory`
+    /// convention; the two binaries do not share a module, so the constant
+    /// is mirrored here.
+    public static func managerStoreDirectory(in configurationDirectory: URL) -> URL {
+        configurationDirectory.appendingPathComponent("moot-mgr", isDirectory: true)
     }
 
     // MARK: - Removal actions
@@ -219,70 +209,48 @@ public enum DataRetention {
         #endif
     }
 
-    /// Uninstall removal: the WHOLE data directory moves as one recoverable
-    /// item (default estate + named estates + moot-mgr store + config).
+    /// Uninstall removal: the WHOLE configuration directory moves as one
+    /// recoverable item (the catalog, the default database location with
+    /// every estate under it, the moot-mgr store, config).
     public static func trashDataDirectory(
-        _ dataDirectory: URL, using move: Mover = systemTrash
+        _ configurationDirectory: URL, using move: Mover = systemTrash
     ) throws {
-        try move(dataDirectory)
+        try move(configurationDirectory)
     }
 
-    /// Reinstall 'reuse': the existing database stays THE default estate;
-    /// the moot-mgr history store is trashed so the dashboard's estate
-    /// registry rebuilds from what the daemon actually serves.
+    /// Reinstall 'reuse': the existing estate stays where it is; the
+    /// moot-mgr history store is trashed so the dashboard's estate registry
+    /// rebuilds from what the daemon actually serves. The caller makes the
+    /// estate the catalog's active record.
     public static func applyReuse(
-        in dataDirectory: URL, using move: Mover = systemTrash
+        configurationDirectory: URL, using move: Mover = systemTrash
     ) throws {
-        try DatabaseManager.setActiveEstate("default", in: dataDirectory)
-        try trashManagerStore(in: dataDirectory, using: move)
+        try trashManagerStore(in: configurationDirectory, using: move)
     }
 
-    /// Reinstall 'replace': the default estate files (both layouts) and the
-    /// moot-mgr store move to the Trash; a fresh database is created on
-    /// first serve. Named estates under databases/<name>/ are untouched —
-    /// they are addressed by `mootx01 db`, not by the install flow.
+    /// Reinstall 'replace': every file of the estate (the record's owned
+    /// files plus the legacy `no-encrypt` marker, which would otherwise
+    /// downgrade the NEXT estate to plaintext) and the moot-mgr store move to
+    /// the Trash; the estate directory stays and a fresh database is created
+    /// in it on first serve. Other estates are untouched — they are addressed
+    /// by `mootx01 db`, not by the install flow.
     public static func applyReplace(
-        in dataDirectory: URL, using move: Mover = systemTrash
+        estateFiles: [URL], configurationDirectory: URL, using move: Mover = systemTrash
     ) throws {
         let fm = FileManager.default
-        // Flat layout: the SQLite file, its WAL/SHM sidecars, and the
-        // derived vector / dreaming-queue siblings that carry estate content
-        // (`estate.sqlite` → `estate.vectors.vec` / `estate.queue.sqlite`,
-        //  see VectorStore.vectorsURL and EstateConfiguration.queueSibling).
-        for name in [
-            "estate.sqlite", "estate.sqlite-wal", "estate.sqlite-shm",
-            "estate.vectors.vec",
-            "estate.queue.sqlite", "estate.queue.sqlite-wal", "estate.queue.sqlite-shm",
-            // The encryption opt-out marker describes the estate being replaced;
-            // it dies with it. Leaving it behind would silently downgrade the
-            // NEXT estate to plaintext despite the encrypted default the install
-            // just advertised (stale-marker downgrade, Codex fe2cf887).
-            EstateKeyProvider.encryptionOptOutMarkerName,
-        ] {
-            let url = dataDirectory.appendingPathComponent(name, isDirectory: false)
-            if fm.fileExists(atPath: url.path) {
-                try move(url)
-            }
+        for url in estateFiles where fm.fileExists(atPath: url.path) {
+            try move(url)
         }
-        // Rust layout: the whole databases/default/ directory (SQLite,
-        // sidecars, and the whole-file encryption key live together).
-        let defaultDir = dataDirectory
-            .appendingPathComponent("databases", isDirectory: true)
-            .appendingPathComponent("default", isDirectory: true)
-        if fm.fileExists(atPath: defaultDir.path) {
-            try move(defaultDir)
-        }
-        try DatabaseManager.setActiveEstate("default", in: dataDirectory)
-        try trashManagerStore(in: dataDirectory, using: move)
+        try trashManagerStore(in: configurationDirectory, using: move)
     }
 
     /// Move the moot-mgr history store to the Trash if present. The manager
     /// recreates an empty store on next start, so this is the "reset
     /// registration" primitive the reuse and replace branches share.
     private static func trashManagerStore(
-        in dataDirectory: URL, using move: Mover
+        in configurationDirectory: URL, using move: Mover
     ) throws {
-        let mgr = managerStoreDirectory(in: dataDirectory)
+        let mgr = managerStoreDirectory(in: configurationDirectory)
         if FileManager.default.fileExists(atPath: mgr.path) {
             try move(mgr)
         }

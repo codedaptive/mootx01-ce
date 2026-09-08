@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct CodexHookCommand: AsyncParsableCommand {
@@ -64,9 +65,7 @@ struct CodexHookCommand: AsyncParsableCommand {
             guard let config = CodexMemoryStore.load(homeDirectory: home),
                   config.enabled, config.automaticRecall,
                   let prompt = input["prompt"] as? String, !prompt.isEmpty else { return }
-            let env = ProcessInfo.processInfo.environment
-            let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
-            let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+            let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
             let query = String(prompt.prefix(2_000))
             if let recalled = try? await CodexRecallClient(port: port).recall(
                 query: query, limit: config.recallLimit), !recalled.isEmpty {
@@ -172,10 +171,10 @@ struct CodexMemoryDoctorCommand: ParsableCommand {
         print("Chronicle: \(FileManager.default.fileExists(atPath: chronicle.path) ? "available (\(count) Markdown file(s))" : "not present")")
         print("Chronicle policy: generated Markdown only; no screenshots; import is consent-gated and read-only toward CODEX_HOME")
 
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
-        let active = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
-        let estate = DatabaseManager.estateURL(for: active, in: dataDir)
-        let posture = EstateKeyProvider.detectEstateFileState(at: estate)
+        // The active estate's file, from the catalog; an unreadable catalog
+        // reports the posture as absent rather than failing the status print.
+        let estate = try? EstateCatalog.open().active.databaseURL
+        let posture = estate.map { EstateOpenPosture.fileState(at: $0) } ?? .absent
         let postureText: String
         switch posture {
         case .absent: postureText = "absent"
@@ -183,8 +182,8 @@ struct CodexMemoryDoctorCommand: ParsableCommand {
         case .ciphertext: postureText = "encrypted/ciphertext"
         }
         print("Estate at rest: \(postureText)")
-        let backups = ((try? FileManager.default.contentsOfDirectory(
-            at: estate.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? [])
+        let backups = (estate.flatMap { try? FileManager.default.contentsOfDirectory(
+            at: $0.deletingLastPathComponent(), includingPropertiesForKeys: nil) } ?? [])
             .filter { $0.lastPathComponent.contains("backup") || $0.lastPathComponent.contains(".bak") }
         print("Estate backups detected: \(backups.count)")
     }
@@ -215,8 +214,7 @@ struct CodexChronicleImportCommand: AsyncParsableCommand {
                 throw ExitCode.failure
             }
         }
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         let daemon = LiveDaemonClient(port: port)
         guard await daemon.ping() else {
             print("MOOTx01 daemon is not reachable on port \(port); no files were imported.")

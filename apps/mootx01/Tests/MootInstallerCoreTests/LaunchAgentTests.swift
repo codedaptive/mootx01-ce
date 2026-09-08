@@ -75,7 +75,6 @@ struct LaunchAgentTests {
             stderrPath: "/Users/test/.mootx01/logs/mootx01-daemon.err.log",
             environmentVariables: [
                 "MOOTX01_HTTP_PORT": "4242",
-                "MOOTX01_DATA_DIR": "/Users/test/Library/Application Support/com.mootx01.ce",
                 "ARIA_MCP_STATS_STORE": "/Users/test/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite",
             ]
         )

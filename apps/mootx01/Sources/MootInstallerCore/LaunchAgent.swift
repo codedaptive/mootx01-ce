@@ -373,12 +373,12 @@ public enum LaunchAgent {
     ///
     /// - Parameters:
     ///   - homeDirectory: the user's home directory.
-    ///   - dataDirectory: the resolved Application Support data directory
-    ///     (e.g. `MootPaths.resolveDataDirectory(environment:homeDirectory:)`).
+    ///   - estateDatabaseURL: the default estate's SQLite file as the estate
+    ///     catalog names it (`EstateRecord.databaseURL`).
     /// - Returns: an `UninstallReport` naming what was observed.
     public static func reportUninstallPreservation(
         homeDirectory: URL,
-        dataDirectory: URL
+        estateDatabaseURL: URL
     ) -> UninstallReport {
         let fm = FileManager.default
         // Daemon configuration: any owned artifact present means the config
@@ -388,7 +388,7 @@ public enum LaunchAgent {
         let configStatus: UninstallPreservation = configPresent ? .retained : .absent
 
         // Estate data: estate.sqlite plus its SQLite WAL sidecar files.
-        let estateFile = MootPaths.estateURL(in: dataDirectory)
+        let estateFile = estateDatabaseURL
         let estatePresent = fm.fileExists(atPath: estateFile.path)
             || fm.fileExists(atPath: estateFile.path + "-wal")
             || fm.fileExists(atPath: estateFile.path + "-shm")
