@@ -44,6 +44,7 @@
 // async Task; the socket fd stays owned by the connection handler.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import LoopbackHTTP
 
@@ -190,7 +191,7 @@ public actor HTTPReadAPI {
     /// A clock the API stamps on snapshots. Injected for determinism in tests.
     private let clock: @Sendable () -> Date
 
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "HTTPReadAPI")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootManager.HTTPReadAPI")
 
     /// Bounded concurrency gate: limits simultaneous in-flight connections to
     /// `MootMgrMaxLoopbackConnections` (default 16, overrideable via env var).
@@ -313,7 +314,7 @@ public actor HTTPReadAPI {
                 }
             }
         }
-        thread.name = "com.mootx01.kit.HTTPReadAPI.accept"
+        thread.name = MootProductIdentity.Queues.managerHTTPReadAPIAccept
         thread.start()
         self.acceptThread = thread
         logger.info("HTTPReadAPI listening on 127.0.0.1:\(port)")

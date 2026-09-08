@@ -53,6 +53,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
         .package(
             name: "GeniusLocusKit",
@@ -72,7 +73,7 @@ let package = Package(
         .package(name: "CognitionKit", path: "../CognitionKit"),
         .package(name: "LocusKit", path: "../LocusKit"),
         // CorpusKit + SynapseKit: the aria-mcp executable wires semantic recall
-        // for the durable SQLite estate (ARIA_MCP_SQLITE_PATH) by constructing a
+        // for the estate its catalog record names by constructing a
         // Corpus + VectorStore after `kit.open` and registering both — the same
         // composition EstateLifecycle.provision wires for a .glk estate. Without
         // this, the BM25 + vector recall lanes stay dark on a bare open. App →
@@ -145,11 +146,13 @@ let package = Package(
     targets: [
         .target(
             name: "AriaMCPWire",
+            dependencies: [.product(name: "MootProductIdentity", package: "MootProductIdentity")],
             path: "Sources/AriaMCPWire"
         ),
         .target(
             name: "AriaMCP",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "AriaMCPWire",
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
@@ -184,6 +187,7 @@ let package = Package(
         .target(
             name: "AriaResident",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "AriaMCP",
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 // NeuronKit: AriaResident constructs NeuronKit.AutonomicGovernor

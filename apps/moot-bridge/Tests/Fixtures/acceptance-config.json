@@ -13,12 +13,13 @@
   },
   "backendB": {
     "name": "mootx01",
-    "command": "MOOTX01_DATA_DIR=__MOOT_DIR__ mootx01 serve",
+    "command": "mootx01 serve --db __MOOT_DIR__/bridge",
     "verbMap": {
       "write": "moot_file_memory",
       "query": "moot_memory_search",
       "contentArg": "content",
       "queryArg": "query",
+      "subjectArg": "subject",
       "constantArgs": { "location": "scratch/notes" },
       "resultFormat": { "kind": "mootText" }
     }
