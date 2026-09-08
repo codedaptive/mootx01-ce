@@ -22,20 +22,14 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpEntryOwnership {
     /// Our server name, and no data-dir/estate env override. Mechanically on
-    /// the default database by construction (`serve` resolves the default
-    /// data dir unless overridden) — safe to replace or remove.
+    /// the default estate by construction (`serve` opens the catalog's active
+    /// estate unless `--db` selects another) — safe to replace or remove.
     OursDefault,
-    /// Carries an env override pointing at a non-default data dir/estate
-    /// (e.g. a development rig). Never auto-removed or auto-replaced; the
-    /// reason names the specific override(s) found, for the printed report.
+    /// Selects another estate with `--db` (e.g. a development rig), or has a
+    /// shape this installer never writes. Never auto-removed or
+    /// auto-replaced; the reason names what was found, for the printed report.
     Foreign(String),
 }
-
-/// Env keys whose presence on an existing entry marks it as pointing at a
-/// non-default database: `serve` resolves the default data dir
-/// unless one of these overrides it, so an entry carrying neither is on the
-/// default database by construction.
-pub const OVERRIDE_ENV_KEYS: [&str; 2] = ["MOOTX01_DATA_DIR", "ARIA_MCP_SQLITE_PATH"];
 
 /// The exact loopback daemon port this installer's default wiring ever
 /// writes. Mirrors Swift's `MootPaths.defaultResidentPort`. A loopback URL
@@ -56,15 +50,15 @@ const DEFAULT_RESIDENT_PORT: u16 = 4242;
 /// auto-removable on a routine `mootx01 install` once a plugin is present.
 /// An entry must resolve to the `mootx01` binary (command basename +
 /// `serve`/`proxy` args) OR the exact loopback daemon endpoint before its
-/// env is even considered; anything else is `Foreign` — reported by name,
-/// never removed — regardless of its env block.
+/// arguments are even considered; anything else is `Foreign` — reported by
+/// name, never removed.
 ///
-/// Once the shape check passes: HTTP entries (no `env` key in every shape
-/// this installer writes) cannot disagree about the database — they reach
-/// whatever estate the resident daemon holds — so the absence
-/// of an `env` map is itself `OursDefault`. Command/stdio entries (the
-/// proxy bridge, or a legacy bare `serve`) are `OursDefault` only when
-/// their `env` carries neither override key.
+/// Once the shape check passes, the one way an entry selects a non-default
+/// estate is the `--db` argument: the estate catalog names every estate, and
+/// no environment value selects one, so an entry's `env` block never bears
+/// on which estate it reaches. HTTP entries reach whatever estate the
+/// resident daemon holds. Everything that passes the shape check without
+/// `--db` is `OursDefault`.
 pub fn classify(entry: &Value) -> McpEntryOwnership {
     if !looks_like_ours(entry) {
         return McpEntryOwnership::Foreign(
@@ -72,18 +66,23 @@ pub fn classify(entry: &Value) -> McpEntryOwnership {
                 .to_string(),
         );
     }
-    let Some(env) = entry.get("env").and_then(|e| e.as_object()) else {
-        return McpEntryOwnership::OursDefault;
-    };
-    let overriding: Vec<&str> = OVERRIDE_ENV_KEYS
-        .iter()
-        .filter(|k| env.contains_key(**k))
-        .copied()
-        .collect();
-    if overriding.is_empty() {
-        McpEntryOwnership::OursDefault
+    // `serve --db <value>` selects another estate. Removing such an entry
+    // would silently collapse the user's estate isolation into the default
+    // estate. Both spellings count: the space-separated `--db <value>` (a
+    // standalone "--db" element) and the equals form `--db=<value>`.
+    let selects_estate = entry
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|args| {
+            args.iter()
+                .filter_map(|a| a.as_str())
+                .any(|a| a == "--db" || a.starts_with("--db="))
+        })
+        .unwrap_or(false);
+    if selects_estate {
+        McpEntryOwnership::Foreign("args override: --db".to_string())
     } else {
-        McpEntryOwnership::Foreign(format!("env override: {}", overriding.join(", ")))
+        McpEntryOwnership::OursDefault
     }
 }
 
@@ -312,29 +311,27 @@ mod tests {
         assert_eq!(classify(&entry), McpEntryOwnership::OursDefault);
     }
 
+    /// An env block never selects an estate, so it never makes our entry
+    /// foreign.
     #[test]
-    fn data_dir_override_is_foreign() {
+    fn env_block_does_not_mark_foreign() {
         let entry = json!({
             "command": "/usr/local/bin/mootx01",
             "args": ["proxy"],
-            "env": {"MOOTX01_DATA_DIR": "/Users/dev/rig-a"},
+            "env": {"MOOTX01_HTTP_PORT": "4242", "SOME_UNRELATED_KEY": "/Users/dev/rig-a"},
         });
-        match classify(&entry) {
-            McpEntryOwnership::Foreign(reason) => assert!(reason.contains("MOOTX01_DATA_DIR")),
-            other => panic!("expected Foreign, got {other:?}"),
-        }
+        assert_eq!(classify(&entry), McpEntryOwnership::OursDefault);
     }
 
+    /// `--db` selects another estate: both spellings mark the entry foreign.
     #[test]
-    fn sqlite_path_override_is_foreign() {
-        let entry = json!({
-            "command": "/usr/local/bin/mootx01",
-            "args": ["proxy"],
-            "env": {"ARIA_MCP_SQLITE_PATH": "/Users/dev/estate.sqlite"},
-        });
-        match classify(&entry) {
-            McpEntryOwnership::Foreign(reason) => assert!(reason.contains("ARIA_MCP_SQLITE_PATH")),
-            other => panic!("expected Foreign, got {other:?}"),
+    fn db_argument_is_foreign() {
+        for args in [json!(["serve", "--db", "rig-a"]), json!(["serve", "--db=rig-a"])] {
+            let entry = json!({"command": "/usr/local/bin/mootx01", "args": args});
+            match classify(&entry) {
+                McpEntryOwnership::Foreign(reason) => assert!(reason.contains("--db"), "{reason}"),
+                other => panic!("expected Foreign, got {other:?}"),
+            }
         }
     }
 
