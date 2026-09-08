@@ -6,12 +6,13 @@
 // the conflict-policy switch in ApplyInbound.swift.
 
 import Foundation
+import MootProductIdentity
 import CloudKit
 import ConvergenceKit
 import PersistenceKit
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.Engine")
 
 // MARK: - DecodedRecord → SyncRecord conversion (skew-queue enqueue, R9)
 

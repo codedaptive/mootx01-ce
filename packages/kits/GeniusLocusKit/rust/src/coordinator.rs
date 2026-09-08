@@ -1816,15 +1816,9 @@ impl EstateCoordinator {
         self.registry.keys().copied().collect()
     }
 
-    /// Admit an estate into the registry. Opens the underlying
-    /// `locus_kit::Estate` over `store` (parity of the Swift
-    /// `LocusKit.Estate.open(storage:owner:)` call inside the actor's
-    /// `open`), derives the handle's UUID from the opened estate, and
-    /// registers it under a fresh `EstateHandle` carrying the zoom window.
-    ///
-    /// Refuses a UUID already registered (spec § 7.7: estate UUIDs are
-    /// immutable, so a duplicate is almost certainly the same store opened
-    /// twice).
+    /// Admit an estate into the registry without federation: the Swift
+    /// `open(storage:owner:identityKeyStore:federate:)` default. See
+    /// `open_with_federation`.
     pub fn open(
         &mut self,
         store: Arc<dyn DrawerStore>,
@@ -1832,14 +1826,39 @@ impl EstateCoordinator {
         zoom_window_low: i64,
         zoom_window_high: i64,
     ) -> Result<EstateHandle, GeniusLocusKitError> {
+        self.open_with_federation(store, owner, zoom_window_low, zoom_window_high, false)
+    }
+
+    /// Admit an estate into the registry. Opens the underlying
+    /// `locus_kit::Estate` over `store` (parity of the Swift
+    /// `LocusKit.Estate.open(storage:owner:identityKeyStore:federate:)` call
+    /// inside the actor's `open`), derives the handle's UUID from the opened
+    /// estate, and registers it under a fresh `EstateHandle` carrying the
+    /// zoom window.
+    ///
+    /// `federate` is the caller's explicit per-open choice: whether this open
+    /// establishes the estate's Ed25519 federation identity. A registered
+    /// estate, the one this machine owns, federates; a transient estate never
+    /// mints an identity. Off by default because minting is additive cost.
+    ///
+    /// Refuses a UUID already registered (spec § 7.7: estate UUIDs are
+    /// immutable, so a duplicate is almost certainly the same store opened
+    /// twice).
+    pub fn open_with_federation(
+        &mut self,
+        store: Arc<dyn DrawerStore>,
+        owner: OwnerCredentials,
+        zoom_window_low: i64,
+        zoom_window_high: i64,
+        federate: bool,
+    ) -> Result<EstateHandle, GeniusLocusKitError> {
         // Capture the underlying Storage before Estate::open moves the
         // DrawerStore Arc. Used below for auto-registering the substrate
         // topology provider (node-tree integrity, NT-G1).
         let topology_storage = store.storage();
-        let estate =
-            Estate::open(store, owner).map_err(|e| GeniusLocusKitError::EstateOpenFailed {
-                detail: format!("{e:?}"),
-            })?;
+        let estate = Estate::open_with_federation(store, owner, federate).map_err(|e| {
+            GeniusLocusKitError::EstateOpenFailed { detail: format!("{e:?}") }
+        })?;
         let estate_uuid: EstateUuid = estate.estate_uuid().into_bytes();
         let handle = EstateHandle::new(estate_uuid, zoom_window_low, zoom_window_high)?;
         // Duplicate detection is keyed by estate UUID ALONE, not the full
@@ -9442,15 +9461,6 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         now: i64,
     ) -> Result<(), GeniusLocusKitError> {
-        // Benchmark-only bypass (MOOTX01_SKIP_CHARTERS): skip charter seeding
-        // entirely so measured estates contain exactly the imported corpus
-        // (charters are outside the benchmark spec and occupy candidate-pool
-        // slots in every recall — 2026-08-24 ruling). Env-only seam, never on
-        // the MCP surface; production estates always seed charters. Twin of
-        // the Swift guard in `seedDefaultWings`.
-        if std::env::var_os("MOOTX01_SKIP_CHARTERS").is_some() {
-            return Ok(());
-        }
         let estate = self
             .estate_for(handle)
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
@@ -9841,12 +9851,16 @@ impl EstateCoordinator {
             })?;
 
         // Step 2: Open the estate through the coordinator path.
-        // open() validates the manifest, issues the handle, and sets mount state to Mounted.
-        let handle = self.open(
+        // open_with_federation() validates the manifest, issues the handle, and
+        // sets mount state to Mounted. A provisioned estate is one this install
+        // owns: it federates, so its identity is minted here. Swift twin:
+        // EstateLifecycle.provision passes `federate: true`.
+        let handle = self.open_with_federation(
             store,
             owner,
             params.zoom_window_low,
             params.zoom_window_high,
+            true,
         )?;
 
         // Step 2a: a fresh estate is born with the span encoder as its default

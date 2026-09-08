@@ -41,12 +41,13 @@
 
 import CorpusKit
 import Foundation
+import MootProductIdentity
 import GeniusLocusKit
 import PersistenceKit
 import os.log
 
 private let log = Logger(
-    subsystem: "com.mootx01.kit",
+    subsystem: MootProductIdentity.Logging.subsystem,
     category: "GeniusLocusKit"
 )
 

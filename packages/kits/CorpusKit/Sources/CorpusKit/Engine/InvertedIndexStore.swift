@@ -23,10 +23,11 @@
 // Parity: Rust twin in CorpusKit/rust/src/engine/inverted_index_store.rs.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 
-private let logger = Logger(subsystem: "com.mootx01.kit", category: "InvertedIndexStore")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit.InvertedIndexStore")
 
 // MARK: - InvertedIndexStore
 

@@ -1326,6 +1326,7 @@ dependencies = [
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",
+ "moot-product-identity",
  "persistence-kit",
  "queuekit",
  "rusqlite",
@@ -1835,6 +1836,10 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "moot-product-identity"
+version = "0.1.0"
 
 [[package]]
 name = "native-tls"

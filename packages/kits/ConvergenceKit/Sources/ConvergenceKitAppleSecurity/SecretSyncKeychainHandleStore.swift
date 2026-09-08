@@ -1,5 +1,6 @@
 import ConvergenceKit
 import Foundation
+import MootProductIdentity
 import Security
 
 /// Fixed, payload-free failures emitted by Apple SecretSync custody.
@@ -25,9 +26,9 @@ enum SecretSyncStoredKeyRole: String, Sendable, Codable {
   var service: String {
     switch self {
     case .signing:
-      "com.codedaptive.mootx01.secret-sync.signing-handle"
+      MootProductIdentity.Keychain.secretSyncSigningHandleService
     case .agreement:
-      "com.codedaptive.mootx01.secret-sync.agreement-handle"
+      MootProductIdentity.Keychain.secretSyncAgreementHandleService
     }
   }
 }

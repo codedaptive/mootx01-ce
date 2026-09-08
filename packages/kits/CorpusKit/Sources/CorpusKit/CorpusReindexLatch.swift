@@ -34,13 +34,14 @@
 //   • Cleared only by a successful rebuild — never here.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import QueueKit
 import SubstrateTypes
 
 // OSLog category matches the CorpusKit convention (category = module name).
-private let latchLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let latchLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 /// The QueueKit stream for reindex marker jobs. Fixed string scoping all
 /// reindex marker jobs to a single well-known stream. Dedupe is performed via

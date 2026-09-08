@@ -52,12 +52,13 @@
 //   - WC1 (estate Ed25519 identity, _fed_identity), WC6 (_fed_peers)
 
 import Foundation
+import MootProductIdentity
 @preconcurrency import Security
 import Network
 import os
 
 private let logger = Logger(
-    subsystem: "com.mootx01.synckit.federation",
+    subsystem: MootProductIdentity.Logging.subsystem,
     category: "LANRelayTLS"
 )
 

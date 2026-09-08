@@ -5,6 +5,7 @@
 // based on the SyncedTable's configured ConflictPolicy.
 
 import Foundation
+import MootProductIdentity
 import ConvergenceKit
 import PersistenceKit
 import SubstrateTypes
@@ -13,7 +14,7 @@ import os
 // File-scoped logger for apply-inbound diagnostics. Uses the same subsystem
 // and category as the parent actor so all CloudKit engine events appear
 // under one filter in Console.app.
-private let applyLogger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
+private let applyLogger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.Engine")
 
 extension CloudKitStateActor {
 

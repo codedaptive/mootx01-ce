@@ -86,11 +86,12 @@
 //   cannot detect itself). See §15 fail-loud read-back commit 0ff08d93.
 
 import Foundation
+import MootProductIdentity
 import PersistenceKit
 import SubstrateTypes
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "PersistenceKitReplication")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKitReplication")
 
 // MARK: - BlobDirtySet
 

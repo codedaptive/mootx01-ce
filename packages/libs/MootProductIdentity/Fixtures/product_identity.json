@@ -1,0 +1,70 @@
+{
+  "productRoot": "com.mootx01",
+  "vendorRoot": "com.codedaptive.mootx01",
+  "storage": {
+    "applicationSupportFolder": "com.mootx01.ce",
+    "latticeFolder": "com.mootx01.lattice",
+    "catalogFile": "estatecatalog.json",
+    "databasesFolder": "databases",
+    "defaultEstateName": "default",
+    "estateDatabaseFile": "estate.sqlite"
+  },
+  "logging": {
+    "subsystem": "com.mootx01.kit"
+  },
+  "services": {
+    "daemonLabel": "com.mootx01.daemon",
+    "managerLabel": "com.mootx01.mgr",
+    "contractHostOwner": "com.mootx01.daemon.contract-host",
+    "daemonProviderLaunchAgentLabel": "com.codedaptive.mootx01.daemon",
+    "bonjourServiceType": "_mootx01._tcp",
+    "federationBonjourServiceType": "_mootx01-fed._tcp",
+    "urlScheme": "mootx01"
+  },
+  "keychain": {
+    "estateKeyService": "com.codedaptive.mootx01",
+    "sharedAccessGroup": "com.codedaptive.mootx01.shared",
+    "estateIdentityService": "com.mootx01.estate.identity",
+    "lanCredentialService": "com.codedaptive.mootx01.lan-credential",
+    "daemonAuthService": "com.codedaptive.mootx01.daemon-auth",
+    "daemonProofService": "com.codedaptive.mootx01.daemon-proof",
+    "crossInstallCustodyProofService": "com.codedaptive.mootx01.cross-install-custody-proof",
+    "secretSyncSigningHandleService": "com.codedaptive.mootx01.secret-sync.signing-handle",
+    "secretSyncAgreementHandleService": "com.codedaptive.mootx01.secret-sync.agreement-handle",
+    "secretSyncProtectedHeadService": "com.codedaptive.mootx01.secret-sync.protected-head",
+    "syncTierServicePrefix": "com.codedaptive.mootx01.sync-tier.",
+    "syncTierAccessGroup": "com.codedaptive.mootx01",
+    "estateSurgeryCloneRecipientService": "com.codedaptive.mootx01.estate-surgery.clone-recipient"
+  },
+  "apple": {
+    "appGroup": "group.com.codedaptive.mootx01",
+    "spotlightDomain": "com.codedaptive.mootx01.memory",
+    "miningRefreshTaskIdentifier": "com.codedaptive.mootx01.mining.refresh",
+    "shareErrorDomain": "com.codedaptive.mootx01.share",
+    "bundleIdentifiers": {
+      "macOSApp": "com.codedaptive.mootx01.macos",
+      "iOSApp": "com.codedaptive.mootx01.ios",
+      "communityMacOSApp": "com.codedaptive.mootx01.community.macos",
+      "daemonProvider": "com.codedaptive.mootx01.macos.daemonprovider",
+      "daemonHelper": "com.codedaptive.mootx01.macos.daemonhelper",
+      "daemonProofHost": "com.codedaptive.mootx01.macos.daemonproofhost",
+      "custodyProofSandboxHelper": "com.codedaptive.mootx01.macos.custodyproof.sandboxhelper",
+      "custodyProofDeveloperIDDaemon": "com.codedaptive.mootx01.macos.custodyproof.developeriddaemon"
+    }
+  },
+  "preferences": {
+    "residency": "com.mootx01.residency",
+    "gatewayHasCompletedOnboarding": "com.mootx01.gateway.hasCompletedOnboarding",
+    "gatewayIsAdvancedMode": "com.mootx01.gateway.isAdvancedMode",
+    "gatewayShowQuickCapture": "com.mootx01.gateway.showQuickCapture",
+    "portableOnPowerOnly": "com.mootx01.portable.onPowerOnly",
+    "portableServiceName": "com.mootx01.portable.serviceName"
+  },
+  "queues": {
+    "ariaHTTPAccept": "com.mootx01.aria-mcp.http.accept",
+    "managerControlChannelAccept": "com.mootx01.mgr.control-channel.accept",
+    "managerHTTPReadAPIAccept": "com.mootx01.mgr.http-read-api.accept",
+    "lanDiscovery": "com.mootx01.lan-discovery",
+    "lanBrowser": "com.mootx01.lan-browser"
+  }
+}

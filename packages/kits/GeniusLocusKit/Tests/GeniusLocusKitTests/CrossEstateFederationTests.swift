@@ -55,7 +55,7 @@ struct CrossEstateFederationTests {
             estateID: UUID(), backend: .inMemory
         ))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        return try await kit.open(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, federate: true)
     }
 
     /// Capture one tagged drawer into the estate addressed by `handle`.

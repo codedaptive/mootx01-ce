@@ -26,9 +26,10 @@
 // no-op is intentional there, not a bug.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "LatticeLib")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LatticeLib")
 
 /// Factory for the production novel-token pool submitter (cookbook §2.2).
 ///
@@ -173,7 +174,8 @@ public enum NovelPoolSubmitter {
         ).first ?? URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Application Support")
         return appSupport
-            .appendingPathComponent("com.mootx01.lattice/pool", isDirectory: true)
+            .appendingPathComponent(MootProductIdentity.Storage.latticeFolder, isDirectory: true)
+            .appendingPathComponent("pool", isDirectory: true)
         #else
         // Non-Apple: XDG_DATA_HOME or ~/.local/share
         let dataHome: String

@@ -44,6 +44,7 @@
 //   history.
 
 import Foundation
+import MootProductIdentity
 import SubstrateKernel
 import OSLog
 // ─────────────────────────────────────────────────────────────────
@@ -560,7 +561,7 @@ extension UnifiedAuditLog {
     /// new logger per access. Fleet-standard subsystem and category
     /// per CLAUDE.md.
     static let logger = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "GeniusLocusKit.UnifiedAuditLog"
     )
 }

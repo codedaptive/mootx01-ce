@@ -26,9 +26,10 @@
 #if canImport(CoreAI)
 import CoreAI
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "AdornmentLib")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "AdornmentLib")
 
 /// How a Core AI arm's mint prompt is framed — chat-tuned models take
 /// the qwen chat frame; NuExtract takes its own extraction template

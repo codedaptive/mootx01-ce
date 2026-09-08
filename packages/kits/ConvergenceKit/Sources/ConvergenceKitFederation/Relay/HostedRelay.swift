@@ -23,12 +23,13 @@
 // re-application idempotently).
 
 import Foundation
+import MootProductIdentity
 import ConvergenceKit
 import os
 
 private let logger = Logger(
-    subsystem: "com.mootx01.synckit.federation",
-    category: "HostedRelay"
+    subsystem: MootProductIdentity.Logging.subsystem,
+    category: "ConvergenceKitFederation.HostedRelay"
 )
 
 // MARK: - Wire types (private, internal to HostedRelay)

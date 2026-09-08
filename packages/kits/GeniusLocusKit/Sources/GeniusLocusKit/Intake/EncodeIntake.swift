@@ -32,6 +32,7 @@
 import CorpusKit
 import EideticLib
 import Foundation
+import MootProductIdentity
 import LocusKit
 import OSLog
 import SubstrateML
@@ -54,7 +55,7 @@ public enum WriteMode: String, Sendable, Codable, CaseIterable {
 public extension GeniusLocusKit {
 
     private static var intakeLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - capture (mode-aware) — D-A

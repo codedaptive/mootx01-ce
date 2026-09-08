@@ -23,6 +23,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../MootProductIdentity"),
         // SubstrateML provides EigenvalueCentrality (LexRank) and FloatSimHash
         // (signature fingerprint). Substrate math is the right home for these.
         .package(path: "../SubstrateML"),
@@ -34,6 +35,7 @@ let package = Package(
         .target(
             name: "LatticeLib",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "SubstrateKernel", package: "SubstrateKernel"),
             ],

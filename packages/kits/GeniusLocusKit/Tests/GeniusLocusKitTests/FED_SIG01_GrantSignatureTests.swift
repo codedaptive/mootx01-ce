@@ -45,7 +45,7 @@ struct FED_SIG01_GrantSignatureTests {
             estateID: UUID(), backend: .inMemory
         ))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        return try await kit.open(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, federate: true)
     }
 
     /// Recall frame that admits unconfirmed drawers (avoids the default

@@ -1,11 +1,12 @@
 import Foundation
+import MootProductIdentity
 import CorpusKit
 import LocusKit
 import OSLog
 import SubstrateKernel
 import SynapseKit
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
 // MARK: - SpanVectorWriter (seam over VectorStore.writeSpanVectors)
 //

@@ -11,10 +11,11 @@
 // propagates cancellation to every child and stops all observations.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
 private let invalidatorLogger = Logger(
-    subsystem: "com.mootx01.kit",
+    subsystem: MootProductIdentity.Logging.subsystem,
     category: "CacheInvalidator"
 )
 

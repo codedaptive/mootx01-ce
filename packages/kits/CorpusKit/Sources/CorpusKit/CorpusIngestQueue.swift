@@ -30,6 +30,7 @@
 // replies. Both wins are preserved on the encrypted SQLite backend.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import PersistenceKitInMemory
@@ -39,7 +40,7 @@ import SubstrateTypes
 
 /// CorpusKit ingest-pipeline logger (category "CorpusKit"). Declared at file
 /// scope so the drain worker does not reconstruct a Logger on every pass.
-private let corpusIngestLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let corpusIngestLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 /// The bookkeeping a drain worker carries between passes. The loop itself
 /// lives in the worker task, which resolves its corpus or engine afresh for

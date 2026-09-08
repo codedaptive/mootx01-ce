@@ -39,9 +39,10 @@
 // is needed on a shared type, stop and file an FT-1 update to Lane F.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "FloatBruteForceIndex")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "SynapseKit.FloatBruteForceIndex")
 
 // MARK: - FloatBruteForceIndex
 

@@ -42,6 +42,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(name: "GeniusLocusKit", path: "../GeniusLocusKit"),
         .package(name: "LocusKit", path: "../LocusKit"),
         .package(name: "EideticLib", path: "../../libs/EideticLib"),
@@ -69,6 +70,7 @@ let package = Package(
         .target(
             name: "VaultKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "EideticLib", package: "EideticLib"),
@@ -90,7 +92,9 @@ let package = Package(
                 // Part B encode-enqueue test (secfix/c-vault-export2).
                 .product(name: "CorpusKit", package: "CorpusKit"),
             ],
-            path: "Tests/VaultKitTests"
+            path: "Tests/VaultKitTests",
+            // Test fixtures are read through #filePath, not Bundle.module.
+            exclude: ["Fixtures"]
         ),
     ]
 )

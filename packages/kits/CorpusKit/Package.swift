@@ -94,6 +94,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/SubstrateTypes"),
         // SubstrateLib: MerkleHash.leaf for the ContentHashProvider callback
         // that HashingRowStore invokes on every chunk insert.
@@ -136,6 +137,7 @@ let package = Package(
         .target(
             name: "CorpusKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "SubstrateTypes", "SubstrateLib", "SubstrateKernel",
                 "SubstrateML",
                 "EngramLib",
@@ -183,6 +185,7 @@ let package = Package(
         .target(
             name: "CorpusKitWholeRecordDense",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "CorpusKit",
                 "SynapseKit",
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
@@ -195,6 +198,7 @@ let package = Package(
         .target(
             name: "CorpusKitProviders",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "CorpusKit",
                 "SubstrateTypes",
                 // SubstrateKernel supplies the canonical float-vector ops

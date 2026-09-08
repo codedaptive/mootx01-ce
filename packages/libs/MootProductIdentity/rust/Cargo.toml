@@ -1,0 +1,19 @@
+[package]
+name = "moot-product-identity"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The product's identity strings, spelled once: configuration folder, logging subsystem, service labels, Keychain services, Apple identifiers, preference keys and queue labels. Twin of the Swift MootProductIdentity library; both ports are pinned by Fixtures/product_identity.json."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "moot_product_identity"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+# The shared fixture beside the Swift library is JSON; the parity test reads
+# it with serde_json. Dev-only: the shipped crate is constants and path math.
+serde_json = "1"

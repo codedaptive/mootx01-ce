@@ -15,13 +15,14 @@
 #if MOOTX01_WHOLE_RECORD_DENSE
 import CorpusKit
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import SynapseKit
 
 /// Sidecar OSLog logger (category "CorpusKit"): store errors on the float
 /// lane are logged so they are never swallowed.
-private let floatLaneLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let floatLaneLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 extension Corpus {
 

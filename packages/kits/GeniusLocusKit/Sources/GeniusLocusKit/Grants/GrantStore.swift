@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 import PersistenceKit
@@ -20,7 +21,7 @@ import PersistenceKit
 /// deterministic.
 public actor GrantStore {
 
-    private static let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+    private static let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
     private let storage: any Storage
 

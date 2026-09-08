@@ -23,6 +23,7 @@
 
 import EngramLib
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import PersistenceKit
@@ -41,7 +42,7 @@ import SynapseKit
 /// WholeRecordDense trait the sidecar's `floatNearest` as well.
 /// Declared at file scope to avoid repeated Logger construction on the hot path
 /// (Logger init is not free on older OS versions).
-private let corpusLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let corpusLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 // MARK: - EmbeddingModel
 

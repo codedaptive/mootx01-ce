@@ -56,11 +56,12 @@
 // serialised through the actor boundary.
 
 import Foundation
+import MootProductIdentity
 import EngramLib
 import IntellectusLib
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "SynapseKit")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "SynapseKit")
 
 // MARK: - Allowed m values
 
