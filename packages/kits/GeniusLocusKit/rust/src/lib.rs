@@ -46,18 +46,17 @@
 pub mod audit;
 pub mod brain;
 
-/// The product's active dense-context converter: intent-span v23.2, the
-/// attributed peer-dialogue ruleset (activated 2026-09-03 per the addendum
-/// to DECISION_CONTEXTDISTILLLIB_2026-09-02). Twin of Swift
+/// The product's active read-time converter: complete-form v6.
+/// Compacts the complete source rather than selecting passages. Twin of Swift
 /// `GeniusLocusKit.distillationConverter`. Every distilled rendering is
 /// computed inline at read time from the verbatim content
 /// (`hydration_representation::distilled_rendering`); nothing stores it.
 /// Readers below GLK (CognitionKit, the CLI) take the converter from here,
 /// never from the library directly, so the choice of converter lives in
-/// exactly one place. The v22 ruleset stays in the library; nothing here
+/// exactly one place. The v23.2 ruleset stays in the library; nothing here
 /// routes between converters.
 pub const DISTILLATION_CONVERTER: context_distill_lib::converter::ContextDistillConverter =
-    context_distill_lib::converter::ContextDistillConverter::IntentSpanV23Attributed;
+    context_distill_lib::converter::ContextDistillConverter::CompleteFormV6;
 // packager.rs — GLKResultsPackager Rust port (PACKAGER mission). Post-recall,
 // pre-presentation packager: gate signals, confidence levels, cliff cutoff,
 // and the packed result type consumed by the ARIA boundary. Mirrors

@@ -124,6 +124,13 @@ struct ConsolidationCycleTests {
             // pin the GLK-visible half: no tombstone, no content change).
             #expect(!drawer.content.isEmpty)
         }
+        let recalled = try await kit.recall(handle, RecallFrame(
+            filterChain: [], hydrationLevel: .full, ordering: .byCaptureTimeDesc))
+        let vagueResult = recalled.first(where: { $0.isVague })
+        let vague = try #require(vagueResult)
+        // Distinct source bodies retain their grammar and document boundaries;
+        // structural selection must not produce the consolidation's text.
+        #expect(Set(vague.content.components(separatedBy: "\n\n")) == Set(clusterBodies))
     }
 
     @Test("sweep is idempotent — represented constituents leave the pool")
