@@ -1357,6 +1357,7 @@ dependencies = [
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",
+ "moot-product-identity",
  "persistence-kit",
  "queuekit",
  "serde",
@@ -1647,6 +1648,7 @@ dependencies = [
 name = "lattice-lib"
 version = "0.1.0"
 dependencies = [
+ "moot-product-identity",
  "serde",
  "serde_json",
  "substrate-kernel",
@@ -1853,6 +1855,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "moot-product-identity"
+version = "0.1.0"
 
 [[package]]
 name = "mootx01-cli"

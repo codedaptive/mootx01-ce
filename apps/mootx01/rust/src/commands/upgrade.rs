@@ -4,6 +4,12 @@
 //!   --check         print the latest available version, exit
 //!   --yes           skip the download confirmation
 //!   --no-restart    place the binary but skip restarting services
+//!   --db <value>    the estate to upgrade: a registered name, or <dir>/<name>
+//!                   for a transient estate (estate migration steps only)
+//!
+//! The catalog names the estate every migration step opens. Each step
+//! quiesces the resident daemon only when the estate's own PID marker names a
+//! live resident serving THIS estate (`resident_serves`).
 //!
 //! Online path: GitHub latest tag → semver compare → download + SHA-256
 //! verify → atomic place. Network failure reports clearly; there is no
@@ -15,6 +21,9 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use genius_locus_kit::{EstateCatalog, EstateManifestEncryption, EstateRecord, EstateRecordKind};
+use genius_locus_kit_migrations as manifest_refresh;
+
 use crate::core::clients::join_rel;
 use crate::core::depth::{self, InstallDepth, ProcessClaudeCliRunner};
 use crate::core::{permissions, release};
@@ -23,6 +32,7 @@ use crate::CURRENT_VERSION;
 
 pub fn run(
     from: Option<String>,
+    db: Option<String>,
     check: bool,
     yes: bool,
     no_restart: bool,
@@ -31,20 +41,38 @@ pub fn run(
 ) -> ExitCode {
     let home = super::install::home_dir();
 
+    // The catalog names the estate every migration step opens. `--db` selects
+    // a registered estate or attaches a transient one; absent, the active
+    // estate. Install-wide work (binary, plugin, encryption offer) belongs to
+    // the machine's own estates only, so a transient estate runs the estate
+    // migration steps and nothing else.
+    let catalog = match db.as_deref() {
+        Some(value) => EstateCatalog::open_selecting(value),
+        None => EstateCatalog::open(),
+    };
+    let record = match catalog {
+        Ok(catalog) => catalog.active().clone(),
+        Err(e) => {
+            println!("mootx01 upgrade: {e}");
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+    let estate_only = backfill_only || record.kind == EstateRecordKind::Transient;
+
     // --converge-only: we ARE the freshly installed binary, re-executed by the
     // upgrade that placed us. Run the convergence steps and nothing else.
     if converge_only {
-        run_convergence();
+        run_convergence(&record);
         return ExitCode::from(exit::OK);
     }
 
-    // --backfill-only: headless data-dir convergence for scripted and benchmark
-    // estates. Runs the eight data-directory migration steps (schema 10 → 19,
-    // kg_facts identity, shared-content reclaim, whole-record vacuum, ssc
-    // facts, dense pooling convergence, span encode, vector reclaim) against
-    // the estate resolved via MOOTX01_DATA_DIR, then exits. No network, no
-    // prompts; each step quiesces the daemon only when the estate is the
-    // resident one. Ordering matches run_convergence: schema gate →
+    // --backfill-only, or a transient estate: estate-only convergence for
+    // scripted and benchmark estates. Runs the estate migration steps (schema
+    // 10 → 19, manifest refresh, kg_facts identity, shared-content reclaim,
+    // whole-record vacuum, ssc facts, dense pooling convergence, span encode,
+    // vector reclaim) against the selected estate, then exits. No network, no
+    // prompts; each step quiesces the daemon only when a live resident serves
+    // this estate. Ordering matches run_convergence: schema gate →
     // correctness migration → VACUUM-backed reclaim → whole-record vacuum
     // (the first estate open, so the 1.6 → 1.7 capsule runs and reports
     // here) → ssc facts → dense pooling convergence → span encode → vector
@@ -52,17 +80,26 @@ pub fn run(
     // step would open the schema and stamp it); otherwise all steps run even
     // when earlier steps fail (independent + retryable) and the exit is
     // non-zero when any step reported failure.
-    if backfill_only {
-        if !run_schema_upgrade() {
+    if estate_only {
+        if record.kind == EstateRecordKind::Transient && !backfill_only {
+            println!(
+                "Transient estate '{}' at {}: running the estate migration steps only.",
+                record.name,
+                record.directory.display()
+            );
+        }
+        if !run_schema_upgrade(&record) {
             return ExitCode::from(exit::FAILURE);
         }
-        let ok_kg    = run_kg_fact_identity_backfill();
-        let ok_recl  = run_shared_content_reclaim_if_pending();
-        let ok_vacuum = run_whole_record_vacuum();
-        let ok_facts = run_ssc_facts_backfill();
-        let ok_dense = run_dense_pooling_convergence();
-        let ok_span  = run_span_encode_backfill();
-        let ok_vec   = run_vector_reclaim();
+        retire_legacy_encryption_opt_out(&record);
+        refresh_manifest(&record);
+        let ok_kg    = run_kg_fact_identity_backfill(&record);
+        let ok_recl  = run_shared_content_reclaim_if_pending(&record);
+        let ok_vacuum = run_whole_record_vacuum(&record);
+        let ok_facts = run_ssc_facts_backfill(&record);
+        let ok_dense = run_dense_pooling_convergence(&record);
+        let ok_span  = run_span_encode_backfill(&record);
+        let ok_vec   = run_vector_reclaim(&record);
         if ok_kg && ok_recl && ok_vacuum && ok_facts && ok_dense && ok_span && ok_vec {
             return ExitCode::from(exit::OK);
         } else {
@@ -79,8 +116,8 @@ pub fn run(
         }
         let code = place_and_report(&src, &home, no_restart);
         if code == ExitCode::from(exit::OK) {
-            converge_after_install(&home, no_restart);
-            offer_estate_encryption_if_needed();
+            converge_after_install(&record, db.as_deref(), &home, no_restart);
+            offer_estate_encryption_if_needed(&record);
         }
         return code;
     }
@@ -109,15 +146,18 @@ pub fn run(
             // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle,
             // and it converges whether or not a new version is available — so
             // the up-to-date early return still runs all migration steps and offers.
-            if run_schema_upgrade() {
-                run_kg_fact_identity_backfill();
-                run_shared_content_reclaim_if_pending();
-                run_ssc_facts_backfill();
-                run_dense_pooling_convergence();
-                run_span_encode_backfill();
-                run_vector_reclaim();
+            if run_schema_upgrade(&record) {
+                retire_legacy_encryption_opt_out(&record);
+                refresh_manifest(&record);
+                run_kg_fact_identity_backfill(&record);
+                run_shared_content_reclaim_if_pending(&record);
+                run_whole_record_vacuum(&record);
+                run_ssc_facts_backfill(&record);
+                run_dense_pooling_convergence(&record);
+                run_span_encode_backfill(&record);
+                run_vector_reclaim(&record);
             }
-            offer_estate_encryption_if_needed();
+            offer_estate_encryption_if_needed(&record);
             return ExitCode::from(exit::OK);
         }
         None => {
@@ -155,8 +195,8 @@ pub fn run(
         // converged install and an accept owns its own stop/start sequence.
         // The backfill runs first: unattended correctness migration before
         // the TTY-gated opt-in offer.
-        converge_after_install(&home, no_restart);
-        offer_estate_encryption_if_needed();
+        converge_after_install(&record, db.as_deref(), &home, no_restart);
+        offer_estate_encryption_if_needed(&record);
     }
     code
 }
@@ -176,17 +216,17 @@ pub fn run(
 /// NOTE ON REACH: this only helps when the ALREADY-INSTALLED binary carries it.
 /// Upgrading FROM a version without this logic still converges with that old
 /// version's code — the installer cannot be fixed from the release it installs.
-fn converge_after_install(home: &std::path::Path, no_restart: bool) {
+fn converge_after_install(record: &EstateRecord, db: Option<&str>, home: &std::path::Path, no_restart: bool) {
     // Same destination `release::place_binary` writes to.
     #[cfg(not(target_os = "windows"))]
     let installed = home.join(".mootx01/bin/mootx01");
     #[cfg(target_os = "windows")]
     let installed = home.join(".mootx01/bin/mootx01.exe");
-    if reexec_convergence(&installed, no_restart) {
+    if reexec_convergence(&installed, db, no_restart) {
         return;
     }
     println!("Note: converging with the previous binary — the installed one could not run.");
-    run_convergence();
+    run_convergence(record);
 }
 
 /// Re-execute `binary` with `--converge-only`. Returns false when it could not
@@ -197,12 +237,16 @@ fn converge_after_install(home: &std::path::Path, no_restart: bool) {
 /// whenever it is not a TTY, which would otherwise place this process's lines
 /// after the child's. `--yes` is passed so the pass never waits on a prompt and
 /// `--no-restart` is forwarded so the flag keeps its meaning across the boundary.
-fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
+fn reexec_convergence(binary: &std::path::Path, db: Option<&str>, no_restart: bool) -> bool {
     use std::io::Write;
     if !binary.exists() {
         return false;
     }
     let mut args: Vec<&str> = vec!["upgrade", "--converge-only", "--yes"];
+    // The re-executed binary converges the same estate this one resolved.
+    if let Some(value) = db {
+        args.extend(["--db", value]);
+    }
     if no_restart {
         args.push("--no-restart");
     }
@@ -223,20 +267,22 @@ fn reexec_convergence(binary: &std::path::Path, no_restart: bool) -> bool {
 /// The convergence sequence itself, in order. The migration steps and the reclaim
 /// both need a quiesced estate; the reclaim additionally repairs foreign SQLite
 /// geometry before its VACUUM.
-fn run_convergence() {
+fn run_convergence(record: &EstateRecord) {
     // Return values are intentionally ignored in the full convergence path —
     // each step is independent and retryable; the next `mootx01 upgrade` catches failures.
     // A refused schema version skips every data step: each of them would
     // open the LocusKit schema and stamp the estate current.
-    if run_schema_upgrade() {
-        let _ = run_kg_fact_identity_backfill();
-        let _ = run_shared_content_reclaim_if_pending();
-        let _ = run_whole_record_vacuum();
-        let _ = run_dense_pooling_convergence();
-        let _ = run_span_encode_backfill();
-        let _ = run_vector_reclaim();
+    if run_schema_upgrade(record) {
+        retire_legacy_encryption_opt_out(record);
+        refresh_manifest(record);
+        let _ = run_kg_fact_identity_backfill(record);
+        let _ = run_shared_content_reclaim_if_pending(record);
+        let _ = run_whole_record_vacuum(record);
+        let _ = run_dense_pooling_convergence(record);
+        let _ = run_span_encode_backfill(record);
+        let _ = run_vector_reclaim(record);
     }
-    run_corpus_counts_migration();
+    run_corpus_counts_migration(record);
     remove_redundant_codex_direct_entry();
 }
 
@@ -254,22 +300,19 @@ fn run_convergence() {
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Returns `true` when the estate is at 19 afterwards (or absent).
-fn run_schema_upgrade() -> bool {
+fn run_schema_upgrade(record: &EstateRecord) -> bool {
     use locus_kit::schema::{self, SchemaUpgradePath};
     use persistence_kit::sqlite::SqliteStorage;
     use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
     use uuid::Uuid;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     // Absent estate means first run — serve creates new estates at 19.
     if !estate.exists() {
         return true;
     }
     let Some(ok) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "schema upgrade",
         &PlatformDaemon,
         || {
@@ -356,14 +399,12 @@ fn run_schema_upgrade() -> bool {
 /// and plaintext estates both open correctly.
 /// Returns `true` when the step completes (or determines there is nothing to do),
 /// `false` when it fails. The caller decides whether to continue or aggregate the failure.
-fn run_kg_fact_identity_backfill() -> bool {
+fn run_kg_fact_identity_backfill(record: &EstateRecord) -> bool {
     use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
     use persistence_kit::sqlite::SqliteStorage;
     use uuid::Uuid;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     // Absent estate means first run — serve creates new estates post-KH;
     // there is nothing to backfill.
     if !estate.exists() {
@@ -375,8 +416,7 @@ fn run_kg_fact_identity_backfill() -> bool {
     // not). `None` means the daemon would not stop; the step is skipped
     // and the next `mootx01 upgrade` retries.
     let Some(result) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "kg_facts identity backfill",
         &PlatformDaemon,
         || {
@@ -472,12 +512,10 @@ fn run_kg_fact_identity_backfill() -> bool {
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Returns `true` on success or when there is nothing to converge, `false` on failure.
-fn run_dense_pooling_convergence() -> bool {
+fn run_dense_pooling_convergence(record: &EstateRecord) -> bool {
     use corpus_kit_providers::BASIS_FORMAT_VERSION;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     if !estate.exists() {
         return true;
     }
@@ -500,8 +538,7 @@ fn run_dense_pooling_convergence() -> bool {
     // not). `None` means the daemon would not stop; the step is skipped and
     // the next `mootx01 upgrade` retries.
     let Some(ok) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "dense pooling convergence",
         &PlatformDaemon,
         || {
@@ -612,20 +649,17 @@ fn stale_format_basis_providers(estate: &std::path::Path) -> Result<Vec<String>,
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Upgrade never creates content: spans are derived rows, not drawers.
 /// Returns `true` on success or when there is nothing to encode.
-fn run_span_encode_backfill() -> bool {
+fn run_span_encode_backfill(record: &EstateRecord) -> bool {
     use super::span_encode_backfill::{self, SpanEncodeReport};
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     if !estate.exists() {
         return true;
     }
     let Some(ok) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "span encode",
         &PlatformDaemon,
         || {
@@ -659,7 +693,7 @@ fn run_span_encode_backfill() -> bool {
                     println!("  ✓ encoder: span encoder is now the default recall stage (embedding_provider = encoder)");
                 }
                 let storage = store.storage().ok_or("drawer store exposes no storage")?;
-                span_encode_backfill::run(storage, &store, &data, now)
+                span_encode_backfill::run(storage, &store, &EstateCatalog::configuration_directory(), now)
             })();
             match result {
                 Ok(SpanEncodeReport::NoActiveModel) => {
@@ -710,19 +744,16 @@ fn run_span_encode_backfill() -> bool {
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Returns `true` on success or when there is nothing to vacuum.
-fn run_whole_record_vacuum() -> bool {
+fn run_whole_record_vacuum(record: &EstateRecord) -> bool {
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     if !estate.exists() {
         return true;
     }
     let Some(ok) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "whole-record vacuum",
         &PlatformDaemon,
         || {
@@ -823,20 +854,17 @@ const RETIRED_DENSE_FAMILY_MODEL_IDS: [&str; 4] = ["lsa-v1", "nmf-v1", "ppmi-v1"
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Returns `true` on success or when there is nothing to reclaim.
-fn run_vector_reclaim() -> bool {
+fn run_vector_reclaim(record: &EstateRecord) -> bool {
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
     use synapsekit::VectorStore;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     if !estate.exists() {
         return true;
     }
     let Some(ok) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "vector reclaim",
         &PlatformDaemon,
         || {
@@ -900,16 +928,13 @@ fn run_vector_reclaim() -> bool {
 /// `UpgradeCommand.runSSCFactsBackfill`.
 ///
 /// Returns `true` on success or when there is nothing to write.
-fn run_ssc_facts_backfill() -> bool {
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+fn run_ssc_facts_backfill(record: &EstateRecord) -> bool {
+    let estate = record.database_path();
     if !estate.exists() {
         return true;
     }
     let Some(ok) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "ssc facts backfill",
         &PlatformDaemon,
         || {
@@ -950,7 +975,7 @@ fn run_ssc_facts_backfill() -> bool {
 }
 
 /// Returns `true` on success or when there is nothing to reclaim, `false` on failure.
-fn run_shared_content_reclaim_if_pending() -> bool {
+fn run_shared_content_reclaim_if_pending(record: &EstateRecord) -> bool {
     use genius_locus_kit::EstateCoordinator;
     use genius_locus_kit_migrations::{SharedContentMigrationExt, SharedContentMigrationStore};
     use locus_kit::drawer_store::DrawerStore;
@@ -959,9 +984,7 @@ fn run_shared_content_reclaim_if_pending() -> bool {
     use persistence_kit::Storage;
     use std::sync::Arc;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     // Absent estate means first run — serve creates new estates post-cutover;
     // there is nothing to reclaim.
     if !estate.exists() {
@@ -973,8 +996,7 @@ fn run_shared_content_reclaim_if_pending() -> bool {
     // not). `None` means the daemon would not stop; the step is skipped
     // and the next `mootx01 upgrade` retries.
     let Some(result) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "shared-content reclaim",
         &PlatformDaemon,
         || {
@@ -1225,13 +1247,11 @@ pub(crate) fn corpus_counts_migration_core(
     Ok((vocab_deleted, counts_updated))
 }
 
-fn run_corpus_counts_migration() {
+fn run_corpus_counts_migration(record: &EstateRecord) {
     use persistence_kit::storage::{BackendConfiguration, EstateConfiguration};
     use uuid::Uuid;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
     // Absent estate means first run — nothing to migrate.
     if !estate.exists() {
         return;
@@ -1242,8 +1262,7 @@ fn run_corpus_counts_migration() {
     // not). `None` means the daemon would not stop; the step is skipped
     // and the next `mootx01 upgrade` retries.
     let Some(result) = with_resident_daemon_quiesced(
-        &data,
-        &crate::core::paths::resident_data_dir(),
+        &record.pid_path(),
         "corpus-counts migration",
         &PlatformDaemon,
         || {
@@ -1412,6 +1431,54 @@ fn codex_plugin_is_installed(home: &std::path::Path) -> bool {
     false
 }
 
+/// Fold a pre-manifest `no-encrypt` marker into the estate manifest and
+/// delete it. The manifest's `encryption` field is the only record of the
+/// posture from here on; a leftover marker would be a second, unread one.
+fn retire_legacy_encryption_opt_out(record: &EstateRecord) {
+    let marker = record.legacy_encryption_opt_out_path();
+    if !marker.exists() {
+        return;
+    }
+    let result = manifest_refresh::refresh(
+        record,
+        genius_locus_kit::estate_format::EstateFormatVersion::CURRENT,
+        EstateManifestEncryption::Plaintext,
+        wall_now_millis(),
+    )
+    .map_err(|e| e.to_string())
+    .and_then(|_| std::fs::remove_file(&marker).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) => println!(
+            "  ✓ recorded the --no-encrypt choice in {} and removed the legacy marker",
+            genius_locus_kit::EstateCatalogNames::MANIFEST
+        ),
+        Err(e) => println!("  ✗ legacy no-encrypt marker left in place: {e}"),
+    }
+}
+
+/// After the schema and format steps, make the manifest say what is on disk.
+fn refresh_manifest(record: &EstateRecord) {
+    use aria_mcp::estate_migration as migration;
+    let posture = if migration::detect_estate_file_state(&record.database_path())
+        == migration::EstateFileState::Ciphertext
+    {
+        EstateManifestEncryption::Encrypted
+    } else {
+        EstateManifestEncryption::Plaintext
+    };
+    let format = genius_locus_kit::estate_format::EstateFormatVersion::CURRENT;
+    match manifest_refresh::refresh(record, format, posture, wall_now_millis()) {
+        Ok(true) => println!(
+            "  ✓ estate manifest refreshed (format {}.{}, schema {})",
+            format.major,
+            format.minor,
+            manifest_refresh::composite_schema_version()
+        ),
+        Ok(false) => {}
+        Err(e) => println!("  ✗ estate manifest not refreshed: {e}"),
+    }
+}
+
 /// CE-1.0.35-08 (Rust leg): offer to encrypt an unencrypted active estate.
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling): no
@@ -1421,15 +1488,21 @@ fn codex_plugin_is_installed(home: &std::path::Path) -> bool {
 /// file migrated in from a macOS install (it fails `PRAGMA key` looking
 /// like corruption). Both end here. TTY-gated: a non-interactive invocation
 /// never prompts and never migrates. Declining is a clean no-op.
-fn offer_estate_encryption_if_needed() {
+fn offer_estate_encryption_if_needed(record: &EstateRecord) {
     use std::io::IsTerminal;
 
     use aria_mcp::estate_migration as migration;
 
-    let data = crate::core::paths::data_dir();
-    let name = crate::core::paths::active_estate(&data);
-    let estate = crate::core::paths::estate_sqlite_path(&data, &name);
+    let estate = record.database_path();
 
+    // Only a registered estate, owned by this machine, may be encrypted.
+    if record.kind != EstateRecordKind::Registered {
+        println!(
+            "  estate '{}' is transient; only a registered estate can be encrypted",
+            record.name
+        );
+        return;
+    }
     // Only a readable plaintext estate qualifies. Absent means first run
     // (serve creates new estates keyed); ciphertext means done.
     if migration::detect_estate_file_state(&estate) != migration::EstateFileState::Plaintext {
@@ -1465,7 +1538,7 @@ fn offer_estate_encryption_if_needed() {
     // against a plaintext file and fails, so the estate is unopenable until
     // a retry succeeds (Codex 5ca9538f). A PREEXISTING key is never
     // touched: deleting it would orphan every encrypted estate it opens.
-    let estates_dir = estate.parent().unwrap_or(&data).to_path_buf();
+    let estates_dir = record.directory.clone();
     let key_path = estates_dir.join(aria_mcp::INSTALL_KEY_FILE);
     let key_preexisted = key_path.exists();
     let rollback_minted_key = || {
@@ -1485,21 +1558,14 @@ fn offer_estate_encryption_if_needed() {
         }
     };
 
-    // The daemon seam: the platform control when this is the resident
-    // estate, a no-op otherwise — a cloned estate is encrypted with the
-    // resident daemon left running over its own estate. The resident
-    // directory comes from the daemon's service registration; an
-    // unreadable registration selects the platform control (SAFETY: the
-    // clone+swap never runs under a daemon that may hold this estate open).
-    let resident_dir = crate::core::paths::resident_data_dir();
-    let resident = crate::core::paths::is_resident_estate(&data, &resident_dir);
+    // The daemon seam: the platform control when a live resident serves THIS
+    // estate (its PID marker names a live process), a no-op otherwise — a
+    // cloned estate is encrypted with the resident daemon left running over
+    // its own estate. SAFETY: the clone+swap never runs under a daemon that
+    // holds this estate open.
+    let resident = resident_serves(&record.pid_path());
     if !resident {
-        println!(
-            "  data directory {} is not the resident estate; daemon left running",
-            data.display()
-        );
-    } else if let Some(warning) = resident_dir.registration_warning(&data) {
-        println!("{warning}");
+        println!("  no live resident serves this estate; daemon left running");
     }
     let daemon: &dyn DaemonControl = if resident { &PlatformDaemon } else { &NoDaemon };
 
@@ -1659,8 +1725,8 @@ impl DaemonControl for PlatformDaemon {
 }
 
 /// A control with no daemon behind it: never running, stop and start
-/// succeed. Selected for a non-resident estate, mirroring the Swift
-/// `DaemonControl.none`.
+/// succeed. Selected when no live resident serves the estate, mirroring the
+/// Swift `DaemonControl.none`.
 struct NoDaemon;
 
 impl DaemonControl for NoDaemon {
@@ -1675,43 +1741,40 @@ impl DaemonControl for NoDaemon {
     }
 }
 
-/// Run `work` with the resident daemon quiesced when `data` is the resident
-/// estate; otherwise run it with the daemon untouched.
-///
-/// Resident estate (`paths::is_resident_estate`): capture whether the daemon
-/// is running, stop it — single-writer discipline, because the step opens
-/// the estate SQLite the daemon has open — run `work`, then start the daemon
-/// again if it was running. The restart happens on every outcome of `work`,
-/// so a failed step never leaves the daemon down.
-///
-/// Not the resident estate: print one line naming the directory so an
-/// operator sees why nothing restarted, then run `work`. The daemon serves a
-/// different estate and has no stake in this one.
-///
-/// Unreadable registration (`ResidentDataDir::UnreadableRegistration`):
-/// print the registration warning, then proceed exactly as for the resident
-/// estate. SAFETY: an estate the daemon may hold open is never migrated
-/// under a running daemon.
+/// Quiesce the resident daemon around `work` when the estate's own PID
+/// marker names a live mootx01 process: that is the one fact that says a
+/// resident serves THIS estate. No marker, or a dead one, and the daemon is
+/// left running because it is serving some other estate or nothing.
 ///
 /// Returns `work`'s result, or `None` when the daemon was running and would
 /// not stop — the step is skipped, nothing is half-done, and the next
 /// `mootx01 upgrade` retries. Twin of the Swift `ResidentDaemonQuiesce.run`.
 pub(crate) fn with_resident_daemon_quiesced<T>(
-    data: &std::path::Path,
-    resident: &crate::core::paths::ResidentDataDir,
+    estate_pid_file: &std::path::Path,
     step: &str,
     daemon: &dyn DaemonControl,
     work: impl FnOnce() -> T,
 ) -> Option<T> {
-    if !crate::core::paths::is_resident_estate(data, resident) {
-        println!(
-            "  data directory {} is not the resident estate; daemon left running",
-            data.display()
-        );
+    with_resident_serving(resident_serves(estate_pid_file), step, daemon, work)
+}
+
+/// The decision already made: `resident_serves` says whether a live resident
+/// serves the estate the step will open. Tests inject it directly.
+///
+/// Resident serving: capture whether the daemon is running, stop it —
+/// single-writer discipline, because the step opens the estate SQLite the
+/// daemon has open — run `work`, then start the daemon again if it was
+/// running. The restart happens on every outcome of `work`, so a failed step
+/// never leaves the daemon down.
+pub(crate) fn with_resident_serving<T>(
+    resident_serves: bool,
+    step: &str,
+    daemon: &dyn DaemonControl,
+    work: impl FnOnce() -> T,
+) -> Option<T> {
+    if !resident_serves {
+        println!("  no live resident serves this estate; daemon left running");
         return Some(work());
-    }
-    if let Some(warning) = resident.registration_warning(data) {
-        println!("{warning}");
     }
     let was_running = daemon.is_running();
     if was_running && !daemon.stop() {
@@ -1725,6 +1788,15 @@ pub(crate) fn with_resident_daemon_quiesced<T>(
         let _ = daemon.start();
     }
     Some(out)
+}
+
+/// True when `estate_pid_file` records a mootx01 process other than this one
+/// and a daemon answers on the recorded port. Twin of the check `serve` makes
+/// before forwarding (T4): the marker says which estate, the loopback probe
+/// says it is alive — portable where kill(pid, 0) is not.
+pub(crate) fn resident_serves(estate_pid_file: &std::path::Path) -> bool {
+    super::serve::resident_pid_recorded(estate_pid_file)
+        && crate::core::daemon_client::alive(crate::core::daemon_client::resolved_port())
 }
 
 fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: bool) -> ExitCode {
@@ -2539,174 +2611,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    use crate::core::paths::ResidentDataDir;
-
-    /// A resident directory (as a registration with no override names it)
-    /// and a scratch clone beside it.
-    fn resident_and_scratch() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    /// A scratch estate directory with a PID marker path inside it.
+    fn scratch_estate() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let resident = tmp.path().join("resident");
-        // A benchmark clone beside the resident directory: same parent,
-        // same prefix, a different estate.
-        let scratch = tmp.path().join("resident-bench");
-        std::fs::create_dir_all(&resident).expect("resident dir");
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
-        (tmp, resident, scratch)
-    }
-
-    fn registered(dir: &std::path::Path) -> ResidentDataDir {
-        ResidentDataDir::Directory(dir.to_path_buf())
+        let pid_file = tmp.path().join("estate.pid");
+        (tmp, pid_file)
     }
 
     #[test]
-    fn scratch_estate_runs_the_work_and_never_touches_the_daemon() {
-        let (_tmp, resident, scratch) = resident_and_scratch();
+    fn unserved_estate_runs_the_work_and_never_touches_the_daemon() {
         let daemon = RecordingDaemon::new(true, true);
         let ran = std::cell::Cell::new(false);
-        let out = super::with_resident_daemon_quiesced(
-            &scratch,
-            &registered(&resident),
-            "kg_facts identity backfill",
-            &daemon,
-            || {
-                ran.set(true);
-                7
-            },
-        );
+        let out = super::with_resident_serving(false, "kg_facts identity backfill", &daemon, || {
+            ran.set(true);
+            7
+        });
         assert_eq!(out, Some(7));
         assert!(ran.get());
-        assert!(daemon.calls().is_empty(), "a scratch estate must not touch the daemon");
+        assert!(daemon.calls().is_empty(), "an estate nobody serves must not touch the daemon");
     }
 
     #[test]
-    fn resident_estate_stops_then_restarts_a_running_daemon() {
-        let (_tmp, resident, _scratch) = resident_and_scratch();
+    fn served_estate_stops_then_restarts_a_running_daemon() {
         let daemon = RecordingDaemon::new(true, true);
-        let out = super::with_resident_daemon_quiesced(
-            &resident,
-            &registered(&resident),
-            "schema upgrade",
-            &daemon,
-            || true,
-        );
+        let out = super::with_resident_serving(true, "schema upgrade", &daemon, || true);
         assert_eq!(out, Some(true));
         assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
     }
 
     #[test]
     fn failed_work_still_restarts_the_daemon() {
-        let (_tmp, resident, _scratch) = resident_and_scratch();
         let daemon = RecordingDaemon::new(true, true);
-        let out = super::with_resident_daemon_quiesced(
-            &resident,
-            &registered(&resident),
-            "shared-content reclaim",
-            &daemon,
-            || false,
-        );
+        let out = super::with_resident_serving(true, "shared-content reclaim", &daemon, || false);
         assert_eq!(out, Some(false));
         assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
     }
 
     #[test]
-    fn resident_estate_with_daemon_down_never_starts_one() {
-        let (_tmp, resident, _scratch) = resident_and_scratch();
+    fn served_estate_with_daemon_down_never_starts_one() {
         let daemon = RecordingDaemon::new(false, true);
-        let out = super::with_resident_daemon_quiesced(
-            &resident,
-            &registered(&resident),
-            "span encode",
-            &daemon,
-            || true,
-        );
+        let out = super::with_resident_serving(true, "span encode", &daemon, || true);
         assert_eq!(out, Some(true));
         assert_eq!(daemon.calls(), vec!["is_running"]);
     }
 
     #[test]
     fn daemon_that_will_not_stop_skips_the_work() {
-        let (_tmp, resident, _scratch) = resident_and_scratch();
         let daemon = RecordingDaemon::new(true, false);
         let ran = std::cell::Cell::new(false);
-        let out = super::with_resident_daemon_quiesced(
-            &resident,
-            &registered(&resident),
-            "kg_facts identity backfill",
-            &daemon,
-            || {
-                ran.set(true);
-                true
-            },
-        );
+        let out = super::with_resident_serving(true, "kg_facts identity backfill", &daemon, || {
+            ran.set(true);
+            true
+        });
         assert_eq!(out, None);
         assert!(!ran.get(), "the work must not run when the daemon will not stop");
         assert_eq!(daemon.calls(), vec!["is_running", "stop"]);
     }
 
-    #[cfg(unix)]
+    /// No PID marker, or a marker naming THIS process, means no resident
+    /// serves the estate: the step runs with the daemon untouched. The live
+    /// case needs a daemon answering on loopback and is covered by the serve
+    /// T4 forwarding tests.
     #[test]
-    fn symlink_to_the_resident_estate_is_quiesced() {
-        let (tmp, resident, _scratch) = resident_and_scratch();
-        let link = tmp.path().join("estate-link");
-        std::os::unix::fs::symlink(&resident, &link).expect("symlink");
+    fn estate_without_a_live_pid_marker_is_not_served() {
+        let (_tmp, pid_file) = scratch_estate();
+        assert!(!super::resident_serves(&pid_file), "no marker");
+        std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        assert!(!super::resident_serves(&pid_file), "our own pid is not a resident");
+
         let daemon = RecordingDaemon::new(true, true);
-        let out = super::with_resident_daemon_quiesced(
-            &link,
-            &registered(&resident),
-            "corpus-counts migration",
-            &daemon,
-            || (),
-        );
-        assert_eq!(out, Some(()));
-        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
-    }
-
-    #[test]
-    fn registered_override_directory_is_quiesced_not_the_platform_default() {
-        // `mootx01 install` run with MOOTX01_DATA_DIR=<scratch> registers the
-        // daemon over scratch. An upgrade step on scratch quiesces; a step on
-        // the platform default (an estate the daemon never opened) does not.
-        let (_tmp, resident, scratch) = resident_and_scratch();
-        let registration = registered(&scratch);
-        let on_scratch = RecordingDaemon::new(true, true);
-        let out = super::with_resident_daemon_quiesced(
-            &scratch,
-            &registration,
-            "schema upgrade",
-            &on_scratch,
-            || true,
-        );
-        assert_eq!(out, Some(true));
-        assert_eq!(on_scratch.calls(), vec!["is_running", "stop", "start"]);
-
-        let on_default = RecordingDaemon::new(true, true);
-        let out = super::with_resident_daemon_quiesced(
-            &resident,
-            &registration,
-            "schema upgrade",
-            &on_default,
-            || true,
-        );
-        assert_eq!(out, Some(true));
-        assert!(on_default.calls().is_empty());
-    }
-
-    #[test]
-    fn unreadable_registration_quiesces_every_estate() {
-        let (_tmp, _resident, scratch) = resident_and_scratch();
-        let unreadable = ResidentDataDir::UnreadableRegistration(std::path::PathBuf::from(
-            "/home/u/.config/systemd/user/mootx01.service",
-        ));
-        let daemon = RecordingDaemon::new(true, true);
-        let out = super::with_resident_daemon_quiesced(
-            &scratch,
-            &unreadable,
-            "kg_facts identity backfill",
-            &daemon,
-            || true,
-        );
-        assert_eq!(out, Some(true));
-        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"]);
+        let out = super::with_resident_daemon_quiesced(&pid_file, "schema upgrade", &daemon, || 1);
+        assert_eq!(out, Some(1));
+        assert!(daemon.calls().is_empty());
     }
 
     #[test]

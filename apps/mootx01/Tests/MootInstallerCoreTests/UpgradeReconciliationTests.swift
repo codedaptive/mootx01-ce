@@ -55,28 +55,6 @@ struct UpgradeReconciliationTests {
                 "no backup may be written when nothing is removed")
     }
 
-    @Test("an entry scoped via env override survives cleanup")
-    func envOverrideScopedEntrySurvives() throws {
-        let home = try makeSandboxHome()
-        defer { cleanupSandbox(home) }
-        try makeCodexPluginOwner(home: home, table: """
-            [mcp_servers.mootx01]
-            command = "/Users/dev/.mootx01/bin/mootx01"
-            args = ["serve"]
-            env = { MOOTX01_DATA_DIR = "/Users/dev/rigs/estate-b" }
-            """)
-        let before = try codexConfigText(home: home)
-
-        let outcome = Installer.cleanupRedundantCodexDirectEntry(homeDirectory: home)
-
-        guard case let .retainedForeign(reason) = outcome else {
-            Issue.record("expected .retainedForeign, got \(outcome)"); return
-        }
-        #expect(reason.contains("MOOTX01_DATA_DIR"),
-                "the report must name the override that scoped the entry; got: \(reason)")
-        #expect(try codexConfigText(home: home) == before)
-    }
-
     @Test("an entry scoped via a --db args override survives cleanup")
     func dbArgsScopedEntrySurvives() throws {
         let home = try makeSandboxHome()
@@ -121,8 +99,8 @@ struct UpgradeReconciliationTests {
         #expect(try codexConfigText(home: home) == before)
     }
 
-    @Test("an entry scoped via env child table survives cleanup")
-    func envChildTableScopedEntrySurvives() throws {
+    @Test("an env child table selects no estate; a redundant entry carrying one is still removed")
+    func envChildTableDoesNotProtectEntry() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
         try makeCodexPluginOwner(home: home, table: """
@@ -131,17 +109,15 @@ struct UpgradeReconciliationTests {
             args = ["serve"]
 
             [mcp_servers.mootx01.env]
-            ARIA_MCP_SQLITE_PATH = "/Users/dev/rigs/estate-c.sqlite"
+            MOOTX01_HTTP_PORT = "4242"
             """)
-        let before = try codexConfigText(home: home)
 
         let outcome = Installer.cleanupRedundantCodexDirectEntry(homeDirectory: home)
 
-        guard case let .retainedForeign(reason) = outcome else {
-            Issue.record("expected .retainedForeign, got \(outcome)"); return
+        if case .retainedForeign = outcome {
+            Issue.record("an env table must not protect a default-estate entry; got \(outcome)")
         }
-        #expect(reason.contains("ARIA_MCP_SQLITE_PATH"))
-        #expect(try codexConfigText(home: home) == before)
+        #expect(!(try codexConfigText(home: home)).contains("[mcp_servers.mootx01]"))
     }
 
     @Test("a non-default-port URL entry survives cleanup")

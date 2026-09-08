@@ -1,15 +1,19 @@
 //! commands/serve.rs — §4.1: host the ARIA MCP server.
 //!
-//! Thin translation of spec flags onto the aria-mcp runtime's environment
-//! contract, then a single call into `aria_mcp::runtime::run` — the same
-//! function the `aria-mcp` dev binary calls, so both entry points run
-//! identical resident-daemon logic.
+//! Resolves the estate through the estate catalog, decides its at-rest posture,
+//! then makes a single call into `aria_mcp::runtime::run` — the same function
+//! the `aria-mcp` dev binary calls, so both entry points run identical
+//! resident-daemon logic. Twin of the Swift `ServeCommand`.
 //!
-//! Flag → env translation:
-//!   --db <name>   → ARIA_MCP_SQLITE_PATH = <data>/databases/<name>/estate.sqlite
-//!                   (skipped when the caller already set ARIA_MCP_POSTGRES_URL
-//!                   or ARIA_MCP_SQLITE_PATH — explicit env wins, and setting
-//!                   both would trip from_env's ambiguity exit)
+//! Estate selection (nothing here computes a path):
+//!   --db <name>        → the registered estate of that name
+//!   --db <dir>/<name>  → a transient estate at <dir>/<name>/ (plaintext, no
+//!                        identity, no charters, forgotten at exit)
+//!   (neither)          → the catalog's active estate
+//!   --in-memory        → the in-memory backend; the estate lives and dies
+//!                        with this process (accuracy-measurement posture)
+//!
+//! Transport:
 //!   --http auto   → hunt 4242 upward to the first free port (§3)
 //!   --http <port> → exact; busy means exit 1, never hunt (§3)
 //!   (neither)     → MOOTX01_HTTP_PORT env if the caller set it, else stdio
@@ -19,21 +23,25 @@
 //!                   drainer, never forwards to a live resident, and refuses
 //!                   the combination with HTTP (the resident's autonomic
 //!                   governor is a background worker)
-//!   MOOTX01_BACKEND=inmemory → skip SQLite path resolution; the runtime's
-//!                   from_env selects InMemory (C1 RAM accuracy shape)
 //!
-//! Whatever port the daemon binds is written to `<data>/daemon.port` and
-//! best-effort removed when the runtime returns (§3).
+//! Whatever port the daemon binds is written to `<configuration>/daemon.port`
+//! and best-effort removed when the runtime returns (§3). The resident's PID
+//! marker is `estate.pid` inside the estate it serves: "this estate is being
+//! served" is a fact about the estate.
 
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::ExitCode;
 
 use aria_mcp::estate_posture::EstatePosture;
+use aria_mcp::estate_registry::SqliteOpening;
+use aria_mcp::server::RuntimeEstate;
+use genius_locus_kit::{
+    EstateBackend, EstateCatalog, EstateOpenPosture, EstateOpenPostureKind, EstateRecord, EstateRecordKind,
+};
 
 use crate::cli::HttpMode;
 use crate::core::daemon_client;
-use crate::core::encrypt_optout;
 use crate::core::mcp_ownership;
 use crate::core::paths;
 use crate::core::release;
@@ -80,16 +88,33 @@ fn lock_memory_from_swap() {
     // Windows: per-region VirtualLock only; not applied process-wide here.
 }
 
-pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> ExitCode {
+pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_memory: bool) -> ExitCode {
     // Keep the daemon's memory (incl. decrypted estate content held in RAM) out
     // of the swap file. Best-effort; the estate is encrypted at rest regardless.
     lock_memory_from_swap();
-    let data = paths::data_dir();
+    // Install-wide files (the resident port file, bundled models) live in the
+    // configuration directory; estate files live with the estate.
+    let data = EstateCatalog::configuration_directory();
+
+    // The catalog is the one place that knows which estates exist and where.
+    // `--db` selects a registered estate by name or attaches a transient one by
+    // path; absent, the active estate serves.
+    let catalog = match db.as_deref() {
+        Some(value) => EstateCatalog::open_selecting(value),
+        None => EstateCatalog::open(),
+    };
+    let record: EstateRecord = match catalog {
+        Ok(catalog) => catalog.active().clone(),
+        Err(e) => {
+            eprintln!("mootx01 serve fatal: {e}");
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+    let registered = record.kind == EstateRecordKind::Registered;
 
     // Frozen posture: `--frozen` wins, else MOOTX01_FROZEN=1. The flag is
     // translated into the environment variable so the runtime's Dispatcher,
-    // constructed inside `aria_mcp::runtime::run`, derives the same posture
-    // — the flag → env contract this module already follows for --db/--http.
+    // constructed inside `aria_mcp::runtime::run`, derives the same posture.
     let posture = EstatePosture::resolve(
         frozen_flag,
         std::env::var(EstatePosture::ENVIRONMENT_KEY).ok().as_deref(),
@@ -99,73 +124,61 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> Exi
         std::env::set_var(EstatePosture::ENVIRONMENT_KEY, "1");
     }
 
-    // Estate selection. Explicit backend env vars win over --db; otherwise
-    // resolve the named (or active) estate to a SQLite path.
-    let postgres_set = env_nonempty("ARIA_MCP_POSTGRES_URL");
-    let sqlite_set = env_nonempty("ARIA_MCP_SQLITE_PATH");
-    // C1 (benchmark reset, RAM accuracy shape): MOOTX01_BACKEND=inmemory
-    // skips the SQLite path resolution entirely AND clears any inherited
-    // backend-path env vars, so the aria-mcp runtime's from_env selects its
-    // InMemory backend (its documented default when neither path env is
-    // set). Without the clears, a stray ARIA_MCP_POSTGRES_URL /
-    // ARIA_MCP_SQLITE_PATH in the caller's shell would silently defeat the
-    // RAM shape contract. Same env contract as the Swift ServeCommand's
-    // in-memory branch; intended for the benchmark harness, never for a
-    // durable estate.
-    let in_memory = std::env::var("MOOTX01_BACKEND")
-        .map(|v| v.to_lowercase() == "inmemory")
-        .unwrap_or(false);
-    if in_memory {
-        std::env::remove_var("ARIA_MCP_POSTGRES_URL");
-        std::env::remove_var("ARIA_MCP_SQLITE_PATH");
+    // The estate the runtime opens. The record's kind decides identity,
+    // federation, charter seeding and the at-rest posture; a transient estate
+    // is plaintext with its identity in memory and holds exactly what was
+    // imported into it. The posture is decided BEFORE the open and fails
+    // closed: a ciphertext file whose key is missing is never reopened
+    // plaintext and never given a fresh key (`mootx01 upgrade` migrates).
+    let runtime_estate = if in_memory {
+        // C1 (benchmark reset, RAM accuracy shape): the estate exists only for
+        // this process. Intended for the benchmark harness; a durable estate
+        // never selects it, and no environment value turns it on.
         eprintln!(
-            "mootx01 serve: IN-MEMORY backend (MOOTX01_BACKEND=inmemory) — \
+            "mootx01 serve: IN-MEMORY backend (--in-memory) — \
              estate exists only for this process; accuracy-measurement posture."
         );
-    }
-    if !postgres_set && !sqlite_set && !in_memory {
-        let name = db.unwrap_or_else(|| paths::active_estate(&data));
-        let estate = paths::estate_sqlite_path(&data, &name);
-        if let Some(dir) = estate.parent() {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                eprintln!("mootx01: cannot create estate directory {}: {e}", dir.display());
-                return ExitCode::from(exit::FAILURE);
+        RuntimeEstate::InMemory
+    } else {
+        match &record.backend {
+            EstateBackend::Postgresql { connection_string } => {
+                eprintln!("mootx01 serve: estate '{}' on PostgreSQL", record.name);
+                RuntimeEstate::Postgresql { connection_string: connection_string.clone() }
             }
-            // Settle key custody by open posture (Rust twin of Swift
-            // EstateKeyProvider.resolveOpenPosture) instead of unconditionally
-            // minting: absent estate → mint db.key (encrypted default) UNLESS
-            // a no-encrypt marker opted out; existing plaintext → untouched;
-            // existing ciphertext → the EXISTING key only, fail closed when it
-            // is missing. Any process opening a file in this directory
-            // resolves the same db.key, so the daemon and moot-mgr share it.
-            //
-            // The marker is honored beside the estate AND at the data-dir
-            // root: a root marker covers every estate this serve creates
-            // under that data dir (the estate lives at
-            // <data>/databases/<name>/estate.sqlite, so a harness that
-            // provisions a scratch data dir drops one marker at the root).
-            match encrypt_optout::prepare_estate_key(&estate, &data) {
-                Ok(encrypt_optout::OpenPosture::NewPlaintextByOptOut) => {
+            EstateBackend::Sqlite => {
+                let open_posture = match EstateOpenPosture::resolve(&record) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("mootx01 serve fatal: estate encryption posture unavailable: {e}");
+                        return ExitCode::from(exit::FAILURE);
+                    }
+                };
+                if !registered {
+                    eprintln!("mootx01 serve: transient estate — identity in memory, no federation, no charters");
+                } else if open_posture.kind == EstateOpenPostureKind::NewPlaintextDeclared {
+                    // A declared-plaintext open is never silent: name the posture
+                    // AND its source, so a downgrade caused by an altered manifest
+                    // is visible in the serve log.
                     eprintln!(
-                        "mootx01: estate encryption DISABLED by no-encrypt marker — \
-                         the estate will be created unencrypted. \
-                         Run `mootx01 upgrade` to encrypt it."
+                        "mootx01 serve: creating estate UNENCRYPTED — its manifest {} declares plaintext. Run `mootx01 upgrade` to encrypt.",
+                        record.manifest_path().display()
                     );
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("mootx01: {e}");
-                    return ExitCode::from(exit::FAILURE);
+                eprintln!(
+                    "mootx01 serve: estate '{}' [{}] at {}",
+                    record.name,
+                    if registered { "registered" } else { "transient" },
+                    record.directory.display()
+                );
+                RuntimeEstate::Sqlite {
+                    opening: SqliteOpening::for_record(&record),
+                    encryption: open_posture.manifest_encryption(),
+                    record: record.clone(),
                 }
             }
         }
-        std::env::set_var("ARIA_MCP_SQLITE_PATH", &estate);
-        eprintln!("mootx01: estate '{name}' at {}", estate.display());
-    } else if db.is_some() {
-        eprintln!(
-            "mootx01: --db ignored (ARIA_MCP_POSTGRES_URL / ARIA_MCP_SQLITE_PATH set explicitly)"
-        );
-    }
+    };
+    let on_disk = !in_memory && record.backend == EstateBackend::Sqlite;
 
     // Transport selection + port hunting (§3).
     let bound_port: Option<u16> = match http {
@@ -219,37 +232,30 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> Exi
     // T4 — forward, don't collide. If this is an stdio serve and a LIVE resident
     // already serves THIS estate, forward stdin JSON-RPC to it over loopback HTTP
     // (the same bridge `mootx01 proxy` uses) instead of opening the estate as a
-    // second direct writer. "Same estate" = the resident's recorded estate path
-    // matches ours; liveness = the recorded port answering on loopback. If the
+    // second direct writer. "Same estate" = a PID marker in THIS estate's
+    // directory; liveness = the recorded port answering on loopback. If the
     // marker is stale (no resident answering), fall through and open directly.
-    if bound_port.is_none() {
-        if let Ok(estate) = std::env::var("ARIA_MCP_SQLITE_PATH") {
-            let marker = data.join("mootx01.estate");
-            let same_estate = std::fs::read_to_string(&marker)
-                .map(|s| s.trim() == estate)
-                .unwrap_or(false);
-            if same_estate {
-                let port = daemon_client::resolved_port();
-                if daemon_client::alive(port) {
-                    // A frozen serve never forwards: the resident is a live,
-                    // mutating server and forwarding would hand the client
-                    // exactly what the flag promised it would not get.
-                    if frozen {
-                        eprintln!(
-                            "mootx01 serve fatal: a live resident already serves this estate on 127.0.0.1:{port}; a frozen serve cannot forward to a live daemon. Stop the resident or freeze a clone."
-                        );
-                        return ExitCode::FAILURE;
-                    }
-                    eprintln!(
-                        "mootx01: a live resident already serves this estate \u{2014} forwarding stdio to the daemon on 127.0.0.1:{port} instead of opening a second writer (T4)"
-                    );
-                    return crate::commands::proxy::run(Some(format!("http://127.0.0.1:{port}")));
-                }
+    let pid_file = record.pid_path();
+    if bound_port.is_none() && on_disk && resident_pid_recorded(&pid_file) {
+        let port = daemon_client::resolved_port();
+        if daemon_client::alive(port) {
+            // A frozen serve never forwards: the resident is a live,
+            // mutating server and forwarding would hand the client
+            // exactly what the flag promised it would not get.
+            if frozen {
                 eprintln!(
-                    "mootx01: estate marker present but no resident reachable on 127.0.0.1:{port} (stale marker) \u{2014} opening the estate directly"
+                    "mootx01 serve fatal: a live resident already serves this estate on 127.0.0.1:{port}; a frozen serve cannot forward to a live daemon. Stop the resident or freeze a clone."
                 );
+                return ExitCode::FAILURE;
             }
+            eprintln!(
+                "mootx01: a live resident already serves this estate \u{2014} forwarding stdio to the daemon on 127.0.0.1:{port} instead of opening a second writer (T4)"
+            );
+            return crate::commands::proxy::run(Some(format!("http://127.0.0.1:{port}")));
         }
+        eprintln!(
+            "mootx01: a resident PID is recorded for this estate but none is reachable on 127.0.0.1:{port} (stale marker) \u{2014} opening the estate directly"
+        );
     }
 
     // Frozen + HTTP is refused rather than served half-frozen: the resident
@@ -264,24 +270,21 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> Exi
         eprintln!("mootx01 serve: {}", EstatePosture::FROZEN_LOG_LINE);
     }
 
-    // §3: whatever port the daemon binds is written to daemon.port and
-    // removed on clean shutdown. The resident daemon also writes mootx01.pid
-    // (status reports it) and mootx01.estate (the served-estate marker a stdio
-    // serve reads for T4 forwarding), and enforces the single-writer rule: one
-    // resident AutonomicGovernor per estate. Liveness is the
-    // recorded port answering on loopback — portable where kill(pid, 0) is not.
-    // An stdio serve either forwards to a live resident (T4, above) or opens the
-    // estate directly; it files none of these markers.
+    // §3: whatever port the daemon binds is written to daemon.port and removed
+    // on clean shutdown. The resident daemon also writes `estate.pid` into the
+    // estate it serves (status reports it; a stdio serve reads it for T4
+    // forwarding) and enforces the single-writer rule: one resident
+    // AutonomicGovernor per estate. Liveness is the recorded port answering on
+    // loopback — portable where kill(pid, 0) is not. An stdio serve either
+    // forwards to a live resident (T4, above) or opens the estate directly; it
+    // files none of these markers. An in-memory estate is nobody's estate on
+    // disk, so no marker is written for it.
     let port_file = paths::daemon_port_file(&data);
-    let pid_file = data.join("mootx01.pid");
     if let Some(p) = bound_port {
         if let Some(prev) = paths::read_port_file(&port_file) {
             // Liveness = a real mootx01 daemon ANSWERS on the recorded port,
-            // not merely that the port is occupied. `!port_free(prev)` is true
-            // for ANY listener (a reused socket, an unrelated service, moot-mgr's
-            // dashboard) and would falsely refuse to start — the Swift port
-            // correctly checks the owning PID's liveness. Probe the daemon the
-            // same way the T4 stdio-forward path does (daemon_client::alive).
+            // not merely that the port is occupied (`!port_free(prev)` is true
+            // for ANY listener and would falsely refuse to start).
             if prev != p && daemon_client::alive(prev) {
                 eprintln!(
                     "mootx01: estate is already served by a live resident daemon \
@@ -296,23 +299,20 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> Exi
                 port_file.display()
             );
         }
-        let _ = std::fs::write(&pid_file, format!("{}\n", std::process::id()));
-        // T4: record the served estate path so a stdio serve can detect that THIS
-        // estate already has a live resident and forward to it. SQLite estates
-        // only (postgres has no local file path to match on).
-        if let Ok(estate) = std::env::var("ARIA_MCP_SQLITE_PATH") {
-            let _ = std::fs::write(data.join("mootx01.estate"), estate);
+        if on_disk {
+            let _ = std::fs::create_dir_all(&record.directory);
+            let _ = std::fs::write(&pid_file, format!("{}\n", std::process::id()));
         }
     }
 
-    //  on-startup dreaming trigger: if the dreaming queue
-    // has pending items from a prior session, spawn a detached dreamer so
-    // dreaming catches up without waiting for the next recall event.
-    if let Ok(estate) = std::env::var("ARIA_MCP_SQLITE_PATH") {
-        if dreaming_queue_has_pending(&estate) && background_worker_permitted(posture, "startup dreamer") {
-            eprintln!("mootx01: dreaming queue has pending items from prior session — spawning detached dreamer (T10 startup)");
-            spawn_detached_dream();
-        }
+    // On-startup dreaming trigger: if the dreaming queue has pending items from
+    // a prior session, spawn a detached dreamer so dreaming catches up without
+    // waiting for the next recall event. The child is told the estate with
+    // `--db <selector>`, the value that selects this record again.
+    let selector = record.selector_argument();
+    if on_disk && record.queue_path().exists() && background_worker_permitted(posture, "startup dreamer") {
+        eprintln!("mootx01: dreaming queue has pending items from prior session — spawning detached dreamer (T10 startup)");
+        spawn_detached_dream(&selector);
     }
 
     // computed once at startup (not per-call). Empty whenever no
@@ -358,79 +358,56 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool) -> Exi
         };
 
     // Host the runtime. Does not return until the transport stops.
-    aria_mcp::runtime::run("mootx01", &version_skew, update_advisory);
+    aria_mcp::runtime::run("mootx01", &version_skew, update_advisory, runtime_estate);
 
     if bound_port.is_some() {
         remove_port_file(&port_file);
-        let _ = std::fs::remove_file(&pid_file);
-        let _ = std::fs::remove_file(data.join("mootx01.estate"));
-    } else {
+        if on_disk {
+            let _ = std::fs::remove_file(&pid_file);
+        }
+    } else if on_disk {
         // T5 — direct-open stdio exit (the forward path returned earlier). The
         // client may SIGKILL us the moment stdin closes, killing the in-process
         // encode drain mid-flight. If encode work is still queued, hand it to a
         // detached `drain` finisher that outlives us (it takes the T3 lease and
         // drains to empty, or stands by if a resident has since taken over). Only
         // spawn when the maildir actually has pending/in-flight jobs.
-        if let Ok(estate) = std::env::var("ARIA_MCP_SQLITE_PATH") {
-            if encode_queue_has_pending(&estate) && background_worker_permitted(posture, "encode drainer") {
-                spawn_detached_drain();
-            }
-            //  on-exit dreaming trigger: if the dreaming
-            // queue has items (enqueued during this session or from prior sessions),
-            // spawn a detached `dream` finisher so dreaming work is not lost when
-            // the stdio serve exits. Independent of the encode drain — both can be
-            // held simultaneously.
-            if dreaming_queue_has_pending(&estate) && background_worker_permitted(posture, "exit dreamer") {
-                eprintln!("mootx01: dreaming queue has pending items on exit — spawning detached dreamer (T10 exit)");
-                spawn_detached_dream();
-            }
+        if encode_queue_has_pending(&record.directory) && background_worker_permitted(posture, "encode drainer") {
+            spawn_detached_drain(&selector);
+        }
+        // On-exit dreaming trigger: if the dreaming queue has items (enqueued
+        // during this session or from prior sessions), spawn a detached `dream`
+        // finisher so dreaming work is not lost when the stdio serve exits.
+        // Independent of the encode drain — both can be held simultaneously.
+        if record.queue_path().exists() && background_worker_permitted(posture, "exit dreamer") {
+            eprintln!("mootx01: dreaming queue has pending items on exit — spawning detached dreamer (T10 exit)");
+            spawn_detached_dream(&selector);
         }
     }
     ExitCode::from(exit::OK)
 }
 
-/// True when the corpus ingest maildir beside `estate_path` has any job waiting
+/// Whether the estate's `estate.pid` marker names a process other than us. A
+/// marker that exists but cannot be read counts as recorded: the port probe
+/// that follows decides whether anyone is actually serving.
+pub(crate) fn resident_pid_recorded(pid_file: &Path) -> bool {
+    match std::fs::read_to_string(pid_file) {
+        Ok(text) => text.trim().parse::<u32>().map(|pid| pid != std::process::id()).unwrap_or(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+/// True when the corpus ingest maildir inside `estate_dir` has any job waiting
 /// (`new/`) or claimed but unfinished (`cur/`). A cheap directory check so a
 /// stdio serve only spawns the detached drainer when there is real work left.
-fn encode_queue_has_pending(estate_path: &str) -> bool {
-    let dir = match Path::new(estate_path).parent() {
-        Some(d) => d,
-        None => return false,
-    };
-    let qdir = dir.join("corpus_ingest_queue");
+fn encode_queue_has_pending(estate_dir: &Path) -> bool {
+    let qdir = estate_dir.join("corpus_ingest_queue");
     ["new", "cur"].iter().any(|sub| {
         std::fs::read_dir(qdir.join(sub))
             .map(|mut entries| entries.next().is_some())
             .unwrap_or(false)
     })
-}
-
-/// True when the dreaming queue SQLite file exists beside `estate_path`,
-/// indicating there may be pending dreaming jobs from a prior session or from
-/// the current session's recalls. A cheap file-existence check that does NOT
-/// open the database — the full pending count is probed by `dream_runner` after
-/// acquiring the DrainLease. Returns false for non-existent estates (nothing to
-/// dream on) and for estates that have never triggered a dreaming enqueue (no
-/// per-estate queue file ever created).
-fn dreaming_queue_has_pending(estate_path: &str) -> bool {
-    let estate = Path::new(estate_path);
-    let dir = match estate.parent() {
-        Some(d) => d,
-        None => return false,
-    };
-    // The dreaming queue lives at <estate-stem>.queue.sqlite beside the estate
-    // file (recall-driven dreaming per-estate isolation). The stem prefix ensures two
-    // estates in the same directory each have their own queue and cannot drain
-    // each other's jobs. Its existence signals at least one dreaming-eligible
-    // recall has occurred — actual pending count is verified inside dream_runner.
-    let stem = estate
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if stem.is_empty() {
-        return false;
-    }
-    dir.join(format!("{}.queue.sqlite", stem)).exists()
 }
 
 /// Whether this serve may launch a detached background worker (dreamer or
@@ -446,12 +423,12 @@ fn background_worker_permitted(posture: EstatePosture, worker: &str) -> bool {
     false
 }
 
-/// Spawn `mootx01 dream` detached to run one REM-ALPHA cycle after a
-/// direct-open stdio serve exits or starts up with a pending dreaming queue
-///. The child `setsid`s itself (unix) / is created
-/// detached (windows); we inherit env (so ARIA_MCP_SQLITE_PATH targets the same
-/// estate) and do not wait on it.
-fn spawn_detached_dream() {
+/// Spawn `mootx01 dream --db <selector>` detached to run one REM-ALPHA cycle
+/// after a direct-open stdio serve exits or starts up with a pending dreaming
+/// queue. The child `setsid`s itself (unix) / is created detached (windows);
+/// the estate is passed as the catalog selector that chose it here, and we do
+/// not wait on it.
+fn spawn_detached_dream(selector: &str) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -460,7 +437,7 @@ fn spawn_detached_dream() {
         }
     };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("dream")
+    cmd.args(["dream", "--db", selector])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -476,11 +453,11 @@ fn spawn_detached_dream() {
     }
 }
 
-/// Spawn `mootx01 drain` detached to finish the encode queue after a direct-open
-/// stdio serve exits (T5). The child `setsid`s itself (unix) / is created
-/// detached (windows); we inherit env (so ARIA_MCP_SQLITE_PATH targets the same
-/// estate) and do not wait on it.
-fn spawn_detached_drain() {
+/// Spawn `mootx01 drain --db <selector>` detached to finish the encode queue
+/// after a direct-open stdio serve exits (T5). The child `setsid`s itself
+/// (unix) / is created detached (windows); the estate is passed as the catalog
+/// selector that chose it here, and we do not wait on it.
+fn spawn_detached_drain(selector: &str) {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -489,7 +466,7 @@ fn spawn_detached_drain() {
         }
     };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("drain")
+    cmd.args(["drain", "--db", selector])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -503,10 +480,6 @@ fn spawn_detached_drain() {
     if let Err(e) = cmd.spawn() {
         eprintln!("mootx01: failed to spawn detached drainer: {e}");
     }
-}
-
-fn env_nonempty(key: &str) -> bool {
-    std::env::var(key).map(|v| !v.is_empty()).unwrap_or(false)
 }
 
 /// Probe-bind on loopback; free means we could bind. Racy by nature (the
@@ -546,7 +519,7 @@ mod tests {
         let mut sites = 0;
         for (i, line) in lines.iter().enumerate() {
             // Skip comments and this test's own string literals.
-            let is_call = (line.contains("spawn_detached_dream();") || line.contains("spawn_detached_drain();"))
+            let is_call = (line.contains("spawn_detached_dream(&") || line.contains("spawn_detached_drain(&"))
                 && !line.trim_start().starts_with("//")
                 && !line.contains("contains(");
             if !is_call {
