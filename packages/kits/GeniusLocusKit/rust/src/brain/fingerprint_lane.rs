@@ -42,19 +42,10 @@ pub fn takes_matrix_path(unit_count: usize) -> bool {
     unit_count >= MIN_INTRA_ITEM_UNITS
 }
 
-/// The short-cluster rendering the consolidation cycle stores when a cluster
-/// has fewer than three sentences: the token-compaction transform, with the
-/// content itself as the last-resort rendering when compaction eliminates
-/// everything (pathological all-stopword content), so every consolidated
-/// item carries a non-empty rendering. Mirrors Swift
+/// Compatibility entrypoint for complete source-preserving rendering. Mirrors Swift
 /// `GeniusLocusKit.compactionRendering(of:)`.
 pub fn compaction_rendering(content: &str) -> String {
-    let compacted = substrate_ml::token_compaction::compact(content);
-    if compacted.is_empty() {
-        content.to_string()
-    } else {
-        compacted
-    }
+    crate::hydration_representation::distilled_rendering(content)
 }
 
 /// One drawer's structural fingerprint — the pure half of
@@ -83,7 +74,7 @@ pub fn structural_fingerprint(drawer_id: &str, content: &str) -> Fingerprint256 
             drawer_id.to_string(),
             vec![drawer_id.to_string()],
         );
-        DistillationPipeline::run(&input, DistillationPipeline::default_extractor, true)
+        DistillationPipeline::run_with_rendering(&input, DistillationPipeline::default_extractor, true, false)
             .feature_fingerprint
     } else {
         DistillationPipeline::query_fingerprint(content, DistillationPipeline::default_extractor)
@@ -140,17 +131,15 @@ mod tests {
     }
 
     #[test]
-    fn compaction_rendering_compacts_normal_content() {
+    fn compatibility_rendering_preserves_normal_content() {
         assert_eq!(
             compaction_rendering("My favorite color is blue."),
-            "My favorite color blue."
+            "My favorite color is blue."
         );
     }
 
     #[test]
-    fn compaction_rendering_falls_back_to_content_when_compaction_empties() {
-        // All-stopword content would compact to "" — the content itself is
-        // the last-resort rendering (population guarantee).
+    fn compatibility_rendering_preserves_stopwords() {
         assert_eq!(compaction_rendering("the a an really"), "the a an really");
     }
 

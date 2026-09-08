@@ -33,10 +33,8 @@ fn cluster_5() -> DistillationInput {
     )
 }
 
-// distilled_text is the SPEC §5 rendering: core sentences (Alice/CERN)
-// compacted and ordered first, the episodic tail last, zero inline
-// metadata. Both legs pin this SAME byte-exact rendering (§13.9 golden
-// vector for the Stage 5 path). Mirrors the Swift
+// Complete rendering retains distinct units in source order.
+// Both legs pin the same byte-exact rendering. Mirrors the Swift
 // "cluster_5: distilledText renders byte-exact (§13.9)" test.
 #[test]
 fn cluster_5_distilled_text_renders_byte_exact() {
@@ -49,10 +47,10 @@ fn cluster_5_distilled_text_renders_byte_exact() {
     );
     assert_eq!(
         result.distilled_text,
-        "Research by Alice at CERN on particle physics \
-         Lab where Alice works CERN facility \
-         Studies conducted by Alice show CERN advances science \
-         Data from CERN shows Alice leading breakthrough research \
+        "Research by Alice at CERN on particle physics\n\
+         The lab where Alice works is CERN facility\n\
+         Studies conducted by Alice show CERN advances science\n\
+         Data from CERN shows Alice leading breakthrough research\n\
          Maintenance was completed on schedule today"
     );
 }
