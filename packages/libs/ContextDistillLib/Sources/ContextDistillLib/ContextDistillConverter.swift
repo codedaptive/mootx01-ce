@@ -6,11 +6,8 @@
 ///   schema_version: 1
 public enum ContextDistillConverter: String, Sendable, Equatable, CaseIterable {
 
-    /// The intent-span@v22 authority-closure candidate.
-    ///
-    /// Selects complete, exact source atoms around operative intent and
-    /// dependency-closed document structure without rewriting their contents.
-    case intentSpanV22
+    /// Complete-content format compaction. No passage selection or ordering.
+    case completeFormV6
 
     /// The intent-span@v23.2 attributed peer-dialogue converter.
     ///
@@ -24,8 +21,8 @@ public enum ContextDistillConverter: String, Sendable, Equatable, CaseIterable {
     /// Mirrors ``f"{candidate}@{INTENT_SPAN_VERSION}"`` from the converter.
     public var id: String {
         switch self {
-        case .intentSpanV22:
-            "intent-span@intent-span-v22-authority-closure"
+        case .completeFormV6:
+            "complete-form@complete-form-visible-v6"
         case .intentSpanV23Attributed:
             "intent-span-v23-attributed@intent-span-v23.2-attributed-prose"
         }

@@ -18,6 +18,8 @@
 
 pub mod atoms;
 pub mod converter;
+pub mod complete_content;
+pub mod passage_views;
 pub mod digest;
 pub mod distiller;
 pub mod input;
