@@ -28,13 +28,14 @@
 import CorpusKit
 import CorpusKitProviders
 import Foundation
+import MootProductIdentity
 import GeniusLocusKit
 import LocusKit
 import OSLog
 import PersistenceKit
 import SynapseKit
 
-private let migrationLog = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+private let migrationLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
 // MARK: - State machine
 

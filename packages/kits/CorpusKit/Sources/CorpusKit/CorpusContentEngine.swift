@@ -33,6 +33,7 @@
 
 import EngramLib
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import PersistenceKit
@@ -42,7 +43,7 @@ import SubstrateTypes
 import SynapseKit
 
 // Logger shared by the engine and its queue extension (CorpusContentEngineQueue.swift).
-private let contentEngineLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let contentEngineLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 // MARK: - Training path decision seam (module-level; shared by CorpusContentEngine and Corpus)
 

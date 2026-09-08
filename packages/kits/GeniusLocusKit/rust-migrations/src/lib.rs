@@ -12,6 +12,9 @@
 // migration trait because the SQLCipher attachFunc heuristic bug affects any
 // plaintext estate created by Apple's SEE-provisioned sqlite3 regardless of
 // the estate's schema version.
+mod estate_manifest_refresh;
+pub use estate_manifest_refresh::*;
+
 mod geometry_normalization;
 pub use geometry_normalization::*;
 

@@ -15,6 +15,7 @@
 // deterministic and testable.
 
 import Foundation
+import MootProductIdentity
 import SubstrateTypes
 import LocusKit
 import PersistenceKit
@@ -24,7 +25,7 @@ public extension GeniusLocusKit {
 
     /// Logger reused across migration verb dispatch.
     private static var migrationLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - runParallel
