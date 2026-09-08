@@ -11,51 +11,30 @@ import Foundation
 
 public enum ResidentDaemonQuiesce {
 
-    /// Run `work` with the resident daemon quiesced when `dataDirectory`
-    /// is the resident estate; otherwise run it with the daemon untouched.
-    ///
-    /// Resident estate (`MootPaths.isResidentEstate`): capture whether the
-    /// daemon is running, stop it — single-writer discipline, because the
-    /// step opens the estate SQLite the daemon has open — run `work`, then
-    /// start the daemon again if it was running. The restart happens on
-    /// every outcome of `work`, so a failed step never leaves the daemon
-    /// down.
-    ///
-    /// Not the resident estate: print one line naming the directory so an
-    /// operator sees why nothing restarted, then run `work`. The daemon
-    /// serves a different estate and has no stake in this one.
-    ///
-    /// Unreadable registration (`MootPaths.ResidentDataDirectory
-    /// .unreadableRegistration`): print the registration warning, then
-    /// proceed exactly as for the resident estate. SAFETY: an estate the
-    /// daemon may hold open is never migrated under a running daemon.
-    ///
-    /// - Parameters:
-    ///   - dataDirectory: the data directory the step will open.
-    ///   - residentDataDirectory: the daemon's data directory, from
-    ///     `MootPaths.residentDataDirectory(homeDirectory:)`.
-    ///   - step: the step's operator-facing name, used in the skip line.
-    ///   - daemon: the daemon control seam. `.launchd(homeDirectory:)` in
-    ///     the executable; tests inject a recorder.
-    ///   - work: the step body.
-    /// - Returns: `work`'s result, or `nil` when the daemon was running
-    ///   and would not stop — the step is skipped, nothing is half-done,
-    ///   and the next `mootx01 upgrade` retries.
+    /// Quiesce the resident daemon around `work` when the estate's own PID
+    /// marker names a live mootx01 process: that is the one fact that says a
+    /// resident serves THIS estate. No marker, or a dead one, and the daemon is
+    /// left running because it is serving some other estate or nothing.
     public static func run<T>(
-        dataDirectory: URL,
-        residentDataDirectory: MootPaths.ResidentDataDirectory,
+        estatePIDURL: URL,
         step: String,
         daemon: EstateEncryptionMigrator.DaemonControl,
         work: () async -> T
     ) async -> T? {
-        guard MootPaths.isResidentEstate(
-            dataDirectory: dataDirectory, residentDataDirectory: residentDataDirectory)
-        else {
-            print("  data directory \(dataDirectory.path) is not the resident estate; daemon left running")
+        await run(residentServes: residentServes(pidURL: estatePIDURL), step: step, daemon: daemon, work: work)
+    }
+
+    /// The decision already made: `residentServes` says whether a live resident
+    /// serves the estate the step will open. Tests inject it directly.
+    public static func run<T>(
+        residentServes: Bool,
+        step: String,
+        daemon: EstateEncryptionMigrator.DaemonControl,
+        work: () async -> T
+    ) async -> T? {
+        guard residentServes else {
+            print("  no live resident serves this estate; daemon left running")
             return await work()
-        }
-        if let warning = residentDataDirectory.registrationWarning(for: dataDirectory) {
-            print(warning)
         }
         let wasRunning = daemon.isRunning()
         if wasRunning && !daemon.stop() {
@@ -68,4 +47,15 @@ public enum ResidentDaemonQuiesce {
         }
         return result
     }
+
+    /// True when `pidURL` names a live, identity-verified mootx01 process other
+    /// than this one. Twin of the check `serve` makes before forwarding (T4).
+    public static func residentServes(pidURL: URL) -> Bool {
+        guard let text = try? String(contentsOf: pidURL, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid != ProcessInfo.processInfo.processIdentifier
+        else { return false }
+        return ProcessIdentity.isLiveProcess(pid)
+    }
+
 }

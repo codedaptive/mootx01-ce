@@ -18,7 +18,7 @@ import Testing
 struct EstateEncryptionMigratorTests {
 
     /// A fresh random 256-bit key. Tests never touch the Keychain: key
-    /// provisioning belongs to EstateKeyProvider (already covered), and the
+    /// provisioning belongs to GeniusLocusKit's EstateOpenPosture (covered there), and the
     /// migrator takes raw key bytes.
     private func makeKey() -> Data {
         var bytes = [UInt8](repeating: 0, count: 32)
@@ -170,7 +170,7 @@ struct EstateEncryptionMigratorTests {
             estateURL: manifest.estateURL, key: key, daemon: daemon, trash: trash)
 
         // The canonical path holds ciphertext that opens with the key.
-        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .ciphertext,
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: manifest.estateURL) == .ciphertext,
             "the canonical estate path must now hold the encrypted estate")
         let count = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
             estateID: UUID(),
@@ -186,7 +186,7 @@ struct EstateEncryptionMigratorTests {
         // unencrypted in the Trash" promise, proven by opening it.
         let trashed = try #require(result.swap.trashedOriginalURL)
         #expect(trashed.path.hasPrefix(trashDir.path))
-        #expect(EstateKeyProvider.detectEstateFileState(at: trashed) == .plaintext)
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: trashed) == .plaintext)
         let trashedCount = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
             estateID: UUID(),
             backend: .sqlite(url: trashed, busyTimeout: 5.0),
@@ -253,7 +253,7 @@ struct EstateEncryptionMigratorTests {
 
     /// Prove the canonical path still holds the complete plaintext original.
     private func assertOriginalIntact(_ manifest: TwentyRowEstateFixture.Manifest) async throws {
-        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .plaintext)
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: manifest.estateURL) == .plaintext)
         let count = try await TwentyRowEstateFixture.drawerCount(of: EstateConfiguration(
             estateID: UUID(),
             backend: .sqlite(url: manifest.estateURL, busyTimeout: 5.0),
@@ -349,11 +349,11 @@ struct EstateEncryptionMigratorTests {
             trash: { _ in throw CocoaError(.fileWriteNoPermission) })
 
         // The migration itself succeeded: canonical path is ciphertext.
-        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .ciphertext)
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: manifest.estateURL) == .ciphertext)
         // And the failure is reported, with the plaintext copy still on disk.
         let reported = try #require(result.swap.untrashedOriginalPath)
         #expect(FileManager.default.fileExists(atPath: reported))
-        #expect(EstateKeyProvider.detectEstateFileState(
+        #expect(EstateEncryptionMigrator.detectEstateFileState(
             at: URL(fileURLWithPath: reported)) == .plaintext,
             "the reported path must be the untrashed plaintext original")
         // Clean up the aside file the failed trash left behind.
@@ -371,7 +371,7 @@ struct EstateEncryptionMigratorTests {
         let result = try EstateEncryptionMigrator.migrate(
             estateURL: manifest.estateURL, key: makeKey(), daemon: daemon, trash: trash)
 
-        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .ciphertext,
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: manifest.estateURL) == .ciphertext,
             "the encrypted estate is in place regardless of the restart failure")
         #expect(result.swap.daemonWasRunning)
         #expect(!result.swap.daemonRestarted,
@@ -422,14 +422,14 @@ struct EstateEncryptionMigratorTests {
         let source = try String(
             contentsOf: commandsDirectory.appendingPathComponent("UpgradeCommand.swift"),
             encoding: .utf8)
-        #expect(source.contains("detectEstateFileState"),
+        #expect(source.contains("EstateOpenPosture.fileState"),
             "the offer must classify via the shared detection function, never by guessing")
         #expect(source.contains("isatty"),
             "a non-TTY invocation must never prompt and never migrate")
         #expect(source.contains("EstateEncryptionMigrator.migrate"),
             "the accepted offer must run the migrator, not a bespoke path")
-        #expect(source.contains("EstateKeyProvider.provideKey"),
-            "key provisioning must go through EstateKeyProvider's custody")
+        #expect(source.contains("EstateOpenPosture.provideKey"),
+            "key provisioning must go through EstateOpenPosture's custody")
     }
 
     @Test("No other command detects or prompts for estate encryption migration")
@@ -460,7 +460,7 @@ struct EstateEncryptionMigratorTests {
             from: manifest.estateURL, to: destination, key: key)
 
         // Ciphertext by the same detection function the offer uses.
-        #expect(EstateKeyProvider.detectEstateFileState(at: destination) == .ciphertext,
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: destination) == .ciphertext,
             "the encrypted copy must not carry the plaintext SQLite header")
 
         // And it must genuinely OPEN with the key — through the same config a
@@ -473,7 +473,7 @@ struct EstateEncryptionMigratorTests {
             "every drawer must survive the physical clone")
 
         // The source stays plaintext and untouched by classification.
-        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .plaintext)
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: manifest.estateURL) == .plaintext)
     }
 
     @Test("Export refuses a ciphertext source")
@@ -514,7 +514,7 @@ struct EstateEncryptionMigratorTests {
         }
         #expect(!FileManager.default.fileExists(atPath: destination.path))
         // The original is untouched and still plaintext.
-        #expect(EstateKeyProvider.detectEstateFileState(at: manifest.estateURL) == .plaintext)
+        #expect(EstateEncryptionMigrator.detectEstateFileState(at: manifest.estateURL) == .plaintext)
     }
 }
 

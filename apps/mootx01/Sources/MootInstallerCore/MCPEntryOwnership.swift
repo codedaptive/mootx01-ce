@@ -45,12 +45,6 @@ public enum MCPEntryOwnership: Equatable, Sendable {
 /// access; callers resolve the entry's presence/absence and hand the decoded
 /// object (or env map) to `classify`.
 public enum MCPEntryClassifier {
-    /// Env keys whose presence on an existing entry marks it as pointing at
-    /// a non-default database: `serve` resolves the default
-    /// data dir unless one of these overrides it, so an entry carrying
-    /// neither is on the default database by construction.
-    public static let overrideEnvKeys: [String] = ["MOOTX01_DATA_DIR", "ARIA_MCP_SQLITE_PATH"]
-
     /// Classify a JSON-decoded `mcpServers.<name>` entry (the object value,
     /// e.g. `{"command":...,"args":[...],"env":{...}}` or
     /// `{"type":"http","url":...}`). Callers pass only entries already known
@@ -67,41 +61,24 @@ public enum MCPEntryClassifier {
     /// before its env is even considered; anything else is `.foreign` —
     /// reported by name, never removed — regardless of its env block.
     ///
-    /// Once the shape check passes: HTTP entries (no `env` key at all in
-    /// every shape this installer writes) cannot disagree about the
-    /// database — they reach whatever estate the resident daemon holds
-    /// — so the absence of an `env` map is itself
-    /// `.oursDefault`. Command/stdio entries (the proxy bridge, or a legacy
-    /// bare `serve`) are `.oursDefault` only when their `env` carries
-    /// neither override key.
+    /// Once the shape check passes, the one way an entry selects a
+    /// non-default estate is the `--db` argument: the estate catalog names
+    /// every estate, and no environment value selects one, so an entry's
+    /// `env` block never bears on which estate it reaches. HTTP entries reach
+    /// whatever estate the resident daemon holds. Everything that passes the
+    /// shape check without `--db` is `.oursDefault`.
     public static func classify(entry: [String: Any]) -> MCPEntryOwnership {
         guard looksLikeOurs(entry) else {
             return .foreign(reason: "entry shape does not resolve to the mootx01 binary or the loopback daemon endpoint")
         }
-        // Args-level override (#67): `serve --db <name>` selects a non-default
-        // estate without using either env key. Removing such an entry silently
-        // collapses the user's estate isolation into the default estate. Check
-        // args BEFORE env so both override mechanisms are honoured.
-        // Both ArgumentParser spellings count (Adams MO-01 INFO-1): the
-        // space-separated `--db <name>` (a standalone "--db" element) and the
-        // equals form `--db=<name>` (a single element).
+        // `serve --db <value>` selects another estate. Removing such an entry
+        // would silently collapse the user's estate isolation into the
+        // default estate. Both ArgumentParser spellings count: the
+        // space-separated `--db <value>` (a standalone "--db" element) and the
+        // equals form `--db=<value>` (a single element).
         if let args = entry["args"] as? [String],
            args.contains(where: { $0 == "--db" || $0.hasPrefix("--db=") }) {
             return .foreign(reason: "args override: --db")
-        }
-        guard let env = entry["env"] as? [String: Any] else { return .oursDefault }
-        return classify(env: env)
-    }
-
-    /// Classify from an already-extracted env map (used by the TOML/YAML
-    /// merge paths, whose entries are not decoded through JSONSerialization).
-    /// Callers of this overload have already established the entry's shape
-    /// out of band (there is no raw entry object to shape-check here) — see
-    /// `classify(entry:)` for the shape-checked JSON entry point.
-    public static func classify(env: [String: Any]) -> MCPEntryOwnership {
-        let overriding = overrideEnvKeys.filter { env[$0] != nil }
-        guard overriding.isEmpty else {
-            return .foreign(reason: "env override: \(overriding.joined(separator: ", "))")
         }
         return .oursDefault
     }

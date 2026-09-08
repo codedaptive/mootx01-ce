@@ -47,10 +47,10 @@ struct UpgradeCommand: AsyncParsableCommand {
             Use --check to print the latest available version without downloading:
               mootx01 upgrade --check
 
-            Use --backfill-only to run only the data-directory migration steps
+            Use --backfill-only to run only the estate migration steps
             (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record
             vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim)
-            against the estate resolved via MOOTX01_DATA_DIR, then exit. No network,
+            against the estate --db selects (the active estate when absent), then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
             cycle — each step quiesces and restores the daemon itself when the
             estate is the resident one, and leaves it running otherwise:
@@ -79,6 +79,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         help: "Install this exact release tag (e.g. 1.1.0-beta-08) instead of the newest stable. Also settable via MOOTX01_VERSION.")
     var version: String?
 
+    @Option(name: .long, help: "Estate to upgrade: a registered name, or <dir>/<name> for a transient estate. Default: the active estate. A transient estate gets the estate migration steps only.")
+    var db: String?
+
     @Flag(name: .customLong("check"), help: "Print the latest available version and exit without downloading.")
     var checkOnly: Bool = false
 
@@ -88,11 +91,11 @@ struct UpgradeCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
 
-    /// Run ONLY the data-directory migration steps: schema 10 → 19, kg_facts
+    /// Run ONLY the estate migration steps: schema 10 → 19, kg_facts
     /// identity, shared-content reclaim, whole-record vacuum, ssc facts, dense
     /// pooling convergence, span encode, and vector reclaim. Intended for
-    /// scripted and benchmark
-    /// estates where the caller owns the estate via MOOTX01_DATA_DIR. No
+    /// scripted and benchmark estates, which the caller names with
+    /// `--db <path>/<name>` (a transient estate) or a registered name. No
     /// network, no download, no plugin convergence, no encryption offer, no
     /// restartAgents cycle. Each step handles its own daemon quiesce and
     /// restore so the caller need not manage service state, and quiesces only
@@ -111,7 +114,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// last (deletes what nothing serves any more).
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the data-directory migration steps (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
+        help: "Run only the estate migration steps (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -153,6 +156,33 @@ struct UpgradeCommand: AsyncParsableCommand {
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd  = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        // The catalog names the estate every migration step opens. `--db`
+        // selects a registered estate or attaches a transient one; absent, the
+        // active estate. Install-wide work (binary, plugin, agents, encryption
+        // offer) belongs to the machine's own estates only, so a transient
+        // estate runs the estate migration steps and nothing else.
+        let estate: EstateRecord
+        do {
+            estate = try (db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()).active
+        } catch {
+            print("mootx01 upgrade: \(error)")
+            throw ExitCode.failure
+        }
+        #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG && os(macOS)
+        // A 1.0.x install kept its estate flat in the configuration directory;
+        // the record above names databases/default/. Move it before any step
+        // opens the record's database (see FlatLayoutStep).
+        if FlatLayoutStep.pending(estate) {
+            let moved = await ResidentDaemonQuiesce.run(
+                residentServes: true,
+                step: "estate layout migration",
+                daemon: .launchd(homeDirectory: home)
+            ) { FlatLayoutStep.migrate(estate) } ?? false
+            guard moved else { throw ExitCode.failure }
+        }
+        #endif
+        let estateOnly = backfillOnly || estate.kind == .transient
         let downloader = ReleaseDownloader(
             repo: Self.repoSlug(),
             currentVersion: Mootx01.currentVersion)
@@ -161,32 +191,37 @@ struct UpgradeCommand: AsyncParsableCommand {
         // upgrade that placed us. Run the convergence steps and nothing else.
         if convergeOnly {
             await runConvergence(
-                home: home,
+                estate: estate, home: home,
                 binaryPath: MootPaths.installedBinaryURL(homeDirectory: home).path)
             return
         }
 
-        // --backfill-only: headless data-dir convergence for scripted and
-        // benchmark estates. Runs only the eight data-directory migration
+        // --backfill-only: headless estate convergence for scripted and
+        // benchmark estates. Runs only the eight estate migration
         // steps (schema 10 → 19, kg_facts identity, shared-content reclaim,
         // whole-record vacuum, ssc facts, dense pooling convergence, span
-        // encode, vector reclaim) against the estate resolved via
-        // MOOTX01_DATA_DIR. No network, no download, no plugin
+        // encode, vector reclaim) against the estate the catalog selected
+        // above. No network, no download, no plugin
         // convergence, no encryption offer, no restartAgents cycle. Each step
         // owns its daemon quiesce+restore through ResidentDaemonQuiesce, which
         // touches the daemon only for the resident estate. A refused schema
         // version stops the sequence (every later step would open the schema
         // and stamp it); otherwise failures aggregate and exit non-zero,
         // matching the Rust `--backfill-only` contract.
-        if backfillOnly {
-            guard await runSchemaUpgrade(home: home) else { throw ExitCode.failure }
-            let okKG     = await runKGFactIdentityBackfill(home: home)
-            let okRecl   = await runSharedContentReclaimIfPending(home: home)
-            let okVacuum = await runWholeRecordVacuum(home: home)
-            let okFacts  = await runSSCFactsBackfill(home: home)
-            let okDense  = await runDensePoolingConvergence(home: home)
-            let okSpan   = await runSpanEncodeBackfill(home: home)
-            let okVec    = await runVectorReclaim(home: home)
+        if estateOnly {
+            if estate.kind == .transient, !backfillOnly {
+                print("Transient estate '\(estate.name)' at \(estate.directory.path): running the estate migration steps only.")
+            }
+            guard await runSchemaUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
+            retireLegacyEncryptionOptOut(estate: estate)
+            refreshManifest(estate: estate)
+            let okKG     = await runKGFactIdentityBackfill(estate: estate, home: home)
+            let okRecl   = await runSharedContentReclaimIfPending(estate: estate, home: home)
+            let okVacuum = await runWholeRecordVacuum(estate: estate, home: home)
+            let okFacts  = await runSSCFactsBackfill(estate: estate, home: home)
+            let okDense  = await runDensePoolingConvergence(estate: estate, home: home)
+            let okSpan   = await runSpanEncodeBackfill(estate: estate, home: home)
+            let okVec    = await runVectorReclaim(estate: estate, home: home)
             guard okKG && okRecl && okVacuum && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
             return
         }
@@ -306,19 +341,21 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // Plugin manifest cache refresh IS included: a prior upgrade
                 // may have placed a new binary but left the Claude Code plugin
                 // cache stale (version_skew advisory firing on every ping).
-                if await runSchemaUpgrade(home: home) {
-                    await runKGFactIdentityBackfill(home: home)
-                    await runSharedContentReclaimIfPending(home: home)
-                    await runWholeRecordVacuum(home: home)
-                    await runSSCFactsBackfill(home: home)
-                    await runDensePoolingConvergence(home: home)
-                    await runSpanEncodeBackfill(home: home)
-                    _ = await runVectorReclaim(home: home)
+                if await runSchemaUpgrade(estate: estate, home: home) {
+                    retireLegacyEncryptionOptOut(estate: estate)
+                    refreshManifest(estate: estate)
+                    await runKGFactIdentityBackfill(estate: estate, home: home)
+                    await runSharedContentReclaimIfPending(estate: estate, home: home)
+                    await runWholeRecordVacuum(estate: estate, home: home)
+                    await runSSCFactsBackfill(estate: estate, home: home)
+                    await runDensePoolingConvergence(estate: estate, home: home)
+                    await runSpanEncodeBackfill(estate: estate, home: home)
+                    _ = await runVectorReclaim(estate: estate, home: home)
                 }
                 updatePluginManifestIfNeeded(home: home)
                 convergeDaemonBundle(home: home)
                 restartAgents(home: home)
-                offerEstateEncryptionIfNeeded(home: home)
+                offerEstateEncryptionIfNeeded(estate: estate, home: home)
                 return
             }
             print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
@@ -404,7 +441,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             // back to converging in THIS image: the pre-existing behaviour, so a
             // failed re-exec never leaves an upgrade less converged than before.
             print("Note: converging with the previous binary — the installed one could not run.")
-            await runConvergence(home: home, binaryPath: binaryPath)
+            await runConvergence(estate: estate, home: home, binaryPath: binaryPath)
         }
 
         #if os(macOS)
@@ -421,7 +458,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // The encryption offer runs AFTER the services are back up so a
         // decline leaves a fully converged install, and an accept owns the
         // whole stop → migrate → restart sequence itself.
-        offerEstateEncryptionIfNeeded(home: home)
+        offerEstateEncryptionIfNeeded(estate: estate, home: home)
     }
 
     /// Schema 10 → 19 (ENCODER_RERANK_CONTRACT §12): the one product schema
@@ -439,23 +476,30 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
     /// Returns `true` when the estate is at 19 afterwards (or absent).
     @discardableResult
-    private func runSchemaUpgrade(home: URL) async -> Bool {
+    /// The identity key store an upgrade step opens the estate with. The
+    /// catalog decided what kind of estate this is and the kind decides every
+    /// Keychain question: a registered estate resolves its Ed25519 identity
+    /// per backend (nil, the Keychain for SQLite); a transient estate keeps it
+    /// in memory and never touches the Keychain, so a headless sweep over
+    /// scratch estates cannot stall on a consent dialog. Same rule as `serve`.
+    private static func identityKeyStore(for estate: EstateRecord) -> (any EstateIdentityKeyStore)? {
+        estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore()
+    }
+
+    private func runSchemaUpgrade(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         // Absent estate means first run — serve creates new estates at 19.
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ schema upgrade skipped — estate key unavailable: \(error)")
             return false
         }
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "schema upgrade",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -525,11 +569,9 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// that predate them.
     /// Returns `true` on success or when there is nothing to backfill, `false` on failure.
     @discardableResult
-    private func runKGFactIdentityBackfill(home: URL) async -> Bool {
+    private func runKGFactIdentityBackfill(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         // Absent estate means first run — serve creates new estates
         // post-KH; there is nothing to backfill.
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
@@ -540,7 +582,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // TTY-gated offer's job, below.
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ kg_facts identity backfill skipped — estate key unavailable: \(error)")
             return false
@@ -551,8 +593,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // prints why when it is not). A nil result means the daemon would
         // not stop; the step is skipped and the next upgrade retries.
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "kg_facts identity backfill",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -614,15 +655,13 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
     /// Returns `true` on success or when there is nothing to converge, `false` on failure.
     @discardableResult
-    private func runDensePoolingConvergence(home: URL) async -> Bool {
+    private func runDensePoolingConvergence(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ dense pooling convergence skipped — estate key unavailable: \(error)")
             return false
@@ -654,8 +693,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // prints why when it is not). A nil result means the daemon would
         // not stop; the step is skipped and the next upgrade retries.
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "dense pooling convergence",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -663,19 +701,10 @@ struct UpgradeCommand: AsyncParsableCommand {
                 let storage = try SQLiteStorage(configuration: configuration)
                 let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
                 let kit = GeniusLocusKit()
-                // MOOTX01_ESTATE_LIFETIME=ephemeral is the declared throwaway
-                // posture (benchmark and scripted estates): identity keys stay
-                // in memory and the Keychain is never consulted, so a headless
-                // run cannot stall on a Keychain consent dialog. Same rule as
-                // `serve` and the shared-content reclaim step.
-                let upgradeLifetimeIsEphemeral =
-                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                        .lowercased() == "ephemeral"
                 let handle = try await kit.open(
                     storage: storage,
                     owner: owner,
-                    identityKeyStore: upgradeLifetimeIsEphemeral
-                        ? InMemoryEstateIdentityKeyStore() : nil
+                    identityKeyStore: Self.identityKeyStore(for: estate)
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 // Wiring the corpus runs the open-time provider reconcile: every
@@ -752,22 +781,19 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// Upgrade never creates content: spans are derived rows, not drawers.
     /// Returns `true` on success or when there is nothing to encode.
     @discardableResult
-    private func runSpanEncodeBackfill(home: URL) async -> Bool {
+    private func runSpanEncodeBackfill(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ span encode skipped — estate key unavailable: \(error)")
             return false
         }
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "span encode",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -780,14 +806,10 @@ struct UpgradeCommand: AsyncParsableCommand {
                 let storage = try SQLiteStorage(configuration: configuration)
                 let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
                 let kit = GeniusLocusKit()
-                let upgradeLifetimeIsEphemeral =
-                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                        .lowercased() == "ephemeral"
                 let handle = try await kit.open(
                     storage: storage,
                     owner: owner,
-                    identityKeyStore: upgradeLifetimeIsEphemeral
-                        ? InMemoryEstateIdentityKeyStore() : nil
+                    identityKeyStore: Self.identityKeyStore(for: estate)
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 // Migration writes the activation key: a CE 1.0.x estate arrives
@@ -812,7 +834,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 let backfillStorage = try SQLiteStorage(configuration: configuration)
                 try await backfillStorage.open(schema: VectorStore.schemaDeclaration)
                 let report = try await SpanEncodeBackfill.run(
-                    storage: backfillStorage, dataDirectory: dataDir, now: Date())
+                    storage: backfillStorage, dataDirectory: EstateCatalog.configurationDirectory, now: Date())
                 await backfillStorage.close()
                 switch report {
                 case .noActiveModel:
@@ -856,22 +878,19 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
     /// Returns `true` on success or when there is nothing to vacuum.
     @discardableResult
-    private func runWholeRecordVacuum(home: URL) async -> Bool {
+    private func runWholeRecordVacuum(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ whole-record vacuum skipped — estate key unavailable: \(error)")
             return false
         }
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "whole-record vacuum",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -885,14 +904,10 @@ struct UpgradeCommand: AsyncParsableCommand {
                 let storage = try SQLiteStorage(configuration: configuration)
                 let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
                 let kit = GeniusLocusKit()
-                let upgradeLifetimeIsEphemeral =
-                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                        .lowercased() == "ephemeral"
                 let handle = try await kit.open(
                     storage: storage,
                     owner: owner,
-                    identityKeyStore: upgradeLifetimeIsEphemeral
-                        ? InMemoryEstateIdentityKeyStore() : nil
+                    identityKeyStore: Self.identityKeyStore(for: estate)
                 )
                 // The chain runs the 1.6 to 1.7 capsule on an estate that has
                 // not taken it yet; closing the estate closes its connection.
@@ -982,22 +997,19 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// rebuild happens once under the final schema.
     ///
     /// Returns `true` on success or when there is nothing to write.
-    private func runSSCFactsBackfill(home: URL) async -> Bool {
+    private func runSSCFactsBackfill(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ ssc facts backfill skipped — estate key unavailable: \(error)")
             return false
         }
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "ssc facts backfill",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -1010,14 +1022,10 @@ struct UpgradeCommand: AsyncParsableCommand {
                 let storage = try SQLiteStorage(configuration: configuration)
                 let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
                 let kit = GeniusLocusKit()
-                let upgradeLifetimeIsEphemeral =
-                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                        .lowercased() == "ephemeral"
                 let handle = try await kit.open(
                     storage: storage,
                     owner: owner,
-                    identityKeyStore: upgradeLifetimeIsEphemeral
-                        ? InMemoryEstateIdentityKeyStore() : nil
+                    identityKeyStore: Self.identityKeyStore(for: estate)
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 // The corpus must be wired for the rebuild below; the wire is
@@ -1048,22 +1056,19 @@ struct UpgradeCommand: AsyncParsableCommand {
         #endif
     }
 
-    private func runVectorReclaim(home: URL) async -> Bool {
+    private func runVectorReclaim(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ vector reclaim skipped — estate key unavailable: \(error)")
             return false
         }
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "vector reclaim",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -1076,14 +1081,10 @@ struct UpgradeCommand: AsyncParsableCommand {
                 let storage = try SQLiteStorage(configuration: configuration)
                 let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
                 let kit = GeniusLocusKit()
-                let upgradeLifetimeIsEphemeral =
-                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                        .lowercased() == "ephemeral"
                 let handle = try await kit.open(
                     storage: storage,
                     owner: owner,
-                    identityKeyStore: upgradeLifetimeIsEphemeral
-                        ? InMemoryEstateIdentityKeyStore() : nil
+                    identityKeyStore: Self.identityKeyStore(for: estate)
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 // Closing the estate closes its storage connection with it, so
@@ -1132,11 +1133,9 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// migration-host seam, which requires an open GLK handle.
     /// Returns `true` on success or when there is nothing to reclaim, `false` on failure.
     @discardableResult
-    private func runSharedContentReclaimIfPending(home: URL) async -> Bool {
+    private func runSharedContentReclaimIfPending(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         // Absent estate means first run — serve creates new estates
         // post-cutover; there is nothing to reclaim.
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
@@ -1145,7 +1144,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // encrypted estate, plaintext posture preserved for a plaintext one.
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ shared-content reclaim skipped — estate key unavailable: \(error)")
             return false
@@ -1156,8 +1155,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // prints why when it is not). A nil result means the daemon would
         // not stop; the step is skipped and the next upgrade retries.
         return await ResidentDaemonQuiesce.run(
-            dataDirectory: dataDir,
-            residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home),
+            estatePIDURL: estate.pidURL,
             step: "shared-content reclaim",
             daemon: .launchd(homeDirectory: home)
         ) { () async -> Bool in
@@ -1186,22 +1184,17 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // process exit -- permanently disabling grant/federation signing for
                 // any estate whose identity had not yet been established.
                 //
-                // EXCEPT under the declared throwaway posture: with
-                // MOOTX01_ESTATE_LIFETIME=ephemeral the identity key lives in an
-                // in-memory store, same contract as ServeCommand. Without this,
-                // every bulk-upgrade sweep over benchmark estates minted one
-                // Keychain identity item per estate and never deleted it —
-                // 247 accumulated items by 2026-08-26 (keychain pollution,
-                // ACTION D5 recurrence). Benchmark estates have no federation
-                // signing to lose; the marker is a declaration, never inferred.
-                let upgradeLifetimeIsEphemeral =
-                    (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                        .lowercased() == "ephemeral"
+                // EXCEPT for a transient estate (`--db <dir>/<name>`): its
+                // identity lives in memory, same contract as ServeCommand. A
+                // bulk upgrade sweep over scratch estates therefore mints no
+                // Keychain identity items (247 had accumulated by 2026-08-26
+                // when the posture was an environment value). Scratch estates
+                // have no federation signing to lose; the catalog's record kind
+                // is the declaration, never inferred.
                 let handle = try await kit.open(
                     storage: storage,
                     owner: owner,
-                    identityKeyStore: upgradeLifetimeIsEphemeral
-                        ? InMemoryEstateIdentityKeyStore() : nil
+                    identityKeyStore: Self.identityKeyStore(for: estate)
                 )
                 let report = try await kit.completeSharedContentReclaim(
                     handle: handle, now: Date())
@@ -1243,6 +1236,34 @@ struct UpgradeCommand: AsyncParsableCommand {
         #endif
     }
 
+    /// Fold a pre-manifest `no-encrypt` marker into the estate manifest and
+    /// delete it. The manifest's `encryption` field is the only record of the
+    /// posture from here on; a leftover marker would be a second, unread one.
+    private func retireLegacyEncryptionOptOut(estate: EstateRecord) {
+        let marker = estate.legacyEncryptionOptOutURL
+        guard FileManager.default.fileExists(atPath: marker.path) else { return }
+        do {
+            try EstateManifestRefresh.refresh(estate: estate, format: .current, encryption: .plaintext, now: Date())
+            try FileManager.default.removeItem(at: marker)
+            print("  ✓ recorded the --no-encrypt choice in \(EstateCatalogNames.manifest) and removed the legacy marker")
+        } catch {
+            print("  ✗ legacy no-encrypt marker left in place: \(error)")
+        }
+    }
+
+    /// After the schema and format steps, make the manifest say what is on disk.
+    private func refreshManifest(estate: EstateRecord) {
+        let posture: EstateManifest.Encryption =
+            EstateOpenPosture.fileState(at: estate.databaseURL) == .ciphertext ? .encrypted : .plaintext
+        do {
+            if try EstateManifestRefresh.refresh(estate: estate, format: .current, encryption: posture, now: Date()) {
+                print("  ✓ estate manifest refreshed (format \(EstateFormatVersion.current), schema \(GeniusLocusKitSchema.version))")
+            }
+        } catch {
+            print("  ✗ estate manifest not refreshed: \(error)")
+        }
+    }
+
     /// CE-1.0.35-08: offer to encrypt an unencrypted default estate.
     ///
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling): no
@@ -1252,15 +1273,18 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// non-interactive invocation (launchd, scripts, piped stdin) never
     /// prompts and never migrates. Declining is a clean no-op; users who
     /// stay unencrypted are assumed to have chosen that.
-    private func offerEstateEncryptionIfNeeded(home: URL) {
+    private func offerEstateEncryptionIfNeeded(estate: EstateRecord, home: URL) {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
 
+        // Only a registered estate, owned by this machine, may be encrypted.
+        guard estate.kind == .registered else {
+            print("  estate '\(estate.name)' is transient; only a registered estate can be encrypted")
+            return
+        }
         // Only a readable plaintext estate qualifies. Absent means first run
         // (serve creates new estates encrypted); ciphertext means done.
-        guard EstateKeyProvider.detectEstateFileState(at: estateURL) == .plaintext else { return }
+        guard EstateOpenPosture.fileState(at: estateURL) == .plaintext else { return }
 
         // Non-TTY invocations skip the offer silently and never migrate.
         guard isatty(fileno(stdin)) == 1 else { return }
@@ -1278,7 +1302,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
-        runEstateEncryptionMigration(estateURL: estateURL, dataDirectory: dataDir, home: home)
+        runEstateEncryptionMigration(estate: estate, home: home)
         #endif
     }
 
@@ -1287,13 +1311,14 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// → swap → trash through EstateEncryptionMigrator. Every failure path
     /// leaves the plaintext original working at the canonical path; the
     /// messages below say which side of the swap the user is on.
-    private func runEstateEncryptionMigration(estateURL: URL, dataDirectory: URL, home: URL) {
+    private func runEstateEncryptionMigration(estate: EstateRecord, home: URL) {
+        let estateURL = estate.databaseURL
         let key: Data
         do {
-            // EstateKeyProvider owns key custody: returns the existing key
+            // EstateOpenPosture owns key custody: returns the existing key
             // for this estate or mints one in the Keychain. On failure
             // nothing has been touched.
-            key = try EstateKeyProvider.provideKey(for: estateURL)
+            key = try EstateOpenPosture.provideKey(for: estate)
         } catch {
             print("""
                 Could not provision an encryption key (\(error)).
@@ -1302,20 +1327,14 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
-        // The migrator's daemon seam: launchd when this is the resident
-        // estate, a no-op otherwise — a cloned estate is encrypted with the
-        // resident daemon left running over its own estate. The resident
-        // directory comes from the daemon's launchd registration; an
-        // unreadable registration selects launchd (SAFETY: the copy+rename
-        // never runs under a daemon that may hold this estate open).
-        let residentDirectory = MootPaths.residentDataDirectory(homeDirectory: home)
-        let resident = MootPaths.isResidentEstate(
-            dataDirectory: dataDirectory,
-            residentDataDirectory: residentDirectory)
+        // The migrator's daemon seam: launchd when a live resident serves THIS
+        // estate (its PID marker names a live process), a no-op otherwise — a
+        // cloned estate is encrypted with the resident daemon left running over
+        // its own estate. SAFETY: the copy+rename never runs under a daemon that
+        // holds this estate open.
+        let resident = ResidentDaemonQuiesce.residentServes(pidURL: estate.pidURL)
         if !resident {
-            print("  data directory \(dataDirectory.path) is not the resident estate; daemon left running")
-        } else if let warning = residentDirectory.registrationWarning(for: dataDirectory) {
-            print(warning)
+            print("  no live resident serves this estate; daemon left running")
         }
         print("Encrypting the estate\u{2026}")
         do {
@@ -1446,19 +1465,21 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// reclaim both need a quiesced estate and run BEFORE `restartAgents`, so the
     /// restarted daemon hydrates migrated rows rather than serving the
     /// pre-migration shape from RAM until its next restart.
-    private func runConvergence(home: URL, binaryPath: String) async {
+    private func runConvergence(estate: EstateRecord, home: URL, binaryPath: String) async {
         rematerializePluginDepth(home: home, binaryPath: binaryPath)
         migratePermissionTiers(home: home)
         removeRedundantCodexDirectEntry(home: home)
         // A refused schema version skips every data step: each of them would
         // open the LocusKit schema and stamp the estate current.
-        if await runSchemaUpgrade(home: home) {
-            await runKGFactIdentityBackfill(home: home)
-            await runSharedContentReclaimIfPending(home: home)
-            await runWholeRecordVacuum(home: home)
-            await runDensePoolingConvergence(home: home)
-            await runSpanEncodeBackfill(home: home)
-            _ = await runVectorReclaim(home: home)
+        if await runSchemaUpgrade(estate: estate, home: home) {
+            retireLegacyEncryptionOptOut(estate: estate)
+            refreshManifest(estate: estate)
+            await runKGFactIdentityBackfill(estate: estate, home: home)
+            await runSharedContentReclaimIfPending(estate: estate, home: home)
+            await runWholeRecordVacuum(estate: estate, home: home)
+            await runDensePoolingConvergence(estate: estate, home: home)
+            await runSpanEncodeBackfill(estate: estate, home: home)
+            _ = await runVectorReclaim(estate: estate, home: home)
         }
         convergeDaemonBundle(home: home)
         restartAgents(home: home)
@@ -1562,13 +1583,15 @@ struct UpgradeCommand: AsyncParsableCommand {
     private func runConvergenceInNewBinary(binaryPath: String, home: URL) async -> Bool {
         guard FileManager.default.isExecutableFile(atPath: binaryPath) else { return false }
         var arguments = ["upgrade", "--converge-only", "--yes"]
+        // The re-executed binary converges the same estate this one resolved.
+        if let db { arguments += ["--db", db] }
         if noRestart { arguments.append("--no-restart") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.arguments = arguments
-        // A child that inherits this process's environment inherits
-        // MOOTX01_DATA_DIR too, so a redirected data directory keeps applying
-        // across the re-exec.
+        // The child inherits this process's environment (MOOTX01_REPO, the
+        // vault and rider values the steps read) so the re-exec converges
+        // under the same settings.
         process.environment = ProcessInfo.processInfo.environment
         // Flush before handing the fd to the child. `print` writes to a
         // block-buffered stdout whenever it is not a TTY (a redirect, a log file,

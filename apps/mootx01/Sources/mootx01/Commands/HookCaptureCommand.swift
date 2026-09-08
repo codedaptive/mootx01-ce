@@ -43,10 +43,12 @@
 
 import ArgumentParser
 import Foundation
+import MootProductIdentity
+import GeniusLocusKit
 import MootInstallerCore
 import os
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "HookCapture")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "mootx01.HookCapture")
 
 struct HookCaptureCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -75,13 +77,8 @@ struct HookCaptureCommand: AsyncParsableCommand {
             return
         }
 
-        // Resolve daemon port from the installed data directory.
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            homeDirectory: home
-        )
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        // Resolve the daemon port from the configuration directory's port file.
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         // Hook path: 1s request / 2s resource to avoid freezing Claude Code.
         // The general LiveDaemonClient (5/10s) is kept for ingest, restore,
         // and enable/disable paths where long lens/synthesis calls are possible.

@@ -1043,9 +1043,8 @@ public enum Installer {
     /// Ownership gate: the entry is extracted from the TOML table and run
     /// through `MCPEntryClassifier.classify(entry:)` — the same shared
     /// classification the install-time dedupe (`dedupeDirectEntry`) and the
-    /// JSON uninstall path use. An entry that classifies `.foreign` (an env
-    /// override such as `MOOTX01_DATA_DIR`/`ARIA_MCP_SQLITE_PATH`, an
-    /// `args` `--db` estate override, a non-default-port URL, or a shape
+    /// JSON uninstall path use. An entry that classifies `.foreign` (an
+    /// `args` `--db` estate selection, a non-default-port URL, or a shape
     /// that does not resolve to the mootx01 binary or the loopback daemon
     /// endpoint) is reported and left untouched: a stale redundant entry is
     /// a far smaller harm than silently deleting a user's scoped working
@@ -1267,7 +1266,7 @@ public enum Installer {
     }
 
     /// Parse a TOML inline table of string values
-    /// (`{ MOOTX01_HTTP_PORT = "", MOOTX01_DATA_DIR = "/x" }`) into a map.
+    /// (`{ MOOTX01_HTTP_PORT = "", MOOTX01_VAULT = "off" }`) into a map.
     /// Bare keys and string values only — anything else returns nil
     /// (callers retain the entry).
     private static func parseTOMLInlineStringTable(_ raw: String) -> [String: Any]? {

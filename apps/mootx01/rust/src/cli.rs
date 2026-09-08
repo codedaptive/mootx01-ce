@@ -58,8 +58,8 @@ pub enum BotLinkSub {
 /// A fully parsed invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// §4.1 serve [--db <name>] [--http <port|auto>] [--frozen]
-    Serve { db: Option<String>, http: Option<HttpMode>, frozen: bool },
+    /// §4.1 serve [--db <name>|<dir>/<name>] [--http <port|auto>] [--frozen] [--in-memory]
+    Serve { db: Option<String>, http: Option<HttpMode>, frozen: bool, in_memory: bool },
     /// §4.2 install [--target <ids>] [--location global|local] [--yes]
     ///              [--mode server|skills|plugin]
     ///              [--grant-permissions] [--no-permissions] [--no-mgr] [--no-daemon]
@@ -107,7 +107,7 @@ pub enum Command {
     Db(DbCommand),
     /// §4.5 status
     Status,
-    /// §4.6 query <verb> [--db <name>] [--json] [-- <args...>]
+    /// §4.6 query <verb> [--db <name>|<dir>/<name>] [--json] [-- <args...>]
     Query { verb: String, db: Option<String>, json: bool, args: Vec<String> },
     /// botlink <ping|list|call|rpc> [--http <url>] [--db <name>]
     BotLink { sub: BotLinkSub, http: Option<String>, db: Option<String> },
@@ -120,8 +120,8 @@ pub enum Command {
     /// (the detached background finisher an stdio serve spawns on startup/exit
     /// when the dreaming queue has pending items;  / recall-driven dreaming).
     Dream { db: Option<String> },
-    /// §4.8 upgrade [--from <path>] [--check] [--yes] [--no-restart] [--backfill-only]
-    Upgrade { from: Option<String>, check: bool, yes: bool, no_restart: bool, converge_only: bool, backfill_only: bool },
+    /// §4.8 upgrade [--from <path>] [--db <name>|<dir>/<name>] [--check] [--yes] [--no-restart] [--backfill-only]
+    Upgrade { from: Option<String>, db: Option<String>, check: bool, yes: bool, no_restart: bool, converge_only: bool, backfill_only: bool },
     /// out-of-band sensitivity grants unlock <private|secret> [--db <name>]
     /// Authenticate and issue an in-RAM sensitivity-tier grant to the daemon.
     /// "private" maps to the restricted tier; "secret" to the secret tier.
@@ -170,9 +170,15 @@ pub enum HttpMode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DbCommand {
-    /// `no_encrypt` mirrors `install --no-encrypt` deliberately: the two
-    /// estate-creating surfaces must not disagree about the default.
-    Create { name: String, no_encrypt: bool },
+    /// `value` is a bare name (registered, at the default location) or
+    /// `<dir>/<name>` (unregistered, at that place). `no_encrypt` mirrors
+    /// `install --no-encrypt` deliberately: the two estate-creating surfaces
+    /// must not disagree about the default.
+    Create { value: String, no_encrypt: bool },
+    /// Register an existing estate: the same `<value>` shape as create.
+    Register { value: String },
+    /// Forget a registered estate; its files are untouched.
+    Unregister { name: String },
     List,
     Open { name: String },
     Delete { name: String, force: bool },
@@ -380,11 +386,12 @@ fn take_value(it: &mut Args, flag: &str) -> Result<String, UsageError> {
 }
 
 fn parse_serve(it: &mut Args) -> Result<Command, UsageError> {
-    let (mut db, mut http, mut frozen) = (None, None, false);
+    let (mut db, mut http, mut frozen, mut in_memory) = (None, None, false, false);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = Some(take_value(it, "--db")?),
             "--frozen" => frozen = true,
+            "--in-memory" => in_memory = true,
             "--http" => {
                 let v = take_value(it, "--http")?;
                 http = Some(if v == "auto" {
@@ -401,7 +408,7 @@ fn parse_serve(it: &mut Args) -> Result<Command, UsageError> {
             other => return Err(unexpected(other, "serve")),
         }
     }
-    Ok(Command::Serve { db, http, frozen })
+    Ok(Command::Serve { db, http, frozen, in_memory })
 }
 
 fn parse_drain(it: &mut Args) -> Result<Command, UsageError> {
@@ -546,14 +553,14 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
     let sub = match it.next() {
         None => {
             return Err(UsageError(
-                "Error: 'db' requires a subcommand: create, list, open, delete.".into(),
+                "Error: 'db' requires a subcommand: create, register, unregister, list, open, delete.".into(),
             ))
         }
         Some(s) => s.as_str(),
     };
     match sub {
         "create" => {
-            let name = take_value(it, "db create <name>")?;
+            let value = take_value(it, "db create <name>|<dir>/<name>")?;
             // create takes flags, so it parses a flag loop rather than
             // expect_help_or_end: --no-encrypt is the same opt-out shape
             // as `install --no-encrypt`.
@@ -565,7 +572,21 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
                     other => return Err(unexpected(other, "db create")),
                 }
             }
-            Ok(Command::Db(DbCommand::Create { name, no_encrypt }))
+            Ok(Command::Db(DbCommand::Create { value, no_encrypt }))
+        }
+        "register" => {
+            let value = take_value(it, "db register <name>|<dir>/<name>")?;
+            if let Some(h) = expect_help_or_end(it, "db")? {
+                return Ok(h);
+            }
+            Ok(Command::Db(DbCommand::Register { value }))
+        }
+        "unregister" => {
+            let name = take_value(it, "db unregister <name>")?;
+            if let Some(h) = expect_help_or_end(it, "db")? {
+                return Ok(h);
+            }
+            Ok(Command::Db(DbCommand::Unregister { name }))
         }
         "list" => {
             if let Some(h) = expect_help_or_end(it, "db")? {
@@ -792,11 +813,13 @@ fn parse_proxy(it: &mut Args) -> Result<Command, UsageError> {
 
 fn parse_upgrade(it: &mut Args) -> Result<Command, UsageError> {
     let mut from = None;
+    let mut db = None;
     let (mut check, mut yes, mut no_restart, mut converge_only, mut backfill_only) =
         (false, false, false, false, false);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--from" => from = Some(take_value(it, "--from")?),
+            "--db" => db = Some(take_value(it, "--db")?),
             "--check" => check = true,
             "--yes" => yes = true,
             "--no-restart" => no_restart = true,
@@ -804,16 +827,15 @@ fn parse_upgrade(it: &mut Args) -> Result<Command, UsageError> {
             // re-executes the binary it just installed with this flag so the
             // convergence steps run the NEW code. See `upgrade::run`.
             "--converge-only" => converge_only = true,
-            // Headless data-dir convergence for scripted and benchmark estates:
-            // run only the migration steps (kg_facts identity, shared-content
-            // reclaim, dense pooling convergence) against MOOTX01_DATA_DIR,
+            // Estate-only convergence for scripted and benchmark estates: run
+            // only the estate migration steps against the selected estate,
             // then exit. No network, no service manager, no prompts.
             "--backfill-only" => backfill_only = true,
             "--help" | "-h" => return Ok(Command::HelpFor("upgrade")),
             other => return Err(unexpected(other, "upgrade")),
         }
     }
-    Ok(Command::Upgrade { from, check, yes, no_restart, converge_only, backfill_only })
+    Ok(Command::Upgrade { from, db, check, yes, no_restart, converge_only, backfill_only })
 }
 
 fn parse_unlock(it: &mut Args) -> Result<Command, UsageError> {
@@ -956,7 +978,7 @@ pub fn root_usage() -> &'static str {
      \x20 serve                   Start the ARIA MCP server (stdio, or resident HTTP when --http / MOOTX01_HTTP_PORT is set).\n\
      \x20 install                 Wire mootx01 into MCP clients.\n\
      \x20 uninstall               Remove mootx01 from MCP clients.\n\
-     \x20 db                      Manage named estate databases.\n\
+     \x20 db                      Manage estate databases.\n\
      \x20 status                  Show server state, active estate, and wired clients.\n\
      \x20 query                   Issue a single ARIA tool call (v1.0: MCP subprocess passthrough).\n\
      \x20 botlink                 One-shot MCP transport for cloud agents (machine JSON stdout, loopback only).\n\
@@ -975,10 +997,11 @@ pub fn subcommand_usage(cmd: &str) -> String {
     match cmd {
         "serve" => "Start the ARIA MCP server (stdio, or resident HTTP when --http / MOOTX01_HTTP_PORT is set).\n\
             \n\
-            USAGE: mootx01 serve [--db <name>] [--http <port|auto>] [--frozen]\n\
+            USAGE: mootx01 serve [--db <name>|<dir>/<name>] [--http <port|auto>] [--frozen] [--in-memory]\n\
             \n\
             OPTIONS:\n\
-            \x20 --db <name>             Named estate to serve. Default: active estate.\n\
+            \x20 --db <name>|<dir>/<name>  A registered estate by name, or a transient estate at <dir>/<name>/ (plaintext, no identity, forgotten at exit). Default: the active estate.\n\
+            \x20 --in-memory             Serve from the in-memory backend: same protocol and algorithms, no filesystem; the estate lives and dies with this process.\n\
             \x20 --http <port|auto>      Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). 'auto' hunts upward from 4242 to the first free port; an explicit port is exact. When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.\n\
             \x20 --frozen                Serve the estate as a read-only snapshot (also MOOTX01_FROZEN=1): no background workers, no recall traces or reward marks, mutating tools refused. stdio only — refused with --http.".into(),
         "install" => "Wire mootx01 into MCP clients.\n\
@@ -1008,28 +1031,33 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --location <scope>      Config scope: 'global', 'local', or omitted for both. Local removes Claude Code project .mcp.json and .claude/settings.json.\n\
             \x20 -y, --yes               Skip prompts; uninstall from all detected clients.\n\
             \x20 --purge                 Also remove all estate databases and the moot-mgr history (moved to the platform trash after a typed confirmation; --yes skips the prompt). Full uninstall only.".into(),
-        "db" => "Manage named estate databases.\n\
+        "db" => "Manage estate databases.\n\
             \n\
-            USAGE: mootx01 db <create|list|open|delete>\n\
+            USAGE: mootx01 db <create|register|unregister|list|open|delete>\n\
+            \n\
+            A bare <name> means the default database location under the configuration directory; <dir>/<name> means exactly that place.\n\
             \n\
             SUBCOMMANDS:\n\
-            \x20 create <name> [--no-encrypt]  Create a new named estate. --no-encrypt creates it WITHOUT at-rest encryption (default is encrypted); run `mootx01 upgrade` at any time to encrypt it later.\n\
-            \x20 list                    List all known estates.\n\
-            \x20 open <name>             Set the active estate (used by serve and status).\n\
-            \x20 delete <name> [-f]      Delete a named estate and its database files. Cannot delete 'default' (use uninstall --purge).".into(),
+            \x20 create <name> [--no-encrypt]        Create an estate at the default location and register it. --no-encrypt creates it WITHOUT at-rest encryption (default is encrypted); run `mootx01 upgrade` at any time to encrypt it later.\n\
+            \x20 create <dir>/<name> --no-encrypt    Create an unregistered (plaintext) estate at that place; attach it with `--db <dir>/<name>`.\n\
+            \x20 register <name>|<dir>/<name>        Register an existing estate in the catalog. Its files are not touched.\n\
+            \x20 unregister <name>                   Forget a registered estate. Its files are not touched.\n\
+            \x20 list                                List the registered estates, active first.\n\
+            \x20 open <name>                         Make a registered estate the active one (used by serve, drain, dream, query and status).\n\
+            \x20 delete <name> [-f]                  Delete a registered estate: its files and its record. Cannot delete the active estate or 'default' (use uninstall --purge).".into(),
         "status" => "Show server state, active estate, and wired clients.\n\
             \n\
             USAGE: mootx01 status".into(),
         "query" => "Issue a single ARIA tool call (v1.0: MCP subprocess passthrough).\n\
             \n\
-            USAGE: mootx01 query <verb> [--db <name>] [--json] [<args>...]\n\
+            USAGE: mootx01 query <verb> [--db <name>|<dir>/<name>] [--json] [<args>...]\n\
             \n\
             ARGUMENTS:\n\
             \x20 <verb>                  ARIA verb name without moot_ prefix, e.g. 'drawer_recall'.\n\
             \x20 <args>                  Tool arguments as --key value pairs.\n\
             \n\
             OPTIONS:\n\
-            \x20 --db <name>             Named estate to query. Default: active estate.\n\
+            \x20 --db <name>|<dir>/<name>  Estate to query: a registered name, or <dir>/<name> for a transient estate (forces the subprocess path). Default: the active estate.\n\
             \x20 --json                  Output raw JSON instead of human-readable text.\n\
             \n\
             If you are a cloud agent that cannot reach `127.0.0.1` on the user's\n\
@@ -1114,14 +1142,15 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --db <name>             Named estate to process dreaming jobs for. Default: active estate.".into(),
         "upgrade" => "Upgrade mootx01 to the latest release or a local build.\n\
             \n\
-            USAGE: mootx01 upgrade [--from <path>] [--check] [--yes] [--no-restart] [--backfill-only]\n\
+            USAGE: mootx01 upgrade [--from <path>] [--db <name>|<dir>/<name>] [--check] [--yes] [--no-restart] [--backfill-only]\n\
             \n\
             OPTIONS:\n\
             \x20 --from <path>           Path to the new binary to install (skips online check).\n\
+            \x20 --db <name>|<dir>/<name>  Estate to upgrade: a registered name, or <dir>/<name> for a transient estate. Default: the active estate. A transient estate gets the estate migration steps only.\n\
             \x20 --check                 Print the latest available version and exit without downloading.\n\
             \x20 --yes                   Skip the confirmation prompt before downloading a new release.\n\
             \x20 --no-restart            Copy the binary but skip restarting the background agents.\n\
-            \x20 --backfill-only         Run only the data-directory migration steps (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
+            \x20 --backfill-only         Run only the estate migration steps (schema 10 → 19, manifest refresh, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
         "unlock" => "Authenticate and issue a sensitivity-tier grant to the resident daemon.\n\
             \n\
             USAGE: mootx01 unlock <private|secret> [--db <name>]\n\
@@ -1254,22 +1283,23 @@ mod tests {
 
     #[test]
     fn serve_defaults() {
-        assert_eq!(p(&["serve"]).unwrap(), Command::Serve { db: None, http: None, frozen: false });
+        assert_eq!(p(&["serve"]).unwrap(), Command::Serve { db: None, http: None, frozen: false, in_memory: false });
+        assert_eq!(p(&["serve", "--in-memory"]).unwrap(), Command::Serve { db: None, http: None, frozen: false, in_memory: true });
     }
 
     #[test]
     fn serve_flags() {
         assert_eq!(
             p(&["serve", "--db", "work", "--http", "4242"]).unwrap(),
-            Command::Serve { db: Some("work".into()), http: Some(HttpMode::Port(4242)), frozen: false }
+            Command::Serve { db: Some("work".into()), http: Some(HttpMode::Port(4242)), frozen: false, in_memory: false }
         );
         assert_eq!(
             p(&["serve", "--http", "auto"]).unwrap(),
-            Command::Serve { db: None, http: Some(HttpMode::Auto), frozen: false }
+            Command::Serve { db: None, http: Some(HttpMode::Auto), frozen: false, in_memory: false }
         );
         assert_eq!(
             p(&["serve", "--frozen", "--db", "clone"]).unwrap(),
-            Command::Serve { db: Some("clone".into()), http: None, frozen: true }
+            Command::Serve { db: Some("clone".into()), http: None, frozen: true, in_memory: false }
         );
     }
 
@@ -1443,11 +1473,15 @@ mod tests {
     #[test]
     fn db_surface() {
         assert_eq!(p(&["db", "create", "work"]).unwrap(),
-                   Command::Db(DbCommand::Create { name: "work".into(), no_encrypt: false }));
+                   Command::Db(DbCommand::Create { value: "work".into(), no_encrypt: false }));
         // Same opt-out shape as install --no-encrypt: the two estate-creating
         // surfaces must not disagree about the default.
         assert_eq!(p(&["db", "create", "work", "--no-encrypt"]).unwrap(),
-                   Command::Db(DbCommand::Create { name: "work".into(), no_encrypt: true }));
+                   Command::Db(DbCommand::Create { value: "work".into(), no_encrypt: true }));
+        assert_eq!(p(&["db", "register", "/tmp/x/work"]).unwrap(),
+                   Command::Db(DbCommand::Register { value: "/tmp/x/work".into() }));
+        assert_eq!(p(&["db", "unregister", "work"]).unwrap(),
+                   Command::Db(DbCommand::Unregister { name: "work".into() }));
         assert!(p(&["db", "create", "work", "--bogus"]).is_err());
         assert_eq!(p(&["db", "list"]).unwrap(), Command::Db(DbCommand::List));
         assert_eq!(p(&["db", "open", "work"]).unwrap(),
@@ -1480,6 +1514,7 @@ mod tests {
             p(&["upgrade", "--check"]).unwrap(),
             Command::Upgrade {
                 from: None,
+                db: None,
                 check: true,
                 yes: false,
                 no_restart: false,
@@ -1497,6 +1532,7 @@ mod tests {
             p(&["upgrade", "--converge-only", "--yes"]).unwrap(),
             Command::Upgrade {
                 from: None,
+                db: None,
                 check: false,
                 yes: true,
                 no_restart: false,
@@ -1527,6 +1563,7 @@ mod tests {
             p(&["upgrade", "--backfill-only"]).unwrap(),
             Command::Upgrade {
                 from: None,
+                db: None,
                 check: false,
                 yes: false,
                 no_restart: false,

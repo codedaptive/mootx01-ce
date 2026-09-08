@@ -357,7 +357,8 @@ struct Core09UninstallReportTests {
             "Library/Application Support/com.mootx01.ce", isDirectory: true
         )
         let report = LaunchAgent.reportUninstallPreservation(
-            homeDirectory: home, dataDirectory: dataDir
+            homeDirectory: home,
+            estateDatabaseURL: dataDir.appendingPathComponent("estate.sqlite", isDirectory: false)
         )
         #expect(report.daemonConfiguration == .absent)
         #expect(report.estateData == .absent)
@@ -379,7 +380,8 @@ struct Core09UninstallReportTests {
             "Library/Application Support/com.mootx01.ce", isDirectory: true
         )
         let report = LaunchAgent.reportUninstallPreservation(
-            homeDirectory: home, dataDirectory: dataDir
+            homeDirectory: home,
+            estateDatabaseURL: dataDir.appendingPathComponent("estate.sqlite", isDirectory: false)
         )
         // Plist is an owned artifact: configuration class is retained.
         #expect(report.daemonConfiguration == .retained)
@@ -402,7 +404,8 @@ struct Core09UninstallReportTests {
 
         // No plist or bundle present (simulates post-config-removal state).
         let report = LaunchAgent.reportUninstallPreservation(
-            homeDirectory: home, dataDirectory: dataDir
+            homeDirectory: home,
+            estateDatabaseURL: dataDir.appendingPathComponent("estate.sqlite", isDirectory: false)
         )
         #expect(report.daemonConfiguration == .absent,
                 "config should be absent after plist/bundle removal")
@@ -423,7 +426,8 @@ struct Core09UninstallReportTests {
         let walFile = dataDir.appendingPathComponent("estate.sqlite-wal", isDirectory: false)
         try Data("wal".utf8).write(to: walFile)
         let report = LaunchAgent.reportUninstallPreservation(
-            homeDirectory: home, dataDirectory: dataDir
+            homeDirectory: home,
+            estateDatabaseURL: dataDir.appendingPathComponent("estate.sqlite", isDirectory: false)
         )
         #expect(report.estateData == .retained,
                 "a WAL sidecar alone is enough to count as estate data present")
@@ -444,13 +448,15 @@ struct Core09UninstallReportTests {
         defer { try? FileManager.default.removeItem(at: home) }
         let dataDir = home.appendingPathComponent("data", isDirectory: true)
         // Case 1: estate absent.
-        let r1 = LaunchAgent.reportUninstallPreservation(homeDirectory: home, dataDirectory: dataDir)
+        let r1 = LaunchAgent.reportUninstallPreservation(
+            homeDirectory: home, estateDatabaseURL: dataDir.appendingPathComponent("estate.sqlite"))
         #expect(r1.estateData != .removed)
         // Case 2: estate present.
         try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         let estateFile = dataDir.appendingPathComponent("estate.sqlite")
         try Data("x".utf8).write(to: estateFile)
-        let r2 = LaunchAgent.reportUninstallPreservation(homeDirectory: home, dataDirectory: dataDir)
+        let r2 = LaunchAgent.reportUninstallPreservation(
+            homeDirectory: home, estateDatabaseURL: dataDir.appendingPathComponent("estate.sqlite"))
         #expect(r2.estateData != .removed)
     }
 }

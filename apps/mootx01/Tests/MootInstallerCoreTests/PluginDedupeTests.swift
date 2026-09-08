@@ -332,30 +332,13 @@ struct PluginDedupeTests {
         #expect(MCPEntryClassifier.classify(entry: entry) == .oursDefault)
     }
 
-    @Test("an entry with MOOTX01_DATA_DIR override classifies as foreign")
-    func classifyDataDirOverrideIsForeign() {
+    @Test("an env block never selects an estate, so it never makes our entry foreign")
+    func classifyEnvBlockDoesNotMarkForeign() {
         let entry: [String: Any] = [
             "command": "/usr/local/bin/mootx01", "args": ["proxy"],
-            "env": ["MOOTX01_DATA_DIR": "/Users/dev/rig-a"],
+            "env": ["MOOTX01_HTTP_PORT": "4242", "SOME_UNRELATED_KEY": "/Users/dev/rig-a"],
         ]
-        guard case let .foreign(reason) = MCPEntryClassifier.classify(entry: entry) else {
-            Issue.record("expected .foreign")
-            return
-        }
-        #expect(reason.contains("MOOTX01_DATA_DIR"))
-    }
-
-    @Test("an entry with ARIA_MCP_SQLITE_PATH override classifies as foreign")
-    func classifySqlitePathOverrideIsForeign() {
-        let entry: [String: Any] = [
-            "command": "/usr/local/bin/mootx01", "args": ["proxy"],
-            "env": ["ARIA_MCP_SQLITE_PATH": "/Users/dev/estate.sqlite"],
-        ]
-        guard case let .foreign(reason) = MCPEntryClassifier.classify(entry: entry) else {
-            Issue.record("expected .foreign")
-            return
-        }
-        #expect(reason.contains("ARIA_MCP_SQLITE_PATH"))
+        #expect(MCPEntryClassifier.classify(entry: entry) == .oursDefault)
     }
 
     // MARK: - Positive shape check (Adams #2)
@@ -592,14 +575,13 @@ struct PluginDedupeTests {
         let client = MCPClients.supported.first { $0.id == "claude-code" }!
         let configURL = home.appendingPathComponent(client.configPath)
 
-        // Hand-write a dev-rig direct entry: our server name, but carrying a
-        // MOOTX01_DATA_DIR override — the plugin-ownership rule's "not ours or non-default".
+        // Hand-write a dev-rig direct entry: our server name, but selecting
+        // another estate with --db — the plugin-ownership rule's "not ours or non-default".
         let devRigEntry: [String: Any] = [
             "mcpServers": [
                 "mootx01": [
                     "command": "/Users/dev/build/mootx01",
-                    "args": ["proxy"],
-                    "env": ["MOOTX01_DATA_DIR": "/Users/dev/rig-a/.mootx01-data"],
+                    "args": ["serve", "--db", "rig-a"],
                 ] as [String: Any],
             ],
         ]
@@ -614,15 +596,14 @@ struct PluginDedupeTests {
             Issue.record("expected .retainedForeign, got \(outcome)")
             return
         }
-        #expect(reason.contains("MOOTX01_DATA_DIR"))
+        #expect(reason.contains("--db"))
         #expect(path == configURL.path)
 
         // The entry is untouched byte-for-byte in substance: still present,
-        // still carrying the override.
+        // still selecting its estate.
         let entry = try directEntry(client: client, home: home)
         #expect(entry?["command"] as? String == "/Users/dev/build/mootx01")
-        let env = entry?["env"] as? [String: Any]
-        #expect(env?["MOOTX01_DATA_DIR"] as? String == "/Users/dev/rig-a/.mootx01-data")
+        #expect(entry?["args"] as? [String] == ["serve", "--db", "rig-a"])
     }
 
     /// Same guarantee on the uninstall path (plugin-owned MCP connections: uninstall must not
@@ -638,8 +619,7 @@ struct PluginDedupeTests {
             "mcpServers": [
                 "mootx01": [
                     "command": "/Users/dev/build/mootx01",
-                    "args": ["proxy"],
-                    "env": ["ARIA_MCP_SQLITE_PATH": "/Users/dev/rig-a/estate.sqlite"],
+                    "args": ["serve", "--db=rig-a"],
                 ] as [String: Any],
             ],
         ]
@@ -653,7 +633,7 @@ struct PluginDedupeTests {
             Issue.record("expected .retainedForeign, got \(outcome)")
             return
         }
-        #expect(reason.contains("ARIA_MCP_SQLITE_PATH"))
+        #expect(reason.contains("--db"))
         #expect(path == configURL.path)
         #expect(try directEntry(client: client, home: home) != nil, "non-default entry must survive uninstall")
     }

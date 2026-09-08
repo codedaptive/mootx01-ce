@@ -25,6 +25,7 @@
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct QueryCommand: AsyncParsableCommand {
@@ -43,7 +44,7 @@ struct QueryCommand: AsyncParsableCommand {
     @Argument(help: "ARIA verb name without moot_ prefix, e.g. 'drawer_recall'.")
     var verb: String
 
-    @Option(name: .long, help: "Named estate to query. Default: active estate (forces subprocess path).")
+    @Option(name: .long, help: "Estate to query: a registered name, or <dir>/<name> for a transient estate (forces the subprocess path). Default: the active estate.")
     var db: String?
 
     @Flag(name: .long, help: "Output raw JSON instead of human-readable text.")
@@ -53,9 +54,16 @@ struct QueryCommand: AsyncParsableCommand {
     var remaining: [String] = []
 
     func run() async throws {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let env = ProcessInfo.processInfo.environment
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
+        // `--db` is resolved by the catalog here, so a bad value fails in this
+        // process with the catalog's message instead of inside the serve child.
+        // The value itself is passed to serve unchanged; serve resolves it the
+        // same way.
+        if let db {
+            do { _ = try EstateCatalog.open(selecting: db) } catch {
+                fputs("mootx01 query: \(error)\n", stderr)
+                throw ExitCode.failure
+            }
+        }
 
         let toolName = "moot_\(verb)"
         let arguments = parseArguments(remaining)
@@ -67,7 +75,7 @@ struct QueryCommand: AsyncParsableCommand {
 
         // Transport select: live daemon (HTTP, stateless per frame) unless --db
         // pins a specific estate — mirroring query.rs transport-select logic.
-        let resolvedPort = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let resolvedPort = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         if db == nil && daemonAlive(port: resolvedPort) {
             // Resident daemon is up: POST the tools/call frame directly.
             // No second writer opened — the daemon already holds the DB.

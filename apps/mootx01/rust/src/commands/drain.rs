@@ -8,13 +8,12 @@
 //! then exits. The T3 lease keeps it from double-draining against a resident or
 //! another finisher. Rarely run by hand.
 
-use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use aria_mcp::estate_registry::{DrainStatus, EstateRegistry};
+use aria_mcp::estate_registry::{DrainStatus, EstateRegistry, SqliteOpening};
+use genius_locus_kit::{EstateBackend, EstateCatalog, EstateOpenPosture};
 
-use crate::core::paths;
 use crate::exit;
 
 /// Host identity for the open (matches the registry's production default). The
@@ -33,32 +32,59 @@ pub fn run(db: Option<String>) -> ExitCode {
         libc::setsid();
     }
 
-    let data = paths::data_dir();
-    // Estate path: an explicit ARIA_MCP_SQLITE_PATH override (inherited from the
-    // spawning serve) wins; else resolve the named/active estate.
-    let estate = match std::env::var("ARIA_MCP_SQLITE_PATH") {
-        Ok(p) if !p.is_empty() => p,
-        _ => {
-            let name = db.unwrap_or_else(|| paths::active_estate(&data));
-            paths::estate_sqlite_path(&data, &name)
-                .to_string_lossy()
-                .into_owned()
+    // The estate is the catalog's: the `--db` value the spawning serve was
+    // launched with (a registered name or a transient path), else the active
+    // estate. Nothing here computes a path.
+    let catalog = match db.as_deref() {
+        Some(value) => EstateCatalog::open_selecting(value),
+        None => EstateCatalog::open(),
+    };
+    let record = match catalog {
+        Ok(catalog) => catalog.active().clone(),
+        Err(e) => {
+            eprintln!("mootx01 drain: {e}");
+            return ExitCode::from(exit::FAILURE);
         }
     };
-    if !Path::new(&estate).exists() {
+    if record.backend != EstateBackend::Sqlite {
+        eprintln!("mootx01 drain: estate '{}' is not a SQLite estate — nothing to drain here", record.name);
+        return ExitCode::from(exit::OK);
+    }
+    let estate_path = record.database_path();
+    if !estate_path.exists() {
         return ExitCode::from(exit::OK); // nothing to drain
     }
+    let estate = estate_path.to_string_lossy().into_owned();
+    // The at-rest posture is decided before the open and fails closed, as in
+    // serve: a ciphertext file whose key is missing is never reopened plaintext.
+    let open_posture = match EstateOpenPosture::resolve(&record) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("mootx01 drain: estate encryption posture unavailable: {e}");
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
 
     // Opening eager-mounts the Corpus ingest queue + lease-gated drain worker
-    // (EstateRegistry::new_sqlite wires the estate through GLK
-    // wire_glk_substores), so the backlog drains without any capture.
-    let reg = match EstateRegistry::new_sqlite(&estate, OWNER) {
+    // (the registry's SQLite open wires the estate through GLK
+    // wire_glk_substores), so the backlog drains without any capture. The
+    // record's kind decides federation; a finisher never seeds charters.
+    let opening = SqliteOpening { seed_charters: false, ..SqliteOpening::for_record(&record) };
+    let reg = match EstateRegistry::new_sqlite_with(&estate, OWNER, opening) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("mootx01 drain: {e}");
             return ExitCode::from(exit::FAILURE);
         }
     };
+    // The manifest must say what is on disk after the migration chain ran.
+    let now_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    if let Err(e) = genius_locus_kit_migrations::refresh_after_chain(&record, open_posture.manifest_encryption(), now_millis) {
+        eprintln!("mootx01 drain: estate manifest could not be written: {e}");
+    }
     let handle = reg.default.handle;
 
     // Poll the drain status (same surface as moot_drain_status) until the
