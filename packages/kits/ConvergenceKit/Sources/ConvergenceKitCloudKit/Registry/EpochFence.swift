@@ -29,12 +29,13 @@
 // Epoch fencing prevents a stale claimant from minting new outbound records.
 
 import Foundation
+import MootProductIdentity
 import CloudKit
 import ConvergenceKit
 import SubstrateTypes
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "EpochFence")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.EpochFence")
 
 // MARK: - EpochFence
 

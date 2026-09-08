@@ -18,6 +18,7 @@
 // No drain loop. Just `queue.send(_:)`.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import PersistenceKitSQLite
@@ -32,7 +33,7 @@ internal extension GeniusLocusKit {
     /// `internal` so DreamingReads.swift (same module, different file) can
     /// reference `Self.dreamLog` without a per-file logger duplicate.
     static var dreamLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - Lazy mount

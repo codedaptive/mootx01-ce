@@ -24,6 +24,7 @@ let package = Package(
     platforms: [.macOS(.v26), .iOS(.v26)],
     products: [.library(name: "SynapseKit", targets: ["SynapseKit"])],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(name: "EngramLib", path: "../../libs/EngramLib"),
         .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/SubstrateTypes"),
@@ -45,6 +46,7 @@ let package = Package(
         .target(
             name: "SynapseKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "EngramLib",
                 "SubstrateTypes", "SubstrateML",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),

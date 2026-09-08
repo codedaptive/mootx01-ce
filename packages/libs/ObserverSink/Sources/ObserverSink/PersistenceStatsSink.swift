@@ -37,6 +37,7 @@
 //   discarded and logged at .debug level (silent to operators by default).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import IntellectusLib
 import PersistenceKit
@@ -88,7 +89,7 @@ public struct PersistenceStatsSink: StatsSink {
     /// e.g. `"aria-mcp-a7f2e914"`.
     private let dropboxID: String
 
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "ObserverSink")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ObserverSink")
 
     /// In-flight task cap (#48): drop samples when this many tasks are
     /// pending. Prevents unbounded memory growth from rapid telemetry
