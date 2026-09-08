@@ -24,11 +24,11 @@
 //   DeltaFeatureExtractor.swift (Ds1)
 //   TypedDecayWeighting.swift   (Ds2)
 //   DistillationScorer.swift    (Ds3)
-// The §7.6 token-compaction transform Stage 5 renders through lives in
-// TokenCompaction.swift.
+// Stage 5 delegates complete, source-ordered rendering to ContextDistillLib.
 
 import Foundation
 import SubstrateTypes
+import ContextDistillLib
 
 // MARK: - DS4: DistillationPipeline core types
 
@@ -60,12 +60,8 @@ public struct DistillationInput: Sendable {
 
 /// Output from the five-stage distillation pipeline.
 public struct DistillationOutput: Sendable {
-    /// The distilled rendering (SPEC_DISTILLATION_STORAGE §5): the item's
-    /// unit sentences compacted through the §7.6 token-compaction
-    /// transform, dominant-component (core) sentences first in stable
-    /// source order, the episodic tail after. Zero inline metadata —
-    /// every byte is payload. Written into the source drawer's
-    /// `distilled` column by the GLK distillation paths.
+    /// Complete content rendered in source order by ContextDistillLib.
+    /// Empty when rendering is explicitly disabled for fingerprint-only work.
     public let distilledText: String
     /// Confidence score conf(F*) ∈ [0, 1].
     public let confidence: Float32
@@ -101,8 +97,8 @@ public struct DistillationOutput: Sendable {
 ///             CONVERGENT/MONOTONE sequences.
 /// Stage 3: Build PMI coherence graph, select dominant component (F*).
 /// Stage 4: Compute structural scores on F*.
-/// Stage 5: Compute confidence, render distilledText (§7.6 compaction,
-///          core-first ordering), compute featureFingerprint.
+/// Stage 5: Compute confidence, optionally render complete source-ordered text,
+///          compute featureFingerprint.
 public enum DistillationPipeline {
 
     /// Feature extractor signature. Called once per (memory, featureType) pair.
@@ -211,11 +207,14 @@ public enum DistillationPipeline {
     ///         (the Falcon doc lost database/tables/shadow to a non-dominant
     ///         component). Intra-item keeps all structural features.
     ///     Default false preserves the cross-memory cluster behaviour.
+    ///   - renderText: produce complete source-ordered text; false skips rendering
+    ///     while preserving all structural analysis and fingerprint results.
     /// - Returns: DistillationOutput with distilledText, confidence, featureFingerprint.
     public static func run(
         input: DistillationInput,
         extractFeatures: FeatureExtractor,
-        intraItem: Bool = false
+        intraItem: Bool = false,
+        renderText: Bool = true
     ) -> DistillationOutput {
         // Five pipeline stages share the incidence matrix, vocabulary, and feature array.
         // Extracting sub-functions would require threading these large structures through
@@ -437,32 +436,15 @@ public enum DistillationPipeline {
             selected: selected, allThreshold: passing)
         let uncertain = confidence >= 0.4 && confidence < 0.7
 
-        // Rendering (SPEC_DISTILLATION_STORAGE §5/§7.4): token-economical
-        // prose built from the item's OWN unit sentences, not from the
-        // feature bag. The structural core orders retention: sentences
-        // carrying a dominant-component (selected) feature render first in
-        // stable source order; the episodic tail follows in source order.
-        // Every unit renders through the ONE §7.6 compaction transform —
-        // rule 1 (propositional fidelity, priority 1) bounds how hard the
-        // tail may compress, so core and tail share the same transform and
-        // "compresses hardest" is realized by ordering, not by a lossier
-        // second transform. Zero inline metadata: confidence/SNR/delta ride
-        // the DistillationOutput fields only, never the text.
-        let selectedValues = Set(selected.map { $0.value })
-        var coreUnits: [String] = []
-        var tailUnits: [String] = []
-        for (i, unit) in input.memoryContents.enumerated() {
-            let carriesCore = perMemoryFeatures[i].contains { selectedValues.contains($0.value) }
-            if carriesCore {
-                coreUnits.append(unit)
-            } else {
-                tailUnits.append(unit)
-            }
+        // Preserve source order and unit boundaries independently of structural
+        // selection. Reserved/invalid input fails unchanged, never to a skim.
+        let distilledText: String
+        if renderText {
+            let source = input.memoryContents.joined(separator: "\n")
+            distilledText = (try? CompleteContentReducer.distill(source).text) ?? source
+        } else {
+            distilledText = ""
         }
-        let distilledText = (coreUnits + tailUnits)
-            .map { TokenCompaction.compact($0) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
 
         // Feature fingerprint: OR-reduce of featureHash for each selected feature
         let fingerprint = selected.reduce(Fingerprint256.zero) { acc, feature in
