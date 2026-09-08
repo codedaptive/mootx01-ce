@@ -21,9 +21,10 @@
 
 import CryptoKit
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "ModelDirectoryResolver")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKitProviders.ModelDirectoryResolver")
 
 /// Locates and integrity-verifies a bundled encoder model directory.
 ///

@@ -31,6 +31,7 @@
 // which is what the Rust conformance harness asserts.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -153,7 +154,7 @@ public struct TrainingDaemonReport: Sendable, Equatable, Codable {
 public final class TrainingDaemon: @unchecked Sendable {
 
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "TrainingDaemon")
 
     /// The admission gate. Manifest-set at construction; reused across

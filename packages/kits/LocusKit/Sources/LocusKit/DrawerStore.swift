@@ -33,6 +33,7 @@
 // per the deterministic-engine rule.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import IntellectusLib
 import SubstrateKernel
@@ -53,7 +54,7 @@ import SubstrateLib
 import SubstrateTypes
 import PersistenceKit
 
-private let drawerStoreLog = Logger(subsystem: "com.mootx01.kit", category: "LocusKit")
+private let drawerStoreLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LocusKit")
 
 public actor DrawerStore {
 
