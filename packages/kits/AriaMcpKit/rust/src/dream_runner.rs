@@ -159,6 +159,7 @@ pub struct DreamRunResult {
 pub fn run_one_dreaming_cycle(
     estate_path: &str,
     owner: &str,
+    opening: crate::estate_registry::SqliteOpening,
     now_epoch_secs: f64,
 ) -> Result<DreamRunResult, String> {
     // Nothing to do if the estate file does not exist.
@@ -172,10 +173,10 @@ pub fn run_one_dreaming_cycle(
         });
     }
 
-    // Open the estate. `EstateRegistry::new_sqlite` wires corpus + VectorStore
-    // + encode queue (semantic recall layer). The dreaming queue is a separate
-    // lazy-mount (below) — it is NOT wired by `new_sqlite`.
-    let reg = EstateRegistry::new_sqlite(estate_path, owner)
+    // Open the estate as its catalog record decides (`opening`): the open
+    // wires corpus + VectorStore + encode queue (semantic recall layer). The
+    // dreaming queue is a separate lazy-mount (below) — it is NOT wired here.
+    let reg = EstateRegistry::new_sqlite_with(estate_path, owner, opening)
         .map_err(|e| format!("dream: estate open failed: {e}"))?;
     let handle = reg.default.handle.clone();
     // The DrawerStore is the manifest-backed KV surface for policy persistence.

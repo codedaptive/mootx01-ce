@@ -38,7 +38,8 @@
 //! Vault tools are backed by `vault-kit` (`VaultBridge`, `ObsidianAdapter`,
 //! `DrawerMapping`). The ARIA layer owns the SHA-256 sidecar manifest for drift
 //! detection (Vault drift and candidate handling decision b).
-//! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
+//! The estate is selected by the host through the estate catalog and passed to
+//! `runtime::run` as a `RuntimeEstate` (SQLite, PostgreSQL or in-memory).
 
 pub mod build_serial;
 pub mod coaching_engine;

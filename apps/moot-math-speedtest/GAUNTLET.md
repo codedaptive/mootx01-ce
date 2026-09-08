@@ -14,8 +14,8 @@ released `mootx01 1.0.34` product.
 - Search depths: recall@1, recall@5, and recall@10; query limit 20
 - Metrics: recall@k, MRR, completeness, distractor contamination, mean latency,
   and P95 latency
-- Product path: MCP stdio through `mootx01 serve --db gauntlet`
-- Isolation: named estate under a temporary `MOOTX01_DATA_DIR`
+- Product path: MCP stdio through `mootx01 serve --db <tmp>/gauntlet`
+- Isolation: a transient estate at a temporary directory (`--db <tmp>/gauntlet`)
 - Guard: healthy; three distinct corpus queries produced non-degenerate rankings
 
 The five tiers test lexical collisions, semantic near-misses, superseded facts,

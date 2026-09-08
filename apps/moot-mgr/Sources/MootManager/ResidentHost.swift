@@ -18,6 +18,8 @@
 // detached Task; `stop()` cancels it.
 
 import Foundation
+import MootProductIdentity
+import GeniusLocusKit
 import OSLog
 
 // MARK: - ResidentHostConfig
@@ -43,10 +45,11 @@ public struct ResidentHostConfig: Sendable {
     /// exact — a busy port fails. When false (the built-in default), `start`
     /// hunts upward from `httpPort` to the first bindable port (spec §3).
     public let httpPortExplicit: Bool
-    /// Whether to maintain the §3 `mgr.port` file. True for the production
-    /// `fromEnvironment` path; false for memberwise (test/embedded) hosts so
-    /// parallel tests never touch the live machine's port file.
-    public let writePortFile: Bool
+    /// Where to maintain the §3 `mgr.port` file, or nil to maintain none. The
+    /// production `fromEnvironment` path passes `defaultPortFileURL`; memberwise
+    /// (test/embedded) hosts pass nil or a scratch path, so parallel tests never
+    /// touch the live machine's port file.
+    public let portFileURL: URL?
     /// Override for the HTTP concurrency cap. `nil` means use the default
     /// (`MootMgrMaxLoopbackConnections` / env var). Set only in tests that need
     /// precise cap control without mutating the process environment.
@@ -59,7 +62,7 @@ public struct ResidentHostConfig: Sendable {
         controlSocketPath: String,
         estatesDirectory: URL,
         httpPortExplicit: Bool = true,
-        writePortFile: Bool = false,
+        portFileURL: URL? = nil,
         httpMaxConnections: Int? = nil
     ) {
         self.manager = manager
@@ -68,7 +71,7 @@ public struct ResidentHostConfig: Sendable {
         self.controlSocketPath = controlSocketPath
         self.estatesDirectory = estatesDirectory
         self.httpPortExplicit = httpPortExplicit
-        self.writePortFile = writePortFile
+        self.portFileURL = portFileURL
         self.httpMaxConnections = httpMaxConnections
     }
 
@@ -123,7 +126,7 @@ public struct ResidentHostConfig: Sendable {
             controlSocketPath: socket,
             estatesDirectory: estatesDir,
             httpPortExplicit: portExplicit,
-            writePortFile: true
+            portFileURL: ResidentHost.defaultPortFileURL
         )
     }
 }
@@ -142,7 +145,7 @@ public actor ResidentHost {
     private let startInstant: Date
     private let clock: @Sendable () -> Date
 
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "ResidentHost")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootManager.ResidentHost")
 
     /// Create a resident host.
     ///
@@ -217,10 +220,9 @@ public actor ResidentHost {
         // `await` here is the actor hop, not an async operation.)
 
         // §3 port file: record the BOUND port for status/dashboard discovery
-        // (production hosts only — see `writePortFile`).
-        if config.writePortFile {
+        // (only when the config names a location — see `portFileURL`).
+        if let portFile = config.portFileURL {
             let bound = await api.boundPort()
-            let portFile = Self.mgrPortFileURL()
             try? FileManager.default.createDirectory(
                 at: portFile.deletingLastPathComponent(),
                 withIntermediateDirectories: true
@@ -243,30 +245,22 @@ public actor ResidentHost {
         retentionTask = nil
         await control?.stop()
         control = nil
-        if httpAPI != nil, config.writePortFile {
+        if httpAPI != nil, let portFile = config.portFileURL {
             // Clean-shutdown removal of the §3 port file (only when we wrote it).
-            try? FileManager.default.removeItem(at: Self.mgrPortFileURL())
+            try? FileManager.default.removeItem(at: portFile)
         }
         await httpAPI?.stop()
         httpAPI = nil
         await manager.stop()
     }
 
-    /// §3 `mgr.port` location: the mootx01 data dir, honoring
-    /// `MOOTX01_DATA_DIR`. macOS default:
-    /// `~/Library/Application Support/ai.mootx01.ce/mgr.port`. Mirrors the
-    /// Rust `mgr_port_file_path`.
-    public static func mgrPortFileURL(
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> URL {
-        if let override = environment["MOOTX01_DATA_DIR"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-                .appendingPathComponent("mgr.port", isDirectory: false)
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent("Library/Application Support/ai.mootx01.ce", isDirectory: true)
-            .appendingPathComponent("mgr.port", isDirectory: false)
+    /// §3 `mgr.port` location for the production host: the mootx01
+    /// configuration directory (`EstateCatalog.configurationDirectory`, the
+    /// same folder the daemon's port file and the estate catalog live in), so
+    /// `mootx01 status` and the dashboard find it beside the daemon's. Mirrors
+    /// the Rust `mgr_port_file_path`.
+    public static var defaultPortFileURL: URL {
+        EstateCatalog.configurationDirectory.appendingPathComponent("mgr.port", isDirectory: false)
     }
 
     /// The HTTP port actually bound (resolves an OS-assigned port when 0 was given).

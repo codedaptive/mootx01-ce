@@ -21,12 +21,17 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "mootx01", path: "../mootx01"),
+        // MootProductIdentity: the one spelling of the product's Application
+        // Support folder. The setup assistant reads the resident daemon's port
+        // file from that configuration directory; nothing else locates it.
+        .package(name: "MootProductIdentity", path: "../../packages/libs/MootProductIdentity"),
     ],
     targets: [
         .executableTarget(
             name: "Mootx01Setup",
             dependencies: [
                 .product(name: "MootInstallerCore", package: "mootx01"),
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
             ],
             path: "Sources/Mootx01Setup"
         ),

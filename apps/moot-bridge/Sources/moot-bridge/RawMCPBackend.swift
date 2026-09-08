@@ -28,8 +28,8 @@ actor RawMCPBackend {
     /// Launches the backend process. The command is operator-supplied and
     /// treated at CLI-argument trust level (same boundary as the benchmarker):
     /// it is split on whitespace and run via `/usr/bin/env`, so an env-var prefix
-    /// (e.g. `MOOTX01_DATA_DIR=/tmp/... /path/mootx01 serve`) is honored — env
-    /// assignments before the program name are consumed by `env` itself.
+    /// (e.g. `SOME_VAR=value /path/mootx01 serve --db /tmp/x/scratch`) is honored
+    /// — env assignments before the program name are consumed by `env` itself.
     func start() throws {
         let parts = command.split(separator: " ").map(String.init)
         guard let program = parts.first else {

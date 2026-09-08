@@ -1,7 +1,7 @@
 // DurableSemanticRecallTests.swift
 //
-// The aria-mcp entry point (AriaMCPMain) lights up semantic recall for the
-// durable, explicit-path estate (ARIA_MCP_SQLITE_PATH given) by registering a
+// The aria-mcp entry point (AriaMCPMain) lights up semantic recall for a
+// durable SQLite estate (a catalog record on the SQLite backend) by registering a
 // Corpus + VectorStore on the opened handle — mirroring EstateLifecycle.provision's
 // .glk wiring while keeping the idempotent `Estate.create + open` path. These
 // tests pin two guarantees:
@@ -32,7 +32,7 @@ import PersistenceKitSQLite
 struct DurableSemanticRecallTests {
 
     /// Open a durable SQLite estate exactly the way AriaMCPMain's
-    /// ARIA_MCP_SQLITE_PATH branch does: Estate.create + kit.open (idempotent),
+    /// SQLite branch does: Estate.create + kit.open (idempotent),
     /// then build a Corpus + standalone VectorStore on the same storage and
     /// register both. Returns the wired kit + handle + a dispatcher over them.
     private func openDurableEstate(at path: String)

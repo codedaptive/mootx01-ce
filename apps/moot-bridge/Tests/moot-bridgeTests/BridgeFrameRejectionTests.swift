@@ -304,9 +304,9 @@ private struct StubRig {
         FileManager.default.createFile(atPath: backendBLogURL.path, contents: nil)
 
         // The log path travels as an env-var prefix on the command string, which
-        // RawMCPBackend hands to /usr/bin/env — the same mechanism the real
-        // config uses for MOOTX01_DATA_DIR. Paths carry no spaces (the command is
-        // whitespace-split), which the UUID-suffixed temp dir guarantees.
+        // RawMCPBackend hands to /usr/bin/env — the mechanism an operator's
+        // config may use for any backend setting. Paths carry no spaces (the
+        // command is whitespace-split), which the UUID-suffixed temp dir guarantees.
         // The verbs are never exercised here — these tests never issue a
         // tools/call, so no write is ever classified or fanned out. Named
         // distinctly so an accidental fan-out would be obvious in a stub log.

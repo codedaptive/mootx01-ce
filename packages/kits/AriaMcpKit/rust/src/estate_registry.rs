@@ -35,7 +35,7 @@
 //!   are idempotent; construction does not open a TCP connection.
 //!
 //! Persistence is server-internal — no wire change; the JSON-RPC surface is
-//! identical for all three backends. See `server::ServerConfig::from_env` for
+//! identical for all three backends. See `server::ServerConfig::for_estate` for
 //! how environment variables select between them at startup.
 
 use std::collections::HashMap;
@@ -109,12 +109,37 @@ pub struct OpenEstate {
 /// The estate registry the dispatcher uses to resolve `estateID` arguments.
 ///
 /// One default estate; zero or more additional estates keyed by UUID.
+/// Which persistence backend the registry's default estate runs on, as the
+/// admin surface reports it. Twin of Swift `GeniusLocusKit.storageBackend(for:)`
+/// (`EstateStorageBackend`): the same three words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstateStorageBackend {
+    Sqlite,
+    Postgresql,
+    InMemory,
+}
+
+impl EstateStorageBackend {
+    /// The label `/api/admin/estates` reports.
+    pub fn label(self) -> &'static str {
+        match self {
+            EstateStorageBackend::Sqlite => "SQLite",
+            EstateStorageBackend::Postgresql => "PostgreSQL",
+            EstateStorageBackend::InMemory => "InMemory",
+        }
+    }
+}
+
 /// The default estate is in-memory, SQLite-backed, or PostgreSQL-backed
-/// depending on which env var `ServerConfig::from_env` finds set. Wire surface
-/// is identical for all three backends.
+/// depending on the `RuntimeEstate` the host resolved from the estate catalog
+/// (`ServerConfig::for_estate`). Wire surface is identical for all three
+/// backends.
 pub struct EstateRegistry {
     /// The default estate — targeted when a tool call omits `estateID`.
     pub default: OpenEstate,
+    /// The backend the default estate runs on; a fact of the open, never
+    /// read from the environment.
+    pub backend: EstateStorageBackend,
     /// All registered estates including the default, keyed by UUID.
     pub(crate) extras: HashMap<Uuid, OpenEstate>,
     /// The shared coordinator (same Arc as in every OpenEstate — single
@@ -128,21 +153,42 @@ pub struct EstateRegistry {
     pub server_identity: String,
 }
 
-/// Whether a SQLite open seeds the default wings and registers the default
-/// minter. `serve` and provisioning seed; `mootx01 upgrade` must not, because
-/// upgrade is a migration vehicle and creates no content (a user who deleted
-/// the default wings must not get them back from a migration).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SqliteOpenSeeding {
-    SeedDefaults,
-    None,
+/// How a SQLite estate is opened: the choices the estate's catalog record
+/// decides. Twin of the Swift `ServeCommand` decisions taken from
+/// `EstateRecord.kind`: a registered estate federates and seeds its charters;
+/// a transient one does neither; a maintenance open (`mootx01 upgrade`)
+/// converges what exists and creates nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqliteOpening {
+    /// Whether this open establishes the estate's Ed25519 federation identity.
+    pub federate: bool,
+    /// Whether the seven default wings and their charter hints are seeded.
+    pub seed_charters: bool,
+}
+
+impl SqliteOpening {
+    /// A registered estate served by this machine: federates, seeds charters.
+    pub const REGISTERED: Self = Self { federate: true, seed_charters: true };
+    /// A transient estate (`--db <dir>/<name>`): holds exactly what was
+    /// imported into it, no identity, no charters.
+    pub const TRANSIENT: Self = Self { federate: false, seed_charters: false };
+    /// A maintenance open: converges existing content and creates none.
+    pub const MAINTENANCE: Self = Self { federate: false, seed_charters: false };
+
+    /// The opening a catalog record calls for when served.
+    pub fn for_record(record: &genius_locus_kit::EstateRecord) -> Self {
+        match record.kind {
+            genius_locus_kit::EstateRecordKind::Registered => Self::REGISTERED,
+            genius_locus_kit::EstateRecordKind::Transient => Self::TRANSIENT,
+        }
+    }
 }
 
 impl EstateRegistry {
     /// Construct a registry with one new in-memory default estate.
     ///
-    /// Used when neither `ARIA_MCP_SQLITE_PATH` nor `ARIA_MCP_POSTGRES_URL` is
-    /// set. **Semantic recall lanes (BM25 + vector) are wired** — a `Corpus` and
+    /// The `--in-memory` backend and the test default. **Semantic recall lanes
+    /// (BM25 + vector) are wired** — a `Corpus` and
     /// a `VectorStore` are registered on a second `InMemoryStorage` handle so BM25
     /// and vector recall are live from the first capture, matching the production
     /// wiring of the Swift `AriaMCPMain.swift` in-memory branch.
@@ -192,6 +238,7 @@ impl EstateRegistry {
         extras.insert(estate_id, default_estate.clone());
         EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::InMemory,
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
@@ -232,6 +279,7 @@ impl EstateRegistry {
         extras.insert(estate_id, default_estate.clone());
         EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::InMemory,
             extras,
             coord,
             server_identity: "mootx01".to_owned(),
@@ -271,7 +319,14 @@ impl EstateRegistry {
     /// if the semantic-recall wiring (Corpus/VectorStore construction) fails.
     /// The caller should print this to stderr and exit with a nonzero code.
     pub fn new_sqlite(path: &str, owner: &str) -> Result<Self, String> {
-        Self::open_sqlite(path, owner, SqliteOpenSeeding::SeedDefaults)
+        Self::open_sqlite(path, owner, SqliteOpening::REGISTERED)
+    }
+
+    /// Open a SQLite estate with the opening its catalog record decides
+    /// (`SqliteOpening::for_record`): federation and charter seeding for a
+    /// registered estate, neither for a transient one.
+    pub fn new_sqlite_with(path: &str, owner: &str, opening: SqliteOpening) -> Result<Self, String> {
+        Self::open_sqlite(path, owner, opening)
     }
 
     /// Open a SQLite estate for maintenance callers (e.g. `mootx01 upgrade`).
@@ -291,15 +346,15 @@ impl EstateRegistry {
     ///
     /// Same error conditions as `new_sqlite`.
     pub fn new_sqlite_for_maintenance(path: &str, owner: &str) -> Result<Self, String> {
-        Self::open_sqlite(path, owner, SqliteOpenSeeding::None)
+        Self::open_sqlite(path, owner, SqliteOpening::MAINTENANCE)
     }
 
     /// Shared SQLite open path behind `new_sqlite` and `new_sqlite_for_maintenance`.
-    /// The two public entry points differ only in `seeding`; everything else
+    /// The public entry points differ only in `opening`; everything else
     /// (geometry normalization, store open, estate-id read-back, coordinator
     /// admission, semantic-recall wiring) is one implementation so the ports
     /// cannot drift between the serve and upgrade opens.
-    fn open_sqlite(path: &str, owner: &str, seeding: SqliteOpenSeeding) -> Result<Self, String> {
+    fn open_sqlite(path: &str, owner: &str, opening: SqliteOpening) -> Result<Self, String> {
         // First run = no estate file before this open. Read before anything
         // below can create the file; it gates the create-time defaults.
         let first_run = !std::path::Path::new(path).exists();
@@ -310,10 +365,12 @@ impl EstateRegistry {
         // encoder from the active registry row, and it can only find the
         // bundled model through this resolver (the coordinator's default
         // answers None for every id, which leaves recall lexical-only).
+        // Install-wide models live in the configuration directory, whichever
+        // estate is opened; the estate's own directory holds only estate files.
         coord.lock().unwrap().set_model_directory_resolver(Box::new(
-            genius_locus_kit::BundledModelDirectoryResolver::new(data_dir_for_estate(
-                std::path::Path::new(path),
-            )),
+            genius_locus_kit::BundledModelDirectoryResolver::new(
+                genius_locus_kit::EstateCatalog::configuration_directory(),
+            ),
         ));
         // Geometry normalization must precede the estate connection so VACUUM and
         // all maintenance paths receive a reserve-0 file. SQLCipher's `attachFunc`
@@ -344,10 +401,12 @@ impl EstateRegistry {
                 format!("aria-mcp: manifest estate_uuid is not a valid UUID at {path:?}: {e}")
             })?
         };
+        // A registered estate federates (its identity is minted on first open);
+        // a transient or maintenance open never mints one.
         let handle = coord
             .lock()
             .unwrap()
-            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
+            .open_with_federation(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100, opening.federate)
             .expect("default sqlite estate open must succeed");
 
         // Semantic recall wiring (SQLite branch only — mirrors AriaMCPMain.swift).
@@ -390,19 +449,14 @@ impl EstateRegistry {
         }
         wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
-        match seeding {
-            SqliteOpenSeeding::SeedDefaults => {
-                // Idempotently seed the seven default wings. Non-fatal: seeding
-                // failure logs and continues — the estate is open and functional.
-                // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
-                seed_wings_non_fatal(&coord, &handle, path);
-            }
-            SqliteOpenSeeding::None => {
-                // Maintenance callers (`mootx01 upgrade`) converge existing content
-                // and create none: no wings, no minter registration. Mirrors the
-                // Swift upgrade path, which opens through the bare
-                // `GeniusLocusKit.open(storage:owner:)` without `seedDefaultWings`.
-            }
+        if opening.seed_charters {
+            // Idempotently seed the seven default wings. Non-fatal: seeding
+            // failure logs and continues — the estate is open and functional.
+            // Mirrors Swift ServeCommand's seedDefaultWings call after
+            // wireGLKSubstores, which runs for a registered estate only: a
+            // transient estate holds exactly what was imported into it, and a
+            // maintenance open (`mootx01 upgrade`) creates nothing.
+            seed_wings_non_fatal(&coord, &handle, path);
         }
 
         let default_estate = OpenEstate {
@@ -416,6 +470,7 @@ impl EstateRegistry {
         extras.insert(estate_id, default_estate.clone());
         Ok(EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::Sqlite,
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
@@ -579,6 +634,7 @@ impl EstateRegistry {
         extras.insert(estate_id, default_estate.clone());
         Ok(EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::Postgresql,
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
@@ -939,29 +995,4 @@ fn wall_now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
-}
-
-/// The mootx01 data directory an estate file belongs to — search slot 1 of
-/// the model-directory resolver (the 1.2 download location, empty in 1.1).
-/// `MOOTX01_DATA_DIR` wins when set (the same override the CLI honours);
-/// otherwise the product layout `<data>/databases/<name>/estate.sqlite` is
-/// walked up from `path`, and an estate that lives elsewhere (a benchmark
-/// clone, a test fixture) uses its own directory.
-fn data_dir_for_estate(path: &std::path::Path) -> std::path::PathBuf {
-    if let Ok(v) = std::env::var("MOOTX01_DATA_DIR") {
-        if !v.is_empty() {
-            return std::path::PathBuf::from(v);
-        }
-    }
-    let estate_dir = path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
-    let in_product_layout = estate_dir
-        .parent()
-        .and_then(|databases| databases.file_name())
-        .map(|name| name == "databases")
-        .unwrap_or(false);
-    if in_product_layout {
-        estate_dir.parent().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf).unwrap_or(estate_dir)
-    } else {
-        estate_dir
-    }
 }

@@ -20,4 +20,6 @@ aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
 # binary mirrors the product serve's engine block so the two Rust entry
 # points do not diverge on minting. In-repo kit dependency; layering holds
 # (app -> lib).
-adornment-lib = { path = "../../../packages/libs/AdornmentLib/rust" }
+# The estate catalog and open posture the entry point resolves its estate through.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
+moot-product-identity = { path = "../../../packages/libs/MootProductIdentity/rust" }

@@ -47,21 +47,27 @@ ARIA_MCP is a boundary, not a processing layer. It does not implement algorithms
 
 ## Persistence
 
-The server selects its storage backend from two environment variables at startup.
-Both are read without trimming — a whitespace-only value is treated as non-empty
-and fails fast as a config error, not a silent fallback.
+The server selects its estate through the estate catalog (GeniusLocusKit
+`EstateCatalog`), the same way every `mootx01` command does. No environment
+value names a database.
 
-### Backend precedence table
+### Estate selection
 
-| `ARIA_MCP_POSTGRES_URL` | `ARIA_MCP_SQLITE_PATH` | Backend | Notes |
-|---|---|---|---|
-| Non-empty | Non-empty | — | Ambiguous config: exit 1, stderr names both vars |
-| Non-empty | Absent or empty | PostgreSQL at the URL | Pooled, lazy; defaults poolSize=10, connectionTimeout=5s, idleTimeout=300s |
-| Absent or empty | Non-empty | SQLite at that path | WAL-mode, durable across restarts |
-| Absent or empty | Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
+| Command line | Estate | Backend |
+|---|---|---|
+| `aria-mcp` | the catalog's active estate | the record's backend |
+| `aria-mcp --db <name>` | a registered estate by name | the record's backend |
+| `aria-mcp --db <dir>/<name>` | a transient estate at that directory, this process only | SQLite, plaintext |
+| `aria-mcp --in-memory` | the selected estate on the in-memory backend | In-memory; gone at exit |
 
-**Unusable config** (path unwritable, malformed connection string, or unreachable
-server at startup): exit 1 with a clear stderr message. No half-open state.
+A record's backend is SQLite (the default: `estate.sqlite` in the record's
+directory, opened under the posture its file requires; an encrypted estate whose
+key is missing fails closed) or PostgreSQL (the record's connection string;
+pooled, lazy; defaults poolSize=10, connectionTimeout=5s, idleTimeout=300s).
+
+**Unusable estate** (a file that will not open, an unreachable server at startup,
+an unregistered name without a path, any other argument): exit 1 with a clear
+stderr message. No half-open state.
 
 **Lazy-vs-probe (PostgreSQL):** `PostgreSQLStorage` uses a lazy connection pool —
 no TCP connection is opened at construction time. The first real connection attempt
@@ -69,9 +75,7 @@ happens at `Estate.create`, which runs at startup before any tool call. An
 unreachable server therefore surfaces as a startup failure (exit 1), not a runtime
 error during a tool call. No explicit probe is needed.
 
-**SQLite:** parent directories of the SQLite path are created automatically if
-missing. A bare filename (no directory component) skips creation and resolves
-against the working directory.
+**SQLite:** the record's directory is created on first open.
 
 Persistence is **server-internal only** — the JSON-RPC wire surface (tools,
 schemas, methods) is completely unchanged for all backends. Clients do not need to
@@ -90,14 +94,17 @@ via `locus_kit::PostgresDrawerStore` (ARIA_MCP_POSTGRES_001-COMPLETE).
 ### Example
 
 ```sh
-# Ephemeral (default — no env var needed)
+# The active estate
 aria-mcp
 
-# Durable SQLite at a specific path
-ARIA_MCP_SQLITE_PATH=/var/lib/aria-mcp/estate.sqlite aria-mcp
+# A registered estate by name (its record decides SQLite or PostgreSQL)
+aria-mcp --db research
 
-# PostgreSQL-backed (requires a running PostgreSQL server)
-ARIA_MCP_POSTGRES_URL=postgresql://user:pass@localhost:5432/aria_mcp aria-mcp
+# A scratch estate at a directory, this process only
+aria-mcp --db /tmp/scratch/bench
+
+# The in-memory backend for an accuracy sweep
+aria-mcp --db /tmp/scratch/bench --in-memory
 ```
 
 ## Build order

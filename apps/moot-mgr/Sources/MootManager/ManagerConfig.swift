@@ -15,6 +15,7 @@
 //     a one-shot pass via the CLI; the cadence is carried for the resident loop).
 
 import Foundation
+import GeniusLocusKit
 
 // MARK: - ManagerConfig
 
@@ -47,15 +48,11 @@ public struct ManagerConfig: Sendable, Equatable {
     /// this often; the Phase-1 CLI runs a single pass on demand.
     public static let defaultRetentionCadence: TimeInterval = 60 * 60
 
-    /// The app-support subdirectory name and the SQLite file name. The manager
-    /// owns exactly one store file: <data-dir>/moot-mgr/stats.sqlite.
+    /// The configuration-directory subdirectory name and the SQLite file name.
+    /// The manager owns exactly one store file:
+    /// `<configuration>/moot-mgr/stats.sqlite`, beside the estate catalog.
     public static let storeSubdirectory = "moot-mgr"
     public static let storeFileName = "stats.sqlite"
-
-    /// The bundle-style data-dir convention reused for the manager's store
-    /// location. Matches the `com.mootx01.ce` convention referenced in the
-    /// mission so the manager's data sits alongside other MOOTx01 CE data.
-    public static let dataDirBundleID = "com.mootx01.ce"
 
     // MARK: - Resolved values
 
@@ -125,18 +122,10 @@ public struct ManagerConfig: Sendable, Equatable {
             return URL(fileURLWithPath: raw)
         }
         // Default: <app-support>/com.mootx01.ce/moot-mgr/stats.sqlite.
-        // FileManager resolves the platform app-support directory (macOS:
-        // ~/Library/Application Support; Linux Swift: ~/.local/share via the
-        // same API). Falling back to the temporary directory keeps the manager
-        // functional even if app-support is unavailable (headless CI).
-        let base = (try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        )) ?? FileManager.default.temporaryDirectory
-        return base
-            .appendingPathComponent(dataDirBundleID, isDirectory: true)
+        // The mootx01 configuration directory, computed from the platform by
+        // the estate catalog: the same folder the daemon writes its stats
+        // store into (`ARIA_MCP_STATS_STORE` in the daemon plist).
+        return EstateCatalog.configurationDirectory
             .appendingPathComponent(storeSubdirectory, isDirectory: true)
             .appendingPathComponent(storeFileName, isDirectory: false)
     }

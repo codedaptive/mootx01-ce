@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import MootProductIdentity
 
 // MARK: - First-party authenticated wire — the frozen protocol core
 //
@@ -90,10 +91,10 @@ public enum FirstPartyAuthProtocol {
     // MARK: - Identity constants
 
     /// The installer-owned provider permitted to publish a descriptor.
-    public static let providerIdentifier = "com.mootx01.mgr"
+    public static let providerIdentifier = MootProductIdentity.Services.managerLabel
 
     /// The resident daemon service that owns the estate.
-    public static let serviceIdentifier = "com.mootx01.daemon"
+    public static let serviceIdentifier = MootProductIdentity.Services.daemonLabel
 
     /// The authentication scheme this contract implements. A descriptor naming
     /// any other scheme is refused rather than negotiated: security properties
@@ -129,7 +130,7 @@ public enum FirstPartyAuthProtocol {
     // they control and then "verify" their own forgery against it.
 
     /// The Keychain service the installation root lives under.
-    public static let keychainService = "com.codedaptive.mootx01.daemon-auth"
+    public static let keychainService = MootProductIdentity.Keychain.daemonAuthService
 
     /// The Keychain account the installation root lives under.
     public static let keychainAccount = "installation-root-v1"
