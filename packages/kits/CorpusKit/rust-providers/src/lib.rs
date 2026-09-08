@@ -101,6 +101,11 @@ pub mod fdc_provider;
 // the critical tokenizer-padding override note.
 pub mod candle_provider;
 pub mod span_encoder_factory;
+// Cross encoder: the candle sequence classifier and the factory that builds a
+// `PairScorer` from a model directory. Twin of Swift `CoreMLPairInference` +
+// `PairScorerFactory`.
+pub mod candle_pair_scorer;
+pub mod pair_scorer_factory;
 // ModelDirectoryResolver: locates the encoder model directory for a given
 // model ID by searching the 1.2 download slot and the installer package slot.
 // Verifies vocab.txt sha256 as the integrity sentinel; returns None on any
@@ -144,6 +149,7 @@ pub use fdc_provider::{
 };
 pub use default_ensemble::default_ensemble;
 pub use span_encoder_factory::{SpanEncoderFactory, VOCABULARY_FILE_NAME};
+pub use pair_scorer_factory::PairScorerFactory;
 pub use model_directory_resolver::model_dir_for;
 pub use encoder_model_seed::EncoderModelSeed;
 #[cfg(feature = "candle")]

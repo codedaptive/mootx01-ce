@@ -168,6 +168,16 @@ let package = Package(
             name: "AppleEncoders",
             description: "Compile apple-nl-v1 and neural-embed-v1 provisioning paths in EstateLifecycle (off by default, plan 70BC55F3)."
         ),
+        // CrossEncoder: lets the retrieval-time cross-encoder stage load the
+        // packaged pair classifier (PairScorerFactory over CoreML). The
+        // request field, the report and the fusion rule compile regardless;
+        // with the trait off an `apply` directive degrades with reason
+        // `capability_off`. Twin of the Rust feature `cross-encoder`
+        // (`corpus-kit-providers/candle`). The product targets enable it.
+        .trait(
+            name: "CrossEncoder",
+            description: "Compile the cross-encoder scorer load (PairScorerFactory over CoreML) behind the retrieval-time rerank stage. Off by default in the kit; enabled by the product targets. Defines MOOTX01_CROSS_ENCODER."
+        ),
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
@@ -266,6 +276,7 @@ let package = Package(
                     .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
                 .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+                .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
         .target(
@@ -346,6 +357,7 @@ let package = Package(
                     .when(traits: ["MigrationV1_6ToV1_7"])
                 ),
                 .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+                .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
         // Flat-layout -> catalog-layout capsule: renames a pre-catalog
@@ -508,6 +520,7 @@ let package = Package(
                 // WholeRecordDense: the whole-record dense float lane and its
                 // lane keys, presets, anti-similar hook and telemetry.
                 .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+                .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
         .testTarget(
@@ -553,6 +566,7 @@ let package = Package(
                 .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
                 .define("MOOTX01_LSA", .when(traits: ["LSA"])),
                 .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+                .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
         .testTarget(
@@ -600,6 +614,7 @@ let package = Package(
                     .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
                 .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+                .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
         // Tests for the GLK 1.4 -> 1.5 storage-ledger kit-id capsule.
@@ -707,6 +722,7 @@ let package = Package(
                     .when(traits: ["MigrationV1_5ToV1_6"])
                 ),
                 .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
+                .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
         // Tests for the app-container -> catalog-layout capsule over temporary

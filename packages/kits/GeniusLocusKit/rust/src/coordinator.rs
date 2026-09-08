@@ -66,7 +66,9 @@ use crate::telemetry::metric_names;
 use crate::glk_emit;
 
 use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
-use corpus_kit::encoder::{EncoderModelSpec, SpanEncoder};
+use corpus_kit::encoder::{
+    CrossEncoderProfile, EncoderModelSpec, PairScorer, RerankAction, RerankDirective, SpanEncoder,
+};
 use corpus_kit_providers::{EncoderModelSeed, SpanEncoderFactory};
 use crate::encoder_activation::{ModelDirectoryResolving, NilModelDirectoryResolver};
 use corpus_kit::{
@@ -103,6 +105,7 @@ use crate::grants::{
     CustodyMode, Grant, GrantError, GrantOptions, IssueGrantResult, GrantStore, ScopeKeyVault,
 };
 use crate::handle::{EstateHandle, EstateUuid};
+use crate::cross_encoder_stage::{CrossEncoderLimits, CrossEncoderReport};
 use crate::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, GLKSubSpanScoring,
     RecallEvidencePath, RecallHit, RecallOrigin, RecallPlan, RecallScoreVector,
@@ -1125,6 +1128,16 @@ impl ModesManifest {
     fn default_coaching_calls() -> usize { 25 }
 }
 
+/// What an estate holds for the cross encoder once an apply has been tried.
+/// Mirrors Swift `PairScorerSlot` (CrossEncoderActivation.swift).
+pub(crate) enum PairScorerSlot {
+    /// The scorer loaded (or was registered by a host or test).
+    Loaded(Arc<dyn PairScorer>),
+    /// The load failed; the reason is a `cross_encoder_stage::reason` value.
+    Unavailable(String),
+}
+
+
 /// # Adding a per-estate registry
 ///
 /// Every `HashMap<EstateHandle, …>` field below is a PER-ESTATE REGISTRY, and
@@ -1185,6 +1198,13 @@ pub struct EstateCoordinator {
     /// rerank stage (lexical-only, contract sheet §7). Mirrors Swift
     /// `spanRerankSources`.
     span_rerank_sources: HashMap<EstateHandle, Arc<crate::span_rerank::SpanRerankSource>>,
+    /// Per-estate cross-encoder scorer slot: loaded lazily by the first
+    /// `apply` (`pair_scorer_for`) or registered by a host or test
+    /// (`register_pair_scorer`); a failed load is remembered as
+    /// `Unavailable`. `RefCell` because `recall_scored` takes `&self`, like
+    /// `dreaming_queues`. Absent until an apply is tried; removed on close.
+    /// Mirrors Swift `GeniusLocusKit.pairScorers`.
+    pair_scorers: RefCell<HashMap<EstateHandle, PairScorerSlot>>,
     /// Per-estate mount state. Set to `Mounted` on open, updated by quiesce/drain,
     /// removed on close. Mirrors Swift actor's `mountStates: [EstateHandle: EstateMountState]`.
     mount_states: HashMap<EstateHandle, EstateMountState>,
@@ -1478,6 +1498,7 @@ impl EstateCoordinator {
             span_encoders: HashMap::new(),
             model_directory_resolver: Box::new(NilModelDirectoryResolver),
             span_rerank_sources: HashMap::new(),
+            pair_scorers: RefCell::new(HashMap::new()),
             mount_states: HashMap::new(),
             audit_logs: HashMap::new(),
             matrix_tiers: HashMap::new(),
@@ -1962,6 +1983,7 @@ impl EstateCoordinator {
         self.vector_stores.remove(handle);
         self.span_encoders.remove(handle);
         self.span_rerank_sources.remove(handle);
+        self.pair_scorers.borrow_mut().remove(handle);
         // Derived-rebuild span depth (moot_rebuild_status): plain counter,
         // no worker to tear down — remove so a reopened same-estate handle
         // never inherits a stale span.
@@ -3424,6 +3446,281 @@ impl EstateCoordinator {
                 spec.model_id
             ),
         }
+    }
+
+    // ── Cross encoder (retrieval-time rerank stage) ───────────────────────
+    //
+    // Mirrors Swift CrossEncoderActivation.swift: the packaged profiles this
+    // build knows, the per-estate manifest limits and the lazily loaded
+    // `PairScorer` per estate. Nothing loads at open: the first `apply` on an
+    // estate resolves the model directory through the same resolver the span
+    // encoder uses and builds the scorer once; a failure is remembered so
+    // later applies degrade without re-resolving. `close` drops the slot.
+
+    /// Manifest key: maximum candidates handed to the stage. Mirrors Swift
+    /// `GeniusLocusKit.crossEncoderPoolMetaKey`.
+    pub const CROSS_ENCODER_POOL_META_KEY: &str = "cross_encoder_pool";
+    /// Manifest key: maximum scored candidates.
+    pub const CROSS_ENCODER_HEAD_META_KEY: &str = "cross_encoder_head";
+    /// Manifest key: maximum spans per scored candidate.
+    pub const CROSS_ENCODER_SPANS_META_KEY: &str = "cross_encoder_spans";
+    /// Manifest key: the packaged profile id a directive without one should
+    /// mean; informational until the verb surface carries directives.
+    pub const CROSS_ENCODER_PROFILE_META_KEY: &str = "cross_encoder_profile";
+
+    /// The profile this build packages for `profile_id`, if any. One today.
+    /// Mirrors Swift `GeniusLocusKit.packagedCrossEncoderProfiles`.
+    pub fn packaged_cross_encoder_profile(profile_id: &str) -> Option<CrossEncoderProfile> {
+        let minilm = CrossEncoderProfile::minilm_l6();
+        (profile_id == minilm.model_id).then_some(minilm)
+    }
+
+    /// Register a `PairScorer` for `handle` so the stage uses it instead of
+    /// loading the packaged model. Re-registering replaces the entry; `close`
+    /// drops it. Hosts and tests use this; the product path loads lazily
+    /// through `pair_scorer_for`. Mirrors Swift `registerPairScorer(_:for:)`.
+    pub fn register_pair_scorer(&mut self, handle: &EstateHandle, scorer: Arc<dyn PairScorer>) {
+        self.pair_scorers.borrow_mut().insert(*handle, PairScorerSlot::Loaded(scorer));
+    }
+
+    /// Whether a loaded scorer is held for `handle` (registered or lazily
+    /// loaded). False for a stale handle and after `close`. Mirrors Swift
+    /// `isPairScorerRegistered(for:)`.
+    pub fn is_pair_scorer_registered(&self, handle: &EstateHandle) -> bool {
+        matches!(self.pair_scorers.borrow().get(handle), Some(PairScorerSlot::Loaded(_)))
+    }
+
+    /// Store the three limits on the estate manifest. Values above the
+    /// packaged profile's maxima are stored as given and clamped on read.
+    /// Mirrors Swift `provisionCrossEncoderLimits(pool:head:spans:for:)`.
+    pub fn provision_cross_encoder_limits(
+        &self,
+        handle: &EstateHandle,
+        pool: usize,
+        head: usize,
+        spans: usize,
+    ) -> Result<(), VerbDispatchError> {
+        self.set_positive_int_meta(handle, Self::CROSS_ENCODER_POOL_META_KEY, pool, "provisionCrossEncoderLimits")?;
+        self.set_positive_int_meta(handle, Self::CROSS_ENCODER_HEAD_META_KEY, head, "provisionCrossEncoderLimits")?;
+        self.set_positive_int_meta(handle, Self::CROSS_ENCODER_SPANS_META_KEY, spans, "provisionCrossEncoderLimits")
+    }
+
+    /// The limits for `profile` on `handle`: each manifest key when present
+    /// and a positive integer, else the profile's value; every one clamped
+    /// to the profile's maximum (the manifest adjusts the maxima downward,
+    /// never above the packaged profile). Mirrors Swift
+    /// `provisionedCrossEncoderLimits(profile:for:)`.
+    pub fn provisioned_cross_encoder_limits(
+        &self,
+        handle: &EstateHandle,
+        profile: &CrossEncoderProfile,
+    ) -> CrossEncoderLimits {
+        let pool = self
+            .positive_int_meta(handle, Self::CROSS_ENCODER_POOL_META_KEY)
+            .unwrap_or(profile.pool)
+            .min(profile.pool);
+        let head = self
+            .positive_int_meta(handle, Self::CROSS_ENCODER_HEAD_META_KEY)
+            .unwrap_or(profile.head)
+            .min(profile.head);
+        let spans = self
+            .positive_int_meta(handle, Self::CROSS_ENCODER_SPANS_META_KEY)
+            .unwrap_or(profile.spans)
+            .min(profile.spans);
+        CrossEncoderLimits::new(pool, head, spans)
+    }
+
+    /// The scorer for `profile` on `handle`, loading it on the first call.
+    ///
+    /// Returns the scorer and whether THIS call loaded it (`cold_load`), or
+    /// the `cross_encoder_stage::reason` the stage reports. The slot check
+    /// and the insert happen under one `borrow_mut`, so a second apply never
+    /// loads again. A failed load is cached as `Unavailable` until `close`.
+    /// Mirrors Swift `pairScorer(profile:for:)`.
+    pub fn pair_scorer_for(
+        &self,
+        handle: &EstateHandle,
+        profile: &CrossEncoderProfile,
+    ) -> Result<(Arc<dyn PairScorer>, bool), String> {
+        let mut slots = self.pair_scorers.borrow_mut();
+        match slots.get(handle) {
+            Some(PairScorerSlot::Loaded(scorer)) => return Ok((Arc::clone(scorer), false)),
+            Some(PairScorerSlot::Unavailable(reason)) => return Err(reason.clone()),
+            None => {}
+        }
+        let loaded = self.load_pair_scorer(handle, profile);
+        match &loaded {
+            Ok(scorer) => {
+                slots.insert(*handle, PairScorerSlot::Loaded(Arc::clone(scorer)));
+            }
+            Err(reason) => {
+                slots.insert(*handle, PairScorerSlot::Unavailable(reason.clone()));
+            }
+        }
+        loaded.map(|scorer| (scorer, true))
+    }
+
+    /// Resolve the model directory and build the scorer through
+    /// `PairScorerFactory` (candle runtime). One stderr line on failure.
+    #[cfg(feature = "cross-encoder")]
+    fn load_pair_scorer(
+        &self,
+        handle: &EstateHandle,
+        profile: &CrossEncoderProfile,
+    ) -> Result<Arc<dyn PairScorer>, String> {
+        let Some(dir) = self.model_directory_resolver.model_dir_for(&profile.model_id) else {
+            eprintln!(
+                "mootx01 cross encoder: estate {} no model directory for {}; apply degrades",
+                uuid_to_str(&handle.estate_uuid),
+                profile.model_id
+            );
+            return Err(crate::cross_encoder_stage::reason::MODEL_UNAVAILABLE.to_string());
+        };
+        match corpus_kit_providers::PairScorerFactory::make(profile, &dir) {
+            Ok(scorer) => {
+                let scorer: Arc<dyn PairScorer> = Arc::from(scorer);
+                eprintln!(
+                    "mootx01 cross encoder: estate {} loaded {} ({}) from {}",
+                    uuid_to_str(&handle.estate_uuid),
+                    profile.model_id,
+                    scorer.backend(),
+                    dir.display()
+                );
+                Ok(scorer)
+            }
+            Err(e) => {
+                eprintln!(
+                    "mootx01 cross encoder: estate {} {} unavailable ({e}); apply degrades",
+                    uuid_to_str(&handle.estate_uuid),
+                    profile.model_id
+                );
+                Err(crate::cross_encoder_stage::reason::MODEL_UNAVAILABLE.to_string())
+            }
+        }
+    }
+
+    /// No pair-classifier runtime in this build (feature `cross-encoder` off).
+    #[cfg(not(feature = "cross-encoder"))]
+    fn load_pair_scorer(
+        &self,
+        _handle: &EstateHandle,
+        _profile: &CrossEncoderProfile,
+    ) -> Result<Arc<dyn PairScorer>, String> {
+        Err(crate::cross_encoder_stage::reason::CAPABILITY_OFF.to_string())
+    }
+
+    /// Run the cross-encoder stage over `hits` (the authorized final list,
+    /// possibly widened to the pool) for `directive`.
+    ///
+    /// Returns the hits to hand on (reordered within the pool on apply,
+    /// unchanged otherwise), the report, and whether the apply degraded.
+    /// Never fails: every failure is a degrade with the incoming order.
+    /// Mirrors Swift `runCrossEncoderStage(handle:request:directive:profile:limits:hits:)`.
+    fn run_cross_encoder_stage(
+        &self,
+        handle: &EstateHandle,
+        request: &GLKRecallRequest,
+        directive: &RerankDirective,
+        profile: Option<&CrossEncoderProfile>,
+        limits: Option<CrossEncoderLimits>,
+        hits: Vec<RecallHit>,
+    ) -> (Vec<RecallHit>, CrossEncoderReport, bool) {
+        use crate::cross_encoder_stage::{self as stage, reason};
+
+        if directive.action != RerankAction::Apply {
+            return (hits, CrossEncoderReport::bypassed(directive), false);
+        }
+        let (Some(profile), Some(limits)) = (profile, limits) else {
+            return (hits, CrossEncoderReport::degraded(directive, reason::PROFILE_UNKNOWN, None), true);
+        };
+        let query = request.query_text.as_deref().unwrap_or("").trim().to_string();
+        if query.is_empty() {
+            return (hits, CrossEncoderReport::degraded(directive, reason::NO_QUERY_TEXT, Some(limits)), true);
+        }
+        let (scorer, cold_load) = match self.pair_scorer_for(handle, profile) {
+            Ok(loaded) => loaded,
+            Err(why) => return (hits, CrossEncoderReport::degraded(directive, &why, Some(limits)), true),
+        };
+
+        let started = std::time::Instant::now();
+        let pool = limits.pool.min(hits.len());
+        let head = limits.head.min(pool);
+        let head_ids: Vec<String> = hits[..head].iter().map(|h| h.id.clone()).collect();
+
+        // Span rows and the query vector come from the registered span rerank
+        // source when there is one; a read failure only means the windowed
+        // fallback in `select_spans` is used, never a degrade.
+        let mut rows: HashMap<String, Vec<crate::span_rerank::SpanRerankVector>> = HashMap::new();
+        let mut query_vector: Option<Vec<f32>> = None;
+        if let Some(source) = self.span_rerank_sources.get(handle) {
+            if !head_ids.is_empty() {
+                if let Ok(vector) = source.encoder.encode_query(&query) {
+                    if !vector.is_empty() {
+                        rows = source.store.span_vectors(&head_ids, source.encoder.model_id()).unwrap_or_default();
+                        query_vector = Some(vector);
+                    }
+                }
+            }
+        }
+        let (window_words, overlap_divisor) = self
+            .span_encoders
+            .get(handle)
+            .map(|e| (e.spec().window_words, e.spec().overlap_divisor))
+            .unwrap_or_else(|| {
+                let floor = EncoderModelSpec::floor();
+                (floor.window_words, floor.overlap_divisor)
+            });
+
+        let mut logits: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut scored = 0usize;
+        for hit in &hits[..head] {
+            let Some(content) = hit.drawer.as_ref().map(|d| d.content.as_str()) else { continue };
+            let spans = stage::select_spans(
+                content,
+                rows.get(&hit.id).map(Vec::as_slice),
+                query_vector.as_deref(),
+                limits.spans,
+                window_words,
+                overlap_divisor,
+            );
+            if spans.is_empty() {
+                continue;
+            }
+            let refs: Vec<&str> = spans.iter().map(String::as_str).collect();
+            match scorer.score(&query, &refs) {
+                Ok(values) => {
+                    if !values.is_empty() {
+                        scored += 1;
+                    }
+                    logits.insert(hit.id.clone(), values);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "mootx01 cross encoder: estate {} scoring failed ({e}); incoming order stands",
+                        uuid_to_str(&handle.estate_uuid)
+                    );
+                    return (hits, CrossEncoderReport::degraded(directive, reason::SCORER_FAILED, Some(limits)), true);
+                }
+            }
+        }
+        let incoming: Vec<String> = hits[..pool].iter().map(|h| h.id.clone()).collect();
+        let order = stage::fuse(&incoming, head, &logits, profile.rrf_k);
+        let reordered = stage::reorder(hits, pool, &order);
+        let report = CrossEncoderReport {
+            status: crate::cross_encoder_stage::CrossEncoderStatus::Applied,
+            requested: true,
+            reason: directive.reason.clone(),
+            profile_id: directive.profile_id.clone(),
+            model_version: Some(profile.model_version.clone()),
+            backend: Some(scorer.backend().to_string()),
+            pool,
+            head,
+            spans: limits.spans,
+            scored,
+            cold_load,
+            stage_millis: Some(started.elapsed().as_millis() as u64),
+        };
+        (reordered, report, false)
     }
 
     /// One `spanEncode` cycle for `handle` (contract sheet §10): the
@@ -10207,9 +10504,32 @@ impl EstateCoordinator {
         #[cfg(not(any(test, feature = "test-seams")))]
         let forced_embed_error: Option<String> = None;
 
+        // Cross-encoder stage (`cross_encoder_stage`): resolve the directive
+        // before the lanes run so the lanes' presentation cut can be widened
+        // to the stage's pool. The plan (frontier_k) above is computed from
+        // the caller's limit and is unchanged, so the candidate pool the lanes
+        // score is identical with or without a directive; only the cut is
+        // wider, and the caller's limit is re-applied after the stage. A None
+        // or bypass directive leaves `lane_request` equal to `request`.
+        // Mirrors Swift RecallDirector.recall.
+        let directive = request.rerank_directive.clone();
+        let mut cross_encoder_profile: Option<CrossEncoderProfile> = None;
+        let mut cross_encoder_limits: Option<CrossEncoderLimits> = None;
+        let mut lane_request = request.clone();
+        if let Some(d) = directive.as_ref().filter(|d| d.action == RerankAction::Apply) {
+            if let Some(profile) = Self::packaged_cross_encoder_profile(&d.profile_id) {
+                let limits = self.provisioned_cross_encoder_limits(handle, &profile);
+                if request.limit < limits.pool {
+                    lane_request.limit = limits.pool;
+                }
+                cross_encoder_profile = Some(profile);
+                cross_encoder_limits = Some(limits);
+            }
+        }
+
         let result = match request.mode {
             GLKRecallMode::LocusOnly => {
-                Self::recall_scored_locus_only(estate, request.clone(), plan, now)
+                Self::recall_scored_locus_only(estate, lane_request.clone(), plan, now)
             }
             GLKRecallMode::Hybrid
             | GLKRecallMode::CorpusOnly
@@ -10236,7 +10556,7 @@ impl EstateCoordinator {
                 // registered them; None ⇒ the stage is skipped (sheet §7).
                 let span_source = self.span_rerank_sources.get(handle).cloned();
                 Self::recall_scored_multi_lane(
-                    estate, request.clone(), plan, now, corpus, vector, handle,
+                    estate, lane_request.clone(), plan, now, corpus, vector, handle,
                     matrix_tier, graph_cache, preference_store, span_source,
                     forced_vector_hamming_error, forced_embed_error,
                 )
@@ -10247,7 +10567,7 @@ impl EstateCoordinator {
                 // not via the scored drawer-recall path. For drawer retrieval,
                 // delegate to the locusOnly bitmap lane so all estate drawers
                 // are reachable through the normal bitmap filter.
-                Self::recall_scored_locus_only(estate, request.clone(), plan, now)
+                Self::recall_scored_locus_only(estate, lane_request.clone(), plan, now)
             }
         }?;
 
@@ -10283,6 +10603,49 @@ impl EstateCoordinator {
                 // M4 single-derivation doctrine — the director derives once;
                 // the anomalous filter is a pure-hit-set operation, not a recall.
                 query_lattice_anchor: result.query_lattice_anchor,
+                cross_encoder: result.cross_encoder,
+            }
+        } else {
+            result
+        };
+
+        // Cross-encoder stage, after the admission gate and before the trace
+        // write and the dreaming enqueue, so the caller receives, and the
+        // trace records, the fused order. A None directive runs nothing here
+        // and the result is byte-identical to a request without the field;
+        // bypass and degrade only attach a report. The caller's limit is
+        // re-applied ONLY when the lanes were widened to the pool: an
+        // unwidened lane result keeps its own cut (UnionBest may return a
+        // tie-widened page), exactly as it does without a directive.
+        // Mirrors Swift RecallDirector.recall.
+        let result = if let Some(directive) = directive.as_ref() {
+            let (hits, report, degraded) = self.run_cross_encoder_stage(
+                handle,
+                &request,
+                directive,
+                cross_encoder_profile.as_ref(),
+                cross_encoder_limits,
+                result.hits,
+            );
+            let mut hits = hits;
+            if lane_request.limit != request.limit {
+                hits.truncate(request.limit);
+            }
+            let mut degraded_stages = result.degraded_stages;
+            if degraded {
+                degraded_stages.push(crate::cross_encoder_stage::DEGRADED_STAGE.to_string());
+            }
+            GLKRecallResult {
+                request: request.clone(),
+                plan: result.plan,
+                union_profile: result.union_profile,
+                hits,
+                #[cfg(feature = "whole-record-dense")]
+                dense_lane_status: result.dense_lane_status,
+                degraded_stages,
+                lane_ranks: result.lane_ranks,
+                query_lattice_anchor: result.query_lattice_anchor,
+                cross_encoder: Some(report),
             }
         } else {
             result
@@ -10449,6 +10812,7 @@ impl EstateCoordinator {
             // locusOnly compiles no sketch — the anchor derivation never runs.
             // Mirrors Swift RecallDirector.locusOnly path (GLKRecallResult.swift §M4).
             query_lattice_anchor: None,
+            cross_encoder: None,
         })
     }
 
@@ -12965,6 +13329,7 @@ impl EstateCoordinator {
             // M4: pre-computed anchor from the sketch compilation block above.
             // Callers must read from here; single-derivation doctrine enforced.
             query_lattice_anchor,
+            cross_encoder: None,
         })
     }
 
@@ -13215,6 +13580,7 @@ impl EstateCoordinator {
             lane_ranks,
             // M4: pre-computed anchor — single derivation for this recall path.
             query_lattice_anchor,
+            cross_encoder: None,
         })
     }
 }

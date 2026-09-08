@@ -1501,6 +1501,18 @@ pub struct GLKRecallRequest {
     /// caller sets this explicitly. Mirrors Swift
     /// `GLKRecallRequest.subSpanScoring`.
     pub sub_span_scoring: GLKSubSpanScoring,
+
+    /// The cross-encoder portion of the caller's recall strategy decision.
+    ///
+    /// `None` (what `new()` sets) and `Bypass` leave the final order as fused
+    /// and produce byte-identical hits; `None` also leaves
+    /// `GLKRecallResult::cross_encoder` None. `Apply` runs the retrieval-time
+    /// cross-encoder stage over the head of the authorized final list
+    /// (`cross_encoder_stage`) under the estate's manifest limits, or
+    /// degrades with a reason when it cannot. The ARIA verb surface does not
+    /// carry it yet; internal callers set it explicitly. Mirrors Swift
+    /// `GLKRecallRequest.rerankDirective`.
+    pub rerank_directive: Option<corpus_kit::encoder::RerankDirective>,
 }
 
 impl GLKRecallRequest {
@@ -1533,7 +1545,16 @@ impl GLKRecallRequest {
             frontier_k: None,
             anomalous_filter: None,
             sub_span_scoring: GLKSubSpanScoring::Off,
+            rerank_directive: None,
         }
+    }
+
+    /// Builder: set the cross-encoder directive. `new()` sets `None`, which
+    /// is bypass with no report. Mirrors Swift's defaulted
+    /// `rerankDirective:` init parameter.
+    pub fn with_rerank_directive(mut self, directive: corpus_kit::encoder::RerankDirective) -> Self {
+        self.rerank_directive = Some(directive);
+        self
     }
 
     /// Builder: set an optional free-text query for BM25 and vector lanes.
@@ -1727,6 +1748,13 @@ pub struct GLKRecallResult {
     /// on the same text a second time; the single-derivation doctrine means the
     /// director's result is the authoritative anchor for the whole recall pipeline.
     pub query_lattice_anchor: Option<(String, String)>,
+
+    /// What the cross-encoder stage did for this request
+    /// (`cross_encoder_stage`), or `None` when the request carried no
+    /// `rerank_directive`. Bypass and degrade are reported here too; a
+    /// degraded apply also pushes `recall.cross_encoder_degraded` onto
+    /// `degraded_stages`. Mirrors Swift `GLKRecallResult.crossEncoder`.
+    pub cross_encoder: Option<crate::cross_encoder_stage::CrossEncoderReport>,
 }
 
 impl GLKRecallResult {

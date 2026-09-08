@@ -179,6 +179,12 @@ public actor GeniusLocusKit {
     /// `registerSpanRerank(_:spanVectors:head:for:)`. Absent ⇒ the unionBest
     /// lane skips the span rerank stage (lexical-only, contract sheet §7).
     internal var spanRerankSources: [EstateHandle: SpanRerankSource] = [:]
+    /// Per-estate cross-encoder scorer slot: loaded lazily by the first
+    /// `apply` (`pairScorer(profile:for:)`), or registered by a host or test
+    /// (`registerPairScorer(_:for:)`); a failed load is remembered as
+    /// `.unavailable`. Absent until an apply is tried. Dropped in `close`.
+    /// See CrossEncoderActivation.swift.
+    internal var pairScorers: [EstateHandle: PairScorerSlot] = [:]
 
     /// Per-estate grant persistence (GRT-01). Built lazily on the first
     /// grant verb against a handle via `ensureGrantSurface(for:)`; the

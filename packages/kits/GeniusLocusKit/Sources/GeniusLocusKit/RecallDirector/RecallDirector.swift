@@ -111,23 +111,44 @@ public extension GeniusLocusKit {
             "RecallDirector: mode=\(request.mode.rawValue, privacy: .public) limit=\(request.limit, privacy: .public) frontierK=\(frontierK, privacy: .public)"
         )
 
+        // Cross-encoder stage (CrossEncoderStage): resolve the directive
+        // before the lanes run so the lanes' presentation cut can be widened
+        // to the stage's pool. The plan (frontierK) above is computed from the
+        // caller's limit and is unchanged, so the candidate pool the lanes
+        // score is identical with or without a directive; only the cut is
+        // wider, and the caller's limit is re-applied after the stage. A nil
+        // or bypass directive leaves `laneRequest` equal to `request`.
+        let directive = request.rerankDirective
+        var crossEncoderProfile: CrossEncoderProfile? = nil
+        var crossEncoderLimits: CrossEncoderLimits? = nil
+        var laneRequest = request
+        if let directive, directive.action == .apply,
+           let profile = Self.packagedCrossEncoderProfiles[directive.profileID] {
+            let limits = await provisionedCrossEncoderLimits(profile: profile, for: handle)
+            crossEncoderProfile = profile
+            crossEncoderLimits = limits
+            if request.limit < limits.pool {
+                laneRequest = request.replacing(limit: limits.pool)
+            }
+        }
+
         // `laneResult` holds the raw per-lane output before the admission gate.
         let laneResult: GLKRecallResult
         switch request.mode {
         case .locusOnly:
-            laneResult = try await recallLocusOnly(estate: estate, request: request, plan: plan)
+            laneResult = try await recallLocusOnly(estate: estate, request: laneRequest, plan: plan)
 
         case .corpusOnly:
             laneResult = try await recallCorpusOnly(
-                estate: estate, request: request, plan: plan, handle: handle)
+                estate: estate, request: laneRequest, plan: plan, handle: handle)
 
         case .hybrid:
             laneResult = try await recallHybrid(
-                estate: estate, request: request, plan: plan, handle: handle)
+                estate: estate, request: laneRequest, plan: plan, handle: handle)
 
         case .unionBest:
             laneResult = try await recallUnionBest(
-                estate: estate, request: request, plan: plan, handle: handle)
+                estate: estate, request: laneRequest, plan: plan, handle: handle)
 
         case .nodeTreeNative:
             // The nodeTreeNative mode injects host-tree topology edges into the
@@ -142,7 +163,7 @@ public extension GeniusLocusKit {
             //
             // nodeTreeNative routes to locusOnly; no corpus/vector stages are
             // attempted, so degradedStages is always empty for this mode.
-            laneResult = try await recallLocusOnly(estate: estate, request: request, plan: plan)
+            laneResult = try await recallLocusOnly(estate: estate, request: laneRequest, plan: plan)
         }
 
         // §11.18 anomalous-flag admission gate — applied BEFORE scoring writes
@@ -157,7 +178,7 @@ public extension GeniusLocusKit {
         // unchanged — the isAnomalous bit requires a hydrated body to test.
         // laneRanks is preserved verbatim so trace-row attribution remains
         // correct for the ids that survive the gate.
-        let result: GLKRecallResult
+        let admitted: GLKRecallResult
         if let anomalousFilter = request.anomalousFilter {
             let admissible = laneResult.hits.filter { hit in
                 // Unhydrated hits carry no drawer body; admit them to avoid
@@ -165,10 +186,34 @@ public extension GeniusLocusKit {
                 guard let drawer = hit.drawer else { return true }
                 return drawer.isAnomalous == anomalousFilter
             }
-            result = laneResult.replacing(hits: admissible)
+            admitted = laneResult.replacing(hits: admissible)
         } else {
             // No filter — pass through byte-identical.
-            result = laneResult
+            admitted = laneResult
+        }
+
+        // Cross-encoder stage, after the admission gate and before the trace
+        // write and the dreaming enqueue, so the caller receives, and the
+        // trace records, the fused order. A nil directive runs nothing here
+        // and the result is byte-identical to a request without the field;
+        // bypass and degrade only attach a report. The caller's limit is
+        // re-applied ONLY when the lanes were widened to the pool: an
+        // unwidened lane result keeps its own cut (unionBest may return a
+        // tie-widened page), exactly as it does without a directive.
+        let result: GLKRecallResult
+        if let directive {
+            let stage = await runCrossEncoderStage(
+                handle: handle, request: request, directive: directive,
+                profile: crossEncoderProfile, limits: crossEncoderLimits, hits: admitted.hits)
+            let widened = laneRequest.limit != request.limit
+            result = admitted.replacing(
+                request: request,
+                hits: widened ? Array(stage.hits.prefix(max(0, request.limit))) : stage.hits,
+                degradedStages: stage.degraded
+                    ? admitted.degradedStages + [CrossEncoderStage.degradedStage] : nil,
+                crossEncoder: .some(stage.report))
+        } else {
+            result = admitted
         }
 
         // Enqueue a dreaming item for external-origin scored recalls.

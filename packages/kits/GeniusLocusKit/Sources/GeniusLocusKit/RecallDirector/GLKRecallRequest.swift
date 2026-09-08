@@ -1,3 +1,4 @@
+import CorpusKit
 import LocusKit
 
 /// Whether a recall request originates from an external consumer or from
@@ -164,6 +165,17 @@ public struct GLKRecallRequest: Sendable {
     /// Every internal caller sets this explicitly; see `GLKSubSpanScoring`.
     public let subSpanScoring: GLKSubSpanScoring
 
+    /// The cross-encoder portion of the caller's recall strategy decision.
+    ///
+    /// `nil` (the default) and `.bypass` leave the final order as fused and
+    /// produce byte-identical hits; `nil` also leaves
+    /// `GLKRecallResult.crossEncoder` nil. `.apply` runs the retrieval-time
+    /// cross-encoder stage over the head of the authorized final list
+    /// (`CrossEncoderStage`) under the estate's manifest limits, or degrades
+    /// with a reason when it cannot. The ARIA verb surface does not carry it
+    /// yet; internal callers pass it explicitly.
+    public let rerankDirective: RerankDirective?
+
     /// Create a recall request with explicit lane, scoring, and policy.
     ///
     /// All five behavioural parameters are required — there are no defaults.
@@ -205,6 +217,8 @@ public struct GLKRecallRequest: Sendable {
     ///     matrixAware pipeline when a corpus is registered and query text is
     ///     present. Internal callers state the value; the ARIA surface does not
     ///     expose it.
+    ///   - rerankDirective: The cross-encoder directive. `nil` (the default)
+    ///     is bypass with no report; `.apply` runs the stage.
     public init(
         frame: LocusKit.RecallFrame,
         mode: GLKRecallMode,
@@ -219,7 +233,8 @@ public struct GLKRecallRequest: Sendable {
         composition: String? = nil,
         frontierK: Int? = nil,
         anomalousFilter: Bool? = nil,
-        subSpanScoring: GLKSubSpanScoring = .off
+        subSpanScoring: GLKSubSpanScoring = .off,
+        rerankDirective: RerankDirective? = nil
     ) {
         self.frame = frame
         self.mode = mode
@@ -235,5 +250,19 @@ public struct GLKRecallRequest: Sendable {
         self.frontierK = frontierK
         self.anomalousFilter = anomalousFilter
         self.subSpanScoring = subSpanScoring
+        self.rerankDirective = rerankDirective
+    }
+
+    /// This request with `limit` replaced and every other field kept. The
+    /// director uses it to widen the lanes' presentation cut to the
+    /// cross-encoder pool; the caller's own limit is re-applied after the
+    /// stage.
+    func replacing(limit: Int) -> GLKRecallRequest {
+        GLKRecallRequest(
+            frame: frame, mode: mode, scoring: scoring, limit: limit, fallback: fallback,
+            queryText: queryText, traceLimit: traceLimit, origin: origin,
+            recallShape: recallShape, door: door, composition: composition,
+            frontierK: frontierK, anomalousFilter: anomalousFilter,
+            subSpanScoring: subSpanScoring, rerankDirective: rerankDirective)
     }
 }

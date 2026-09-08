@@ -1,0 +1,198 @@
+{
+ "schema": "cross-encoder-fuse-parity-v1",
+ "source": "benchmark-ee/cross-encoder-lab lab.py fuse over fixtures/minilm6-reference.json plus synthetic cases",
+ "cases": [
+  {
+   "name": "boiling",
+   "incoming": [
+    "berlin",
+    "cat",
+    "water",
+    "paris",
+    "empty"
+   ],
+   "head": 30,
+   "rrf_k": 60,
+   "logits": {
+    "berlin": [
+     -11.240537643432617
+    ],
+    "cat": [
+     -11.256487846374512
+    ],
+    "empty": [],
+    "paris": [
+     -11.247589111328125,
+     -11.252758026123047
+    ],
+    "water": [
+     9.275367736816406
+    ]
+   },
+   "expected": [
+    "berlin",
+    "water",
+    "cat",
+    "paris",
+    "empty"
+   ]
+  },
+  {
+   "name": "capital",
+   "incoming": [
+    "cat",
+    "berlin",
+    "paris",
+    "water",
+    "empty"
+   ],
+   "head": 30,
+   "rrf_k": 60,
+   "logits": {
+    "berlin": [
+     -3.6770708560943604
+    ],
+    "cat": [
+     -11.045146942138672
+    ],
+    "empty": [],
+    "paris": [
+     8.089582443237305,
+     -2.3964743614196777
+    ],
+    "water": [
+     -11.110855102539062
+    ]
+   },
+   "expected": [
+    "cat",
+    "paris",
+    "berlin",
+    "water",
+    "empty"
+   ]
+  },
+  {
+   "name": "pet",
+   "incoming": [
+    "paris",
+    "water",
+    "cat",
+    "berlin",
+    "empty"
+   ],
+   "head": 30,
+   "rrf_k": 60,
+   "logits": {
+    "berlin": [
+     -11.181516647338867
+    ],
+    "cat": [
+     8.426995277404785
+    ],
+    "empty": [],
+    "paris": [
+     -11.166393280029297,
+     -11.152200698852539
+    ],
+    "water": [
+     -11.198495864868164
+    ]
+   },
+   "expected": [
+    "paris",
+    "cat",
+    "water",
+    "berlin",
+    "empty"
+   ]
+  },
+  {
+   "name": "tail_and_ties",
+   "incoming": [
+    "c01",
+    "c02",
+    "c03",
+    "c04",
+    "c05",
+    "c06",
+    "c07",
+    "c08",
+    "c09",
+    "c10"
+   ],
+   "head": 6,
+   "rrf_k": 60,
+   "logits": {
+    "c01": [
+     0.5
+    ],
+    "c02": [
+     9.0,
+     1.0
+    ],
+    "c03": [],
+    "c04": [
+     9.0
+    ],
+    "c05": [
+     -3.0,
+     2.5
+    ],
+    "c06": [
+     2.5
+    ]
+   },
+   "expected": [
+    "c02",
+    "c01",
+    "c04",
+    "c05",
+    "c03",
+    "c06",
+    "c07",
+    "c08",
+    "c09",
+    "c10"
+   ]
+  },
+  {
+   "name": "all_equal_keeps_incoming",
+   "incoming": [
+    "c01",
+    "c02",
+    "c03",
+    "c04",
+    "c05"
+   ],
+   "head": 3,
+   "rrf_k": 60,
+   "logits": {
+    "c01": [
+     1.0
+    ],
+    "c02": [
+     1.0
+    ],
+    "c03": [
+     1.0
+    ]
+   },
+   "expected": [
+    "c01",
+    "c02",
+    "c03",
+    "c04",
+    "c05"
+   ]
+  },
+  {
+   "name": "empty",
+   "incoming": [],
+   "head": 30,
+   "rrf_k": 60,
+   "logits": {},
+   "expected": []
+  }
+ ]
+}
