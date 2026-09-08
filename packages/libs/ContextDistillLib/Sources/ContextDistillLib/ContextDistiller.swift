@@ -304,8 +304,8 @@ public struct ContextDistiller: Sendable {
     /// - Parameters:
     ///   - input: Source text and raw enrichment trailer (split before this call).
     ///   - converter: The converter variant to apply. Pass
-    ///     ``ContextDistillConverter/intentSpanV22`` for the v22 authority-closure
-    ///     converter, or ``ContextDistillConverter/intentSpanV23Attributed`` for
+    ///     ``ContextDistillConverter/completeFormV6`` for complete compaction,
+    ///     or ``ContextDistillConverter/intentSpanV23Attributed`` for
     ///     the v23.2 attributed peer-dialogue converter.
     /// - Returns: A ``DistilledRepresentation`` whose fields match the oracle
     ///   JSONL schema for the chosen converter.
@@ -322,6 +322,9 @@ public struct ContextDistiller: Sendable {
     ) -> DistilledRepresentation {
         let source = input.original
         let trailer = input.enrichmentTrailer
+        if converter == .completeFormV6 {
+            return completeRepresentation(input, converter: converter)
+        }
 
         // --- Shape classification ---
         // Mirrors Python: decision = classify_record(record.content)
@@ -410,5 +413,42 @@ public struct ContextDistiller: Sendable {
             metrics:                   metrics,
             selectionDetails:          intentDetails
         )
+    }
+
+    /// Complete-form compaction never selects away source passages. Reserved
+    /// representation collisions fail unchanged rather than losing a record.
+    private func completeRepresentation(
+        _ input: DistillationInput, converter: ContextDistillConverter
+    ) -> DistilledRepresentation {
+        let source = input.original
+        let reduced = try? CompleteContentReducer.distill(source)
+        let core = reduced?.text ?? source
+        let trailer = input.enrichmentTrailer
+        let combined = combine(core, trailer: trailer)
+        let bytes = source.utf8.count
+        return DistilledRepresentation(
+            schemaVersion: converter.schemaVersion,
+            converterVersion: converter.converterVersion,
+            rulesetVersion: "complete-form-visible-v6",
+            converterID: converter.id, sourceSHA256: sourceDigest(source),
+            shape: ContextShape.classify(source).asDict(),
+            spanOffsetUnit: "unicode-code-point", spanUTF8OffsetUnit: "byte",
+            selectedSourceSpans: source.isEmpty ? [] : [[
+                "start": 0, "end": source.unicodeScalars.count,
+                "start_utf8_byte": 0, "end_utf8_byte": bytes,
+                "kind": "complete-source"
+            ]],
+            compactCore: core, appliedEnrichmentTrailer: trailer,
+            aiText: combined, miningBody: combined,
+            metrics: ["original_bytes": bytes, "original_tokens_est": estimateTokens(source),
+                      "core_bytes": core.utf8.count, "trailer_bytes": trailer.utf8.count,
+                      "applied_trailer_bytes": trailer.utf8.count,
+                      "distilled_bytes": combined.utf8.count,
+                      "distilled_tokens_est": estimateTokens(combined),
+                      "compression_ratio_ppm": bytes == 0 ? 0 : combined.utf8.count * 1_000_000 / bytes],
+            selectionDetails: ["mode": "complete-form", "complete": true,
+                               "rendering": "complete-form-visible-v6",
+                               "count_unit": "tokens_estimate", "model_assistance": false,
+                               "fallback_unchanged": reduced == nil])
     }
 }
