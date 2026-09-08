@@ -187,11 +187,15 @@ pub fn run_doctor() -> ExitCode {
     }
     println!("Chronicle policy: generated Markdown only; no screenshots; import is consent-gated and read-only toward CODEX_HOME");
 
-    // Estate at rest: use aria_mcp::estate_migration::detect_estate_file_state.
-    let data_dir = crate::core::paths::data_dir();
-    let active = crate::core::paths::active_estate(&data_dir);
-    let estate_path = crate::core::paths::estate_sqlite_path(&data_dir, &active);
-    let posture = migration::detect_estate_file_state(&estate_path);
+    // The active estate's file, from the catalog; an unreadable catalog
+    // reports the posture as absent rather than failing the status print.
+    let estate_path = genius_locus_kit::EstateCatalog::open()
+        .ok()
+        .map(|catalog| catalog.active().database_path());
+    let posture = estate_path
+        .as_deref()
+        .map(migration::detect_estate_file_state)
+        .unwrap_or(migration::EstateFileState::Absent);
     let posture_text = match posture {
         migration::EstateFileState::Absent => "absent",
         migration::EstateFileState::Plaintext => "plaintext (migration recommended)",
@@ -200,7 +204,7 @@ pub fn run_doctor() -> ExitCode {
     println!("Estate at rest: {posture_text}");
 
     // Count estate backup files (*.bak or files containing "backup" in name).
-    let backup_count = if let Some(parent) = estate_path.parent() {
+    let backup_count = if let Some(parent) = estate_path.as_deref().and_then(Path::parent) {
         fs::read_dir(parent)
             .map(|entries| {
                 entries
