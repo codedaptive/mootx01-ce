@@ -19,6 +19,7 @@
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct EnableCommand: AsyncParsableCommand {
@@ -77,8 +78,7 @@ struct EnableCommand: AsyncParsableCommand {
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let env = ProcessInfo.processInfo.environment
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         guard await LiveDaemonClient(port: port).ping() else {
             print("  ✗ MOOTx01 daemon not reachable at port \(port); refusing to enable Codex memory.")
             throw ExitCode.failure
@@ -167,11 +167,7 @@ struct EnableCommand: AsyncParsableCommand {
 
         // Daemon reachability check — Harness Memory without an estate is
         // worse than useless (writes blocked with nowhere to go).
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            homeDirectory: home
-        )
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         let daemon = LiveDaemonClient(port: port)
         guard await daemon.ping() else {
             print("  ✗ MOOTx01 daemon not reachable at port \(port).")
@@ -381,11 +377,7 @@ struct DisableCommand: AsyncParsableCommand {
         // Restore offer.
         guard !noRestore else { return }
 
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            homeDirectory: home
-        )
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         let daemon = LiveDaemonClient(port: port)
 
         guard await daemon.ping() else {

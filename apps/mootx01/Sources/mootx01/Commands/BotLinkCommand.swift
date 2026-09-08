@@ -24,6 +24,7 @@
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 /// Transport-layer failures surfaced by the real HTTP/stdio wiring. The
@@ -100,11 +101,8 @@ enum BotLinkWiring {
         }
 
         if options.db == nil {
-            let home = FileManager.default.homeDirectoryForCurrentUser
-            let env = ProcessInfo.processInfo.environment
-            let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
             let url = overrideURL
-                ?? URL(string: "http://127.0.0.1:\(MootPaths.resolvedResidentPort(dataDir: dataDir))/")!
+                ?? URL(string: "http://127.0.0.1:\(MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory))/")!
             // Probe the resolved port (default 4242, or the --http override's
             // port); 250 ms then fall through to the subprocess immediately —
             // no proxy-style multi-minute wait.
