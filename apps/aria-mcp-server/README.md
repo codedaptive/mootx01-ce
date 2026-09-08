@@ -14,9 +14,19 @@ a managed external server to prove the substrate is shared across clients.
 - Swift executable: `Sources/aria-mcp` → product `aria-mcp`.
 - Rust binary: `rust/` → the Rust vertical's `aria-mcp` binary (over the `aria_mcp` lib).
 
-**Backend selection** (env, fail-fast — no silent fallback):
-`ARIA_MCP_POSTGRES_URL` → PostgreSQL · `ARIA_MCP_SQLITE_PATH` → SQLite (durable) ·
-neither → InMemory (ephemeral). Both set → exit 1.
+**Estate selection** (the estate catalog, the same as every `mootx01` command;
+no environment value names a database):
+
+```
+aria-mcp                     the catalog's active estate
+aria-mcp --db <name>         a registered estate by name
+aria-mcp --db <dir>/<name>   a transient estate at that directory, this process only
+aria-mcp --in-memory         the selected estate on the in-memory backend, gone at exit
+```
+
+The catalog record decides the backend: SQLite (`estate.sqlite` in the record's
+directory, opened under the posture its file requires) or PostgreSQL (the record's
+connection string). Any other argument is a usage error.
 
 ## Build / run
 
