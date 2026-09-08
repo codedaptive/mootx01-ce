@@ -15,9 +15,31 @@
 // `tokenizer.json` (candle provider); both ports hash the same `vocab.txt`
 // for `EncoderModelSpec.tokenizerHash`, so a vocabulary swap is caught on
 // either side before a single span is encoded.
+//
+// `tokenizePair` is the cross-encoder form: `[CLS] query [SEP] span [SEP]`
+// with segment ids 0 / 1 and longest-first truncation, the shape a BERT
+// sequence classifier was trained on. The Rust twin is the `tokenizers`
+// crate's pair encode with `TruncationStrategy::LongestFirst`.
 
 import Foundation
 import CorpusKit
+
+/// One tokenized (query, span) pair for a cross encoder.
+///
+/// `ids` and `tokenTypeIDs` have the same count; every position is a real
+/// token (no padding here, the inference runtime pads to its own shape).
+public struct PairTokens: Sendable, Equatable {
+    /// `[CLS] q… [SEP] s… [SEP]`.
+    public let ids: [Int32]
+    /// `0` for `[CLS] q… [SEP]`, `1` for `s… [SEP]`.
+    public let tokenTypeIDs: [Int32]
+
+    /// Memberwise.
+    public init(ids: [Int32], tokenTypeIDs: [Int32]) {
+        self.ids = ids
+        self.tokenTypeIDs = tokenTypeIDs
+    }
+}
 
 /// BERT uncased WordPiece tokenizer over a `vocab.txt` vocabulary.
 public struct WordPieceTokenizer: Tokenizer {
@@ -92,6 +114,36 @@ public struct WordPieceTokenizer: Tokenizer {
         }
         ids.append(separatorTokenID)
         return ids
+    }
+
+    /// `[CLS]` + query pieces + `[SEP]` + span pieces + `[SEP]`, with
+    /// segment ids, truncated longest-first so the whole pair is at most
+    /// `maxTokens` ids.
+    ///
+    /// Longest-first is the reference `truncation="longest_first"`: while
+    /// the two piece lists together exceed `maxTokens - 3`, drop the last
+    /// piece of the LONGER list; on a tie drop from the query (the first
+    /// sequence). Pinned against the reference tokenizer in
+    /// `PairTokenizerTests`.
+    public func tokenizePair(_ query: String, _ span: String) -> PairTokens {
+        let budget = max(0, maxTokens - 3)
+        var q = Self.basicTokens(query).flatMap(wordPieces)
+        var s = Self.basicTokens(span).flatMap(wordPieces)
+        while q.count + s.count > budget {
+            if s.count > q.count {
+                s.removeLast()
+            } else {
+                q.removeLast()
+            }
+        }
+        var ids: [Int32] = [classTokenID]
+        ids.reserveCapacity(q.count + s.count + 3)
+        ids += q
+        ids.append(separatorTokenID)
+        ids += s
+        ids.append(separatorTokenID)
+        let tokenTypeIDs = [Int32](repeating: 0, count: q.count + 2) + [Int32](repeating: 1, count: s.count + 1)
+        return PairTokens(ids: ids, tokenTypeIDs: tokenTypeIDs)
     }
 
     // MARK: - Basic tokenisation
