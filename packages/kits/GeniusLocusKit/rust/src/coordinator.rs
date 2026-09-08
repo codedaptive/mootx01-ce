@@ -4942,7 +4942,7 @@ impl EstateCoordinator {
         constituents: &[locus_kit::drawer::Drawer],
         config: &crate::brain::consolidation_cycle::ConsolidationConfig,
     ) -> Option<(String, substrate_types::Fingerprint256)> {
-        use crate::brain::fingerprint_lane::{compaction_rendering, takes_matrix_path};
+        use crate::brain::fingerprint_lane::takes_matrix_path;
         use substrate_ml::distillation_pipeline::{DistillationInput, DistillationPipeline};
 
         // Each piece keeps its constituent's event time so sentences can be
@@ -4993,20 +4993,17 @@ impl EstateCoordinator {
                 constituents[0].id.clone(),
                 constituents.iter().map(|c| c.id.clone()).collect(),
             );
-            let output = DistillationPipeline::run(
+            let output = DistillationPipeline::run_with_rendering(
                 &input,
                 DistillationPipeline::default_extractor,
                 true,
+                false,
             );
-            let rendering = if output.distilled_text.is_empty() {
-                compaction_rendering(&combined)
-            } else {
-                output.distilled_text
-            };
+            let rendering = crate::hydration_representation::distilled_rendering(&combined);
             (rendering, output.feature_fingerprint)
         } else {
             (
-                compaction_rendering(&combined),
+                crate::hydration_representation::distilled_rendering(&combined),
                 DistillationPipeline::query_fingerprint(&combined, DistillationPipeline::default_extractor),
             )
         };

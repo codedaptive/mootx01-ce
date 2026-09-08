@@ -14,6 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 substrate-types  = { path = "../../SubstrateTypes/rust" }
 substrate-kernel = { path = "../../SubstrateKernel/rust" }
+context-distill-lib = { path = "../../ContextDistillLib/rust" }
 # intellectus-lib is the zero-dep telemetry leaf. Adding it here lets the
 # five VizGraph algorithms emit community.assignment, centrality.score,
 # nmf.factor, anomaly.flag, and edge.decayed_weight signals when monitoring
