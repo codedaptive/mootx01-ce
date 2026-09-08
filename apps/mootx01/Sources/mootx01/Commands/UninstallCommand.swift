@@ -13,6 +13,7 @@
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct UninstallCommand: AsyncParsableCommand {
@@ -152,14 +153,20 @@ struct UninstallCommand: AsyncParsableCommand {
         print("\nDone. Restart your MCP client to apply changes.")
     }
 
-    /// Offer/confirm/trash the data directory. The decision matrix lives in
-    /// `DataRetention.decideDataRemoval` (unit-tested); this wrapper owns
-    /// the prompts and the exit codes.
+    /// Offer/confirm/trash the configuration directory. The decision matrix
+    /// lives in `DataRetention.decideDataRemoval` (unit-tested); this wrapper
+    /// owns the prompts and the exit codes. The inventory is the catalog's:
+    /// a missing or unreadable catalog means no estates to report, and the
+    /// directory is offered on the strength of the mgr store alone.
     private func removeUserData() throws {
-        let environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
-        guard let inventory = DataRetention.dataInventory(in: dataDir) else { return }
+        let dataDir = EstateCatalog.configurationDirectory
+        let records = (try? EstateCatalog.load())?.records ?? []
+        let defaultRecord = records.first { $0.name == EstateCatalog.defaultName }
+        guard let inventory = DataRetention.dataInventory(
+            defaultDatabaseURL: defaultRecord?.databaseURL,
+            namedDatabaseURLs: records.filter { $0.name != EstateCatalog.defaultName }.map(\.databaseURL),
+            configurationDirectory: dataDir)
+        else { return }
 
         let decision = DataRetention.decideDataRemoval(
             purge: purge,
