@@ -15,7 +15,7 @@ pub const DEFAULT_PORT: u16 = 4242;
 
 /// Resolve the daemon port: the port file when present, else 4242.
 pub fn resolved_port() -> u16 {
-    paths::read_port_file(&paths::daemon_port_file(&paths::data_dir())).unwrap_or(DEFAULT_PORT)
+    paths::read_port_file(&paths::daemon_port_file(&genius_locus_kit::EstateCatalog::configuration_directory())).unwrap_or(DEFAULT_PORT)
 }
 
 /// Parse "http://127.0.0.1:4242" → port. Only loopback HTTP URLs are
