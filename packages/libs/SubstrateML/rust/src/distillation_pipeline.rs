@@ -12,8 +12,8 @@
 //             CONVERGENT/MONOTONE sequences.
 // Stage 3: Build PMI coherence graph, select dominant component (F*).
 // Stage 4: Compute structural scores on F*.
-// Stage 5: Compute confidence, render distilled_text (SPEC §5/§7.4:
-//          §7.6 compaction, core-first ordering), compute feature_fingerprint.
+// Stage 5: Compute confidence, optionally render complete source-ordered text,
+//          compute feature_fingerprint.
 //
 // Critical: f32::log2 is used in DistillationScorer (not f32::ln) — conformance with Swift.
 // Critical: FEATURE_SIM_HASH_SEED = 0x44495354494C4C41 — "DISTILLA" in ASCII.
@@ -75,13 +75,8 @@ impl DistillationInput {
 /// Mirrors Swift DistillationOutput in DistillationPipeline.swift.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistillationOutput {
-    /// The distilled rendering (SPEC_DISTILLATION_STORAGE §5): the item's
-    /// unit sentences compacted through the §7.6 token-compaction
-    /// transform, dominant-component (core) sentences first in stable
-    /// source order, the episodic tail after. Zero inline metadata —
-    /// every byte is payload. Written into the source drawer's
-    /// `distilled` column by the GLK distillation paths.
-    /// Empty string when succeeded == false.
+    /// Complete content rendered in source order by ContextDistillLib.
+    /// Empty when rendering is explicitly disabled for fingerprint-only work.
     pub distilled_text: String,
     /// Confidence score conf(F*) ∈ [0, 1].
     pub confidence: f32,
@@ -272,6 +267,17 @@ impl DistillationPipeline {
         input: &DistillationInput,
         extract_features: FeatureExtractor,
         intra_item: bool,
+    ) -> DistillationOutput {
+        Self::run_with_rendering(input, extract_features, intra_item, true)
+    }
+
+    /// Run structural analysis with optional complete-content rendering.
+    /// Disabling rendering leaves all structural results unchanged.
+    pub fn run_with_rendering(
+        input: &DistillationInput,
+        extract_features: FeatureExtractor,
+        intra_item: bool,
+        render_text: bool,
     ) -> DistillationOutput {
         let m = input.m();
         if m == 0 {
@@ -524,38 +530,16 @@ impl DistillationPipeline {
         let confidence = DistillationScorer::compute_confidence(&selected, &passing);
         let uncertain = confidence >= 0.4 && confidence < 0.7;
 
-        // Rendering (SPEC_DISTILLATION_STORAGE §5/§7.4): token-economical
-        // prose built from the item's OWN unit sentences, not from the
-        // feature bag. Sentences carrying a dominant-component (selected)
-        // feature render first in stable source order; the episodic tail
-        // follows in source order. Every unit renders through the ONE §7.6
-        // compaction transform — rule 1 (propositional fidelity, priority 1)
-        // bounds tail compression, so core and tail share the same transform
-        // and "compresses hardest" is realized by ordering, not by a lossier
-        // second transform. Zero inline metadata: confidence/SNR/delta ride
-        // the DistillationOutput fields only, never the text. Mirrors the
-        // Swift Stage 5 exactly (bit-identical rendering required).
-        let selected_values: std::collections::HashSet<&str> =
-            selected.iter().map(|f| f.value.as_str()).collect();
-        let mut core_units: Vec<&str> = Vec::new();
-        let mut tail_units: Vec<&str> = Vec::new();
-        for (i, unit) in input.memory_contents.iter().enumerate() {
-            let carries_core = per_memory_features[i]
-                .iter()
-                .any(|f| selected_values.contains(f.value.as_str()));
-            if carries_core {
-                core_units.push(unit.as_str());
-            } else {
-                tail_units.push(unit.as_str());
-            }
-        }
-        let distilled_text: String = core_units
-            .into_iter()
-            .chain(tail_units)
-            .map(crate::token_compaction::compact)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        // Preserve source order and unit boundaries independently of structural
+        // selection. Invalid/reserved input fails unchanged, never to a skim.
+        let distilled_text = if render_text {
+            let source = input.memory_contents.join("\n");
+            context_distill_lib::complete_content::CompleteContentReducer::distill(
+                &source, context_distill_lib::digest::estimate_tokens,
+            ).map(|result| result.text).unwrap_or(source)
+        } else {
+            String::new()
+        };
 
         // Feature fingerprint: OR-reduce of feature_hash for each selected feature
         let fingerprint = selected.iter().fold(Fingerprint256::ZERO, |acc, feature| {
@@ -734,25 +718,34 @@ mod tests {
     }
 
     #[test]
-    fn rendering_orders_core_before_episodic_tail() {
-        // §7.4: sentences carrying a dominant-component feature render
-        // first (stable source order); the featureless tail follows.
-        // Mirrors Swift `renderingOrdersCoreFirst`.
-        let input = five_memory_cluster();
+    fn rendering_preserves_source_order() {
+        let mut input = five_memory_cluster();
+        input.memory_contents.rotate_right(1);
         let output = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
-        if !output.succeeded {
-            return;
-        }
+        assert!(output.succeeded);
         let text = &output.distilled_text;
         let core_idx = text.find("Alice").expect("core sentence must render");
         let tail_idx = text
             .find("Maintenance")
             .expect("tail sentence must render (rule 1: it compresses, it does not vanish)");
-        assert!(core_idx < tail_idx, "core must precede tail: {text}");
-        // The compaction transform ran per unit ("The lab where Alice
-        // works is CERN facility" loses its article and copula).
-        assert!(!text.contains("The lab where"));
-        assert!(text.contains("Lab where Alice works CERN facility"));
+        assert!(tail_idx < core_idx, "source order must survive: {text}");
+        assert_eq!(text, &input.memory_contents.join("\n"));
+    }
+
+    #[test]
+    fn fingerprint_only_skips_rendering_without_changing_structural_results() {
+        let input = five_memory_cluster();
+        let rendered = DistillationPipeline::run(&input, DistillationPipeline::default_extractor, false);
+        let analysis = DistillationPipeline::run_with_rendering(&input, DistillationPipeline::default_extractor, false, false);
+        assert!(!rendered.distilled_text.is_empty());
+        assert!(analysis.distilled_text.is_empty());
+        assert_eq!(analysis.feature_fingerprint, rendered.feature_fingerprint);
+        assert_eq!(analysis.confidence, rendered.confidence);
+        assert_eq!(analysis.snr, rendered.snr);
+        assert_eq!(analysis.delta_type, rendered.delta_type);
+        assert_eq!(analysis.uncertain, rendered.uncertain);
+        assert_eq!(analysis.succeeded, rendered.succeeded);
+        assert_eq!(analysis.failure_reason, rendered.failure_reason);
     }
 
     #[test]

@@ -41,10 +41,8 @@ struct DistillationLensConformanceTests {
         )
     }
 
-    // distilledText is the SPEC §5 rendering: core sentences (Alice/CERN)
-    // compacted and ordered first, the episodic tail last, zero inline
-    // metadata. Both Swift and Rust conformance legs pin this SAME
-    // byte-exact rendering (§13.9 golden vector for the Stage 5 path).
+    // Complete rendering retains these distinct units in source order.
+    // Both Swift and Rust conformance legs pin the same byte-exact text.
     // Uses defaultExtractor explicitly to decouple from the production default.
     @Test("cluster_5: distilledText renders byte-exact (§13.9)")
     func distilledTextRendering() {
@@ -52,10 +50,10 @@ struct DistillationLensConformanceTests {
             input: cluster5(), extractFeatures: DistillationPipeline.defaultExtractor)
         #expect(result.succeeded)
         #expect(result.distilledText
-            == "Research by Alice at CERN on particle physics "
-            + "Lab where Alice works CERN facility "
-            + "Studies conducted by Alice show CERN advances science "
-            + "Data from CERN shows Alice leading breakthrough research "
+            == "Research by Alice at CERN on particle physics\n"
+            + "The lab where Alice works is CERN facility\n"
+            + "Studies conducted by Alice show CERN advances science\n"
+            + "Data from CERN shows Alice leading breakthrough research\n"
             + "Maintenance was completed on schedule today")
     }
 

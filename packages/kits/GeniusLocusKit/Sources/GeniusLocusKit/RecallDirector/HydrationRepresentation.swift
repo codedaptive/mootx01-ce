@@ -48,20 +48,18 @@ public extension HydrationRepresentation {
 
 public extension GeniusLocusKit {
 
-    /// The converter that produces every distilled rendering: intent-span
-    /// v23.2, the attributed peer-dialogue ruleset. Readers that need the
+    /// The converter that produces normal distilled renderings: complete-form
+    /// v6. The v23.2 recipe remains available explicitly in the library. Readers that need the
     /// converter (CognitionKit recipes, the ARIA hydration path) take it from
     /// here rather than from ContextDistillLib directly, so the choice of
     /// converter is made in exactly one place. Twin of Rust
     /// `DISTILLATION_CONVERTER`.
-    static var distillationConverter: ContextDistillConverter { .intentSpanV23Attributed }
+    static var distillationConverter: ContextDistillConverter { .completeFormV6 }
 
     /// The inline distilled rendering of one item's content: the converter
-    /// receives the verbatim text and selects the exact source spans around
-    /// operative intent. Pure — no I/O, no clock — and byte-identical across
-    /// the Swift and Rust ports by conformance to the library's frozen oracle
-    /// vectors. Measured at 17 ms per 4.9k-character record, which is why it
-    /// runs at read time instead of being stored. Twin of Rust
+    /// receives the complete verbatim text and compacts eligible forms without
+    /// selecting away passages. Pure — no I/O or clock. It runs at read time
+    /// instead of changing stored content. Twin of Rust
     /// `distilled_rendering`.
     static func distilledRendering(of content: String) -> String {
         ContextDistiller().distill(

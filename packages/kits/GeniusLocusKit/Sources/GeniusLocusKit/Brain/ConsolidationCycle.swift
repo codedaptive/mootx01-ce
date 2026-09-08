@@ -649,12 +649,12 @@ extension GeniusLocusKit {
                 memoryTimestamps: sentenceTimestamps,
                 clusterID: constituents[0].id,
                 sourceIDs: constituents.map(\.id)))
-            rendering = output.distilledText.isEmpty
-                ? Self.compactionRendering(of: combined)
-                : output.distilledText
+            // Preserve the original combined document boundaries for text;
+            // the sentence matrix supplies only structural math.
+            rendering = Self.distilledRendering(of: combined)
             fingerprint = output.featureFingerprint
         } else {
-            rendering = Self.compactionRendering(of: combined)
+            rendering = Self.distilledRendering(of: combined)
             fingerprint = DistillationPipeline.queryFingerprint(
                 query: combined,
                 extractFeatures: DistillationPipeline.defaultExtractor)
