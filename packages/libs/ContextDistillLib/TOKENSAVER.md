@@ -1,5 +1,9 @@
 # Complete Distiller, orderReducer and Skim
 
+Authoritative contracts: [Specification](../../../docs/reference/CONTEXTDISTILLLIB_SPEC.md)
+and [Swift/Rust interface](../../../docs/reference/CONTEXTDISTILLLIB_INTERFACE.md).
+This file is a quick invocation guide, not a separate contract.
+
 All three operations are native Swift and Rust library functions. No Python,
 model, network call or database is involved. The Python lab is the test oracle.
 
