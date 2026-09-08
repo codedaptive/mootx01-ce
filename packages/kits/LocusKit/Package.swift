@@ -47,6 +47,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(name: "SubstrateLib", path: "../../libs/SubstrateLib"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(path: "../../libs/SubstrateKernel"),
@@ -70,6 +71,7 @@ let package = Package(
         .target(
             name: "LocusKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 .product(name: "SubstrateLib", package: "SubstrateLib"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "SubstrateKernel", package: "SubstrateKernel"),
@@ -86,6 +88,7 @@ let package = Package(
         .target(
             name: "LocusKitEstateFixture",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "LocusKit",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),

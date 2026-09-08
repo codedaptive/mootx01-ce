@@ -28,6 +28,7 @@
 // rust/src/encoder_activation.rs.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import CorpusKit
 import LocusKit
@@ -98,7 +99,7 @@ public extension GeniusLocusKit {
     }
 
     private static var encoderLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - Registry

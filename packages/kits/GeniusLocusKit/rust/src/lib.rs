@@ -68,6 +68,8 @@ pub mod packager;
 // schema + sampled content. Byte-identical mirror of
 // GeniusLocusKit/Sources/GeniusLocusKit/Intake/DatasetSignatures.swift.
 pub mod dataset_signatures;
+pub mod estate_catalog;
+pub mod estate_open_posture;
 pub mod estate_format;
 pub mod branches;
 pub mod coordinator;
@@ -176,6 +178,11 @@ pub use coordinator::{
 };
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
+pub use estate_open_posture::{EstateOpenPosture, EstateOpenPostureError, EstateOpenPostureKind};
+pub use estate_catalog::{
+    EstateBackend, EstateCatalog, EstateCatalogError, EstateCatalogNames, EstateManifest,
+    EstateManifestEncryption, EstateRecord, EstateRecordKind, EstateSelector,
+};
 // Re-export the encode-speed knob so consumers that depend on GeniusLocusKit
 // (VaultKit's PalaceBridge, AriaMcpKit) can name it without a direct CorpusKit
 // dependency. `.foreground` / `.background` select the drain's embedding QoS;

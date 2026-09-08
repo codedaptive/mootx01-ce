@@ -4,6 +4,7 @@
 // connection (SQLite WAL mode handles multi-reader concurrency).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import SubstrateTypes
 import SQLCipher
@@ -506,7 +507,7 @@ let SQLITE_TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1), to: sqlite3_
 
 // Internal so sibling files in PersistenceKitSQLite (e.g. SQLiteStorage.swift)
 // can share the same logger without a second OSLog allocation.
-let sqliteConnectionLog = Logger(subsystem: "com.mootx01.kit", category: "SQLiteConnection")
+let sqliteConnectionLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKitSQLite.Connection")
 
 // ─────────────────────────────────────────────────────────────────
 // Write-boundary clamp constants — mirrors Rust iso8601() in sqlite.rs.

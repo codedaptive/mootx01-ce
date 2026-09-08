@@ -50,7 +50,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await estate.close() } }
 
@@ -77,7 +78,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         let estateID = await estate.estateUUID
         defer { Task { try? await estate.close() } }
@@ -102,7 +104,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await estate.close() } }
 
@@ -125,7 +128,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await estate.close() } }
 
@@ -162,7 +166,8 @@ struct EstateIdentityKeyStoreTests {
         let first = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         let pubKeyFirst = try await first.manifest.ed25519PublicKey
         let rawFirst = await first.retrievePrivateSigningKeyData()
@@ -172,7 +177,8 @@ struct EstateIdentityKeyStoreTests {
         let second = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await second.close() } }
 
@@ -203,7 +209,8 @@ struct EstateIdentityKeyStoreTests {
         let first = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: firstKeyStore
+            identityKeyStore: firstKeyStore,
+            federate: true
         )
         try await first.close()
 
@@ -213,7 +220,8 @@ struct EstateIdentityKeyStoreTests {
         let second = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: emptyStore
+            identityKeyStore: emptyStore,
+            federate: true
         )
         defer { Task { try? await second.close() } }
 
@@ -223,8 +231,8 @@ struct EstateIdentityKeyStoreTests {
 
     // MARK: - 7. federate:false skips the identity step entirely
 
-    /// A declared non-federating open (MOOTX01_ESTATE_FEDERATE=false, injected
-    /// here as `federate: false`) skips the whole identity-establishment step:
+    /// A non-federating open (`federate: false`, the default) skips the whole
+    /// identity-establishment step:
     /// no keypair is minted, nothing is written to the identity key store, no
     /// public key lands in the manifest, and no in-memory signing key exists.
     @Test("federate:false mints nothing and touches no key store")
@@ -298,14 +306,4 @@ struct EstateIdentityKeyStoreTests {
     /// Only the exact value "false" (any case) disables federation; absence
     /// and every other value keep the default minting behavior. The parse is
     /// a pure function so this test never mutates process environment.
-    @Test("MOOTX01_ESTATE_FEDERATE parse: only \"false\" disables")
-    func federationEnvironmentValueParseContract() {
-        #expect(Estate.federationEnabled(fromEnvironmentValue: nil))
-        #expect(Estate.federationEnabled(fromEnvironmentValue: ""))
-        #expect(Estate.federationEnabled(fromEnvironmentValue: "true"))
-        #expect(Estate.federationEnabled(fromEnvironmentValue: "0"))
-        #expect(!Estate.federationEnabled(fromEnvironmentValue: "false"))
-        #expect(!Estate.federationEnabled(fromEnvironmentValue: "FALSE"))
-        #expect(!Estate.federationEnabled(fromEnvironmentValue: "False"))
-    }
 }

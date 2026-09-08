@@ -20,13 +20,14 @@
 // never rewriting the miner.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "AdornmentLib")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "AdornmentLib")
 
 // MARK: - Engine plug
 

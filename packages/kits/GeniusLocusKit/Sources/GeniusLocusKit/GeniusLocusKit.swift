@@ -1,6 +1,7 @@
 import ConvergenceKit
 import CorpusKit
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 import PersistenceKit
@@ -46,7 +47,7 @@ public actor GeniusLocusKit {
     /// Logger for the kit, fleet-standard subsystem and category per
     /// CLAUDE.md.
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "GeniusLocusKit"
     )
 
@@ -433,6 +434,29 @@ public actor GeniusLocusKit {
     public var handles: [EstateHandle] {
         Array(registry.keys)
     }
+
+    /// The persistence backend the estate at `handle` was opened on, or nil
+    /// when the handle is not open. Status surfaces (the resident's
+    /// `/api/admin/estates`) report this instead of guessing from the
+    /// process environment, so a server hosting several estates on
+    /// different backends labels each one correctly.
+    public func storageBackend(for handle: EstateHandle) -> EstateStorageBackend? {
+        guard let storage = storages[handle] else { return nil }
+        switch storage.configuration.backend {
+        case .sqlite: return .sqlite
+        case .postgresql: return .postgresql
+        case .inMemory: return .inMemory
+        }
+    }
+}
+
+/// The three PersistenceKit backends an estate can be open on, named as the
+/// status surfaces print them. The raw values are the labels moot-mgr's
+/// estate table binds to; changing one changes what operators see.
+public enum EstateStorageBackend: String, Sendable, Equatable {
+    case sqlite = "SQLite"
+    case postgresql = "PostgreSQL"
+    case inMemory = "InMemory"
 }
 
 // MARK: - CorpusKit / VectorStore registration (RECALL-DIRECTOR-002)

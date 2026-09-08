@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import LocusKit
@@ -30,7 +31,7 @@ public extension GeniusLocusKit {
     /// kit's static logger so the subsystem and category stay
     /// fleet-standard ("com.mootx01.kit" / "GeniusLocusKit").
     private static var log: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - open
@@ -75,17 +76,24 @@ public extension GeniusLocusKit {
     ///     window).
     ///   - `.duplicateEstate` if an estate with this UUID is already
     ///     in the registry.
+    /// - Parameter federate: whether this open establishes the estate's Ed25519
+    ///   federation identity. Only a registered estate, one this machine owns,
+    ///   federates; a transient estate never touches an identity key store.
+    ///   The caller decides from its `EstateRecord.kind`. Off by default:
+    ///   minting is additive cost and a Keychain write.
     func open(
         storage: any Storage,
         owner: OwnerCredentials,
-        identityKeyStore: (any EstateIdentityKeyStore)? = nil
+        identityKeyStore: (any EstateIdentityKeyStore)? = nil,
+        federate: Bool = false
     ) async throws -> EstateHandle {
         let estate: LocusKit.Estate
         do {
             estate = try await LocusKit.Estate.open(
                 storage: storage,
                 owner: owner,
-                identityKeyStore: identityKeyStore
+                identityKeyStore: identityKeyStore,
+                federate: federate
             )
         } catch {
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")

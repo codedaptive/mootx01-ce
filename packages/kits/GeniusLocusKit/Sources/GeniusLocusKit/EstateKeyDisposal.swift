@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 import PersistenceKit
@@ -13,12 +14,11 @@ import PersistenceKit
 //           Corresponds to the `EstateIdentityKeyStore.deletePrivateKey` path.
 //
 //   Step 2: Delete the whole-file SQLCipher database key from the Keychain
-//           (com.codedaptive.mootx01 service, keyed by estate file path hash).
-//           Only applies when the backing storage is a SQLite file; in-memory
-//           and PostgreSQL estates never write a db key to the Keychain.
-//           Deletes from BOTH the shared access group AND the legacy default
-//           group (estates created before #94 stored the key in the default
-//           group).
+//           through `EstateOpenPosture.disposeKey` (the estate key service,
+//           keyed by estate file path hash; both the shared access group and
+//           the default group). Only applies when the backing storage is a
+//           SQLite file; in-memory and PostgreSQL estates never write a db
+//           key to the Keychain.
 //
 // Both steps are IDEMPOTENT — a missing Keychain item is not an error. The
 // method is safe to call on an estate that never had Keychain items (e.g. an
@@ -34,10 +34,9 @@ import PersistenceKit
 //   - `close()` releases the storage connection after the keys are disposed.
 //
 // Callers that permanently retire a durable estate outside of `destroy()` (e.g.
-// `DbDeleteCommand`) may also call `disposeEstateKeys` directly for the same
-// guarantee, or may use the lower-level `KeychainKeyStore.deleteKey()` and
-// `KeychainEstateIdentityKeyStore.deletePrivateKey()` directly as `DbDeleteCommand`
-// currently does.
+// `DbDeleteCommand`) call `EstateOpenPosture.disposeKey(databaseURL:)` for the
+// db key and `KeychainEstateIdentityKeyStore.deletePrivateKey()` for the
+// identity key, the same two steps this method performs.
 
 #if canImport(PersistenceKitSQLite)
 import PersistenceKitSQLite
@@ -46,7 +45,7 @@ import PersistenceKitSQLite
 public extension GeniusLocusKit {
 
     private static var disposalLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit.KeyDisposal")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit.KeyDisposal")
     }
 
     /// Dispose the Keychain key material for a durable estate that is being
@@ -63,9 +62,10 @@ public extension GeniusLocusKit {
     ///    `com.mootx01.estate.identity` service, keyed by the estate UUID string.
     ///    Deleted via `KeychainEstateIdentityKeyStore.deletePrivateKey`.
     ///
-    /// 2. **Database key** — the whole-file SQLCipher key in the
-    ///    `com.codedaptive.mootx01` service, keyed by the estate file path hash.
-    ///    Deleted from both the shared access group and the legacy default group.
+    /// 2. **Database key** — the whole-file SQLCipher key under
+    ///    `MootProductIdentity.Keychain.estateKeyService`, keyed by the estate
+    ///    file path hash. Deleted from both the shared access group and the
+    ///    default group through `EstateOpenPosture.disposeKey`.
     ///    Only attempted when the backing storage is a `.sqlite(url:)` backend;
     ///    in-memory and PostgreSQL backends never write a db key to the Keychain.
     ///
@@ -119,34 +119,20 @@ public extension GeniusLocusKit {
         // Only meaningful for SQLite-backed estates — an inMemory or PostgreSQL
         // estate never wrote a Keychain item for the db key, so we skip both
         // to avoid generating spurious Keychain queries on non-SQLite paths.
-        #if canImport(PersistenceKitSQLite)
         if case .sqlite(let estateURL, _) = storage.configuration.backend {
-            // Attempt deletion from BOTH the shared access group (current, post-#94)
-            // AND the legacy default group (estates created before #94). Both are
-            // best-effort: the data is already gone or being destroyed, so a
-            // Keychain error here is a warning, not a mission-critical failure.
-            for accessGroup in ["com.codedaptive.mootx01.shared", nil] as [String?] {
-                do {
-                    try KeychainKeyStore(
-                        service: "com.codedaptive.mootx01",
-                        estateURL: estateURL,
-                        accessGroup: accessGroup
-                    ).deleteKey()
-                    Self.disposalLog.info(
-                        "disposeEstateKeys: db key deleted for \(handle.estateUUID, privacy: .public) (group: \(accessGroup ?? "default", privacy: .public))"
-                    )
-                } catch {
-                    // Best-effort: log the warning but do not rethrow.
-                    // The estate data is gone (or going); a db-key Keychain error
-                    // must not prevent close() from running and releasing the
-                    // storage connection. This matches DbDeleteCommand's posture.
-                    Self.disposalLog.warning(
-                        "disposeEstateKeys: db key deletion warning for \(handle.estateUUID, privacy: .public) (group: \(accessGroup ?? "default", privacy: .public)): \(error, privacy: .public)"
-                    )
-                }
+            // Best effort: the data is already gone or being destroyed, so a
+            // db-key Keychain error is a warning that must not prevent close()
+            // from releasing the storage connection.
+            let failures = EstateOpenPosture.disposeKey(databaseURL: estateURL)
+            if failures.isEmpty {
+                Self.disposalLog.info(
+                    "disposeEstateKeys: db key deleted for \(handle.estateUUID, privacy: .public)")
+            }
+            for error in failures {
+                Self.disposalLog.warning(
+                    "disposeEstateKeys: db key deletion warning for \(handle.estateUUID, privacy: .public): \(error, privacy: .public)")
             }
         }
-        #endif // canImport(PersistenceKitSQLite)
         #endif // canImport(Security)
     }
 }

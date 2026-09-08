@@ -492,7 +492,7 @@ public enum EstateEncryptionMigrator {
 
     /// End-to-end migration for a plaintext estate at `estateURL`:
     /// stop daemon → clone → verify → swap → restart → trash, with `key`
-    /// already provisioned by the caller (EstateKeyProvider owns key
+    /// already provisioned by the caller (GeniusLocusKit's EstateOpenPosture owns key
     /// custody; this type never touches the Keychain). Throws on any
     /// failure that left the plaintext original in place; the error says so
     /// explicitly.

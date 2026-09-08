@@ -60,9 +60,10 @@
 //   seed           = 42   (SplitMix64 initial state; overridable in tests)
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let hnswLog = Logger(subsystem: "com.mootx01.kit", category: "HNSWIndex")
+private let hnswLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "SynapseKit.HNSWIndex")
 
 // MARK: - HNSW tuning constants (public — exposed so VectorStore can log them)
 

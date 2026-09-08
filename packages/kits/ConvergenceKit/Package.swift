@@ -29,6 +29,7 @@ let package = Package(
         .library(name: "ConvergenceKitFederation", targets: ["ConvergenceKitFederation"]),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(path: "../PersistenceKit"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
@@ -46,6 +47,7 @@ let package = Package(
         .target(
             name: "ConvergenceKitAppleSecurity",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "ConvergenceKit",
             ],
             path: "Sources/ConvergenceKitAppleSecurity"
@@ -64,6 +66,7 @@ let package = Package(
         .target(
             name: "ConvergenceKitCloudKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "ConvergenceKit",
                 "SubstrateTypes",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
@@ -73,6 +76,7 @@ let package = Package(
         .target(
             name: "ConvergenceKitFederation",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "ConvergenceKit",
                 "SubstrateTypes",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),

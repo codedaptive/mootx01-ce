@@ -4,6 +4,7 @@ import CorpusKitWholeRecordDense
 #endif
 import EngramLib
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 import SubstrateML
@@ -39,7 +40,7 @@ public extension GeniusLocusKit {
     static let graphExpansionTotalCap = 512
 
     private static var recallLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - Primary entry point

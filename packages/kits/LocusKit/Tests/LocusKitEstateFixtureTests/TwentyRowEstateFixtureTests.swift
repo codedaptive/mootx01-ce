@@ -123,12 +123,12 @@ struct TwentyRowEstateFixtureTests {
 
     @Test("Generator refuses a path inside the real data directory")
     func refusesPathInsideRealDataDirectory() async throws {
-        // Drive the guard with an INJECTED home and environment rather than the
-        // real ones, so the test proves the logic without needing (or risking)
-        // the actual production directory on the machine running it.
+        // Drive the guard with an INJECTED home rather than the real one, so
+        // the test proves the logic without needing (or risking) the actual
+        // production directory on the machine running it.
         let fakeHome = URL(fileURLWithPath: "/tmp/fixture-guard-home", isDirectory: true)
         let dataDirectory = TwentyRowEstateFixture.productionDataDirectory(
-            environment: [:], homeDirectory: fakeHome)
+            homeDirectory: fakeHome)
 
         // The canonical production estate path, and a nested path under it.
         for target in [
@@ -138,7 +138,7 @@ struct TwentyRowEstateFixtureTests {
         ] {
             #expect(throws: TwentyRowEstateFixture.FixtureError.self) {
                 try TwentyRowEstateFixture.assertNotProductionPath(
-                    target, environment: [:], homeDirectory: fakeHome)
+                    target, homeDirectory: fakeHome)
             }
         }
 
@@ -147,36 +147,13 @@ struct TwentyRowEstateFixtureTests {
         let sibling = fakeHome
             .appendingPathComponent("Library/Application Support/com.mootx01.ce2/estate.sqlite")
         try TwentyRowEstateFixture.assertNotProductionPath(
-            sibling, environment: [:], homeDirectory: fakeHome)
+            sibling, homeDirectory: fakeHome)
 
         // An ordinary temp path must be allowed.
         let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("fixture-allowed.sqlite")
         try TwentyRowEstateFixture.assertNotProductionPath(
-            temp, environment: [:], homeDirectory: fakeHome)
-    }
-
-    @Test("Guard honors the MOOTX01_DATA_DIR override")
-    func refusesPathInsideEnvOverriddenDataDirectory() async throws {
-        // When MOOTX01_DATA_DIR is set, THAT is the real data directory, so the
-        // guard has to follow the override rather than only checking the
-        // Application Support default.
-        let overrideDir = URL(fileURLWithPath: "/tmp/fixture-guard-override", isDirectory: true)
-        let environment = [TwentyRowEstateFixture.dataDirEnvVar: overrideDir.path]
-        let fakeHome = URL(fileURLWithPath: "/tmp/fixture-guard-home", isDirectory: true)
-
-        #expect(throws: TwentyRowEstateFixture.FixtureError.self) {
-            try TwentyRowEstateFixture.assertNotProductionPath(
-                overrideDir.appendingPathComponent("estate.sqlite"),
-                environment: environment, homeDirectory: fakeHome)
-        }
-
-        // With the override in force, the Application Support default is no
-        // longer the data directory and must not be refused.
-        let defaultDir = fakeHome
-            .appendingPathComponent("Library/Application Support/com.mootx01.ce/estate.sqlite")
-        try TwentyRowEstateFixture.assertNotProductionPath(
-            defaultDir, environment: environment, homeDirectory: fakeHome)
+            temp, homeDirectory: fakeHome)
     }
 
     @Test("generate() refuses before creating any file")
@@ -186,12 +163,12 @@ struct TwentyRowEstateFixtureTests {
         let fakeHome = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("fixture-guard-nowrite-\(UUID().uuidString)", isDirectory: true)
         let dataDirectory = TwentyRowEstateFixture.productionDataDirectory(
-            environment: [:], homeDirectory: fakeHome)
+            homeDirectory: fakeHome)
         let target = dataDirectory.appendingPathComponent("estate.sqlite")
 
         await #expect(throws: TwentyRowEstateFixture.FixtureError.self) {
             try await TwentyRowEstateFixture.generate(
-                at: target, environment: [:], homeDirectory: fakeHome)
+                at: target, homeDirectory: fakeHome)
         }
 
         #expect(!FileManager.default.fileExists(atPath: target.path),

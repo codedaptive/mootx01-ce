@@ -66,7 +66,7 @@ struct GrantSigningSecureStoreTests {
         let storage = makeStorage()
 
         _ = try await LocusKit.Estate.create(storage: storage, owner: testOwner)
-        let handle = try await kit.open(storage: storage, owner: testOwner)
+        let handle = try await kit.open(storage: storage, owner: testOwner, federate: true)
 
         // Re-read the estate manifest via a fresh LocusKit handle to inspect
         // what was actually written to estate_meta.
@@ -116,7 +116,8 @@ struct GrantSigningSecureStoreTests {
         let handle = try await kit.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await kit.close(handle) } }
 
@@ -162,7 +163,8 @@ struct GrantSigningSecureStoreTests {
         let seedEstate = try await LocusKit.Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: firstStore
+            identityKeyStore: firstStore,
+            federate: true
         )
         try await seedEstate.close()
 
@@ -174,7 +176,8 @@ struct GrantSigningSecureStoreTests {
         let handle = try await kit.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: emptyStore
+            identityKeyStore: emptyStore,
+            federate: true
         )
         defer { Task { try? await kit.close(handle) } }
 

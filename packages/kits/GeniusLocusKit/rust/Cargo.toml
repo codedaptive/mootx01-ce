@@ -24,6 +24,11 @@ path = "src/lib.rs"
 # GLK also depends on, so this adds no new transitive external crate.
 # Per in-repository dependency direction (Rust no-inversion rule).
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
+# MootProductIdentity: the product's identity strings spelled once. The estate
+# catalog takes the configuration directory and every on-disk name from it, as
+# the Swift catalog imports MootProductIdentity. Foundation lib, no kit deps;
+# layering does not invert.
+moot-product-identity = { path = "../../../libs/MootProductIdentity/rust" }
 # F18.3 (2026-05-27): GLK now depends on SubstrateLib so the unified
 # audit log can consume the canonical SHA-256 content-hash and HLC
 # rather than hold byte-compatible local mirrors. The GLK-01/03 missions

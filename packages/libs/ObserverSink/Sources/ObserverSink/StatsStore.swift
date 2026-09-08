@@ -39,6 +39,7 @@
 //   per MANAGER_1.0_PLAN.md §5 item 3, Bob 2026-06-06).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import PersistenceKitSQLite
@@ -172,7 +173,7 @@ public final class StatsStore: Sendable {
     // MARK: - Private state
 
     private let storage: SQLiteStorage
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "ObserverSink")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ObserverSink")
 
     // MARK: - Schema version
 

@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 import SubstrateKernel
 
@@ -31,7 +32,7 @@ import SubstrateKernel
 /// they are not written to disk by this type.
 public actor ScopeKeyVault {
 
-    private static let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+    private static let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
     /// Mode-1 scope keys held in custody, keyed by grant id.
     /// 32-byte raw key material (AES-256 width). Stored as [UInt8] so the

@@ -31,11 +31,12 @@
 //     and all copied audit events is returned in the ReplicationCursor.
 
 import Foundation
+import MootProductIdentity
 import PersistenceKit
 import SubstrateTypes
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "PersistenceKitReplication")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKitReplication")
 
 // MARK: - ReplicationPayload (internal transfer type)
 

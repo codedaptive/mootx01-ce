@@ -49,6 +49,7 @@ let package = Package(
         .library(name: "PersistenceKitReplication", targets: ["PersistenceKitReplication"]),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
         // swift-nio-ssl: provides NIOSSLContext for PostgreSQL TLS (SECFIX-WS2-PK F3).
@@ -68,6 +69,7 @@ let package = Package(
         .target(
             name: "PersistenceKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "SubstrateTypes",
                 // IntellectusLib: PersistenceKitTelemetry.swift emits storage-health
                 // metrics via Intellectus.report(_:). Zero cost when monitoring is
@@ -145,7 +147,8 @@ let package = Package(
         ),
         .target(
             name: "PersistenceKitSQLite",
-            dependencies: ["PersistenceKit", "SubstrateTypes", "SQLCipher"],
+            dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),"PersistenceKit", "SubstrateTypes", "SQLCipher"],
             path: "Sources/PersistenceKitSQLite"
         ),
         .target(
@@ -171,7 +174,8 @@ let package = Package(
         // intra-repo dependency additions when a recorded architectural decision requires it.
         .target(
             name: "PersistenceKitReplication",
-            dependencies: ["PersistenceKit", "SubstrateTypes"],
+            dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),"PersistenceKit", "SubstrateTypes"],
             path: "Sources/PersistenceKitReplication"
         ),
 

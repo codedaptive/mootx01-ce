@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 
@@ -69,7 +70,7 @@ public extension GeniusLocusKit {
     static let budgetDebitPerRead: Double = 0.01
 
     private static var federationLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     /// Read content from `source` on behalf of `requester`, gated by the

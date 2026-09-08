@@ -57,9 +57,10 @@
 // sit in each resolver cell.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let rowKeyDerivationLogger = Logger(subsystem: "com.mootx01.kit", category: "RowKeyDerivation")
+private let rowKeyDerivationLogger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKit.RowKeyDerivation")
 
 /// Deterministic, content-derived `RowKey` minting for single-column TEXT
 /// primary keys. See file header for the full gap-5 rationale.

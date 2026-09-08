@@ -44,6 +44,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../MootProductIdentity"),
         // IntellectusLib: the StatsSink protocol and StatSample datum.
         // Zero-dep floor library; layering is correct (ObserverSink is downstream).
         .package(path: "../../libs/IntellectusLib"),
@@ -56,6 +57,7 @@ let package = Package(
         .target(
             name: "ObserverSink",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "IntellectusLib",
                 "PersistenceKit",
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),

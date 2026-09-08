@@ -47,6 +47,7 @@
 // bytes are opaque here; only the provider interprets them.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import SubstrateTypes
@@ -54,7 +55,7 @@ import SubstrateTypes
 /// Store-level log: the format-version gate in `restoreCounts(into:)` reports
 /// a refused counts blob here so an operator can see why a provider retrained
 /// from the corpus instead of restoring its counts.
-private let countsLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let countsLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.

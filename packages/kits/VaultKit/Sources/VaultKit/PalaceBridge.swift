@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 import GeniusLocusKit
 import LocusKit
@@ -40,7 +41,7 @@ import LocusKit
 public struct PalaceBridge: Sendable {
 
     private let kit: GeniusLocusKit
-    private let log = Logger(subsystem: "com.mootx01.kit", category: "VaultKit")
+    private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "VaultKit")
 
     // Default field values that mirror VaultBridge / DrawerMapping defaults.
     static let addedBy = "palacebridge-import"

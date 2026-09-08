@@ -59,9 +59,10 @@
 // reduction is a batch operation, not a per-token side effect.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "LatticeLib")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LatticeLib")
 
 // ─── Result type ──────────────────────────────────────────────────────────────
 

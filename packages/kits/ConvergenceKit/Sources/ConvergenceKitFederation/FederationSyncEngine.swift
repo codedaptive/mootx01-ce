@@ -16,6 +16,7 @@
 // in tests.
 
 import Foundation
+import MootProductIdentity
 import Crypto
 import ConvergenceKit
 import PersistenceKit
@@ -35,7 +36,7 @@ import PersistenceKit
 import SubstrateTypes
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.federation", category: "Engine")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitFederation.Engine")
 
 public final class FederationSyncEngine: SyncEngine, Sendable {
     let stateActor: FederationStateActor
