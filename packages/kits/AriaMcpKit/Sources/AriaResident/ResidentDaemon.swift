@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import AriaMCP
 import CognitionKit
 import GeniusLocusKit
@@ -149,7 +150,7 @@ public enum AriaResident {
             create: false
         )) ?? FileManager.default.temporaryDirectory
         let path = base
-            .appendingPathComponent("com.mootx01.ce", isDirectory: true)
+            .appendingPathComponent(MootProductIdentity.Storage.applicationSupportFolder, isDirectory: true)
             .appendingPathComponent("moot-mgr", isDirectory: true)
             .appendingPathComponent("stats.sqlite", isDirectory: false)
             .path

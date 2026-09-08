@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 
 /// stderr-bound logging.
@@ -17,7 +18,7 @@ public enum Logging {
     /// consumers that want the unified-logging path; the server's own
     /// banners and stdio-loop diagnostics use `stderr` so they are
     /// visible to clients scraping the child process's stderr stream.
-    public static let osLog = Logger(subsystem: "com.mootx01.kit", category: "AriaMCP")
+    public static let osLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "AriaMCP")
 
     /// The stderr writer. Use this when a message must appear in the
     /// process's stderr stream specifically (e.g. tools that scrape

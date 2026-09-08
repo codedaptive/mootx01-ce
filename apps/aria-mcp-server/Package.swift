@@ -47,9 +47,9 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
-                // SQLite backend: selected at runtime via ARIA_MCP_SQLITE_PATH.
+                // SQLite backend: the estate catalog record's default backend.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
-                // PostgreSQL backend: selected at runtime via ARIA_MCP_POSTGRES_URL.
+                // PostgreSQL backend: a catalog record that names a connection string.
                 .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
                 // Semantic recall wiring for the durable SQLite estate (BM25 + vector).
                 .product(name: "CorpusKit", package: "CorpusKit"),
