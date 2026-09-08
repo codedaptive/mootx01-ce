@@ -20,6 +20,7 @@
 // Rust twin: the queue integration lands with the Rust coordinator cutover.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import PersistenceKitInMemory
@@ -27,7 +28,7 @@ import PersistenceKitSQLite
 import QueueKit
 import SubstrateTypes
 
-private let contentEngineLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let contentEngineLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 public extension CorpusContentEngine {
 
