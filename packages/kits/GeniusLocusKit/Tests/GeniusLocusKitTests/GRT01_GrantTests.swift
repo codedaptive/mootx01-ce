@@ -39,7 +39,7 @@ struct GRT01_GrantTests {
         let owner = OwnerCredentials(ownerIdentifier: "owner-grt01")
         let storage = makeStorage()
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, federate: true)
         return (kit, handle, storage)
     }
 
@@ -101,7 +101,7 @@ struct GRT01_GrantTests {
         let (kit, handle, storage) = try await openOneEstate()
         let result = try await kit.issueGrant(handle, options(.mediated))
 
-        let estate = try await LocusKit.Estate.open(storage: storage, owner: OwnerCredentials(ownerIdentifier: "owner-grt01"))
+        let estate = try await LocusKit.Estate.open(storage: storage, owner: OwnerCredentials(ownerIdentifier: "owner-grt01"), federate: true)
         let manifest = try await estate.manifest
         let pubKeyData = try #require(manifest.ed25519PublicKey)
         let pubKey = try Curve25519.Signing.PublicKey(rawRepresentation: pubKeyData)
@@ -365,11 +365,11 @@ struct GRT01_GrantTests {
         let owner = OwnerCredentials(ownerIdentifier: "owner-grt01")
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
 
-        let first = try await LocusKit.Estate.open(storage: storage, owner: owner)
+        let first = try await LocusKit.Estate.open(storage: storage, owner: owner, federate: true)
         let firstKey = try await first.manifest.ed25519PublicKey
         #expect(firstKey != nil, "estate open generates an Ed25519 public key")
 
-        let second = try await LocusKit.Estate.open(storage: storage, owner: owner)
+        let second = try await LocusKit.Estate.open(storage: storage, owner: owner, federate: true)
         let secondKey = try await second.manifest.ed25519PublicKey
         #expect(firstKey == secondKey, "keypair is stable across re-open from the same storage")
     }

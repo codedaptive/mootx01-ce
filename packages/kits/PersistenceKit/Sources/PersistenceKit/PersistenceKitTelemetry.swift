@@ -52,10 +52,11 @@
 //    emitted metrics are side effects only. StorageStats is unchanged by telemetry.
 
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 
-private let logger = Logger(subsystem: "com.mootx01.kit", category: "PersistenceKit")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKit")
 
 // MARK: - Public entry point
 

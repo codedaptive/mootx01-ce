@@ -53,6 +53,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/EideticLib"),
         // LatticeLib supplies Tokenizer.tokenize (UAX #29 word boundaries) and
         // LatticeLib.wordClass(_:tagger:recordNovel:) with .hmm and recordNovel:false,
@@ -112,6 +113,7 @@ let package = Package(
         .target(
             name: "NeuronKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 .product(name: "EideticLib", package: "EideticLib"),
                 // Tokenizer + HMM wordClass tagger for the production feature extractor
                 // (HMMFeatureExtractor.swift). Direct dep required: NeuronKit calls

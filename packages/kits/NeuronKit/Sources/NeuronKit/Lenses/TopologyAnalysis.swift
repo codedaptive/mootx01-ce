@@ -1,5 +1,6 @@
 import CoreFoundation
 import Foundation
+import MootProductIdentity
 import OSLog
 import SubstrateML
 
@@ -24,7 +25,7 @@ import SubstrateML
 
 // Module-scoped logger. Fleet standard: subsystem "com.mootx01.kit",
 // category = module name.
-private let topologyLogger = Logger(subsystem: "com.mootx01.kit", category: "NeuronKit")
+private let topologyLogger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "NeuronKit")
 
 // MARK: - Input descriptors
 

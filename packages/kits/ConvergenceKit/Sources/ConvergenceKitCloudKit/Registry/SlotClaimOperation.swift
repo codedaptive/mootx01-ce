@@ -28,12 +28,13 @@
 // Slot claims use CloudKit compare-and-swap so exactly one device wins.
 
 import Foundation
+import MootProductIdentity
 import CloudKit
 import ConvergenceKit
 import SubstrateTypes
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "SlotClaim")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.SlotClaim")
 
 // MARK: - SlotClaimOperation
 
