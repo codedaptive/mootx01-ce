@@ -941,7 +941,7 @@ fn wire_postgres_semantic_recall(
 /// CorpusKit/SynapseKit own chunks/vectors. WAL serialises all writes through the
 /// shared connection.
 ///
-/// Recall ensemble is the honest signals (`default_ensemble()`:
+/// Recall ensemble is the deterministic signals (`default_ensemble()`:
 /// RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on) — reproducible
 /// across Swift/Rust ports, no CoreML.
 /// Matches `provision`'s default and the Swift `AriaMCPMain.swift` Lane D wiring
