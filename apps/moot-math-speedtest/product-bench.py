@@ -107,12 +107,14 @@ def main() -> int:
     read_count = 20 if args.quick else 80
     started = datetime.now(timezone.utc)
     with tempfile.TemporaryDirectory(prefix="mootx01-product-bench-") as data_dir:
+        # A transient estate at <tmp>/benchmark: `--db <dir>/<name>` attaches it
+        # for one invocation, so the machine's estate catalog is never touched.
+        estate = f"{data_dir}/benchmark"
         env = os.environ.copy()
-        env["MOOTX01_DATA_DIR"] = data_dir
-        subprocess.run([str(binary), "db", "create", "benchmark"], env=env, check=True, capture_output=True, text=True)
+        subprocess.run([str(binary), "db", "create", estate], env=env, check=True, capture_output=True, text=True)
         daemon_start = time.perf_counter_ns()
         daemon = subprocess.Popen(
-            [str(binary), "serve", "--db", "benchmark", "--http", str(args.port)],
+            [str(binary), "serve", "--db", estate, "--http", str(args.port)],
             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True,
         )
         try:

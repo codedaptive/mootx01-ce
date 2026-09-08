@@ -25,6 +25,7 @@
 // and actor isolation gives a clean Sendable boundary around the open store.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import ObserverSink
 import PersistenceKit
@@ -185,7 +186,7 @@ public actor MootManager {
         coordinateFrameVersion: Int, generatedTs: String?
     )? = nil
 
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "MootManager")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootManager")
 
     /// DoS bound for the unauthenticated loopback read APIs. The dropbox-ID
     /// set derived from the event stream is attacker-influenceable (a poisoned

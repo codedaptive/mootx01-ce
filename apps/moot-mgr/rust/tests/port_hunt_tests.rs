@@ -2,7 +2,7 @@
 //
 // Default (non-explicit) port hunts upward by retrying the bind on the next
 // candidate; an explicitly requested port is exact — busy fails. The §3
-// mgr.port file is maintained only by production (`write_port_file`) hosts,
+// mgr.port file is maintained only where the config names one (`port_file`),
 // recorded with the BOUND port and removed on clean stop.
 
 use std::net::TcpListener;
@@ -68,17 +68,15 @@ fn explicit_port_does_not_hunt() {
 #[test]
 fn port_file_written_with_bound_port_and_removed_on_stop() {
     let dir = scratch("portfile");
-    // Route the §3 port file into the scratch dir; this is the only test in
-    // this binary touching MOOTX01_DATA_DIR.
-    std::env::set_var("MOOTX01_DATA_DIR", &dir);
-
+    // Route the §3 port file into the scratch dir; the live machine's
+    // configuration directory is never touched.
+    let port_file = std::path::Path::new(&dir).join("mgr.port");
     let mut config = cfg(&dir, 0, "portfile"); // OS-assigned
-    config.write_port_file = true;
+    config.port_file = Some(port_file.clone());
     let mut host = ResidentHost::new(config, NOW);
     host.start().expect("host must start");
     let bound = host.bound_http_port();
 
-    let port_file = std::path::Path::new(&dir).join("mgr.port");
     let recorded: u16 = std::fs::read_to_string(&port_file)
         .expect("mgr.port must exist while running")
         .trim()
@@ -88,6 +86,5 @@ fn port_file_written_with_bound_port_and_removed_on_stop() {
 
     host.stop();
     assert!(!port_file.exists(), "mgr.port removed on clean stop");
-    std::env::remove_var("MOOTX01_DATA_DIR");
     let _ = std::fs::remove_dir_all(&dir);
 }
