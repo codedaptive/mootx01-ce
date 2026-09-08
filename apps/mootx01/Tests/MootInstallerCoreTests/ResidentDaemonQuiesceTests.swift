@@ -36,22 +36,16 @@ private final class DaemonRecorder: @unchecked Sendable {
 @Suite("ResidentDaemonQuiesce")
 struct ResidentDaemonQuiesceTests {
 
-    private let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-    /// The daemon's directory as a registration with no override names it.
-    private var resident: URL { MootPaths.resolveDataDirectory(environment: [:], homeDirectory: home) }
-    private var registered: MootPaths.ResidentDataDirectory { .directory(resident) }
-    private var scratch: URL {
-        MootPaths.resolveDataDirectory(
-            environment: ["MOOTX01_DATA_DIR": "/Users/test/Library/Application Support/com.mootx01.ce-bench"],
-            homeDirectory: home)
-    }
+    /// The one input the helper takes: whether a live resident serves the
+    /// estate the step will open. Production derives it from the estate's own
+    /// PID marker (`residentServes(pidURL:)`); these tests inject it.
 
-    @Test("a scratch estate runs the work and never touches the daemon")
-    func scratchEstateNeverTouchesTheDaemon() async {
+    @Test("an estate no resident serves runs the work and never touches the daemon")
+    func unservedEstateNeverTouchesTheDaemon() async {
         let daemon = DaemonRecorder(running: true)
         var ran = false
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: scratch, residentDataDirectory: registered,
+            residentServes: false,
             step: "kg_facts identity backfill", daemon: daemon.control
         ) { ran = true; return true }
         #expect(result == true)
@@ -59,12 +53,12 @@ struct ResidentDaemonQuiesceTests {
         #expect(daemon.calls.isEmpty)
     }
 
-    @Test("the resident estate stops a running daemon and restarts it after the work")
-    func residentEstateStopsThenRestarts() async {
+    @Test("a served estate stops a running daemon and restarts it after the work")
+    func servedEstateStopsThenRestarts() async {
         let daemon = DaemonRecorder(running: true)
         var order: [String] = []
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: registered,
+            residentServes: true,
             step: "daemon stop restart test", daemon: daemon.control
         ) { order.append("work"); return true }
         #expect(result == true)
@@ -76,18 +70,18 @@ struct ResidentDaemonQuiesceTests {
     func failedWorkStillRestarts() async {
         let daemon = DaemonRecorder(running: true)
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: registered,
+            residentServes: true,
             step: "shared-content reclaim", daemon: daemon.control
         ) { false }
         #expect(result == false)
         #expect(daemon.calls == ["isRunning", "stop", "start"])
     }
 
-    @Test("the resident estate with no daemon running neither stops nor starts one")
-    func residentEstateWithDaemonDownNeverStartsOne() async {
+    @Test("a served estate with no daemon running neither stops nor starts one")
+    func servedEstateWithDaemonDownNeverStartsOne() async {
         let daemon = DaemonRecorder(running: false)
         let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: registered,
+            residentServes: true,
             step: "distilled representation convergence", daemon: daemon.control
         ) { true }
         #expect(result == true)
@@ -99,7 +93,7 @@ struct ResidentDaemonQuiesceTests {
         let daemon = DaemonRecorder(running: true, stopSucceeds: false)
         var ran = false
         let result: Bool? = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: registered,
+            residentServes: true,
             step: "kg_facts identity backfill", daemon: daemon.control
         ) { ran = true; return true }
         #expect(result == nil)
@@ -107,39 +101,19 @@ struct ResidentDaemonQuiesceTests {
         #expect(daemon.calls == ["isRunning", "stop"])
     }
 
-    @Test("the registered override directory is the resident estate, not the platform default")
-    func registeredOverrideDirectoryIsQuiesced() async {
-        // `mootx01 install` run with MOOTX01_DATA_DIR=<scratch> registers the
-        // daemon over scratch. An upgrade step on scratch quiesces; a step
-        // on the platform default (an estate the daemon never opened) does not.
-        let registered = MootPaths.ResidentDataDirectory.directory(scratch)
-        let onScratch = DaemonRecorder(running: true)
-        let scratchResult = await ResidentDaemonQuiesce.run(
-            dataDirectory: scratch, residentDataDirectory: registered,
-            step: "schema upgrade", daemon: onScratch.control
-        ) { true }
-        #expect(scratchResult == true)
-        #expect(onScratch.calls == ["isRunning", "stop", "start"])
-
-        let onDefault = DaemonRecorder(running: true)
-        let defaultResult = await ResidentDaemonQuiesce.run(
-            dataDirectory: resident, residentDataDirectory: registered,
-            step: "schema upgrade", daemon: onDefault.control
-        ) { true }
-        #expect(defaultResult == true)
-        #expect(onDefault.calls.isEmpty)
-    }
-
-    @Test("an unreadable registration quiesces the daemon for any estate")
-    func unreadableRegistrationQuiescesEveryEstate() async {
-        let unreadable = MootPaths.ResidentDataDirectory.unreadableRegistration(
-            MootPaths.daemonPlistURL(homeDirectory: home))
-        let daemon = DaemonRecorder(running: true)
-        let result = await ResidentDaemonQuiesce.run(
-            dataDirectory: scratch, residentDataDirectory: unreadable,
-            step: "kg_facts identity backfill", daemon: daemon.control
-        ) { true }
-        #expect(result == true)
-        #expect(daemon.calls == ["isRunning", "stop", "start"])
+    @Test("the PID marker decides: absent, dead or our own pid means no resident")
+    func pidMarkerDecidesResidency() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quiesce-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidURL = dir.appendingPathComponent("estate.pid")
+        #expect(!ResidentDaemonQuiesce.residentServes(pidURL: pidURL))            // absent
+        try "999999".write(to: pidURL, atomically: true, encoding: .utf8)
+        #expect(!ResidentDaemonQuiesce.residentServes(pidURL: pidURL))            // dead
+        try String(ProcessInfo.processInfo.processIdentifier).write(to: pidURL, atomically: true, encoding: .utf8)
+        #expect(!ResidentDaemonQuiesce.residentServes(pidURL: pidURL))            // ourselves
+        try "not a pid".write(to: pidURL, atomically: true, encoding: .utf8)
+        #expect(!ResidentDaemonQuiesce.residentServes(pidURL: pidURL))            // garbage
     }
 }

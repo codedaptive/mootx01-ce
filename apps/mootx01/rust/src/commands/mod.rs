@@ -7,7 +7,6 @@
 use std::process::ExitCode;
 
 use crate::cli::Command;
-use crate::core::paths;
 
 pub mod db;
 pub mod codex_memory;
@@ -33,7 +32,7 @@ pub mod unlock;
 
 pub fn dispatch(command: Command) -> ExitCode {
     match command {
-        Command::Serve { db, http, frozen } => serve::run(db, http, frozen),
+        Command::Serve { db, http, frozen, in_memory } => serve::run(db, http, frozen, in_memory),
         Command::Install {
             target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db, no_encrypt,
         } => install::run(target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db, no_encrypt),
@@ -50,8 +49,8 @@ pub fn dispatch(command: Command) -> ExitCode {
         Command::Proxy { daemon_url } => proxy::run(daemon_url),
         Command::Drain { db } => drain::run(db),
         Command::Dream { db } => dream::run(db),
-        Command::Upgrade { from, check, yes, no_restart, converge_only, backfill_only } => {
-            upgrade::run(from, check, yes, no_restart, converge_only, backfill_only)
+        Command::Upgrade { from, db, check, yes, no_restart, converge_only, backfill_only } => {
+            upgrade::run(from, db, check, yes, no_restart, converge_only, backfill_only)
         }
         // sensitivity unlock / lock.
         Command::Unlock { tier, db: _ } => {
@@ -60,7 +59,7 @@ pub fn dispatch(command: Command) -> ExitCode {
             // daemon itself owns grant-issuance — the estate name affects which
             // estate is opened by `serve`, not which port to unlock on. The port
             // is always resolved via the standard daemon-port-file mechanism.
-            let data_dir = paths::data_dir();
+            let data_dir = genius_locus_kit::EstateCatalog::configuration_directory();
             ExitCode::from(unlock::run_unlock(&tier, &data_dir) as u8)
         }
         Command::Lock => ExitCode::from(unlock::run_lock() as u8),

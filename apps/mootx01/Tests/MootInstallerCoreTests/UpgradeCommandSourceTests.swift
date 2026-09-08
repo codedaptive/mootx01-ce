@@ -59,20 +59,22 @@ struct UpgradeCommandSourceTests {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
         // The backfillOnly branch must contain all eight steps in order.
         let branchStart = try #require(
-            source.range(of: "if backfillOnly {")?.lowerBound)
+            source.range(of: "if estateOnly {")?.lowerBound)
         let branchEnd = try #require(
             source.range(of: "return\n        }\n\n        // --check:", range: branchStart..<source.endIndex)?.upperBound)
         let branch = source[branchStart..<branchEnd]
         // The schema step gates the rest: a refused version must stop the
         // sequence before any other step can open the schema and stamp it.
-        #expect(branch.contains("guard await runSchemaUpgrade(home: home) else { throw ExitCode.failure }"))
-        #expect(branch.contains("await runKGFactIdentityBackfill(home: home)"))
-        #expect(branch.contains("await runSharedContentReclaimIfPending(home: home)"))
-        #expect(branch.contains("await runWholeRecordVacuum(home: home)"))
-        #expect(branch.contains("await runSSCFactsBackfill(home: home)"))
-        #expect(branch.contains("await runDensePoolingConvergence(home: home)"))
-        #expect(branch.contains("await runSpanEncodeBackfill(home: home)"))
-        #expect(branch.contains("await runVectorReclaim(home: home)"))
+        #expect(branch.contains("guard await runSchemaUpgrade(estate: estate, home: home) else { throw ExitCode.failure }"))
+        #expect(branch.contains("retireLegacyEncryptionOptOut(estate: estate)"))
+        #expect(branch.contains("refreshManifest(estate: estate)"))
+        #expect(branch.contains("await runKGFactIdentityBackfill(estate: estate, home: home)"))
+        #expect(branch.contains("await runSharedContentReclaimIfPending(estate: estate, home: home)"))
+        #expect(branch.contains("await runWholeRecordVacuum(estate: estate, home: home)"))
+        #expect(branch.contains("await runSSCFactsBackfill(estate: estate, home: home)"))
+        #expect(branch.contains("await runDensePoolingConvergence(estate: estate, home: home)"))
+        #expect(branch.contains("await runSpanEncodeBackfill(estate: estate, home: home)"))
+        #expect(branch.contains("await runVectorReclaim(estate: estate, home: home)"))
         // Retired steps must not come back.
         #expect(!branch.contains("runAdornmentStoreMigration"))
         #expect(!branch.contains("runDistilledRepresentationConvergence"))
@@ -82,13 +84,13 @@ struct UpgradeCommandSourceTests {
         // runs BEFORE the span-encode step, so the latter's estate open never
         // absorbs the rebuild unreported; the vector reclaim runs last, after
         // the span rows exist.
-        let schemaAt = try #require(branch.range(of: "runSchemaUpgrade(home: home)")?.lowerBound)
-        let reclAt = try #require(branch.range(of: "await runSharedContentReclaimIfPending(home: home)")?.lowerBound)
-        let vacuumAt = try #require(branch.range(of: "await runWholeRecordVacuum(home: home)")?.lowerBound)
-        let factsAt = try #require(branch.range(of: "await runSSCFactsBackfill(home: home)")?.lowerBound)
-        let denseAt = try #require(branch.range(of: "await runDensePoolingConvergence(home: home)")?.lowerBound)
-        let spanAt = try #require(branch.range(of: "await runSpanEncodeBackfill(home: home)")?.lowerBound)
-        let reclaimAt = try #require(branch.range(of: "await runVectorReclaim(home: home)")?.lowerBound)
+        let schemaAt = try #require(branch.range(of: "runSchemaUpgrade(estate: estate, home: home)")?.lowerBound)
+        let reclAt = try #require(branch.range(of: "await runSharedContentReclaimIfPending(estate: estate, home: home)")?.lowerBound)
+        let vacuumAt = try #require(branch.range(of: "await runWholeRecordVacuum(estate: estate, home: home)")?.lowerBound)
+        let factsAt = try #require(branch.range(of: "await runSSCFactsBackfill(estate: estate, home: home)")?.lowerBound)
+        let denseAt = try #require(branch.range(of: "await runDensePoolingConvergence(estate: estate, home: home)")?.lowerBound)
+        let spanAt = try #require(branch.range(of: "await runSpanEncodeBackfill(estate: estate, home: home)")?.lowerBound)
+        let reclaimAt = try #require(branch.range(of: "await runVectorReclaim(estate: estate, home: home)")?.lowerBound)
         #expect(schemaAt < reclAt && reclAt < vacuumAt && vacuumAt < factsAt && factsAt < denseAt
                 && denseAt < spanAt && spanAt < reclaimAt,
                 "schema → shared-content reclaim → whole-record vacuum → ssc facts → dense pooling → span encode → vector reclaim")
@@ -119,7 +121,7 @@ struct UpgradeCommandSourceTests {
              "/// MXE-MI: move pre-MXE-KH"),
             ("runKGFactIdentityBackfill",
              "private func runKGFactIdentityBackfill",
-             "/// Bring the dense distributional lanes (random-indexing, PPMI, NMF, LSA)"),
+             "/// Bring the trainable provider bases a populated estate carries"),
             ("runDensePoolingConvergence",
              "private func runDensePoolingConvergence",
              "/// Provider keys (`model_id@model_version`) whose part-0 basis row carries"),
@@ -131,7 +133,7 @@ struct UpgradeCommandSourceTests {
              "/// P5 of the shared-content"),
             ("runSharedContentReclaimIfPending",
              "private func runSharedContentReclaimIfPending",
-             "/// CE-1.0.35-08: offer to encrypt"),
+             "/// Fold a pre-manifest `no-encrypt` marker"),
         ]
         for step in steps {
             let start = try #require(source.range(of: step.start)?.lowerBound)
@@ -140,8 +142,8 @@ struct UpgradeCommandSourceTests {
             let body = source[start..<end]
             #expect(body.contains("ResidentDaemonQuiesce.run("),
                     "\(step.name) must route its quiesce through the shared helper")
-            #expect(body.contains("residentDataDirectory: MootPaths.residentDataDirectory(homeDirectory: home)"),
-                    "\(step.name) must compare against the resident data directory")
+            #expect(body.contains("estatePIDURL: estate.pidURL,"),
+                    "\(step.name) must decide the quiesce from the estate's own PID marker")
             #expect(body.contains("daemon: .launchd(homeDirectory: home)"),
                     "\(step.name) must hand the helper the launchd seam")
             #expect(!body.contains("LaunchAgent.isDaemonRunning"),
@@ -164,7 +166,7 @@ struct UpgradeCommandSourceTests {
         let end = try #require(
             source.range(of: "/// See the call site's doc comment. The gating", range: start..<source.endIndex)?.lowerBound)
         let body = source[start..<end]
-        #expect(body.contains("MootPaths.isResidentEstate("))
+        #expect(body.contains("ResidentDaemonQuiesce.residentServes(pidURL: estate.pidURL)"))
         #expect(body.contains("daemon: resident ? .launchd(homeDirectory: home) : .none"))
     }
 
@@ -246,8 +248,8 @@ struct UpgradeCommandSourceTests {
                 range: currentBranch..<source.endIndex)?.upperBound)
         let branch = source[currentBranch..<branchReturn]
 
-        #expect(branch.contains("await runKGFactIdentityBackfill(home: home)"))
+        #expect(branch.contains("await runKGFactIdentityBackfill(estate: estate, home: home)"))
         #expect(branch.contains("restartAgents(home: home)"))
-        #expect(branch.contains("offerEstateEncryptionIfNeeded(home: home)"))
+        #expect(branch.contains("offerEstateEncryptionIfNeeded(estate: estate, home: home)"))
     }
 }
