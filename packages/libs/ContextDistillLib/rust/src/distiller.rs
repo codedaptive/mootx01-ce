@@ -875,6 +875,34 @@ pub fn render_peer_attributed_prose(text: &str) -> String {
 pub struct ContextDistiller;
 
 impl ContextDistiller {
+    fn complete_representation(&self, input: &DistillationInput, converter: ContextDistillConverter) -> DistilledRepresentation {
+        let source = &input.original;
+        let reduced = crate::complete_content::CompleteContentReducer::distill(source, estimate_tokens).ok();
+        let core = reduced.as_ref().map(|r| r.text.as_str()).unwrap_or(source);
+        let trailer = &input.enrichment_trailer;
+        let combined = combine(core, trailer);
+        let bytes = source.len();
+        DistilledRepresentation {
+            schema_version: converter.schema_version(), converter_version: converter.converter_version().into(),
+            ruleset_version: "complete-form-visible-v6".into(), converter_id: converter.id().into(),
+            source_sha256: source_digest(source),
+            shape: serde_json::to_value(classify_record(source)).expect("shape serializes"),
+            span_offset_unit: "unicode-code-point".into(), span_utf8_offset_unit: "byte".into(),
+            selected_source_spans: if source.is_empty() { json!([]) } else { json!([{
+                "start": 0, "end": source.chars().count(), "start_utf8_byte": 0,
+                "end_utf8_byte": bytes, "kind": "complete-source"
+            }]) },
+            compact_core: core.into(), applied_enrichment_trailer: trailer.clone(),
+            ai_text: combined.clone(), mining_body: combined.clone(),
+            metrics: json!({"original_bytes": bytes, "original_tokens_est": estimate_tokens(source),
+                "core_bytes": core.len(), "trailer_bytes": trailer.len(), "applied_trailer_bytes": trailer.len(),
+                "distilled_bytes": combined.len(), "distilled_tokens_est": estimate_tokens(&combined),
+                "compression_ratio_ppm": if bytes == 0 { 0 } else { combined.len() * 1_000_000 / bytes }}),
+            selection_details: json!({"mode": "complete-form", "complete": true,
+                "rendering": "complete-form-visible-v6", "count_unit": "tokens_estimate",
+                "model_assistance": false, "fallback_unchanged": reduced.is_none()}),
+        }
+    }
     /// Creates a new distiller.
     pub fn new() -> Self { ContextDistiller }
 
@@ -903,6 +931,9 @@ impl ContextDistiller {
     ) -> DistilledRepresentation {
         let source = &input.original;
         let trailer = &input.enrichment_trailer;
+        if converter == ContextDistillConverter::CompleteFormV6 {
+            return self.complete_representation(input, converter);
+        }
         let peer_dialogue = matches!(
             converter, ContextDistillConverter::IntentSpanV23Attributed);
 
@@ -1170,7 +1201,7 @@ mod tests {
     fn test_distiller_smoke() {
         let input = DistillationInput::new("Hello world. This is a test.", "");
         let distiller = ContextDistiller::new();
-        let result = distiller.distill(&input, ContextDistillConverter::IntentSpanV22);
+        let result = distiller.distill(&input, ContextDistillConverter::CompleteFormV6);
         assert!(!result.compact_core.is_empty());
         assert_eq!(result.schema_version, 1);
         assert_eq!(result.converter_version, "distill-plus-v1");

@@ -57,7 +57,7 @@ private enum JSONError: Error { case encoding }
 private func assertFullRowMatch(
     _ row: OracleRow,
     distiller: ContextDistiller,
-    converter: ContextDistillConverter = .intentSpanV22
+    converter: ContextDistillConverter
 ) throws {
     let input = DistillationInput(original: row.original,
                                   enrichmentTrailer: row.enrichmentTrailer)
@@ -113,51 +113,9 @@ func shapeConformance_blind200() throws {
     }
 }
 
-// MARK: - Full-row conformance (Part 5 — 509 rows, four beds)
-
-/// Full-row conformance: ContextDistiller output matches every oracle field
-/// (excluding record-identity and input-only keys) for all 7 debug7 rows.
-@Test("Full-row conformance — debug7 (7 rows)")
-func fullRowConformance_debug7() throws {
-    let distiller = ContextDistiller()
-    let rows = loadOracleRows(bed: "debug7")
-    for row in rows {
-        try assertFullRowMatch(row, distiller: distiller)
-    }
-}
-
-/// Full-row conformance for all 30 sample30 rows.
-@Test("Full-row conformance — sample30 (30 rows)")
-func fullRowConformance_sample30() throws {
-    let distiller = ContextDistiller()
-    let rows = loadOracleRows(bed: "sample30")
-    for row in rows {
-        try assertFullRowMatch(row, distiller: distiller)
-    }
-}
-
-/// Full-row conformance for all 272 locomo rows.
-@Test("Full-row conformance — locomo (272 rows)")
-func fullRowConformance_locomo() throws {
-    let distiller = ContextDistiller()
-    let rows = loadOracleRows(bed: "locomo")
-    for row in rows {
-        try assertFullRowMatch(row, distiller: distiller)
-    }
-}
-
-/// Full-row conformance for all 200 blind200 rows.
-@Test("Full-row conformance — blind200 (200 rows)")
-func fullRowConformance_blind200() throws {
-    let distiller = ContextDistiller()
-    let rows = loadOracleRows(bed: "blind200")
-    for row in rows {
-        try assertFullRowMatch(row, distiller: distiller)
-    }
-}
+// MARK: - Full-row conformance (v23.2 — 309 rows, three beds)
 
 /// Full-row conformance for the v23.2 attributed converter over all 7 debug7 rows.
-/// The v22 beds above remain independent regression gates for the default converter.
 @Test("Full-row conformance — v23.2 attributed debug7 (7 rows)")
 func fullRowConformance_v23Attributed_debug7() throws {
     let distiller = ContextDistiller()
@@ -210,7 +168,7 @@ func fullRowConformance_v23Attributed_locomo() throws {
 
 // MARK: - Cross-port fixture (Part 5)
 
-/// Writes all 509 v22 Swift port output rows plus 309 v23.2 rows to the cross-port
+/// Writes all 309 v23.2 Swift port output rows to the cross-port
 /// fixture file.
 ///
 /// The fixture path comes from the environment variable CDL_CROSSPORT_OUT.
@@ -218,7 +176,6 @@ func fullRowConformance_v23Attributed_locomo() throws {
 /// cross-port diff, not a conformance gate.
 ///
 /// Output format: one JSON object per line (JSONL).
-/// - 509 v22 rows: debug7 → sample30 → locomo → blind200.
 /// - 309 v23.2 rows: debug7 → sample30 → locomo (no blind200 bed for v23.2).
 ///
 /// The Rust port writes its equivalent output to a sibling file (rust-rows.jsonl)
@@ -235,31 +192,7 @@ func crossPortFixture() throws {
 
     let distiller = ContextDistiller()
     var lines: [String] = []
-    lines.reserveCapacity(818)  // 509 v22 + 309 v23.2
-
-    // v22 rows: all four beds in order.
-    let v22Beds = ["debug7", "sample30", "locomo", "blind200"]
-    for bed in v22Beds {
-        let rows = loadOracleRows(bed: bed)
-        for row in rows {
-            let input = DistillationInput(original: row.original,
-                                          enrichmentTrailer: row.enrichmentTrailer)
-            let result = distiller.distill(input, converter: .intentSpanV22)
-
-            // Include record-identity fields so the cross-port diff can correlate rows.
-            var dict = result.asDict()
-            dict["drawer_id"] = row.drawerID
-            dict["original"]  = row.original
-            dict["enrichment_trailer"] = row.enrichmentTrailer
-            dict["candidate"] = "intent-span"
-
-            let data = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
-            guard let line = String(data: data, encoding: .utf8) else {
-                throw JSONError.encoding
-            }
-            lines.append(line)
-        }
-    }
+    lines.reserveCapacity(309)
 
     // v23.2 rows: three beds (no blind200 oracle exists for v23.2).
     let v23Beds = ["debug7", "sample30", "locomo"]
@@ -292,8 +225,12 @@ func crossPortFixture() throws {
 
 @Test("ContextDistillConverter identifiers")
 func contextDistillConverterIdentifiers() {
-    let c = ContextDistillConverter.intentSpanV22
-    #expect(c.id             == "intent-span@intent-span-v22-authority-closure")
+    let c = ContextDistillConverter.completeFormV6
+    #expect(c.id             == "complete-form@complete-form-visible-v6")
+    #expect(ContextDistillConverter(rawValue: "intentSpanV22") == nil)
+    #expect(!ContextDistillConverter.allCases.contains {
+        $0.id == "intent-span@intent-span-v22-authority-closure"
+    })
     #expect(c.converterVersion == "distill-plus-v1")
     #expect(c.schemaVersion  == 1)
 
@@ -316,10 +253,6 @@ func v23AttributedPeerDialogueIsExplicit() {
     ].joined(separator: "\n")
     let input = DistillationInput(original: source)
     let distiller = ContextDistiller()
-
-    let v22 = distiller.distill(input, converter: .intentSpanV22)
-    #expect(v22.selectionDetails["mode"] as? String == "document")
-    #expect(v22.selectionDetails["rendering"] == nil)
 
     let attributed = distiller.distill(input, converter: .intentSpanV23Attributed)
     #expect(attributed.selectionDetails["mode"] as? String == "peer-dialogue")
@@ -415,12 +348,12 @@ func combineHelper() {
 func contextDistillerIdentityFields() {
     let distiller = ContextDistiller()
     let input = DistillationInput(original: "Hello world.", enrichmentTrailer: "")
-    let result = distiller.distill(input, converter: .intentSpanV22)
+    let result = distiller.distill(input, converter: .completeFormV6)
 
     #expect(result.schemaVersion     == 1)
     #expect(result.converterVersion  == "distill-plus-v1")
-    #expect(result.rulesetVersion    == "intent-span-v22-authority-closure")
-    #expect(result.converterID       == "intent-span@intent-span-v22-authority-closure")
+    #expect(result.rulesetVersion    == "complete-form-visible-v6")
+    #expect(result.converterID       == "complete-form@complete-form-visible-v6")
     #expect(result.sourceSHA256      == sourceDigest("Hello world."))
     #expect(result.spanOffsetUnit    == "unicode-code-point")
     #expect(result.spanUTF8OffsetUnit == "byte")

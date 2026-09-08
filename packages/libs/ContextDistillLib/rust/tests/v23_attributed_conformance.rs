@@ -228,24 +228,6 @@ Bob said: “I can help pack the 12 boxes.”"
 }
 
 #[test]
-fn v22_peer_shaped_input_is_byte_stable_and_never_attributed() {
-    let source = [
-        "Alice: I decided to move to Boston.",
-        "Bob: I can help with the move.",
-        "Alice: I start the new job Friday.",
-        "Bob: I will bring 12 boxes.",
-        "Alice: Boston remains the plan.",
-        "Bob: The boxes arrive Thursday.",
-    ]
-    .join("\n");
-    let result = distill(&source, ContextDistillConverter::IntentSpanV22);
-    assert_eq!(mode(&result), "document");
-    assert_eq!(result.compact_core, source);
-    assert!(!result.compact_core.contains(" said: "));
-    assert!(result.selection_details.get("rendering").is_none());
-}
-
-#[test]
 fn v23_requires_every_strict_topology_threshold() {
     let cases = [
         // Fewer than six tagged turns.
