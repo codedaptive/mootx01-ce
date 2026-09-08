@@ -38,6 +38,7 @@
 // break the daemon's proposal and diary functions.
 
 import Foundation
+import MootProductIdentity
 import GeniusLocusKit
 import OSLog
 
@@ -86,7 +87,7 @@ public struct EstateThetaBasisRetrainHook: ThetaBasisRetrainHook {
     private let kit: GeniusLocusKit
 
     private static let log = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "NeuronKit"
     )
 

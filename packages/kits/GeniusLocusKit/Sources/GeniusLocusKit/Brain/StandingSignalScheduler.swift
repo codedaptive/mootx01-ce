@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -77,7 +78,7 @@ public actor StandingSignalScheduler {
 
     /// Fleet-standard logger.
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "StandingSignalScheduler")
 
     /// The estate this scheduler serves. One scheduler per estate so

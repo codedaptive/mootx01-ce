@@ -1,5 +1,6 @@
 import ConvergenceKit
 import Foundation
+import MootProductIdentity
 
 /// One proposed local-head advance with an explicit predecessor binding.
 public struct SecretSyncProtectedHeadAdvance: Sendable, Hashable {
@@ -25,7 +26,7 @@ public struct SecretSyncProtectedHeadAdvance: Sendable, Hashable {
 /// freshness or substitute for an enrolled peer/recovery checkpoint.
 public actor SecretSyncProtectedHeadStore {
   private static let baseService =
-    "com.codedaptive.mootx01.secret-sync.protected-head"
+    MootProductIdentity.Keychain.secretSyncProtectedHeadService
   private static let maximumRecordByteCount = 4_096
   private let keychain: any SecretSyncKeychainOperating
 

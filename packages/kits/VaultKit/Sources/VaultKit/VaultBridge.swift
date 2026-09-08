@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 import GeniusLocusKit
 import LocusKit
@@ -166,7 +167,7 @@ public struct VaultBridge: Sendable {
     private let adapter: VaultAdapter
     private let mapping: DrawerMapping
 
-    private static let log = Logger(subsystem: "com.mootx01.kit", category: "VaultKit")
+    private static let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "VaultKit")
 
     /// - Parameters:
     ///   - kit: the opened `GeniusLocusKit` instance whose estates this
