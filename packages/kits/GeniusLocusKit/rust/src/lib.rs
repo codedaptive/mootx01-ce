@@ -104,6 +104,9 @@ pub mod substrate_node_topology_provider;
 pub mod recall;
 pub mod recall_explainer;
 pub mod span_rerank;
+// The retrieval-time cross-encoder stage (fusion rule, span selection,
+// report). Twin of Swift RecallDirector/CrossEncoderStage.swift.
+pub mod cross_encoder_stage;
 pub mod recall_signal_budget;
 pub mod training;
 pub mod verbs;

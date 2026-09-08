@@ -210,6 +210,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "context-distill-lib"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "substrate-kernel",
+]
+
+[[package]]
 name = "convergence-kit"
 version = "0.1.0"
 dependencies = [
@@ -807,6 +816,7 @@ dependencies = [
 name = "lattice-lib"
 version = "0.1.0"
 dependencies = [
+ "moot-product-identity",
  "serde",
  "serde_json",
  "substrate-kernel",
@@ -905,6 +915,10 @@ dependencies = [
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "moot-product-identity"
+version = "0.1.0"
 
 [[package]]
 name = "native-tls"
@@ -1525,6 +1539,7 @@ dependencies = [
 name = "substrate-ml"
 version = "1.0.0-skeleton"
 dependencies = [
+ "context-distill-lib",
  "intellectus-lib",
  "substrate-kernel",
  "substrate-types",
