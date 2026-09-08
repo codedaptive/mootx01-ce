@@ -50,13 +50,14 @@
 //   → detail = "Personal"          (wing displayName, context for the room)
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import AriaMCP
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
 
-private let log = Logger(subsystem: "com.mootx01", category: "CommunityCaptureCoordinator")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.Capture")
 
 private enum CaptureLedgerError: Error {
     case encodingFailed
@@ -97,41 +98,29 @@ public actor CommunityCaptureCoordinator: Sendable {
 
     // MARK: - Properties
 
-    /// The layout directory — parent of estate.sqlite and the sidecar files.
+    /// The daemon's shared estate host: the catalog record it names and the
+    /// one open every coordinator shares.
+    private let host: CommunityEstateHost
+
+    /// The daemon's state directory — parent of the ledger sidecar.
     public let layoutURL: URL
 
-    /// Owner identifier threaded into OwnerCredentials for LocusKit.
-    private let ownerIdentifier: String
-
-    /// Key provider: returns the encryption config for the estate URL.
-    private let keyProvider: @Sendable (URL) throws -> EstateEncryptionConfig
-
-    // Derived paths.
-    private var estateURL: URL { layoutURL.appendingPathComponent("estate.sqlite") }
+    // Derived paths (computed lazily, never stored — paths are not state).
+    private var estateURL: URL { host.record.databaseURL }
     private var ledgerURL: URL { layoutURL.appendingPathComponent("capture-ledger.json") }
-
-    // Lazily-opened estate. Held open for the coordinator lifetime.
-    // nil until the first call that needs estate access.
-    private var openedHost: CommunityEstateHost?
-    private var openedEstate: Estate?
 
     // MARK: - Init
 
-    /// Construct a coordinator for the estate in `layoutURL`.
+    /// Construct a coordinator over the daemon's shared estate host.
     ///
     /// - Parameters:
-    ///   - layoutURL: The layout directory containing (or that will contain)
-    ///     `estate.sqlite` and `capture-ledger.json`.
-    ///   - ownerIdentifier: Non-empty stable label for OwnerCredentials.
-    ///   - keyProvider: Returns the encryption config for the estate URL.
-    public init(
-        layoutURL: URL,
-        ownerIdentifier: String,
-        keyProvider: @Sendable @escaping (URL) throws -> EstateEncryptionConfig
-    ) {
+    ///   - host: The estate host; its record names the estate and its open is
+    ///     the one every coordinator shares.
+    ///   - layoutURL: The daemon's state directory, which contains (or will
+    ///     contain) `capture-ledger.json`. Must already exist.
+    public init(host: CommunityEstateHost, layoutURL: URL) {
+        self.host = host
         self.layoutURL = layoutURL
-        self.ownerIdentifier = ownerIdentifier
-        self.keyProvider = keyProvider
     }
 
     // MARK: - Endpoint: moot_community_capture_choices
@@ -481,69 +470,21 @@ public actor CommunityCaptureCoordinator: Sendable {
 
     // MARK: - Estate access
 
-    /// Open the estate on first use and cache it for subsequent calls.
+    /// The shared estate, opened by the host on first use.
     ///
-    /// Fail-closed: throws `CommunityDaemonError.estateAbsent` if estate.sqlite
-    /// does not exist. This prevents `SQLiteStorage(configuration:)` — which uses
-    /// `SQLITE_OPEN_CREATE` — from silently creating the estate file when the
-    /// lifecycle `estate_create` endpoint has not yet been called. Creating the
-    /// estate here would bypass the `needsCreation` lifecycle gate (F11 fix).
+    /// Fail-closed: throws `CommunityDaemonError.estateAbsent` if the record's
+    /// database does not exist. The host would create it, and creating the
+    /// estate here would bypass the lifecycle `needsCreation` gate (F11 fix):
+    /// only the lifecycle `estate_create` endpoint creates.
     ///
-    /// Any error from the key provider, storage backend, or LocusKit propagates
-    /// to the caller without wrapping — no silent fallback.
+    /// Any error from the posture, the storage backend or GeniusLocusKit
+    /// propagates to the caller without wrapping — no silent fallback.
     private func requireEstate() async throws -> Estate {
-        if let estate = openedEstate { return estate }
-
-        // Fail-closed gate: the estate file must already exist. If it is absent,
-        // the lifecycle coordinator's estate_create has not been called yet.
-        // Return an explicit error so the caller can surface a clear message rather
-        // than letting SQLiteStorage create a zero-byte estate file as a side-effect.
-        let url = estateURL
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            log.error("capture requireEstate: estate.sqlite not found at \(url.path, privacy: .public)")
-            throw CommunityDaemonError.estateAbsent(url)
+        guard host.databaseExists else {
+            log.error("capture requireEstate: estate database not found at \(self.estateURL.path, privacy: .public)")
+            throw CommunityDaemonError.estateAbsent(estateURL)
         }
-
-        let host = CommunityEstateHost(
-            estateURL: estateURL,
-            ownerIdentifier: ownerIdentifier,
-            keyProvider: keyProvider
-        )
-        let proof = try await host.openEstate()
-        log.debug("capture coordinator: estate opened uuid=\(proof.estateIdentifier, privacy: .public)")
-
-        // Retrieve the live Estate from the host. The host holds it via its
-        // actor-isolated openEstate_ property; we access it via a dedicated
-        // accessor rather than re-opening.
-        //
-        // CommunityEstateHost does not expose the Estate directly (it keeps it
-        // private). Instead, we open a SECOND connection to the same file via
-        // a separate host. This is correct and safe because:
-        //   - SQLite WAL mode allows multiple readers and one writer.
-        //   - The coordinator is the sole writer for capture records.
-        //   - The lifecycle coordinator, when present, holds its own connection
-        //     only during its transient inspect/create/open calls (not persistently).
-        //   - In tests, the coordinator is the only opener.
-        //
-        // Opening two connections to the same SQLite file is explicitly supported
-        // and is the standard pattern for multi-actor access in this codebase
-        // (see CommunityEstateLifecycleCoordinator's transient open pattern).
-        let config = EstateConfiguration(
-            estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-            encryptionConfig: try keyProvider(estateURL)
-        )
-        let storage = try SQLiteStorage(configuration: config)
-        let locusEstate = try await Estate.open(
-            storage: storage,
-            owner: OwnerCredentials(ownerIdentifier: ownerIdentifier),
-            identityKeyStore: InMemoryEstateIdentityKeyStore()
-        )
-        // Close the proof-only host — we have our own connection now.
-        try? await host.closeEstate()
-
-        self.openedEstate = locusEstate
-        return locusEstate
+        return try await host.estate()
     }
 
     // MARK: - Default inbox seeding

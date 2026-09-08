@@ -31,6 +31,7 @@
 
 import Testing
 import Foundation
+import GeniusLocusKit
 import CryptoKit
 @testable import MootCommunityDaemon
 import AriaMCP
@@ -66,8 +67,6 @@ private struct CaptureScratch {
     func remove() { try? FileManager.default.removeItem(at: url) }
 }
 
-/// Plaintext key provider for test estates.
-private let plaintextProvider: @Sendable (URL) throws -> EstateEncryptionConfig = { _ in .plaintext }
 
 /// Seed a fresh estate at `estateURL` with two rooms:
 ///   - wing "personal", room "capture"
@@ -118,11 +117,12 @@ private func makeDispatcher(layoutURL: URL) -> (
     dispatcher: ARIA_MCPDispatcher,
     captureCoord: CommunityCaptureCoordinator
 ) {
-    let coord = CommunityCaptureCoordinator(
-        layoutURL: layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    // A transient record over the scratch directory: plaintext, identity in
+    // memory, never written to any catalog file.
+    let host = CommunityEstateHost(
+        record: EstateRecord(name: layoutURL.lastPathComponent, directory: layoutURL, kind: .transient),
+        kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
+    let coord = CommunityCaptureCoordinator(host: host, layoutURL: layoutURL)
     let providerState = CommunityProviderState(
         instanceIdentifier: UUID(uuidString: "A4000000-0000-0000-0000-000000000001")!,
         estateIdentifier: UUID()

@@ -15,6 +15,7 @@
 
 import Testing
 import Foundation
+import GeniusLocusKit
 @testable import MootCommunityDaemon
 import MootDaemonProvider
 import LocusKit
@@ -39,17 +40,15 @@ private struct HostScratch {
     var estateURL: URL {
         url.appendingPathComponent("estate.sqlite")
     }
+    /// A transient catalog record over this directory: plaintext, identity in
+    /// memory, never written to any catalog file. `estate.sqlite` sits inside it.
+    var record: EstateRecord { EstateRecord(name: url.lastPathComponent, directory: url, kind: .transient) }
 
     func remove() {
         try? FileManager.default.removeItem(at: url)
     }
 }
 
-/// Plaintext key provider — returns EstateEncryptionConfig.plaintext for all URLs.
-/// Used in every test; no Keychain, no encryption, no external state.
-private let plaintextProvider: @Sendable (URL) throws -> EstateEncryptionConfig = { _ in
-    .plaintext
-}
 
 // MARK: - A1a-H1: Fresh directory creates one estate
 
@@ -58,11 +57,7 @@ func freshDirectoryCreatesEstate() async throws {
     let scratch = try HostScratch()
     defer { scratch.remove() }
 
-    let host = CommunityEstateHost(
-        estateURL: scratch.estateURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    let host = CommunityEstateHost(record: scratch.record, kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
     let proof = try await host.openEstate()
 
     // The estate file must now exist.
@@ -89,20 +84,12 @@ func reopenReturnsSameIdentity() async throws {
     defer { scratch.remove() }
 
     // First host: creates the estate.
-    let host1 = CommunityEstateHost(
-        estateURL: scratch.estateURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    let host1 = CommunityEstateHost(record: scratch.record, kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
     let proof1 = try await host1.openEstate()
     try await host1.closeEstate()
 
     // Second host: REOPENS the same file without creating a new one.
-    let host2 = CommunityEstateHost(
-        estateURL: scratch.estateURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    let host2 = CommunityEstateHost(record: scratch.record, kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
     let proof2 = try await host2.openEstate()
 
     // CORE-01: the identity must be the SAME as on the first open.
@@ -124,11 +111,7 @@ func concurrentOpenReturnsSameProof() async throws {
     let scratch = try HostScratch()
     defer { scratch.remove() }
 
-    let host = CommunityEstateHost(
-        estateURL: scratch.estateURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    let host = CommunityEstateHost(record: scratch.record, kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
 
     // Launch two concurrent callers. The actor serializes them; both see the
     // same proof (the first caller opens the estate, the second gets the cached proof).
@@ -151,11 +134,7 @@ func corruptEstateFailsClosed() async throws {
     let garbage = Data(repeating: 0xDE, count: 4096)
     try garbage.write(to: scratch.estateURL)
 
-    let host = CommunityEstateHost(
-        estateURL: scratch.estateURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    let host = CommunityEstateHost(record: scratch.record, kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
 
     // openEstate() MUST throw on a non-parseable file.
     // The exact error type varies (LocusKit may throw EstateError or StorageError),
@@ -180,11 +159,7 @@ func closeAndReopenSucceeds() async throws {
     let scratch = try HostScratch()
     defer { scratch.remove() }
 
-    let host = CommunityEstateHost(
-        estateURL: scratch.estateURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    let host = CommunityEstateHost(record: scratch.record, kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
 
     let proof1 = try await host.openEstate()
     try await host.closeEstate()

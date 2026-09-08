@@ -24,6 +24,7 @@
 
 import Testing
 import Foundation
+import GeniusLocusKit
 import CryptoKit
 @testable import MootCommunityDaemon
 import MootDaemonProvider
@@ -53,19 +54,18 @@ private struct LifecycleScratch {
     func remove() { try? FileManager.default.removeItem(at: url) }
 }
 
-/// Plaintext key provider for test coordinators. No Keychain, no encryption.
-private let plaintextProvider: @Sendable (URL) throws -> EstateEncryptionConfig = { _ in .plaintext }
 
 /// Build a dispatcher with a live coordinator over `layoutURL`.
 private func makeDispatcher(layoutURL: URL) -> (
     dispatcher: ARIA_MCPDispatcher,
     coordinator: CommunityEstateLifecycleCoordinator
 ) {
-    let coord = CommunityEstateLifecycleCoordinator(
-        layoutURL: layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: plaintextProvider
-    )
+    // A transient record over the scratch directory: plaintext, identity in
+    // memory, never written to any catalog file.
+    let host = CommunityEstateHost(
+        record: EstateRecord(name: layoutURL.lastPathComponent, directory: layoutURL, kind: .transient),
+        kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
+    let coord = CommunityEstateLifecycleCoordinator(host: host, layoutURL: layoutURL)
     let providerState = CommunityProviderState(
         instanceIdentifier: UUID(uuidString: "A3000000-0000-0000-0000-000000000001")!,
         estateIdentifier: UUID()  // placeholder — estate endpoints derive from coordinator

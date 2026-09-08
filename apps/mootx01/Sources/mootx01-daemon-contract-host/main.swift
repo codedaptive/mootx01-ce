@@ -32,6 +32,7 @@
 //      before returning — so the process exits cleanly on SIGTERM.
 
 import Foundation
+import MootProductIdentity
 import AriaMCP
 import MootDaemonProvider
 import MootCommunityDaemon
@@ -152,11 +153,15 @@ func runContractHost() async -> Int32 {
 
     // ── Step 3: build coordinators via the shared composition function ─────────
     // Uses CommunityResidentMain.makeCommunityDispatch — the SAME function the
-    // production daemon calls — with plaintext database keys, an in-memory estate
-    // identity store, and slow poll intervals. Both key classes therefore remain
-    // process-local and a terminated test host leaves no Keychain residue.
-    let ownerID = "com.mootx01.daemon.contract-host"
-    let plaintextKeyProvider: @Sendable (URL) throws -> EstateEncryptionConfig = { _ in .plaintext }
+    // production daemon calls — over a transient record (plaintext, identity in
+    // memory) and slow poll intervals, so a terminated test host leaves no
+    // Keychain residue.
+    let ownerID = MootProductIdentity.Services.contractHostOwner
+    // A transient catalog record over the scratch directory: plaintext, identity
+    // in memory, never written to any catalog file, so the test host leaves no
+    // Keychain residue and never touches the machine's estates.
+    let contractRecord = EstateRecord(name: "contract", directory: estateDir.appendingPathComponent("contract", isDirectory: true), kind: .transient)
+    let contractHost = CommunityEstateHost(record: contractRecord, kit: GeniusLocusKit(), ownerIdentifier: ownerID)
     let providerState = CommunityProviderState(
         instanceIdentifier: instanceID,
         estateIdentifier: estateID
@@ -164,10 +169,8 @@ func runContractHost() async -> Int32 {
     let communityDispatch: CommunityContractDispatch
     do {
         communityDispatch = try await CommunityResidentMain.makeCommunityDispatch(
+            host: contractHost,
             layoutURL: estateDir,
-            ownerIdentifier: ownerID,
-            keyProvider: plaintextKeyProvider,
-            identityKeyStore: InMemoryEstateIdentityKeyStore(),
             state: providerState,
             // Slow poll intervals: background workers are irrelevant for contract tests,
             // which only exercise the sidecar and tool dispatch layer. Keeping intervals

@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import AriaMCP
 import OSLog
 
@@ -21,7 +22,7 @@ import OSLog
 /// on a call-site remembering a privacy annotation for secret material —
 /// secrets simply never reach the logger.
 enum ProviderLog {
-    static let logger = Logger(subsystem: "com.mootx01.kit", category: "MootDaemonProvider")
+    static let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootDaemonProvider")
 }
 
 /// What a completed activation proved.

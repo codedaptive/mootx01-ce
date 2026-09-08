@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import AriaMCP
 #if canImport(Security)
 import Security
@@ -353,7 +354,7 @@ public enum DaemonShellMain {
             (.sandboxedPro, home
                 .appendingPathComponent("Library", isDirectory: true)
                 .appendingPathComponent("Containers", isDirectory: true)
-                .appendingPathComponent("com.codedaptive.mootx01.macos", isDirectory: true)
+                .appendingPathComponent(MootProductIdentity.Apple.BundleIdentifiers.macOSApp, isDirectory: true)
                 .appendingPathComponent("Data", isDirectory: true)
                 .appendingPathComponent("Library", isDirectory: true)
                 .appendingPathComponent("Application Support", isDirectory: true)
@@ -365,7 +366,7 @@ public enum DaemonShellMain {
                 .appendingPathComponent("mootx01.sqlite", isDirectory: false)),
             // Swift CLI legacy default.
             (.swiftCE, support
-                .appendingPathComponent("com.mootx01.ce", isDirectory: true)
+                .appendingPathComponent(MootProductIdentity.Storage.applicationSupportFolder, isDirectory: true)
                 .appendingPathComponent("estate.sqlite", isDirectory: false)),
             // Rust CLI legacy default (databases/default per the Rust spec).
             (.rustCE, support
@@ -453,11 +454,15 @@ public enum DaemonShellMain {
            let container = AppGroupRootResolver().containerURL(
                forSecurityApplicationGroupIdentifier: eligibility.appGroupIdentifier
            ) {
-            let canonicalURL = container
-                .appendingPathComponent("Library", isDirectory: true)
-                .appendingPathComponent("Application Support", isDirectory: true)
-                .appendingPathComponent("MOOTx01", isDirectory: true)
-                .appendingPathComponent("estate.sqlite", isDirectory: false)
+            // The canonical estate is the app family's catalog default record:
+            // the group container is that family's home
+            // (DECISION_INSTALL_TAKEOVER_2026-09-08), and a fresh catalog
+            // places its default estate at databases/default/. The names come
+            // from MootProductIdentity, the same constants the catalog spells.
+            let canonicalURL = MootProductIdentity.Storage.applicationSupportDirectory(homeDirectory: container)
+                .appendingPathComponent(MootProductIdentity.Storage.databasesFolder, isDirectory: true)
+                .appendingPathComponent(MootProductIdentity.Storage.defaultEstateName, isDirectory: true)
+                .appendingPathComponent(MootProductIdentity.Storage.estateDatabaseFile, isDirectory: false)
             canonicalRecord = DefaultEstateCensus.observeFileLevel(
                 candidateClass: .canonical,
                 mainURL: canonicalURL,
@@ -469,7 +474,7 @@ public enum DaemonShellMain {
         #endif
 
         let siblings = siblingNames(
-            dataDirectory: support.appendingPathComponent("com.mootx01.ce", isDirectory: true)
+            dataDirectory: support.appendingPathComponent(MootProductIdentity.Storage.applicationSupportFolder, isDirectory: true)
         ) + siblingNames(
             dataDirectory: support.appendingPathComponent("ai.mootx01.ce", isDirectory: true)
         )
