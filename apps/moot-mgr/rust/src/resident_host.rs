@@ -67,10 +67,11 @@ pub struct ResidentHostConfig {
     /// exact — a busy port fails. When false (the built-in default), `start`
     /// hunts upward from `http_port` to the first bindable port (spec §3).
     pub http_port_explicit: bool,
-    /// Whether to maintain the §3 `mgr.port` file. True for the production
-    /// `from_environment` path; false for memberwise (test/embedded) hosts so
+    /// Where to maintain the §3 `mgr.port` file, or `None` to maintain none.
+    /// The production `from_environment` path passes `default_port_file_path`;
+    /// memberwise (test/embedded) hosts pass `None` or a scratch path, so
     /// parallel tests never touch the live machine's port file.
-    pub write_port_file: bool,
+    pub port_file: Option<std::path::PathBuf>,
     /// Override for the HTTP concurrency cap. `None` means use the default
     /// (`MAX_LOOPBACK_CONNECTIONS` / `MOOT_MGR_HTTP_MAX_CONNECTIONS` env var).
     /// Set only in tests that need precise cap control.
@@ -95,7 +96,7 @@ impl ResidentHostConfig {
             // Memberwise construction (tests, embedders) is an explicit choice
             // of port: exact bind, no hunting, no §3 port file.
             http_port_explicit: true,
-            write_port_file: false,
+            port_file: None,
             http_max_connections: None,
         }
     }
@@ -143,7 +144,7 @@ impl ResidentHostConfig {
             control_socket_path,
             estates_directory,
             http_port_explicit,
-            write_port_file: true,
+            port_file: Some(default_port_file_path()),
             // Production hosts always read the cap from the env var (handled
             // inside HttpReadApi::new). No override at this layer.
             http_max_connections: None,
@@ -319,14 +320,13 @@ impl ResidentHost {
         })?;
 
         // §3 port file: record the bound port for status/dashboard discovery
-        // (production hosts only — see `write_port_file`).
-        if self.config.write_port_file {
+        // (only when the config names a location — see `port_file`).
+        if let Some(port_file) = &self.config.port_file {
             let bound = api.bound_port();
-            let port_file = mgr_port_file_path();
             if let Some(dir) = port_file.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            if let Err(e) = std::fs::write(&port_file, format!("{bound}\n")) {
+            if let Err(e) = std::fs::write(port_file, format!("{bound}\n")) {
                 eprintln!(
                     "moot-mgr: cannot write port file {}: {e} (continuing)",
                     port_file.display()
@@ -348,8 +348,8 @@ impl ResidentHost {
         if let Some(api) = self.api.take() {
             api.stop();
             // Clean-shutdown removal of the §3 port file (only when we wrote it).
-            if self.config.write_port_file {
-                let _ = std::fs::remove_file(mgr_port_file_path());
+            if let Some(port_file) = &self.config.port_file {
+                let _ = std::fs::remove_file(port_file);
             }
         }
         self.manager.lock().unwrap().stop();
@@ -393,53 +393,15 @@ impl ResidentHost {
     }
 }
 
-/// The mootx01 data dir, honoring `MOOTX01_DATA_DIR`. Mirrors the mootx01 CLI's
-/// data-dir resolution (apps/mootx01/rust core::paths): macOS
-/// `~/Library/Application Support/ai.mootx01.ce`, Windows `%LOCALAPPDATA%\MOOTx01`,
-/// elsewhere `${XDG_DATA_HOME:-~/.local/share}/mootx01`. Both `mgr.port` and the
-/// daemon's `daemon.port` live under this directory.
-pub fn mootx01_data_dir() -> std::path::PathBuf {
-    use std::path::PathBuf;
-    if let Ok(v) = std::env::var("MOOTX01_DATA_DIR") {
-        if !v.is_empty() {
-            return PathBuf::from(v);
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
-        home.join("Library/Application Support/ai.mootx01.ce")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        base.join("MOOTx01")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let base = std::env::var("XDG_DATA_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(|h| PathBuf::from(h).join(".local").join("share"))
-                    .unwrap_or_else(|_| PathBuf::from("."))
-            });
-        base.join("mootx01")
-    }
+/// §3 `mgr.port` default location — `<configuration>/mgr.port`, the one a
+/// production host maintains.
+pub fn default_port_file_path() -> std::path::PathBuf {
+    genius_locus_kit::EstateCatalog::configuration_directory().join("mgr.port")
 }
 
-/// §3 `mgr.port` location — `<data>/mgr.port`.
-pub fn mgr_port_file_path() -> std::path::PathBuf {
-    mootx01_data_dir().join("mgr.port")
-}
-
-/// §3 `daemon.port` location — `<data>/daemon.port`, where the mootx01 daemon
+/// §3 `daemon.port` location — `<configuration>/daemon.port`, where the mootx01 daemon
 /// writes the port it actually bound. moot-mgr reads this to reach the daemon
 /// rather than guessing 4242 (the daemon hunts off 4242 with `--http auto`).
 pub fn daemon_port_file_path() -> std::path::PathBuf {
-    mootx01_data_dir().join("daemon.port")
+    genius_locus_kit::EstateCatalog::configuration_directory().join("daemon.port")
 }

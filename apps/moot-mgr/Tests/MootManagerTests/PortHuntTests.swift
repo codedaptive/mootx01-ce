@@ -2,7 +2,7 @@
 //
 // Default (non-explicit) port hunts upward by retrying the bind on the next
 // candidate; an explicitly requested port is exact — busy fails. The §3
-// mgr.port file is maintained only by production (`writePortFile`) hosts,
+// mgr.port file is maintained only by hosts whose config names a `portFileURL`,
 // recorded with the BOUND port and removed on clean stop. Twin of the Rust
 // tests/port_hunt_tests.rs vectors.
 
@@ -19,7 +19,7 @@ struct PortHuntTests {
     private func freshConfig(
         httpPort: UInt16,
         httpPortExplicit: Bool = true,
-        writePortFile: Bool = false
+        portFileURL: URL? = nil
     ) -> ResidentHostConfig {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("mm-hunt-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -34,7 +34,7 @@ struct PortHuntTests {
             controlSocketPath: "/tmp/mm-h\(UUID().uuidString.prefix(8)).sock",
             estatesDirectory: dir.appendingPathComponent("estates", isDirectory: true),
             httpPortExplicit: httpPortExplicit,
-            writePortFile: writePortFile
+            portFileURL: portFileURL
         )
     }
 
@@ -94,14 +94,13 @@ struct PortHuntTests {
 
     @Test("Port file records the BOUND port and is removed on stop")
     func portFileLifecycle() async throws {
-        // Route the §3 port file into a scratch dir via MOOTX01_DATA_DIR.
+        // Route the §3 port file into a scratch dir through the config.
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("mm-portfile-\(UUID().uuidString.prefix(8))", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-        setenv("MOOTX01_DATA_DIR", scratch.path, 1)
-        defer { unsetenv("MOOTX01_DATA_DIR") }
 
-        let host = ResidentHost(config: freshConfig(httpPort: 0, writePortFile: true))
+        let host = ResidentHost(config: freshConfig(
+            httpPort: 0, portFileURL: scratch.appendingPathComponent("mgr.port", isDirectory: false)))
         try await host.start()
         let bound = await host.boundHTTPPort()
 

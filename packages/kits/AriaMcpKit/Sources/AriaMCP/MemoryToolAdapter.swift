@@ -9,12 +9,13 @@ import AriaMCPWire
 // existing ARIA estate verbs. See the journal entry for the full design.
 
 import Foundation
+import MootProductIdentity
 import LocusKit
 import GeniusLocusKit
 import SubstrateTypes
 import OSLog
 
-private let memLog = Logger(subsystem: "com.mootx01.kit", category: "MemoryToolAdapter")
+private let memLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "AriaMCP.MemoryToolAdapter")
 
 /// The dedicated wing for memory-tool-managed content.
 private let memoryAdapterWing = "memories"

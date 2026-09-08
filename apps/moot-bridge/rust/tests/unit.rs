@@ -119,6 +119,7 @@ fn mempalace_verbs() -> VerbMap {
         query_arg: "query".to_string(),
         constant_args: constant,
         result_format: ResultFormat::JsonObjects { id_key: None, content_key: "text".to_string() },
+        subject_arg: None,
     }
 }
 
@@ -132,6 +133,7 @@ fn mootx01_verbs() -> VerbMap {
         query_arg: "query".to_string(),
         constant_args: constant,
         result_format: ResultFormat::MootText,
+        subject_arg: Some("subject".to_string()),
     }
 }
 
@@ -157,6 +159,8 @@ fn write_translates_to_secondary_tool() {
     assert_eq!(out["params"]["name"], json!("moot_file_memory"));
     assert_eq!(out["params"]["arguments"]["content"], json!("hello bridge"));
     assert_eq!(out["params"]["arguments"]["location"], json!("scratch/notes"));
+    // mootx01 requires a subject; the bridge derives it from the content.
+    assert_eq!(out["params"]["arguments"]["subject"], json!("hello bridge"));
     // The primary-only constantArgs (wing/room) are NOT leaked to mootx01.
     assert!(out["params"]["arguments"].get("wing").is_none());
     assert!(out["params"]["arguments"].get("room").is_none());
@@ -200,6 +204,44 @@ fn write_without_content_returns_none() {
         1,
     )
     .is_none());
+}
+
+/// A subject the client already gave under the secondary's key is carried
+/// through unchanged rather than re-derived.
+#[test]
+fn write_carries_a_given_subject_through() {
+    let client_call: Value = serde_json::from_str(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"mempalace_add_drawer",
+                      "arguments":{"wing":"scratch","room":"notes","content":"body text","subject":"given"}}}"#,
+    )
+    .unwrap();
+    let out: Value = serde_json::from_str(
+        &BridgeServer::translate_call(Some(&client_call), BridgeCallType::Write, &mempalace_verbs(), &mootx01_verbs(), 2)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(out["params"]["arguments"]["subject"], json!("given"));
+}
+
+/// The derived subject is the first non-empty line, trimmed, cut to the 120
+/// characters mootx01 accepts; empty content still yields a subject.
+#[test]
+fn derived_subject_shape() {
+    assert_eq!(BridgeServer::derived_subject("\n  first line  \nsecond"), "first line");
+    let long = "x".repeat(300);
+    assert_eq!(BridgeServer::derived_subject(&long).chars().count(), BridgeServer::DERIVED_SUBJECT_LIMIT);
+    assert_eq!(BridgeServer::derived_subject("   \n"), "memory");
+}
+
+/// A mirrored write the secondary refused is a failure, never a completed
+/// mirror: JSON-RPC errors and `isError` tool results both count.
+#[test]
+fn failed_tool_responses_are_recognised() {
+    assert!(BridgeServer::is_failed_tool_response(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"x"}}"#));
+    assert!(BridgeServer::is_failed_tool_response(r#"{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[]}}"#));
+    assert!(!BridgeServer::is_failed_tool_response(r#"{"jsonrpc":"2.0","id":1,"result":{"isError":false,"content":[]}}"#));
+    assert!(BridgeServer::is_failed_tool_response("not json"));
 }
 
 // MARK: - Bridge tool schemas

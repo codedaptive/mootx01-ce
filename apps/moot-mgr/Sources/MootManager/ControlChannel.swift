@@ -30,6 +30,7 @@
 // loop runs on a dedicated thread; each connection is served on the actor.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import LoopbackHTTP
 
@@ -51,7 +52,7 @@ public actor ControlChannel {
     /// Filesystem path of the Unix domain socket.
     private let socketPath: String
 
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "ControlChannel")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootManager.ControlChannel")
 
     private var listenFD: Int32 = -1
     private var acceptThread: Thread?
@@ -93,7 +94,7 @@ public actor ControlChannel {
                 Task { await self.serve(cfd) }
             }
         }
-        thread.name = "com.mootx01.kit.ControlChannel.accept"
+        thread.name = MootProductIdentity.Queues.managerControlChannelAccept
         thread.start()
         self.acceptThread = thread
         logger.info("ControlChannel listening on UDS \(self.socketPath) (0600)")

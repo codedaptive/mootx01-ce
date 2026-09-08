@@ -8,8 +8,8 @@
 //!   (primary's answer) → bridge_set_primary to the other backend → read again
 //!   (now the other backend answers) → bridge_status shows the swap.
 //!
-//! SAFETY: scratch backends only — temp palace + temp MOOTX01_DATA_DIR, torn
-//! down per run. The test is SKIPPED (passes trivially) when the `mempalace-mcp`
+//! SAFETY: scratch backends only — temp palace + a transient mootx01 estate
+//! selected with `--db <dir>/<name>`, torn down per run. The test is SKIPPED (passes trivially) when the `mempalace-mcp`
 //! / `mootx01` binaries are not on PATH, so the unit suite still runs everywhere.
 
 use serde_json::Value;
@@ -80,7 +80,9 @@ fn full_bridge_session() {
     // --- id6: read AFTER swap is answered by mootx01 -----------------------
     let secondary_read = result_text(by_id.get(&6).expect("id6 response"));
     assert!(secondary_read.contains(&token));
-    assert!(secondary_read.contains("found")); // mootText shape proves mootx01
+    // mootText shape proves mootx01 answered (not MemPalace JSON): the
+    // "found N candidate ..." header and the one-line-per-hit rows.
+    assert!(secondary_read.contains("found 1 candidate memory")); // mootText shape proves mootx01
     assert!(secondary_read.contains("[scratch/notes]"));
 
     // --- id7: bridge_status reflects the swap --------------------------------
@@ -95,8 +97,8 @@ fn full_bridge_session() {
         "write must have landed in MemPalace"
     );
     assert!(
-        direct_has_token(&mootx01_bin, &["serve"],
-                         &[("MOOTX01_DATA_DIR", moot_dir.to_str().unwrap())],
+        direct_has_token(&mootx01_bin, &["serve", "--db", &format!("{}/bridge", moot_dir.display())],
+                         &[],
                          "moot_memory_search", &token),
         "write must have fanned out to mootx01"
     );
@@ -121,10 +123,11 @@ fn config_json(mp_dir: &PathBuf, moot_dir: &PathBuf) -> String {
   }},
   "backendB": {{
     "name": "mootx01",
-    "command": "MOOTX01_DATA_DIR={moot} mootx01 serve",
+    "command": "mootx01 serve --db {moot}/bridge",
     "verbMap": {{
       "write": "moot_file_memory",
       "query": "moot_memory_search",
+      "subjectArg": "subject",
       "constantArgs": {{ "location": "scratch/notes" }},
       "resultFormat": {{ "kind": "mootText" }}
     }}

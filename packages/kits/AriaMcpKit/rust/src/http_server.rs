@@ -1482,19 +1482,13 @@ fn get_graph_snapshot(
 
 /// GET /api/admin/estates — list all estates in the registry.
 ///
-/// Backend is inferred from env vars (ARIA_MCP_POSTGRES_URL / ARIA_MCP_SQLITE_PATH),
-/// same as Swift. Estate name and mount state are read from the registry entry
-/// (defaulting to UUID-as-name and "mounted" when not set). Mirrors Swift
-/// HTTPServer.adminEstatesSnapshot(dispatcher:).
+/// The backend is the one the registry opened its default estate on, never
+/// read from the environment — the same words Swift's
+/// `HTTPServer.adminEstatesSnapshot` takes from `kit.storageBackend(for:)`.
+/// Estate name and mount state are read from the registry entry (defaulting
+/// to UUID-as-name and "mounted" when not set).
 fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry) -> (u16, Vec<u8>) {
-    // Backend inferred from env vars — same selection logic as ServerConfig::from_env.
-    let backend = if std::env::var("ARIA_MCP_POSTGRES_URL").is_ok() {
-        "PostgreSQL"
-    } else if std::env::var("ARIA_MCP_SQLITE_PATH").is_ok() {
-        "SQLite"
-    } else {
-        "InMemory"
-    };
+    let backend = registry.backend.label();
 
     let mut estates: Vec<serde_json::Value> = Vec::new();
     let default_uuid = registry.default.estate_id.to_string();

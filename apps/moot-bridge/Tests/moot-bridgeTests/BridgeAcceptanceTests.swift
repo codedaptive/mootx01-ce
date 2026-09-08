@@ -12,8 +12,9 @@ import Testing
 //   (primary's answer) → bridge_set_primary to the other backend → read again (now
 //   the other backend answers) → bridge_status shows the swap.
 //
-// SAFETY: scratch backends only — temp palace + temp MOOTX01_DATA_DIR under
-// /tmp, torn down per run. Never the real palace or real mootx01 data dir.
+// SAFETY: scratch backends only — temp palace + a temp transient estate
+// (`mootx01 serve --db <tmp>/bridge`) under /tmp, torn down per run. Never the
+// real palace or a registered mootx01 estate.
 //
 // This suite is SKIPPED (via the `.enabled(if:)` trait — Swift Testing has no
 // runtime skip, so a thrown "skip" error records as a FAILURE; that broke the
@@ -106,9 +107,9 @@ struct BridgeAcceptanceTests {
         // --- id6: read AFTER swap is answered by mootx01 -------------------
         let secondaryReadText = try resultText(byID[6])
         #expect(secondaryReadText.contains(token))
-        // mootText shape proves mootx01 answered (not MemPalace JSON).
-        #expect(secondaryReadText.contains("found"))
-        #expect(secondaryReadText.contains("[scratch/notes]"))
+        // mootText shape proves mootx01 answered (not MemPalace JSON): the
+        // "found N candidate ..." header and the one-line-per-hit rows.
+        #expect(secondaryReadText.contains("found 1 candidate memory"))
 
         // --- id7: bridge_status reflects the swap ----------------------------
         let statusText = try resultText(byID[7])
@@ -147,10 +148,11 @@ struct BridgeAcceptanceTests {
           },
           "backendB": {
             "name": "mootx01",
-            "command": "MOOTX01_DATA_DIR=\(mootDir) mootx01 serve",
+            "command": "mootx01 serve --db \(mootDir)/bridge",
             "verbMap": {
               "write": "moot_file_memory",
               "query": "moot_memory_search",
+              "subjectArg": "subject",
               "constantArgs": { "location": "scratch/notes" },
               "resultFormat": { "kind": "mootText" }
             }
@@ -169,12 +171,12 @@ struct BridgeAcceptanceTests {
         proc.executableURL = URL(fileURLWithPath: bin)
         proc.arguments = ["--config", configPath, "--stats-store", statsPath]
         // Ensure the backend launch commands resolve mempalace-mcp / mootx01.
-        // Prepend the user's local bin dir (derived from HOME, not hard-wired)
-        // so binaries installed via standard packaging helpers are found without
-        // a machine-specific absolute path.
+        // The user's local bin dir (derived from HOME, not hard-wired) is a
+        // FALLBACK after PATH, so a freshly built mootx01 placed ahead on PATH
+        // is the one exercised rather than whatever older binary is installed.
         var env = ProcessInfo.processInfo.environment
         let localBin = (env["HOME"] ?? "") + "/.local/bin"
-        env["PATH"] = localBin + ":" + (env["PATH"] ?? "")
+        env["PATH"] = (env["PATH"] ?? "") + ":" + localBin
         proc.environment = env
 
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
@@ -236,8 +238,8 @@ struct BridgeAcceptanceTests {
     private func directMootx01HasToken(_ token: String, dataDir: String) throws -> Bool {
         let out = try driveBackend(
             command: mootx01BinPath!,
-            args: ["serve"],
-            env: ["MOOTX01_DATA_DIR": dataDir],
+            args: ["serve", "--db", "\(dataDir)/bridge"],
+            env: nil,
             queryTool: "moot_memory_search",
             args2: ["query": token])
         return out.contains(token)
@@ -348,7 +350,9 @@ private func bridgeBinaryPath() -> String? {
 private func whichBinary(_ name: String) -> String? {
     let env = ProcessInfo.processInfo.environment
     let localBin = (env["HOME"] ?? "") + "/.local/bin"
-    let dirs = ([localBin] + (env["PATH"]?.split(separator: ":").map(String.init) ?? []))
+    // PATH first, the local bin dir as a fallback: the same order the bridge
+    // child gets in `runBridgeBinary`, so the probe and the run agree.
+    let dirs = ((env["PATH"]?.split(separator: ":").map(String.init) ?? []) + [localBin])
     for d in dirs {
         let p = d + "/" + name
         if FileManager.default.isExecutableFile(atPath: p) { return p }

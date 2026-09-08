@@ -4,11 +4,15 @@
 //! Extracted verbatim from the binary's `main.rs` so that BOTH entry points —
 //! the `aria-mcp` dev binary and the product `mootx01 serve` (apps/mootx01/rust)
 //! — run the identical resident-daemon logic from one source of truth. The
-//! caller prepares the environment (`ARIA_MCP_SQLITE_PATH`,
-//! `MOOTX01_HTTP_PORT`, `ARIA_MCP_STATS_STORE`, …) and calls `run()`; this
+//! caller prepares the transport environment (`MOOTX01_HTTP_PORT`,
+//! `ARIA_MCP_STATS_STORE`, …) and calls `run()`; this
 //! function does not return until the transport stops (stdin closes, or the
 //! HTTP loop exits). On fatal config errors it exits the process, same as
 //! the original main.
+//!
+//! The estate is passed in as a `RuntimeEstate`: the caller resolved it from
+//! the estate catalog (`--db`, `--in-memory`), and no environment value names
+//! an estate here.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -73,12 +77,18 @@ pub fn run(
     banner: &str,
     version_skew: &str,
     update_advisory: Option<crate::dispatcher::UpdateAdvisoryProvider>,
+    estate: crate::server::RuntimeEstate,
 ) {
     eprintln!("{banner}: starting Rust MCP server");
-    // from_env reads ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH and applies
-    // the four-state precedence ladder. Exits with a nonzero code on ambiguous
-    // config or an unusable path/URL (unreachable PostgreSQL fails fast here).
-    let mut config = ServerConfig::from_env();
+    // Exits with a nonzero code when the estate cannot be opened (an
+    // unreachable PostgreSQL estate fails fast here).
+    let mut config = match ServerConfig::for_estate(estate) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
     // Inject the host identity so rows filed by this server are stamped with
     // the correct source. The banner ("mootx01" for the product binary and the
     // aria-mcp dev binary alike) is the canonical name for whichever binary is
@@ -96,8 +106,8 @@ pub fn run(
     // Telemetry wiring (durable default for resident mode, opt-in for stdio).
     //
     // stats_store_path_from_env() resolves: ARIA_MCP_STATS_STORE env override
-    // first; if absent in resident HTTP mode, the moot-mgr platform default
-    // path (<data-dir>/com.mootx01.ce/moot-mgr/stats.sqlite). stdio mode
+    // first; if absent in resident HTTP mode, the moot-mgr default path
+    // (<configuration directory>/moot-mgr/stats.sqlite). stdio mode
     // returns None when the env var is absent (telemetry off by default there).
     //
     // is_http_mode = MOOTX01_HTTP_PORT is set (determined here before the
@@ -467,11 +477,10 @@ pub fn run(
 ///
 /// 1. `ARIA_MCP_STATS_STORE` set and non-empty → use that exact path.
 /// 2. `use_default` is `true` (resident HTTP mode) → fall back to
-///    `<data-dir>/com.mootx01.ce/moot-mgr/stats.sqlite`:
-///    - Linux:   `~/.local/share/com.mootx01.ce/moot-mgr/stats.sqlite`
-///    - macOS:   `~/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite`
+///    `<configuration>/moot-mgr/stats.sqlite`, the configuration directory
+///    being the estate catalog's (`EstateCatalog::configuration_directory`):
+///    - Linux:   `${XDG_DATA_HOME:-~/.local/share}/mootx01/moot-mgr/stats.sqlite`
 ///    - Windows: `%LOCALAPPDATA%\com.mootx01.ce\moot-mgr\stats.sqlite`
-///    - Fallback (home var absent): `/tmp/...` on POSIX, `.\...` on Windows.
 ///    This is the same file the `moot-mgr` manager process owns.
 /// 3. `use_default` is `false` (stdio mode) → return `None` (telemetry off).
 ///
@@ -486,41 +495,19 @@ pub fn stats_store_path_from_env(use_default: bool) -> Option<String> {
         // stdio mode: no default — telemetry off unless explicitly configured.
         return None;
     }
-    // Resident HTTP mode: compute the moot-mgr default path.
-    //
-    // Path: <data-dir>/com.mootx01.ce/moot-mgr/stats.sqlite
-    //   Linux:   ~/.local/share  (XDG_DATA_HOME, or ~/.local/share as fallback)
-    //   macOS:   ~/Library/Application Support
-    //   Windows: %LOCALAPPDATA%  (USERPROFILE\AppData\Local as fallback)
-    //
-    // The store file and its parent directories are created by SqliteStorage
-    // when StatsStore::new opens the connection — no pre-creation needed here.
-    #[cfg(target_os = "macos")]
-    let base = {
-        // macOS: $HOME/Library/Application Support
-        std::env::var("HOME")
-            .map(|h| format!("{h}/Library/Application Support"))
-            .unwrap_or_else(|_| "/tmp".to_string())
-    };
-    #[cfg(target_os = "windows")]
-    let base = {
-        // Windows: %LOCALAPPDATA% — there is no XDG and no /tmp. USERPROFILE\
-        // AppData\Local is the fallback when LOCALAPPDATA is unset; "." is the
-        // last resort (avoids the bare "/tmp" that does not exist on Windows).
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("USERPROFILE").ok().map(|h| format!("{h}\\AppData\\Local")))
-            .unwrap_or_else(|| ".".to_string())
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let base = {
-        // Linux / other: XDG_DATA_HOME if set, else ~/.local/share
-        std::env::var("XDG_DATA_HOME")
-            .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.local/share")))
-            .unwrap_or_else(|_| "/tmp".to_string())
-    };
-    Some(format!("{base}/com.mootx01.ce/moot-mgr/stats.sqlite"))
+    // Resident HTTP mode: the moot-mgr stats store in the configuration
+    // directory, `<configuration>/moot-mgr/stats.sqlite`. Twin of Swift
+    // `MootPaths.daemonStatsStorePath(dataDir:)` over
+    // `EstateCatalog.configurationDirectory`. The store file and its parent
+    // directories are created by SqliteStorage when StatsStore::new opens the
+    // connection — no pre-creation needed here.
+    Some(
+        genius_locus_kit::EstateCatalog::configuration_directory()
+            .join("moot-mgr")
+            .join("stats.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Resolve the HTTP request body cap from `MOOTX01_HTTP_MAX_BODY_BYTES`,

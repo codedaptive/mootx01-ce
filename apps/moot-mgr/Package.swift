@@ -64,6 +64,7 @@ let package = Package(
         .executable(name: "moot-mgr", targets: ["moot-mgr"]),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../packages/libs/MootProductIdentity"),
         // ObserverSink: StatsStore (the central stats store), PersistenceStatsSink,
         // MetricRow/EventRow. The shared observer-sink reused by the manager.
         .package(name: "ObserverSink", path: "../../packages/libs/ObserverSink"),
@@ -116,6 +117,7 @@ let package = Package(
         .target(
             name: "MootManager",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 .product(name: "ObserverSink", package: "ObserverSink"),
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
