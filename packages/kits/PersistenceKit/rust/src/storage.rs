@@ -477,7 +477,7 @@ pub enum BackendConfiguration {
     InMemory,
     /// SQLite backend (sqlite.rs) — WAL-mode rusqlite over a
     /// filesystem path; the durable backend behind SqliteDrawerStore
-    /// and the servers' ARIA_MCP_SQLITE_PATH configuration.
+    /// and the servers' SQLite estates.
     Sqlite {
         path: String,
         busy_timeout_secs: f64,

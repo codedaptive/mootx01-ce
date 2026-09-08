@@ -44,13 +44,15 @@ let package = Package(
         ),
     ],
     // Zero external dependencies. No kit deps. Pure functions + command seam.
-    dependencies: [],
+    dependencies: [
+        .package(name: "MootProductIdentity", path: "../MootProductIdentity"),],
     targets: [
         .target(
             name: "AdornmentLib",
             // No kit or external deps — the command seam reads a process path
             // from the environment; it does not link any ML library.
-            dependencies: [],
+            dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),],
             path: "Sources/AdornmentLib",
             swiftSettings: miners
                 // MOOTX01_MINERS=1 in the environment: compile the full library.

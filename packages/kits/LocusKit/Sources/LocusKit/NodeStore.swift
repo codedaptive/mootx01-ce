@@ -24,11 +24,12 @@
 // mutation method (deterministic-engine rule).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import SubstrateTypes
 
-private let nodeStoreLog = Logger(subsystem: "com.mootx01.kit", category: "LocusKit.NodeStore")
+private let nodeStoreLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LocusKit.NodeStore")
 
 /// Storage for the estate's containment tree.
 ///

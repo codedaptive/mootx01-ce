@@ -23,13 +23,14 @@
 //    parked. Only truly-accepted records count in the SyncReceipt (B-2).
 
 import Foundation
+import MootProductIdentity
 import CloudKit
 import ConvergenceKit
 import PersistenceKit
 import SubstrateTypes
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.Engine")
 
 // MARK: - Push
 

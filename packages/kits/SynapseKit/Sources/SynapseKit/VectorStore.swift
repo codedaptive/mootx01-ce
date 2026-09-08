@@ -82,6 +82,7 @@
 
 import EngramLib
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import PersistenceKit
@@ -141,7 +142,7 @@ struct VKLogicalPos: Hashable {
 /// short-circuited no-op (single Atomic<Bool> load) when disabled.
 public actor VectorStore {
 
-    private let log = Logger(subsystem: "com.mootx01.kit", category: "VectorStore")
+    private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "SynapseKit.VectorStore")
     let storage: any Storage
 
     // MARK: - Resident hot-path scan structures
@@ -4390,7 +4391,7 @@ enum SchemaLedgerPreparation {
     /// Kit-level logger for the ledger preparation. The enum has no instance,
     /// so it cannot share `VectorStore`'s per-store logger; the category is
     /// the kit's, matching the other module-level loggers in SynapseKit.
-    private static let log = Logger(subsystem: "com.mootx01.kit", category: "SynapseKit")
+    private static let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "SynapseKit")
 
     /// Rename the ledger row under each id in `formerKitIDs` to `kitID`.
     ///

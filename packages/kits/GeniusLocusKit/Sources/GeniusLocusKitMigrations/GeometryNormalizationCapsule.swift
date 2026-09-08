@@ -17,6 +17,7 @@
 //     and leaves no persistent state beyond the normalized file.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 
@@ -29,7 +30,7 @@ import PersistenceKit
 public enum GeometryNormalizationCapsule {
 
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit", category: "GeniusLocusKitMigrations")
+        subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKitMigrations")
 
     /// Run geometry normalization on `storage`.
     ///

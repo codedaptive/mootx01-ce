@@ -66,7 +66,7 @@ public enum EstateKind: String, Sendable, Equatable, CaseIterable {
 ///
 /// The identity key (Ed25519 signing key) is written to the Apple Keychain and
 /// survives process restarts. The whole-file database key (SQLCipher) is minted
-/// by `EstateKeyProvider` and stored in the Keychain keyed to the estate file
+/// by `EstateOpenPosture` and stored in the Keychain keyed to the estate file
 /// path. This is the correct posture for user-owned estates that must survive
 /// device restarts.
 ///

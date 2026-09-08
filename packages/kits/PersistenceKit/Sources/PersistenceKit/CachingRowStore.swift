@@ -33,10 +33,11 @@
 // unwrapped backing store. The cache only affects latency.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import SubstrateTypes
 
-private let cacheLogger = Logger(subsystem: "com.mootx01.kit", category: "CachingRowStore")
+private let cacheLogger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKit.CachingRowStore")
 
 /// Callback that maps a changed row to its Merkle-aggregate parent chain.
 /// Returns RowHandles for each ancestor whose cached aggregate must be

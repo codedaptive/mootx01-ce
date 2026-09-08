@@ -118,6 +118,26 @@ public struct KeychainKeyStore: Sendable {
         }
     }
 
+    /// Store a key that already exists for this estate under this account:
+    /// the relocation path, when an estate file moves and its key must follow
+    /// it to the account of the new path. Refuses a wrong-length key and an
+    /// account that already holds an item, so a relocation can never
+    /// overwrite a live key. Not the minting path; `loadOrCreateKey` is.
+    public func storeKey(_ key: Data) throws {
+        guard key.count == Self.keyByteCount else {
+            throw StorageError.backendError(
+                underlying: "keychain: refusing to store a key of \(key.count) bytes (expected \(Self.keyByteCount))")
+        }
+        switch addKey(key) {
+        case errSecSuccess:
+            return
+        case errSecDuplicateItem:
+            throw StorageError.backendError(underlying: "keychain: an item already exists for this estate account")
+        case let status:
+            throw StorageError.backendError(underlying: "keychain: SecItemAdd failed (\(status))")
+        }
+    }
+
     /// Return the existing key if one has been minted, or nil if no key exists
     /// for this estate. Never creates a new key — a nil return means the estate
     /// has no Keychain entry, not that one was generated and discarded. Callers
