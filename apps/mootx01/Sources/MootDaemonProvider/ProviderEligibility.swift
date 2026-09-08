@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 #if canImport(Security)
 import Security
 #endif
@@ -130,13 +131,13 @@ public enum ProviderEligibilityJudge {
     /// both and propagates WHICHEVER the shell's own signature declares,
     /// because `containerURL(forSecurityApplicationGroupIdentifier:)` must be
     /// handed the signed spelling.
-    public static let requiredAppGroup = "group.com.codedaptive.mootx01"
+    public static let requiredAppGroup = MootProductIdentity.Apple.appGroup
 
     /// The team Keychain group SUFFIX. The full group is always the runtime-
     /// expanded `<TEAMID>.` + this suffix read from the shell's own signed
     /// entitlements — never a compiled-in literal with a team prefix
     /// (Kong decision 2: literal/unexpanded group use is a hard stop).
-    public static let requiredKeychainGroupSuffix = "com.codedaptive.mootx01.shared"
+    public static let requiredKeychainGroupSuffix = MootProductIdentity.Keychain.sharedAccessGroup
 
     /// Judge eligibility. Refuses the four ineligible classes (Perkins P1):
     /// unsigned, ad-hoc, wrong-team, wrong-group.

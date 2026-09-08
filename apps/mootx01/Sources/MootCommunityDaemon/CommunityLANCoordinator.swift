@@ -85,6 +85,7 @@
 
 import CryptoKit
 import Foundation
+import MootProductIdentity
 import OSLog
 import AriaMCP
 import LoopbackHTTP
@@ -95,7 +96,7 @@ import Glibc
 import Darwin
 #endif
 
-private let log = Logger(subsystem: "com.mootx01", category: "CommunityLANCoordinator")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.LAN")
 
 // MARK: - Sidecar
 

@@ -34,6 +34,7 @@
 
 import Testing
 import Foundation
+import GeniusLocusKit
 @testable import MootCommunityDaemon
 import AriaMCP
 import LocusKit
@@ -47,6 +48,10 @@ private struct ReviewScratch {
     let url: URL
     var layoutURL: URL { url }
     var estateURL: URL { url.appendingPathComponent("estate.sqlite") }
+    /// The shared estate host over a transient record on this directory:
+    /// plaintext, identity in memory, never written to any catalog file. Every
+    /// coordinator a test builds over this scratch shares it, as the daemon's do.
+    let host: CommunityEstateHost
 
     init() throws {
         url = FileManager.default.temporaryDirectory
@@ -55,13 +60,14 @@ private struct ReviewScratch {
             at: url, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        host = CommunityEstateHost(
+            record: EstateRecord(name: url.lastPathComponent, directory: url, kind: .transient),
+            kit: GeniusLocusKit(), ownerIdentifier: "com.mootx01.daemon.test")
     }
 
     func remove() { try? FileManager.default.removeItem(at: url) }
 }
 
-/// Plaintext key provider for test estates.
-private let reviewPlaintextProvider: @Sendable (URL) throws -> EstateEncryptionConfig = { _ in .plaintext }
 
 /// Open (or create) an estate at the given URL and return it.
 private func openEstate(at url: URL) async throws -> Estate {
@@ -104,11 +110,7 @@ private func makeDispatch(scratch: ReviewScratch) -> CommunityContractDispatch {
         instanceIdentifier: UUID(),
         estateIdentifier: UUID()
     )
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
     return CommunityContractDispatch(
         state: state,
         lifecycle: nil,
@@ -273,11 +275,7 @@ func dashboardReflectsDurableState() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1)
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate a session (persists inProgress).
     _ = await coordinator.reviewSession(kind: .morning, now: testNow)
@@ -304,11 +302,7 @@ func applyRetryIdempotency() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate session.
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
@@ -344,11 +338,7 @@ func staleSessionAfterEstateMutation() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate session BEFORE adding a new drawer.
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
@@ -373,11 +363,7 @@ func staleSessionAfterEstateMutation() async throws {
     // Apply the action → must return staleSession (fingerprint mismatch).
     // Note: we clear the coordinator's cached estate by creating a new one
     // that will read the updated estate on next access.
-    let freshCoordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let freshCoordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
     // Read the state from the existing coordinator (it wrote the session) but use
     // the fresh coordinator which opens a new estate connection.
     // Copy the sidecar file to the fresh coordinator's layout (same directory).
@@ -400,11 +386,7 @@ func reversalSuccessAfterApply() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate session.
     let sessionResult1 = await coordinator.reviewSession(kind: .morning, now: testNow)
@@ -443,11 +425,7 @@ func reReversalRefused() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate session, apply, then reverse.
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
@@ -482,11 +460,7 @@ func conflictAfterReversalAndEstateChange() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate session, apply action, reverse action.
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
@@ -511,11 +485,7 @@ func conflictAfterReversalAndEstateChange() async throws {
     try await seedDrawer(in: estate2, subject: "New task added after reversal")
 
     // Fresh coordinator to force new estate connection.
-    let freshCoordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let freshCoordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Re-apply the reversed action → must return conflict (estate changed + was reversed).
     let reApplyResult = await freshCoordinator.applyAction(
@@ -539,11 +509,7 @@ func duplicateResolutionSuccess() async throws {
     try await seedDrawer(in: estate1, subject: "Research notes", content: "Notes on distributed systems")
     try await seedDrawer(in: estate1, subject: "Research notes", content: "Notes from the RAFT paper")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
     guard let sc = extractSC(sessionResult),
@@ -593,11 +559,7 @@ func completionReceiptDurable() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator1 = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator1 = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate session.
     let sessionResult = await coordinator1.reviewSession(kind: .morning, now: testNow)
@@ -624,11 +586,7 @@ func completionReceiptDurable() async throws {
     }
 
     // DURABILITY CHECK: create a FRESH coordinator (simulates daemon restart).
-    let coordinator2 = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator2 = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // The dashboard on the fresh coordinator must show "completed" for morning.
     let dashResult = await coordinator2.dashboard()
@@ -656,11 +614,7 @@ func refusalCausesZeroPartialMutation() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Try to apply a completely made-up sessionID → staleSession, no mutation.
     let fakeSessionID = UUID()
@@ -801,11 +755,7 @@ func contractShapeValidation() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A", content: "Content")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Dashboard: must have "modes" array.
     let dashResult = await coordinator.dashboard()
@@ -1055,11 +1005,7 @@ func completeReceiptSessionIDRoundTrip() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1)
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
     guard let sc = extractSC(sessionResult),
@@ -1093,11 +1039,7 @@ func completeUnknownSessionRefused() async throws {
     let scratch = try ReviewScratch()
     defer { scratch.remove() }
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // No session has been generated — any sessionID is unknown.
     let result = await coordinator.completeSession(sessionID: UUID(), now: testNow)
@@ -1111,11 +1053,7 @@ func applyUnknownSessionStale() async throws {
     let scratch = try ReviewScratch()
     defer { scratch.remove() }
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     let result = await coordinator.applyAction(
         actionID: UUID(),
@@ -1135,11 +1073,7 @@ func applyUnknownActionRefused() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
     guard let sc = extractSC(sessionResult),
@@ -1171,11 +1105,7 @@ func reverseUnappliedActionRefused() async throws {
     let estate1 = try await openEstate(at: scratch.estateURL)
     try await seedDrawer(in: estate1, subject: "Task A")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
     guard let sc = extractSC(sessionResult),
@@ -1212,11 +1142,7 @@ func resolvedDuplicateDisappearsFromSubsequentSession() async throws {
     try await seedDrawer(in: estate1, subject: "Research notes", content: "First version")
     try await seedDrawer(in: estate1, subject: "Research notes", content: "Second version")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     // Generate a session — must contain a duplicate group.
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
@@ -1280,11 +1206,7 @@ func mergeChoiceArchivesOlderDrawer() async throws {
     let drawA = try await seedDrawer(in: estate1, subject: "Meeting notes", content: "Old draft")
     let drawB = try await seedDrawer(in: estate1, subject: "Meeting notes", content: "New draft")
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
     guard let sc = extractSC(sessionResult),
@@ -1357,11 +1279,7 @@ func sentinelDrawersExcludedFromReviewSwift() async throws {
         subject: "Research notes"   // same subject as user drawer — must NOT form a duplicate group
     ))
 
-    let coordinator = CommunityReviewCoordinator(
-        layoutURL: scratch.layoutURL,
-        ownerIdentifier: "com.mootx01.daemon.test",
-        keyProvider: reviewPlaintextProvider
-    )
+    let coordinator = CommunityReviewCoordinator(host: scratch.host, layoutURL: scratch.layoutURL)
 
     let sessionResult = await coordinator.reviewSession(kind: .morning, now: testNow)
     guard let sc = extractSC(sessionResult),
