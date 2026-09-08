@@ -113,7 +113,8 @@ struct TranslateTests {
         write: "moot_file_memory", query: "moot_memory_search",
         contentArg: "content", queryArg: "query",
         constantArgs: ["location": "scratch/notes"],
-        resultFormat: .mootText)
+        resultFormat: .mootText,
+        subjectArg: "subject")
 
     private func parse(_ s: String) -> JSONValue {
         try! JSONDecoder().decode(JSONValue.self, from: Data(s.utf8))
@@ -140,9 +141,29 @@ struct TranslateTests {
         #expect(argObj["content"] == .string("hello bridge"))
         // Secondary's constant write-context present.
         #expect(argObj["location"] == .string("scratch/notes"))
+        // mootx01 requires a subject; the bridge derives it from the content.
+        #expect(argObj["subject"] == .string("hello bridge"))
         // The primary-only constantArgs (wing/room) are NOT leaked to mootx01.
         #expect(argObj["wing"] == nil)
         #expect(argObj["room"] == nil)
+    }
+
+    /// The derived subject is the first non-empty line, trimmed, cut to the
+    /// 120 characters mootx01 accepts; empty content still yields a subject.
+    @Test func derivedSubjectShape() {
+        #expect(BridgeServer.derivedSubject(from: "\n  first line  \nsecond") == "first line")
+        let long = String(repeating: "x", count: 300)
+        #expect(BridgeServer.derivedSubject(from: long).count == BridgeServer.derivedSubjectLimit)
+        #expect(BridgeServer.derivedSubject(from: "   \n") == "memory")
+    }
+
+    /// A mirrored write the secondary refused is a failure, never a completed
+    /// mirror: JSON-RPC errors and `isError` tool results both count.
+    @Test func failedToolResponsesAreRecognised() {
+        #expect(BridgeServer.isFailedToolResponse(Data(#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"x"}}"#.utf8)))
+        #expect(BridgeServer.isFailedToolResponse(Data(#"{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[]}}"#.utf8)))
+        #expect(!BridgeServer.isFailedToolResponse(Data(#"{"jsonrpc":"2.0","id":1,"result":{"isError":false,"content":[]}}"#.utf8)))
+        #expect(BridgeServer.isFailedToolResponse(Data("not json".utf8)))
     }
 
     /// The reverse direction: a mootx01 write translates into a MemPalace write,
