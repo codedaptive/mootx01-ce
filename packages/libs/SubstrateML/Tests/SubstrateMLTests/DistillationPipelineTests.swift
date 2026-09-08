@@ -3,7 +3,7 @@
 // Tests for DistillationPipeline and supporting math.
 // Coverage: full pipeline runs, the SPEC_DISTILLATION_STORAGE §5/§7.4
 // Stage 5 rendering (token-economical prose, zero inline metadata,
-// core-first ordering), SNR gate, delta pre-pass, queryFingerprint, and
+// source ordering), SNR gate, delta pre-pass, queryFingerprint, and
 // featureHash determinism.
 
 import Testing
@@ -198,43 +198,54 @@ struct DistillationPipelineRunTests {
         #expect(output.snr > 0)
     }
 
-    @Test("rendering orders dominant-component (core) sentences before the episodic tail (§7.4)")
-    func renderingOrdersCoreFirst() {
+    @Test("complete rendering preserves source order even when a featureless unit comes first")
+    func renderingPreservesSourceOrder() {
         let input = DistillationInput(
-            memoryContents: memories,
+            memoryContents: [memories[4]] + Array(memories.prefix(4)) + [memories[5]],
             clusterID: "test-cluster-03",
             sourceIDs: memories.indices.map { "src-\($0)" }
         )
         let output = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
-        guard output.succeeded else { return }
-        // memories[4]/[5] carry no selected feature (the episodic tail) —
-        // their compacted renderings must appear AFTER the Alice/CERN core.
+        #expect(output.succeeded)
         let text = output.distilledText
         let coreIdx = text.range(of: "Alice")?.lowerBound
-        let tailIdx = text.range(of: "Quarterly review")?.lowerBound
+        let tailIdx = text.range(of: "The quarterly review")?.lowerBound
         #expect(coreIdx != nil)
         #expect(tailIdx != nil)
         if let c = coreIdx, let t = tailIdx {
-            #expect(c < t)
+            #expect(t < c)
         }
         // Every unit survives into the rendering (rule 1: propositional
         // fidelity — the tail compresses, it does not vanish).
         #expect(text.contains("archived"))
     }
 
-    @Test("rendering compacts each unit through the §7.6 transform")
-    func renderingUsesCompaction() {
+    @Test("complete rendering keeps grammatical content and unit boundaries")
+    func renderingPreservesCompleteContent() {
         let input = DistillationInput(
             memoryContents: memories,
             clusterID: "test-cluster-compact",
             sourceIDs: memories.indices.map { "src-\($0)" }
         )
         let output = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
-        guard output.succeeded else { return }
-        // "The lab where Alice works is CERN in Switzerland" compacts its
-        // article and copula away — the raw phrase must not survive.
-        #expect(!output.distilledText.contains("The lab where"))
-        #expect(output.distilledText.contains("Lab where Alice works CERN"))
+        #expect(output.succeeded)
+        #expect(output.distilledText == memories.joined(separator: "\n"))
+    }
+
+    @Test("disabling rendering leaves fingerprint and structural results unchanged")
+    func fingerprintOnlySkipsRendering() {
+        let input = DistillationInput(memoryContents: memories, clusterID: "render-toggle", sourceIDs: [])
+        let rendered = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor)
+        let analysis = DistillationPipeline.run(input: input, extractFeatures: DistillationPipeline.defaultExtractor, renderText: false)
+        #expect(!rendered.distilledText.isEmpty)
+        #expect(analysis.distilledText.isEmpty)
+        #expect(analysis.featureFingerprint == rendered.featureFingerprint)
+        #expect(analysis.confidence == rendered.confidence)
+        #expect(analysis.snr == rendered.snr)
+        #expect(analysis.deltaType == rendered.deltaType)
+        #expect(analysis.uncertain == rendered.uncertain)
+        #expect(analysis.succeeded == rendered.succeeded)
+        #expect(analysis.failureReason == rendered.failureReason)
     }
 
     @Test("SNR gate: cluster with no shared features returns succeeded=false")
