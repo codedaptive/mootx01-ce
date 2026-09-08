@@ -10,7 +10,10 @@
 // All tests run against SCRATCH estates (in-memory / a temp directory). The real
 // estate and ~/.mempalace are never touched.
 
-use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, RecallEvidencePath};
+use genius_locus_kit::recall::{
+    GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath, RecallFallbackPolicy,
+    RecallOrigin,
+};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::estate_types::LatticeAnchor;
 use locus_kit::filter::{Filter, RecallFrame};
@@ -180,10 +183,15 @@ fn captured_drawer_becomes_bm25_searchable() {
     // (b) BM25-searchable (DEBT-2): a CorpusOnly scored recall keyed on a word
     // from the captured content returns the captured drawer via the BM25 lane.
     // A `coord.open`-constructed estate (no corpus) would return zero BM25 hits.
-    let mut request = GLKRecallRequest::new(RecallFrame::new(vec![Filter::CurrentlyBelieve]))
-        .with_mode(GLKRecallMode::CorpusOnly);
-    request.query_text = Some("peregrine falcon estuary".to_string());
-    request.limit = 10;
+    let request = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::CurrentlyBelieve]),
+        GLKRecallMode::CorpusOnly,
+        GLKRecallScoring::Raw,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+    .with_query_text("peregrine falcon estuary");
 
     let recall = admin
         .coordinator()
