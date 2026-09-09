@@ -571,4 +571,73 @@ mod tests {
         }
         assert!(freed, "a released port must become free");
     }
+
+    /// Source-shape guard (V2-F): EstateOpenPosture::resolve is called only
+    /// inside the on-disk backend arm, never inside the in-memory arm.
+    ///
+    /// Anchors on `RuntimeEstate::InMemory {` (the variant constructed by the
+    /// in-memory arm) and `match &record.backend {` (the match that opens the
+    /// on-disk paths). A nested else inside the in-memory arm could shadow the
+    /// bare `} else {` token, so these structural anchors are unambiguous.
+    #[test]
+    fn resolve_is_inside_non_in_memory_branch() {
+        let source = include_str!("serve.rs");
+        let prod = &source[..source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("tests module marker not found in serve.rs")];
+        let in_memory_start = prod.find("if in_memory {").expect("if in_memory { not found");
+        let in_memory_variant = prod
+            .find("RuntimeEstate::InMemory {")
+            .expect("RuntimeEstate::InMemory { not found");
+        let backend_match = prod
+            .find("match &record.backend {")
+            .expect("match &record.backend { not found");
+        let resolve_pos = prod
+            .find("EstateOpenPosture::resolve(")
+            .expect("EstateOpenPosture::resolve( not found");
+        assert!(
+            in_memory_start < in_memory_variant,
+            "if in_memory {{ ({in_memory_start}) must precede RuntimeEstate::InMemory {{ ({in_memory_variant})"
+        );
+        assert!(
+            in_memory_variant < backend_match,
+            "RuntimeEstate::InMemory {{ ({in_memory_variant}) must precede match &record.backend {{ ({backend_match})"
+        );
+        assert!(
+            backend_match < resolve_pos,
+            "match &record.backend {{ ({backend_match}) must precede EstateOpenPosture::resolve( ({resolve_pos})"
+        );
+        assert!(
+            !prod[in_memory_start..in_memory_variant].contains("EstateOpenPosture::resolve("),
+            "EstateOpenPosture::resolve must not appear inside the in-memory arm"
+        );
+        assert_eq!(
+            prod.matches("EstateOpenPosture::resolve(").count(),
+            1,
+            "exactly one call to EstateOpenPosture::resolve in production serve.rs"
+        );
+    }
+
+    /// Source-shape guard (V2-F follow-up): the Rust serve never refreshes the
+    /// estate manifest on any path, so an in-memory serve writes nothing into
+    /// the estate directory. The Swift port reaches the same result by guarding
+    /// its refresh with `if let encryption`. The production region of serve.rs
+    /// must not reference the refresh module or the Swift type name.
+    #[test]
+    fn serve_never_refreshes_the_manifest() {
+        let source = include_str!("serve.rs");
+        let prod = &source[..source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("tests module marker not found in serve.rs")];
+        assert!(
+            !prod.contains("manifest_refresh"),
+            "serve.rs production code must not reference manifest_refresh; \
+             the Swift port's in-memory guard matches this"
+        );
+        assert!(
+            !prod.contains("EstateManifestRefresh"),
+            "serve.rs production code must not reference EstateManifestRefresh; \
+             the Swift port's in-memory guard matches this"
+        );
+    }
 }
