@@ -52,6 +52,17 @@ public struct CoreMLPairInference: PairInference {
 
     public var backend: String { "coreml" }
 
+    /// The fixed sequence length this model was compiled for, when its
+    /// `input_ids` shape is static (`[1, L]`); `nil` when the model
+    /// accepts variable-length inputs.
+    ///
+    /// Swift derives this value from the CoreML `input_ids` shape constraint
+    /// (enumerated or range). The Rust candle backend derives the same ceiling
+    /// from `max_position_embeddings` in `config.json`. The factory uses
+    /// whichever value it has to clamp `maxTokens` on the tokenizer so encoded
+    /// pairs never exceed the model's positional embedding ceiling.
+    public var fixedLength: Int? { box.fixedLength }
+
     /// Load the compiled classifier in `modelDirectory`.
     ///
     /// - Throws: `EncoderError.modelUnavailable` when no model file exists,
@@ -93,6 +104,16 @@ public struct CoreMLPairInference: PairInference {
     private init(box: ModelBox, tokenizer: WordPieceTokenizer) {
         self.box = box
         self.tokenizer = tokenizer
+    }
+
+    /// Return a new `CoreMLPairInference` that shares this instance's loaded
+    /// `ModelBox` but uses a different tokenizer.
+    ///
+    /// Used by `PairScorerFactory` to rebuild the tokenizer with a clamped
+    /// `maxTokens` when `fixedLength < profile.maxSequence`, without loading
+    /// the model binary a second time.
+    func rebuilding(tokenizer newTokenizer: WordPieceTokenizer) -> CoreMLPairInference {
+        CoreMLPairInference(box: box, tokenizer: newTokenizer)
     }
 
     /// One prediction per pair. CoreML's converted classifier takes a fixed

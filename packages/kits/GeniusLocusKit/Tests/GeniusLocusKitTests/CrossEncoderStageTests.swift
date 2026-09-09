@@ -376,8 +376,14 @@ struct CrossEncoderStageDirectorTests {
         let noModel = try await kit.recall(handle, request(directive: .apply()))
         #expect(noModel.hits.map(\.id) == poolHead)
         #expect(noModel.crossEncoder?.status == .degraded)
-        #expect([CrossEncoderStage.Reason.modelUnavailable, CrossEncoderStage.Reason.capabilityOff]
-            .contains(noModel.crossEncoder?.reason ?? ""))
+        // Without MOOTX01_CROSS_ENCODER the activation returns `capabilityOff`;
+        // with it, it tries to load the model and returns `modelUnavailable`
+        // because no resolver is wired in this test configuration.
+#if MOOTX01_CROSS_ENCODER
+        #expect(noModel.crossEncoder?.reason == CrossEncoderStage.Reason.modelUnavailable)
+#else
+        #expect(noModel.crossEncoder?.reason == CrossEncoderStage.Reason.capabilityOff)
+#endif
         #expect(await kit.isPairScorerRegistered(for: handle) == false)
 
         let noQuery = try await kit.recall(handle, request(query: nil, directive: .apply()))
@@ -392,6 +398,53 @@ struct CrossEncoderStageDirectorTests {
         #expect(failed.crossEncoder?.reason == CrossEncoderStage.Reason.scorerFailed)
         #expect(failed.degradedStages.contains(CrossEncoderStage.degradedStage))
     }
+
+#if MOOTX01_CROSS_ENCODER
+    /// Two concurrent first-applies against an EMPTY scorer slot go through the
+    /// `testPairScorerMaker` seam. Because `pairScorer(profile:for:)` is
+    /// synchronous and runs under the actor, the slot check and insert happen
+    /// without a suspension point between them: exactly one of the two concurrent
+    /// `runCrossEncoderStage` calls wins the empty slot and loads (coldLoad ==
+    /// true), while the other hits the already-filled slot (coldLoad == false).
+    /// The factory is therefore called exactly once. — W6-4.
+    @Test("two concurrent applies on an empty slot cold-load exactly once, factory called once")
+    func concurrentFirstAppliesOnEmptySlot() async throws {
+        let (kit, handle) = try await openEstate(owner: "ce-concurrent-empty")
+
+        // No model directory setup needed: the testPairScorerMaker seam
+        // intercepts before the resolver is consulted, matching Rust's
+        // coordinator which also checks the seam before model_directory_resolver.
+        // A simple class counter is safe here: the actor guarantees the factory
+        // closure is called from within the actor context (no concurrent access).
+        final class CallCount: @unchecked Sendable { var value = 0 }
+        let counter = CallCount()
+        let log = ScoreLog()
+        await kit.setTestPairScorerMaker { _, _ in
+            counter.value += 1
+            return FakePairScorer(favored: "none", log: log, failing: false)
+        }
+
+        // Fire two concurrent applies from an empty slot.
+        let results = try await withThrowingTaskGroup(of: GLKRecallResult.self) { group in
+            group.addTask { try await kit.recall(handle, self.request(directive: .apply())) }
+            group.addTask { try await kit.recall(handle, self.request(directive: .apply())) }
+            var out: [GLKRecallResult] = []
+            for try await r in group { out.append(r) }
+            return out
+        }
+        #expect(results.count == 2)
+        // Both applies complete successfully.
+        for r in results {
+            #expect(r.crossEncoder?.status == .applied)
+        }
+        // Exactly one cold load: the actor serialises the slot check+insert,
+        // so only one `runCrossEncoderStage` call loads the scorer.
+        let coldLoads = results.compactMap(\.crossEncoder).filter(\.coldLoad).count
+        #expect(coldLoads == 1, "expected exactly one cold load, got \(coldLoads)")
+        // The factory was called exactly once.
+        #expect(counter.value == 1, "factory must be called exactly once for the two concurrent applies, got \(counter.value)")
+    }
+#endif
 
     @Test("strict transcript directive propagates typed unavailable evidence")
     func strictTranscriptUnavailable() async throws {
@@ -549,11 +602,20 @@ struct CrossEncoderStageDirectorTests {
     }
 
 #if MOOTX01_CROSS_ENCODER
-    @Test("the packaged CoreML classifier loads once through the resolver and applies (MOOT_CROSS_ENCODER_ASSETS)")
+    @Test(
+        "the packaged CoreML classifier loads once through the resolver and applies (MOOT_CROSS_ENCODER_ASSETS)",
+        .enabled(
+            if: ProcessInfo.processInfo.environment["MOOT_CROSS_ENCODER_ASSETS"].map { !$0.isEmpty } ?? false,
+            "MOOT_CROSS_ENCODER_ASSETS not set — skipping asset-gated test"
+        )
+    )
     func packaged() async throws {
-        guard let root = ProcessInfo.processInfo.environment["MOOT_CROSS_ENCODER_ASSETS"], !root.isEmpty else { return }
+        let root = ProcessInfo.processInfo.environment["MOOT_CROSS_ENCODER_ASSETS"]!
         let apple = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("apple", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: apple.path) else { return }
+        guard FileManager.default.fileExists(atPath: apple.path) else {
+            try #require(Bool(false), "MOOT_CROSS_ENCODER_ASSETS set but apple/ subdirectory not found at \(apple.path)")
+            return
+        }
         // Stage the assets in the resolver's download slot of a scratch
         // configuration directory: <scratch>/models/<modelID>/.
         let scratch = FileManager.default.temporaryDirectory
@@ -581,4 +643,55 @@ struct CrossEncoderStageDirectorTests {
         #expect(bypass.crossEncoder?.status == .bypassed)
     }
 #endif
+}
+
+// MARK: - summaryLine encoding
+
+/// Pins the full `summaryLine` format for applied and degraded reports.
+/// Mirrors Rust `summary_line_encodes_all_applied_fields` / `summary_line_encodes_degraded_report`.
+/// Constructed with fixed values so the assertion is byte-identical regardless of run context.
+@Suite("CrossEncoderReport summaryLine")
+struct CrossEncoderReportSummaryLineTests {
+
+    @Test("summaryLine encodes all applied fields in the shared format")
+    func summaryLineEncodesAllAppliedFields() {
+        let report = CrossEncoderReport(
+            status: .applied,
+            requested: true,
+            reason: "explicit",
+            profileID: "ms-marco-minilm-l6-cross-v1",
+            modelVersion: "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+            backend: "fake",
+            pool: 50,
+            head: 30,
+            spans: 3,
+            scored: 30,
+            coldLoad: true,
+            stageMillis: 42)
+        #expect(
+            report.summaryLine ==
+            "cross_encoder: applied profile=ms-marco-minilm-l6-cross-v1 reason=explicit backend=fake pool=50 head=30 scored=30 cold_load ms=42"
+        )
+    }
+
+    @Test("summaryLine encodes a degraded report without the applied-only fields")
+    func summaryLineEncodesDegradedReport() {
+        let report = CrossEncoderReport(
+            status: .degraded,
+            requested: true,
+            reason: CrossEncoderStage.Reason.modelUnavailable,
+            profileID: "ms-marco-minilm-l6-cross-v1",
+            modelVersion: nil,
+            backend: nil,
+            pool: 0,
+            head: 0,
+            spans: 0,
+            scored: 0,
+            coldLoad: false,
+            stageMillis: nil)
+        #expect(
+            report.summaryLine ==
+            "cross_encoder: degraded profile=ms-marco-minilm-l6-cross-v1 reason=model_unavailable"
+        )
+    }
 }

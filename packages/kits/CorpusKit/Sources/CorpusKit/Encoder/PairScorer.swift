@@ -39,8 +39,22 @@ public protocol PairScorer: Sendable {
 public protocol PairInference: Sendable {
     /// The runtime's name (`coreml`, `candle`, or a test double's own name).
     var backend: String { get }
+    /// The compiled fixed sequence length for this inference runtime, when
+    /// one is known. `CoreMLPairInference` reads this from the model's
+    /// `input_ids` shape constraint; the Rust candle backend reads
+    /// `max_position_embeddings` from `config.json`. Both are exposed here so
+    /// `PairScorerFactory` can clamp the tokenizer to the tighter limit
+    /// without loading the model a second time. Returns `nil` when no fixed
+    /// length is known (e.g. test doubles).
+    var fixedLength: Int? { get }
     /// Raw logits for `spans` against `query`, one per span, same order.
     func logits(query: String, spans: [String]) async throws -> [Float]
+}
+
+public extension PairInference {
+    /// Default: no fixed sequence length known. Test doubles and runtimes
+    /// that do not constrain the input shape return `nil`.
+    var fixedLength: Int? { nil }
 }
 
 /// The concrete pair scorer: profile + inference seam + batch size.
@@ -52,7 +66,8 @@ public struct ProviderPairScorer: PairScorer {
     public let profile: CrossEncoderProfile
     /// The pair-logit seam.
     public let inference: any PairInference
-    /// Pairs per seam call; values below 1 act as 1.
+    /// Pairs per seam call; clamped to a minimum of 1 at construction.
+    /// Mirrors Rust's `batch_size.max(1)` in `ProviderPairScorer::new`.
     public let batchSize: Int
 
     /// Default `batchSize` when the caller supplies none: the lab's
@@ -60,10 +75,13 @@ public struct ProviderPairScorer: PairScorer {
     public static let defaultBatchSize = 8
 
     /// Build a scorer for `profile` over `inference`.
+    ///
+    /// `batchSize` below 1 is clamped to 1 at construction so the stored
+    /// value always reflects the effective batch size.
     public init(profile: CrossEncoderProfile, inference: any PairInference, batchSize: Int = ProviderPairScorer.defaultBatchSize) {
         self.profile = profile
         self.inference = inference
-        self.batchSize = batchSize
+        self.batchSize = max(1, batchSize)
     }
 
     public var backend: String { inference.backend }
@@ -71,7 +89,7 @@ public struct ProviderPairScorer: PairScorer {
     public func score(query: String, spans: [String]) async throws -> [Float] {
         var out: [Float] = []
         out.reserveCapacity(spans.count)
-        let stride = max(1, batchSize)
+        let stride = batchSize
         var index = 0
         while index < spans.count {
             let end = min(index + stride, spans.count)

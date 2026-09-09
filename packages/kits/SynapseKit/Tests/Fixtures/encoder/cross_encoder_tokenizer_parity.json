@@ -1,0 +1,60 @@
+{
+  "_comment": "Shared tokenizer parity fixture for CrossEncoderPairTokenizer tests. Read by both Swift (PairTokenizerTests.swift) and Rust (cross_encoder_candle_tests.rs). Hand-maintained; pinned by both ports' tests. Produced from HuggingFace tokenizers over vocab.txt of ms-marco-MiniLM-L-6-v2 (revision 233902d25c440f23af6f7d6e94d2946bac0bee0a) with truncation=longest_first.",
+  "texts": {
+    "capital": "What is the capital of France?",
+    "boiling": "At what temperature does water boil at standard pressure?",
+    "pet": "What kind of animal is a domestic cat?",
+    "paris0": "Paris is the capital city of France.",
+    "paris1": "Paris stands on the river Seine.",
+    "berlin": "Berlin is the capital city of Germany.",
+    "water": "At standard atmospheric pressure, pure water boils at 100 degrees Celsius.",
+    "cat": "A domestic cat is a small carnivorous mammal often kept as a pet."
+  },
+  "pairs": [
+    {
+      "name": "capital_paris0",
+      "query": "capital",
+      "span": "paris0",
+      "max_length": null,
+      "ids": [101, 2054, 2003, 1996, 3007, 1997, 2605, 1029, 102, 3000, 2003, 1996, 3007, 2103, 1997, 2605, 1012, 102],
+      "query_token_count": 9,
+      "span_token_count": 9
+    },
+    {
+      "name": "boiling_water",
+      "query": "boiling",
+      "span": "water",
+      "max_length": null,
+      "ids": [101, 2012, 2054, 4860, 2515, 2300, 26077, 2012, 3115, 3778, 1029, 102, 2012, 3115, 12483, 3778, 1010, 5760, 2300, 26077, 2015, 2012, 2531, 5445, 8292, 4877, 4173, 1012, 102],
+      "query_token_count": 12,
+      "span_token_count": 17
+    },
+    {
+      "name": "pet_cat",
+      "query": "pet",
+      "span": "cat",
+      "max_length": null,
+      "ids": [101, 2054, 2785, 1997, 4111, 2003, 1037, 4968, 4937, 1029, 102, 1037, 4968, 4937, 2003, 1037, 2235, 2482, 29193, 25476, 2411, 2921, 2004, 1037, 9004, 1012, 102],
+      "query_token_count": 11,
+      "span_token_count": 16
+    },
+    {
+      "name": "boiling_water_16",
+      "query": "boiling",
+      "span": "water",
+      "max_length": 16,
+      "ids": [101, 2012, 2054, 4860, 2515, 2300, 26077, 102, 2012, 3115, 12483, 3778, 1010, 5760, 2300, 102],
+      "query_token_count": 8,
+      "span_token_count": 8
+    },
+    {
+      "name": "boiling_water_15",
+      "query": "boiling",
+      "span": "water",
+      "max_length": 15,
+      "ids": [101, 2012, 2054, 4860, 2515, 2300, 26077, 102, 2012, 3115, 12483, 3778, 1010, 5760, 102],
+      "query_token_count": 8,
+      "span_token_count": 7
+    }
+  ]
+}

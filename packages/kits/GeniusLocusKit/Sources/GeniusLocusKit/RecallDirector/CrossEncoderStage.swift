@@ -382,8 +382,17 @@ public enum CrossEncoderStage {
     /// Reorder `hits` so its first `pool` entries follow `order` (a
     /// permutation of their ids); entries beyond the pool keep their place.
     /// An id in `order` that is not in the pool is ignored, and pool hits
-    /// absent from `order` keep their relative order after the ordered ones,
-    /// so membership can never change.
+    /// absent from `order` keep their relative order after the ordered ones.
+    ///
+    /// **Assumes distinct ids within the pool.** The `fuse` function produces
+    /// a permutation of the incoming ids without duplication, so this invariant
+    /// holds whenever `reorder` is called from the stage. If you call it with
+    /// a pool that contains duplicate ids the first occurrence wins (the
+    /// `byID[hit.id] == nil` guard) and duplicate ids are dropped; the output
+    /// can be shorter than the pool, so membership is preserved only for
+    /// distinct ids. The caller (`runCrossEncoderStage` in RecallDirector.swift)
+    /// passes the pool hits from `fuse`, which contains no duplicates, keeping
+    /// this guarantee intact.
     static func reorder(hits: [RecallHit], pool: Int, order: [String]) -> [RecallHit] {
         let poolCount = max(0, min(pool, hits.count))
         let poolHits = Array(hits.prefix(poolCount))
