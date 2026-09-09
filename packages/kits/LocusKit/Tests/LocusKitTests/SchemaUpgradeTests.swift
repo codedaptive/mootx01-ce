@@ -1,13 +1,13 @@
 // SchemaUpgradeTests.swift
 //
-// The single v10 → v19 hop (ENCODER_RERANK_CONTRACT §12) against a
+// The v10 → v19 → v20 ladder against a
 // schema-10 SQLite file. Twin of Rust `schema_upgrade_tests.rs`.
 //
 // The fixture is built here from the CE v1.0.37 declaration shape (schema
 // 10: no subject trio, no kg_facts identity trio, no operationalAND, none
 // of the v16–v18 objects), stamped 10 in the ledger by opening it with a
 // version-10 declaration. Opening it again with the current LocusKit
-// schema must land at 19 with `encoder_models`, `ssc_facts` and the
+// schema must land at 20 with the encoder and fact-extractor registries,
 // surviving v11–v15 deltas present, and none of the retired objects.
 //
 // Failure modes pinned:
@@ -22,7 +22,7 @@ import PersistenceKit
 import PersistenceKitSQLite
 @testable import LocusKit
 
-@Suite("Schema upgrade v10 → v19")
+@Suite("Schema upgrade v10 → v20")
 struct SchemaUpgradeTests {
 
     /// The schema-10 shape of the tables the hop touches (CE v1.0.37
@@ -76,8 +76,8 @@ struct SchemaUpgradeTests {
         }
     }
 
-    @Test("a schema-10 estate lands at 19 with only the surviving deltas")
-    func schema10LandsAt19() async throws {
+    @Test("a schema-10 estate lands at 20 with only the surviving deltas")
+    func schema10LandsAt20() async throws {
         let url = TestStorage.tempURL()
         defer { TestStorage.cleanup(url) }
         do {
@@ -89,11 +89,17 @@ struct SchemaUpgradeTests {
         let storage = TestStorage.sqlite(url)
         try await storage.open(schema: LocusKitSchema.schema)
         #expect(try await storage.currentSchemaVersion(for: "LocusKit") == LocusKitSchema.version)
-        #expect(LocusKitSchema.version == 19)
+        #expect(LocusKitSchema.version == 20)
 
         // v19 additions.
         #expect(await columnsExist(storage, table: "encoder_models", columns: ["model_id", "is_active"]))
         #expect(await columnsExist(storage, table: "drawers", columns: ["ssc_facts"]))
+        #expect(await columnsExist(storage, table: "fact_extractor_models", columns: ["recipe_id", "is_active"]))
+        #expect(await columnsExist(storage, table: "kg_facts", columns: [
+            "evidenceQuote", "evidenceStart", "evidenceEnd", "sourceDigest",
+            "extractorProviderID", "extractorModelID", "searchProjection",
+            "searchProjectionVersion",
+        ]))
         // Surviving v11–v15 deltas.
         #expect(await columnsExist(storage, table: "drawers", columns: ["subject", "subject_pipeline_version", "subject_at"]))
         #expect(await columnsExist(storage, table: "kg_facts", columns: ["addedBy", "foreignSourceKey", "foreignRecordID"]))
@@ -114,7 +120,7 @@ struct SchemaUpgradeTests {
                                          addedBy: "bilby", filedAt: Date(timeIntervalSince1970: 1_700_000_000),
                                          embeddingModelID: "test-v1", udcCode: "001"))
         let loaded = try #require(try await store.getDrawer(id: id))
-        #expect(loaded.sscFacts == nil && !loaded.isSpanIndexed)
+        #expect(loaded.sscFacts == nil && !loaded.isSpanIndexed && !loaded.areFactsExtracted)
         await storage.close()
     }
 
@@ -122,8 +128,9 @@ struct SchemaUpgradeTests {
     func upgradePathGate() {
         #expect(LocusKitSchema.upgradePath(storedVersion: 0) == .fresh)
         #expect(LocusKitSchema.upgradePath(storedVersion: 10) == .upgrade(from: 10))
-        #expect(LocusKitSchema.upgradePath(storedVersion: 19) == .current)
-        for found in [1, 9, 11, 15, 18, 20] {
+        #expect(LocusKitSchema.upgradePath(storedVersion: 19) == .upgrade(from: 19))
+        #expect(LocusKitSchema.upgradePath(storedVersion: 20) == .current)
+        for found in [1, 9, 11, 15, 18, 21] {
             #expect(LocusKitSchema.upgradePath(storedVersion: found) == .unsupported(found: found))
         }
     }
