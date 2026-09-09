@@ -45,6 +45,11 @@ libc       = { version = "0.2" }
 # Autonomic Governor). `serve` is a thin translation of spec flags onto
 # this library's ServerConfig.
 aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
+# moot-product-identity: install.rs calls settings::seed_defaults_if_absent to
+# write the daemon.stats_store default to config.json (R6, 2026-09-09). Already
+# a transitive dep via aria-mcp; named directly so the install command can
+# reference the crate explicitly.
+moot-product-identity = { path = "../../../packages/libs/MootProductIdentity/rust" }
 # Reuse-estate installer repair: open the existing SQLCipher database with its
 # sibling install key, then retire the legacy Rust audit-column dialect before
 # the new binary serves it. Both crates are already in the product graph via
@@ -130,6 +135,12 @@ encoder = ["genius-locus-kit/encoder"]
 # model directory; the kit default is off. Twin of the Swift product trait
 # `CrossEncoder` on GeniusLocusKit.
 cross-encoder = ["genius-locus-kit/cross-encoder"]
+# harness-keyfile: the benchmark harness serves scratch estates it converted
+# to ciphertext, so the open posture must consult the `db.key` file beside
+# the database. Off by default; no shipping build enables it. The bench
+# Makefile's `rust-moot-binary` target passes --features harness-keyfile so
+# the matrix lane can serve the encrypted cell.
+harness-keyfile = ["genius-locus-kit/harness-keyfile"]
 
 [dev-dependencies]
 # genius-locus-kit/test-seams: EstateCatalog::set_configuration_directory_override,
