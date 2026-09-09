@@ -1847,6 +1847,7 @@ dependencies = [
  "lattice-lib",
  "libc",
  "locus-kit",
+ "moot-product-identity",
  "observer-sink",
  "persistence-kit",
  "serde",
@@ -1857,6 +1858,9 @@ dependencies = [
 [[package]]
 name = "moot-product-identity"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "native-tls"
@@ -2925,6 +2929,7 @@ dependencies = [
 name = "substrate-ml"
 version = "1.0.0-skeleton"
 dependencies = [
+ "context-distill-lib",
  "intellectus-lib",
  "substrate-kernel",
  "substrate-types",
