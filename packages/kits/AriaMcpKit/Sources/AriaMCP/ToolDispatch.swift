@@ -1725,8 +1725,11 @@ public struct ToolDispatcher: Sendable {
     }
 
     /// Opaque structured row for an id the text path renders without a drawer
-    /// (gated or unhydrated). Id only; every other field is absent so the
-    /// structured block is as opaque as the text row.
+    /// (gated or unhydrated). Subject is set to `noSubjectMarker` so the
+    /// row carries a non-nil subject (structurally admissible) while being
+    /// identifiable as opaque; room and content are absent. Readers that
+    /// filter on the marker skip opaque rows rather than surfacing them as
+    /// "(no subject)" entries for content the caller cannot see.
     static func opaqueStructuredRow(id: String) -> StructuredRecallRow {
         StructuredRecallRow(id: id, subject: ResultComposer.noSubjectMarker)
     }
@@ -2042,7 +2045,13 @@ extension ToolDispatcher {
             )
         }
         let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSubject.isEmpty, trimmedSubject.count <= DrawerStore.subjectLengthContract else {
+        // Unicode SCALARS, the unit the Rust twin counts (`subject.chars().count()`
+        // in interface_tools.rs) and the unit both moot-bridge ports cut on. A
+        // grapheme cluster can carry several scalars, so counting Characters
+        // here would accept a subject the Rust server refuses and the two ports
+        // would disagree on the same input.
+        let subjectLength = trimmedSubject.unicodeScalars.count
+        guard subjectLength > 0, subjectLength <= DrawerStore.subjectLengthContract else {
             // Return as an isError result rather than throwing a JSON-RPC protocol error.
             // MCP clients render thrown JSON-RPC errors as bare "Tool execution failed"
             // and discard the message. An isError result puts the contract text in front
@@ -2050,7 +2059,7 @@ extension ToolDispatcher {
             // TOOL_DISPATCH_FAILURE path in run_file_memory (interface_tools.rs).
             return Self.errorResult(
                 "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
-                    + "(got \(trimmedSubject.count)). One telegraphic sentence in the AI-facing "
+                    + "(got \(subjectLength)). One telegraphic sentence in the AI-facing "
                     + "register — compress, don't truncate."
             )
         }
@@ -3086,7 +3095,9 @@ extension ToolDispatcher {
                 )
             }
             let trimmed = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, trimmed.count <= DrawerStore.subjectLengthContract else {
+            // Unicode scalars, the unit the Rust twin counts; see runFileMemory.
+            let trimmedLength = trimmed.unicodeScalars.count
+            guard trimmedLength > 0, trimmedLength <= DrawerStore.subjectLengthContract else {
                 // Return as an isError result rather than throwing a JSON-RPC protocol error.
                 // MCP clients render thrown JSON-RPC errors as bare "Tool execution failed"
                 // and discard the message. An isError result puts the contract text in front
@@ -3094,7 +3105,7 @@ extension ToolDispatcher {
                 // TOOL_DISPATCH_FAILURE path in run_update_memory (interface_tools.rs).
                 return Self.errorResult(
                     "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
-                        + "(got \(trimmed.count)). Compress, don't truncate."
+                        + "(got \(trimmedLength)). Compress, don't truncate."
                 )
             }
             kind = .setSubject(trimmed)
@@ -3543,7 +3554,9 @@ extension ToolDispatcher {
         let handle = try resolveHandle(args)
         let subject = try requireString(args, "subject")
         let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSubject.isEmpty, trimmedSubject.count <= DrawerStore.subjectLengthContract else {
+        // Unicode scalars, the unit the Rust twin counts; see runFileMemory.
+        let subjectLength = trimmedSubject.unicodeScalars.count
+        guard subjectLength > 0, subjectLength <= DrawerStore.subjectLengthContract else {
             // Return as an isError result rather than throwing a JSON-RPC protocol error.
             // MCP clients render thrown JSON-RPC errors as bare "Tool execution failed"
             // and discard the message. An isError result puts the contract text in front
@@ -3551,7 +3564,7 @@ extension ToolDispatcher {
             // TOOL_DISPATCH_FAILURE path in run_file_fact (interface_tools.rs).
             return Self.errorResult(
                 "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
-                    + "(got \(trimmedSubject.count)). One telegraphic sentence in the AI-facing "
+                    + "(got \(subjectLength)). One telegraphic sentence in the AI-facing "
                     + "register — compress, don't truncate."
             )
         }
