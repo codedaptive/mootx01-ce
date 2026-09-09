@@ -325,6 +325,7 @@ pub fn run(
                 Some(hunt_cycle),
                 Some(anomaly_cycle),
                 Some(span_encode_cycle),
+                None, // fact extraction remains harness-first until qualified
             ) {
                 Ok(registered) => {
                     eprintln!(
