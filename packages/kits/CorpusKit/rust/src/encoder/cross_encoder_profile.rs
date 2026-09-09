@@ -86,7 +86,7 @@ impl CrossEncoderProfile {
     pub fn minilm_l6() -> Self {
         Self {
             model_id: "ms-marco-minilm-l6-cross-v1".to_string(),
-            model_version: "233902d2".to_string(),
+            model_version: "233902d25c440f23af6f7d6e94d2946bac0bee0a".to_string(),
             tokenizer_hash: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
                 .to_string(),
             max_sequence: 512,
