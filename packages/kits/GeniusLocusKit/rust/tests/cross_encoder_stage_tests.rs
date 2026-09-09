@@ -27,7 +27,8 @@ use corpus_kit::encoder::{
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::cross_encoder_stage::{
-    self as stage, reason, CrossEncoderLimits, CrossEncoderStatus, DEGRADED_STAGE,
+    self as stage, reason, CrossEncoderLimits, CrossEncoderReport, CrossEncoderStatus,
+    DEGRADED_STAGE,
 };
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallFallbackPolicy,
@@ -328,7 +329,7 @@ fn apply_reaches_the_scorer_reorders_within_the_pool_and_reports_applied() {
     assert_eq!(report.reason.as_deref(), Some("explicit"));
     assert_eq!(report.backend.as_deref(), Some("fake"));
     assert_eq!(report.profile_id, CrossEncoderProfile::minilm_l6().model_id);
-    assert_eq!(report.model_version.as_deref(), Some("233902d2"));
+    assert_eq!(report.model_version.as_deref(), Some("233902d25c440f23af6f7d6e94d2946bac0bee0a"));
     assert_eq!(report.pool, 50usize.min(wide.hits.len()));
     assert_eq!(report.head, 30usize.min(report.pool));
     assert_eq!(report.spans, 3);
@@ -345,7 +346,7 @@ fn apply_reaches_the_scorer_reorders_within_the_pool_and_reports_applied() {
     assert_eq!(calls.len(), report.head);
     assert!(calls.iter().all(|(q, spans)| q == QUERY && !spans.is_empty() && spans.len() <= 3));
     assert!(calls.iter().any(|(_, spans)| spans.iter().any(|s| s.contains(&favored))));
-    assert!(report.summary_line().starts_with("cross_encoder: applied profile=ms-marco-minilm-l6-cross-v1 reason=explicit backend=fake pool="));
+    // The full encoding is covered by `summary_line_encodes_all_applied_fields` below.
 }
 
 #[test]
@@ -397,7 +398,13 @@ fn degrades_carry_their_reason_and_the_incoming_order() {
     assert_eq!(ids(&no_model), pool_head);
     let r = no_model.cross_encoder.as_ref().unwrap();
     assert_eq!(r.status, CrossEncoderStatus::Degraded);
-    assert!(matches!(r.reason.as_deref(), Some(reason::MODEL_UNAVAILABLE) | Some(reason::CAPABILITY_OFF)));
+    // Without the feature the activation returns `capability_off`; with it,
+    // it tries to load the model and returns `model_unavailable` when no
+    // directory is registered (no resolver configured in this test).
+    #[cfg(feature = "cross-encoder")]
+    assert_eq!(r.reason.as_deref(), Some(reason::MODEL_UNAVAILABLE));
+    #[cfg(not(feature = "cross-encoder"))]
+    assert_eq!(r.reason.as_deref(), Some(reason::CAPABILITY_OFF));
     assert!(!coord.is_pair_scorer_registered(&h));
 
     let no_query = coord
@@ -417,6 +424,57 @@ fn degrades_carry_their_reason_and_the_incoming_order() {
     assert_eq!(r.status, CrossEncoderStatus::Degraded);
     assert_eq!(r.reason.as_deref(), Some(reason::SCORER_FAILED));
     assert!(failed.degraded_stages.iter().any(|s| s == DEGRADED_STAGE));
+}
+
+/// Two sequential `recall_scored` calls on an EMPTY scorer slot exercise the
+/// `test_pair_scorer_maker` counting seam — W6-4.
+///
+/// The coordinator is single-threaded (RefCell) so "two applies" is a
+/// sequential pair on the same slot. The first call sees `None` in the slot,
+/// invokes the counting factory (cold_load == true), and caches the scorer.
+/// The second call sees the filled slot and returns the cached scorer without
+/// touching the factory (cold_load == false). The factory is called exactly
+/// once. This mirrors the structural guarantee described in `coordinator.rs`:
+/// the slot check and insert happen without suspension, so only one call ever
+/// drives a load.
+#[cfg(all(feature = "test-seams", feature = "cross-encoder"))]
+#[test]
+fn counting_factory_loads_once_on_empty_slot() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    let (coord, h) = open_estate();
+    // Inject a counting factory via the test seam; the slot is empty.
+    let call_count = Arc::new(AtomicU32::new(0));
+    let call_count2 = Arc::clone(&call_count);
+    let (factory_scorer, _) = FakePairScorer::new("none", false);
+    // Wrap in Option so the closure can take ownership on first call.
+    let scorer_cell = Arc::new(Mutex::new(Some(factory_scorer)));
+    coord.set_test_pair_scorer_maker(Box::new(move |_profile| {
+        call_count2.fetch_add(1, Ordering::SeqCst);
+        // Panic on any call after the first — the seam must be hit exactly once.
+        let scorer = scorer_cell.lock().unwrap().take()
+            .expect("factory called more than once");
+        Ok(scorer)
+    }));
+
+    // First apply: slot is empty → factory called → cold_load == true.
+    let r1 = coord
+        .recall_scored(&h, request(20, Some(QUERY), None, Some(RerankDirective::apply(None))), NOW + 1000)
+        .unwrap();
+    let rep1 = r1.cross_encoder.as_ref().unwrap();
+    assert_eq!(rep1.status, CrossEncoderStatus::Applied, "first apply must succeed");
+    assert!(rep1.cold_load, "first apply must be a cold load");
+
+    // Second apply: slot is already filled → factory NOT called → cold_load == false.
+    let r2 = coord
+        .recall_scored(&h, request(20, Some(QUERY), None, Some(RerankDirective::apply(None))), NOW + 1000)
+        .unwrap();
+    let rep2 = r2.cross_encoder.as_ref().unwrap();
+    assert_eq!(rep2.status, CrossEncoderStatus::Applied, "second apply must succeed");
+    assert!(!rep2.cold_load, "second apply must NOT be a cold load");
+
+    // Factory called exactly once across both applies.
+    assert_eq!(call_count.load(Ordering::SeqCst), 1, "factory must be called exactly once");
 }
 
 #[test]
@@ -444,6 +502,57 @@ fn close_drops_the_scorer_slot() {
     assert!(!coord.is_pair_scorer_registered(&h));
 }
 
+/// Pins the full `summary_line()` format for an `Applied` report with every
+/// optional field present. Mirrors Swift `CrossEncoderStageTests.summaryLineEncodesAllAppliedFields`.
+/// Constructed with fixed values so the assertion is byte-identical regardless of run context.
+#[test]
+fn summary_line_encodes_all_applied_fields() {
+    let report = CrossEncoderReport {
+        status: CrossEncoderStatus::Applied,
+        requested: true,
+        reason: Some("explicit".to_string()),
+        profile_id: "ms-marco-minilm-l6-cross-v1".to_string(),
+        model_version: Some("233902d25c440f23af6f7d6e94d2946bac0bee0a".to_string()),
+        backend: Some("fake".to_string()),
+        pool: 50,
+        head: 30,
+        spans: 3,
+        scored: 30,
+        cold_load: true,
+        stage_millis: Some(42),
+        strict_transcript: None,
+    };
+    assert_eq!(
+        report.summary_line(),
+        "cross_encoder: applied profile=ms-marco-minilm-l6-cross-v1 reason=explicit backend=fake pool=50 head=30 scored=30 cold_load ms=42"
+    );
+}
+
+/// Pins the full `summary_line()` format for a `Degraded` report.
+/// Mirrors the Swift twin: backend=nil, pool/head/spans all zero.
+#[test]
+fn summary_line_encodes_degraded_report() {
+    let report = CrossEncoderReport {
+        status: CrossEncoderStatus::Degraded,
+        requested: true,
+        reason: Some(reason::MODEL_UNAVAILABLE.to_string()),
+        profile_id: "ms-marco-minilm-l6-cross-v1".to_string(),
+        model_version: None,
+        backend: None,
+        pool: 0,
+        head: 0,
+        spans: 0,
+        scored: 0,
+        cold_load: false,
+        stage_millis: None,
+        strict_transcript: None,
+    };
+    assert_eq!(
+        report.summary_line(),
+        "cross_encoder: degraded profile=ms-marco-minilm-l6-cross-v1 reason=model_unavailable"
+    );
+}
+
 #[cfg(feature = "cross-encoder")]
 mod packaged {
     use super::*;
@@ -457,17 +566,14 @@ mod packaged {
         }
     }
 
+    /// Enable with: `MOOT_CROSS_ENCODER_ASSETS=<dir> cargo test --features cross-encoder -- --ignored`
     #[test]
+    #[ignore]
     fn packaged_candle_classifier_loads_once_and_applies() {
-        let Some(root) = std::env::var_os("MOOT_CROSS_ENCODER_ASSETS") else {
-            eprintln!("SKIP: MOOT_CROSS_ENCODER_ASSETS not set");
-            return;
-        };
+        let root = std::env::var_os("MOOT_CROSS_ENCODER_ASSETS")
+            .expect("MOOT_CROSS_ENCODER_ASSETS must be set to run ignored tests");
         let linux = PathBuf::from(root).join("linux");
-        if !linux.is_dir() {
-            eprintln!("SKIP: {} absent", linux.display());
-            return;
-        }
+        assert!(linux.is_dir(), "MOOT_CROSS_ENCODER_ASSETS set but linux/ subdirectory absent");
         let scratch = std::env::temp_dir().join(format!("ce-packaged-{}", std::process::id()));
         let target = scratch.join("models").join(CrossEncoderProfile::minilm_l6().model_id);
         let _ = std::fs::remove_dir_all(&scratch);
