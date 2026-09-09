@@ -203,6 +203,15 @@ struct GroundedSynthesisTests {
         }
     }
 
+    @Test("public provenance gate rejects secret and reserved raw encodings")
+    func publicProvenanceGateUsesRawEncoding() {
+        #expect(GroundedSynthesis.publicCaptureProvenance(0 << 30))
+        #expect(GroundedSynthesis.publicCaptureProvenance(16 << 30))
+        #expect(!GroundedSynthesis.publicCaptureProvenance(32 << 30))
+        #expect(!GroundedSynthesis.publicCaptureProvenance(48 << 30))
+        #expect(!GroundedSynthesis.publicCaptureProvenance(63 << 30))
+    }
+
     /// The scoring-evidence gate — the DEGRADED contract. When lane-B hits
     /// carry no scoring evidence (BM25 / Hamming / dense cosine), the gate
     /// drops them: their order is recency, not relevance, and admitting it

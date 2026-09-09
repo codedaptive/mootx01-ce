@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use corpus_kit::corpus::EmbeddingModelConfig;
+use corpus_kit::encoder::{EncoderError, EncoderModelSpec, Pooling, SpanEncoder};
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::{
     EstateCoordinator, EstateKind, EstateLifetime, EstateProvisionParams, SyncMode,
@@ -28,6 +29,38 @@ use persistence_kit::storage::Storage;
 use uuid::Uuid;
 
 const NOW: i64 = 1_700_000_000_000; // millis since epoch
+
+struct DrainSpanEncoder {
+    spec: EncoderModelSpec,
+}
+
+impl DrainSpanEncoder {
+    fn new() -> Self {
+        Self { spec: EncoderModelSpec {
+            model_id: "drain-span-model".to_string(),
+            model_version: "v1".to_string(),
+            dim: 4,
+            query_prefix: "Q:".to_string(),
+            doc_prefix: "D:".to_string(),
+            pooling: Pooling::Mean,
+            tokenizer_hash: "fixture".to_string(),
+            window_words: 3,
+            overlap_divisor: 2,
+            max_spans: 4,
+            max_sequence: 512,
+        }}
+    }
+}
+
+impl SpanEncoder for DrainSpanEncoder {
+    fn spec(&self) -> &EncoderModelSpec { &self.spec }
+    fn encode_query(&self, _text: &str) -> Result<Vec<f32>, EncoderError> {
+        Ok(vec![1.0, 0.0, 0.0, 0.0])
+    }
+    fn encode_spans(&self, spans: &[&str]) -> Result<Vec<Vec<f32>>, EncoderError> {
+        Ok(spans.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+    }
+}
 
 /// Provision a GLK estate (mounts Corpus + VectorStore + the encode queue).
 /// Same fixture as encode_intake_parity.rs; provision seeds the 7 default
@@ -102,6 +135,23 @@ fn seed_hint_fresh_estate_drains_to_zero() {
         statuses.iter().all(|s| !s.is_draining()),
         "every drain lane settles on a fresh drained estate: {statuses:?}"
     );
+}
+
+#[test]
+fn registered_span_encoder_exposes_true_row_debt_without_gating_corpus_finisher() {
+    let (mut coord, handle) = provision_glk_estate();
+    let before = coord.drain_statuses(&handle).expect("drain_statuses");
+    assert!(!before.iter().any(|s| s.name == genius_locus_kit::DrainStatus::SPAN_ENCODE_NAME));
+
+    coord.register_span_encoder(&handle, Arc::new(DrainSpanEncoder::new()));
+    let statuses = coord.drain_statuses(&handle).expect("drain_statuses");
+    let span = statuses.iter()
+        .find(|s| s.name == genius_locus_kit::DrainStatus::SPAN_ENCODE_NAME)
+        .expect("span_encode lane");
+    assert_eq!(span.pending, locus_kit::default_wings::DEFAULT_WINGS.len());
+    assert_eq!(span.in_flight, 0);
+    assert_eq!(span.detail.as_deref(), Some("model: drain-span-model"));
+    assert!(genius_locus_kit::DrainStatus::encode_settled(&statuses));
 }
 
 /// Re-running seed_default_wings on a converged estate enqueues nothing

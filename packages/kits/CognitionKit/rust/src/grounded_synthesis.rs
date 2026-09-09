@@ -110,8 +110,8 @@ pub struct GroundedOutput {
 /// (previous behaviour). The cap is applied after reranking so the most
 /// cue-relevant drawers survive, not the most recent.
 ///
-/// `query` is the raw text for the SCORED second lane (BM25 + vector via the
-/// GLK UnionBest/Raw request). The scored lane reaches relevant rows that
+/// `query` is the raw text for the SCORED second lane (BM25 + vector via a
+/// GLK UnionBest request). The scored lane reaches relevant rows that
 /// share NO cue terms with the question. None = lexical-only grounding.
 pub fn run_grounded_synthesis(
     coord: &EstateCoordinator,
@@ -125,7 +125,8 @@ pub fn run_grounded_synthesis(
     query: Option<&str>,
 ) -> Result<GroundedOutput, RecipeRunError> {
     run_grounded_synthesis_impl(
-        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query, false,
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query,
+        GLKRecallScoring::Raw, false,
     )
 }
 
@@ -143,7 +144,29 @@ pub fn run_grounded_synthesis_with_provenance_gate(
     query: Option<&str>,
 ) -> Result<GroundedOutput, RecipeRunError> {
     run_grounded_synthesis_impl(
-        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query, true,
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query,
+        GLKRecallScoring::Raw, true,
+    )
+}
+
+/// Selected public synthesis variant. It retains the provenance gate and uses
+/// the query-aware matrix scorer so the raw UnionBest locus-first merge cannot
+/// promote recent unrelated rows above an older relevant row.
+pub fn run_grounded_synthesis_with_provenance_gate_and_scoring(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    frame: RecallFrame,
+    tuning: RecallFrameTuning,
+    now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+    cue_terms: &[String],
+    cap: Option<usize>,
+    query: Option<&str>,
+    scoring: GLKRecallScoring,
+) -> Result<GroundedOutput, RecipeRunError> {
+    run_grounded_synthesis_impl(
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query,
+        scoring, true,
     )
 }
 
@@ -157,6 +180,7 @@ fn run_grounded_synthesis_impl(
     cue_terms: &[String],
     cap: Option<usize>,
     query: Option<&str>,
+    scored_lane_scoring: GLKRecallScoring,
     exclude_provenance_sensitive: bool,
 ) -> Result<GroundedOutput, RecipeRunError> {
     // B-5: verify capabilities before any substrate touch. A capability gate
@@ -258,7 +282,7 @@ fn run_grounded_synthesis_impl(
             let request = GLKRecallRequest {
                 frame: lane_b_frame,
                 mode: GLKRecallMode::UnionBest,
-                scoring: GLKRecallScoring::Raw,
+                scoring: scored_lane_scoring,
                 limit: pool_bound,
                 fallback: RecallFallbackPolicy::AllowDegraded,
                 query_text: Some(q.to_string()),
@@ -328,13 +352,7 @@ fn run_grounded_synthesis_impl(
         None => lane_a,
     };
     if exclude_provenance_sensitive {
-        drawers.retain(|drawer| {
-            !matches!(
-                drawer.sensitivity(),
-                locus_kit::provenance::Sensitivity::Restricted
-                    | locus_kit::provenance::Sensitivity::Secret
-            )
-        });
+        drawers.retain(|drawer| public_capture_provenance(drawer.provenance));
     }
 
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
@@ -438,6 +456,13 @@ fn run_grounded_synthesis_impl(
     })
 }
 
+/// Public synthesis admits only the two explicitly public provenance
+/// sensitivity encodings. Unknown/reserved encodings fail closed rather than
+/// inheriting the compatibility fallback of `Drawer::sensitivity`.
+fn public_capture_provenance(provenance: i64) -> bool {
+    matches!((provenance >> 30) & 0x3f, 0 | 16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +481,15 @@ mod tests {
     /// Empty node-name map for tests — no display-name resolution needed.
     fn empty_names() -> std::collections::HashMap<String, (String, String)> {
         std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn public_provenance_gate_uses_raw_encoding() {
+        assert!(public_capture_provenance(0_i64 << 30));
+        assert!(public_capture_provenance(16_i64 << 30));
+        assert!(!public_capture_provenance(32_i64 << 30));
+        assert!(!public_capture_provenance(48_i64 << 30));
+        assert!(!public_capture_provenance(63_i64 << 30));
     }
 
     fn coord_with_rows(contents: &[&str]) -> (EstateCoordinator, EstateHandle) {

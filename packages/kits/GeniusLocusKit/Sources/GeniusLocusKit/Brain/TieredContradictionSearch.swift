@@ -89,6 +89,10 @@ public struct TierFinding: Sendable, Equatable {
     public let cueKind: String?
     /// Tier 1: the typed rule that proved the pair. Tiers 2/3: nil.
     public let ruleID: String?
+    /// Tier 1: the version of `ruleID` that justified the proof.  The
+    /// proposal lifecycle uses this as part of its same-tier renewal key;
+    /// omitting it would collapse distinct rule revisions.
+    public let ruleVersion: Int?
     /// Tiers 2/3: the cue score. Tier 1: nil — a typed proof has NO
     /// score; its lane ranks by endpoint recency, and the absence of a
     /// score is load-bearing (nothing may fold tiers into one ranked
@@ -346,6 +350,7 @@ public enum TieredContradictionCore {
             drawerB: ordered.b,
             cueKind: nil,
             ruleID: finding.outcome.ruleID,
+            ruleVersion: finding.outcome.ruleVersion,
             score: nil,
             sourceSnippet: nil,
             targetSnippet: nil,
@@ -693,6 +698,7 @@ internal extension GeniusLocusKit {
                 drawerB: ordered.b,
                 cueKind: cue.kind.rawValue,
                 ruleID: nil,
+                ruleVersion: nil,
                 score: cue.score,
                 sourceSnippet: String(first.content.prefix(Self.huntSnippetLimit)),
                 targetSnippet: String(second.content.prefix(Self.huntSnippetLimit)),
