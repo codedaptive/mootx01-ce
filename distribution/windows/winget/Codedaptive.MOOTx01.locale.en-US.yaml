@@ -22,7 +22,7 @@ Description: >-
   machine. It runs as a local background service and connects to AI clients
   (Claude, Cursor, and others) over the Model Context Protocol, so your
   assistants can capture, recall, and reason over what you have told them
-  across sessions. All estate data stays local under %LOCALAPPDATA%\MOOTx01;
+  across sessions. All estate data stays local under %LOCALAPPDATA%\com.mootx01.ce;
   nothing is sent to a cloud.
 Tags:
   - ai

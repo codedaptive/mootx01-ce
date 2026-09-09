@@ -99,14 +99,14 @@ Filename: "{app}\mootx01.exe"; Parameters: "uninstall --yes"; \
   Flags: runhidden waituntilterminated skipifdoesntexist
 
 [UninstallDelete]
-; Clean up the install directory. Estate data under %LOCALAPPDATA%\MOOTx01
+; Clean up the install directory. Estate data under %LOCALAPPDATA%\com.mootx01.ce
 ; is intentionally left intact (the uninstall message notes this).
 Type: filesandordirs; Name: "{app}"
 
 [Messages]
 WelcomeLabel1=Welcome to MOOTx01 Setup
 WelcomeLabel2=MOOTx01 gives your AI tools a persistent, private memory that lives on your machine.%n%nThis will install MOOTx01 and let you connect your AI clients.%n%nClick Next to continue.
-FinishedLabel=MOOTx01 has been installed.%n%nIf you checked "Connect AI clients," a terminal window will open to let you select which clients to wire.%n%nYour estate data is stored at %LOCALAPPDATA%\MOOTx01 and stays on this machine.
+FinishedLabel=MOOTx01 has been installed.%n%nIf you checked "Connect AI clients," a terminal window will open to let you select which clients to wire.%n%nYour estate data is stored at %LOCALAPPDATA%\com.mootx01.ce and stays on this machine.
 
 [Code]
 // Check whether the install dir is already on the user PATH.
@@ -155,7 +155,7 @@ begin
   if CurUninstallStep = usPostUninstall then
     if not UninstallSilent then
       MsgBox('MOOTx01 has been removed.' + #13#10 + #13#10 +
-             'Your estate data at %LOCALAPPDATA%\MOOTx01 was not deleted. ' +
+             'Your estate data at %LOCALAPPDATA%\com.mootx01.ce was not deleted. ' +
              'Remove that folder manually if you want to erase your data.',
              mbInformation, MB_OK);
 end;
