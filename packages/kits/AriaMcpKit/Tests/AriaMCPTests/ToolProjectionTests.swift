@@ -15,6 +15,12 @@ import Testing
 @Suite("Tool projection")
 struct ToolProjectionTests {
 
+    #if !MOOTX01_ARIA_V2
+    @Test func testV1WireToolsDoNotGainSelectedV2Annotations() {
+        #expect(ToolProjection.tools(environment: [:]).allSatisfy { $0.annotations == nil })
+    }
+    #endif
+
     /// Every interface tool must carry `.interface` provenance. No
     /// `.lexicon` provenance should appear anywhere in the list.
     @Test func testNoLexiconProvenance() {

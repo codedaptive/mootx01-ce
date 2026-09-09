@@ -86,11 +86,14 @@ pub mod runtime;
 pub mod sensitivity_grant_ledger;
 pub mod server;
 pub mod session_protocol;
+pub mod surface;
 pub mod surfaced_recall_ledger;
 pub mod teachme_guides;
 pub mod tool_list;
 pub mod tool_mutation_inventory;
 pub mod vault_tools;
+#[cfg(feature = "aria-v2")]
+pub mod v2;
 
 /// Re-export the shared whole-file key entry point so the `mootx01` binary can
 /// ensure the estate-encryption key exists at serve startup without a direct
