@@ -25,14 +25,18 @@
 //!
 //! ## Normalization rules (§11.1)
 //!
-//! `normalize_value` applies to EVERY S1/S2/S4/S5 field value:
+//! `normalize_value` applies to S1/S2/S5 AND S4 field values:
 //!   - embedded newlines → single space
 //!   - whitespace runs → one space (trim leading/trailing)
 //!   - literal U+00B7 middle-dot → `-`
 //!
+//! S4 rows are normalised so one fact can never split a row and an
+//! embedded separator can never add ghost columns. The dual-ended S4
+//! parser in the Swift MinerEngine and ReviewLineParsing is retained as
+//! defence in depth against unnormalized producers.
 //! S6 values are EXEMPT from normalization — they use lossless quoting.
-//! The separator is ` · ` (space U+00B7 space); never occurs in values
-//! after normalization.
+//! The separator is ` · ` (space U+00B7 space); never occurs in S1/S2/S5/S4
+//! values after normalization.
 //!
 //! ## Absent-field contract (fixed columns)
 //!
@@ -572,7 +576,10 @@ fn normalized_best_span(row: &CandidateRowData, subject_normalized: &str) -> Str
 }
 
 fn ssc_text(row: &CandidateRowData) -> String {
-    row.ssc_facts.as_deref().unwrap_or("-").to_string()
+    // Normalize for the same reason as subject and bestSpan: an sscFacts value
+    // containing a newline or the separator (U+00B7) would split the row or
+    // add ghost columns. normalizeValue maps both to safe substitutes.
+    normalize_value(row.ssc_facts.as_deref().unwrap_or("-"))
 }
 
 /// Render one S1 row (six fixed columns). The score is mandatory;
@@ -723,8 +730,15 @@ pub fn render_s4_fact_search(facts: &[FactSearchRow]) -> ComposedResult {
     let mut lines = vec![header];
     for fact in facts {
         let source = fact.source_drawer_id.as_deref().unwrap_or("-");
-        let row = [fact.fact_id.as_str(), &fact.subject, &fact.predicate,
-                   &fact.object, source, &fact.filed_at].join(SEP);
+        // Normalize S4 fields so embedded newlines cannot split the row and
+        // embedded separators cannot add ghost columns (the S4 parser comment
+        // in the Swift MinerEngine explains the defence strategy).
+        let row = [normalize_value(&fact.fact_id),
+                   normalize_value(&fact.subject),
+                   normalize_value(&fact.predicate),
+                   normalize_value(&fact.object),
+                   normalize_value(source),
+                   normalize_value(&fact.filed_at)].join(SEP);
         lines.push(row);
     }
     ComposedResult { text: lines.join("\n"), structured: None }
@@ -764,7 +778,11 @@ pub fn render_s5_edges(direction: &str, edges: &[EdgeRow]) -> ComposedResult {
         };
         // Far endpoint: S2 pick fields (six columns without a score prefix).
         let far = render_s2_row(&edge.far_endpoint);
-        let row = [edge.tunnel_id.as_str(), &kind_field, &far].join(SEP);
+        // Normalize tunnel_id and kind_field so embedded separators or
+        // newlines (e.g. free-text tunnel labels) cannot split the row.
+        let tunnel_norm = normalize_value(&edge.tunnel_id);
+        let kind_norm   = normalize_value(&kind_field);
+        let row = [tunnel_norm.as_str(), kind_norm.as_str(), &far].join(SEP);
         lines.push(row);
     }
     ComposedResult { text: lines.join("\n"), structured: None }
