@@ -405,7 +405,7 @@ impl EstateRegistry {
         let frozen = crate::estate_posture::EstatePosture::from_process_environment().is_frozen();
         // This startup policy belongs only to the selected v2 surface. Legacy
         // v1 opens retain their existing frozen wiring behaviour.
-        let preserve_v2_frozen_configuration = frozen && cfg!(feature = "aria-v2");
+        let preserve_v2_frozen_configuration = frozen;
         if frozen && first_run {
             return Err("frozen SQLite open requires an existing estate".to_string());
         }
@@ -601,8 +601,7 @@ impl EstateRegistry {
             format!("aria-mcp: SqliteDrawerStore at {path:?} did not expose its backing Storage — cannot wire semantic recall")
         })?;
         let preserve_v2_frozen_configuration =
-            crate::estate_posture::EstatePosture::from_process_environment().is_frozen()
-                && cfg!(feature = "aria-v2");
+            crate::estate_posture::EstatePosture::from_process_environment().is_frozen();
         wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord, preserve_v2_frozen_configuration)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         let estate = OpenEstate {

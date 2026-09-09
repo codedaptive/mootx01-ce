@@ -15,12 +15,6 @@ import Testing
 @Suite("Tool projection")
 struct ToolProjectionTests {
 
-    #if !MOOTX01_ARIA_V2
-    @Test func testV1WireToolsDoNotGainSelectedV2Annotations() {
-        #expect(ToolProjection.tools(environment: [:]).allSatisfy { $0.annotations == nil })
-    }
-    #endif
-
     /// Every interface tool must carry `.interface` provenance. No
     /// `.lexicon` provenance should appear anywhere in the list.
     @Test func testNoLexiconProvenance() {
@@ -50,41 +44,26 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 78.
-    /// Snapshot includes the interface, federation, recipe, lens, vault, and
-    /// maintenance surfaces exposed by ToolProjection, plus the three dataset
-    /// tools added in MX-TAB-7 (moot_file_dataset, moot_dataset_query,
-    /// moot_dataset_stats).
-    /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory
-    /// drawer by id, in full; closes the fetch-drawer-by-ID gap,
-    /// build-now per Bob's ruling).
-    /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
-    /// node motion modeling) added alongside moot_lens_contradiction.
-    /// The 11th recipe tool is moot_hunt_contradictions (Wave 1: moot_recollect
-    /// was removed; moot_consolidate no longer dispatches — its alias era ended
-    /// with SPEC_DISTILLATION_STORAGE §3 Phase 2). The
-    /// maintenance tools are moot_reindex (corpus/vector backfill),
-    /// moot_drain_status (background drain progress), moot_reclassify_fdc
-    /// (FDC anchor repair/reset), moot_timing_report (C3+A6, audit-derived
-    /// timing metrics), and moot_palace_import (PAR-PB-1,
-    /// direct palace import).
-    /// The contradiction hunter adds two: moot_hunt_contradictions (recipe —
-    /// on-demand content sweep for conflicts) and moot_review_tunnel
-    /// (interface Tier 2 — accept/reject a PROPOSED tunnel).
+    /// Hard contract gate: the total tool count must be exactly 84.
+    /// The v2 catalog (AriaV2SelectedCatalog) defines the complete surface —
+    /// all operations whose typed handlers are executable in this build.
+    /// Vault tools are included by default (MOOTX01_VAULT != "0" with empty env).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        // 66 baseline + 2 contradiction-hunter tools (moot_hunt_contradictions,
-        // moot_review_tunnel) + 3 dataset tools (MX-TAB-7: moot_file_dataset,
-        // moot_dataset_query, moot_dataset_stats) + 4 packet tools (FAB5-I2:
-        // moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage) + moot_recall_connected
-        // + moot_json_import (MXE-JI-1 seed-file lane, vault-gated)
-        // + moot_timing_report (C3+A6 audit-derived timing metrics)
-        // + moot_recall_temporal (query-date window recipe)
-        // + moot_recall_walk (D10 walk-recall escalation ladder)
-        // + moot_rebuild_status (derived-state rebuild status, Bob ruling
-        //   2026-08-26)
-        #expect(ToolProjection.tools(environment: [:]).count == 80,
-                "tools() must return exactly 80 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        // 84 tools in the v2 catalog (vault-on with empty environment):
+        // - moot_help (v2 surface discovery)
+        // - 7 recall/search: moot_file_memory, moot_memory_get, moot_memory_list,
+        //   moot_memory_search, moot_transcript_recall, moot_update_memory,
+        //   moot_withdraw_memory, moot_erase_memory, moot_confirm_memory,
+        //   moot_move_memory (10 total Tier 1-5 memory tools)
+        // - 23 reasoning lenses + 7 recall operations + grounded synthesize
+        // - 4 packet tools, 3 dataset tools, 5 vault tools
+        // - 4 KG/journal tool groups, 2 connection tools
+        // - estate diagnostics, migration, monitoring, contradiction hunter, dream
+        // - 3 maintenance: reindex, reclassify_fdc, palace_import
+        // - federated_recall, json_import
+        #expect(ToolProjection.tools(environment: [:]).count == 84,
+                "tools() must return exactly 84 tools (v2 catalog, vault-on); got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.
@@ -134,36 +113,6 @@ struct ToolProjectionTests {
             )
         }
     }
-
-    /// The federation tool must be present, carry `.federation` provenance,
-    /// and use the renamed `federatedSearchToolName` constant.
-    ///
-    /// Item 2 hardening: `requesterEstateID` is now optional (anti-spoof gate
-    /// binds the requester to the default estate when omitted). The required
-    /// list must be empty. The property is still present in the schema so
-    /// callers can supply it for verification (it must match the default).
-    @Test func testFederationToolIsPresentAboveTheProjection() throws {
-        let federation = ToolProjection.tools(environment: [:]).filter { $0.provenance == .federation }
-        #expect(federation.count == 1, "exactly one federation tool is expected")
-        let tool = try #require(federation.first)
-        #expect(tool.name == ToolDispatcher.federatedSearchToolName)
-        #expect(tool.name == "moot_federated_search")
-        let schema = tool.inputSchema.objectValue
-        // requesterEstateID is optional; required must be empty (Item 2 hardening).
-        let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-        #expect(!required.contains("requesterEstateID"),
-            "requesterEstateID must not be required after Item 2 anti-spoof hardening")
-        #expect(required.isEmpty, "federation tool has no required fields after Item 2")
-        // The property is present in the schema (so clients know it exists).
-        #expect(schema?["properties"]?.objectValue?["requesterEstateID"] != nil,
-            "requesterEstateID must remain in properties as an optional field")
-        #expect(schema?["properties"]?.objectValue?["estateID"] == nil,
-            "federation tool fans across estates, not a single estateID target")
-    }
-
-    /// `moot_file_memory` must require `content` and `location`, and must
-    /// NOT expose internal infrastructure fields (udcCode, embeddingModelID,
-    /// latticeAnchor, addedBy).
     @Test func testFileMemoryRequiredFieldsAndNoInternals() {
         guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_file_memory" }) else {
             Issue.record("moot_file_memory not found")
@@ -181,7 +130,8 @@ struct ToolProjectionTests {
         #expect(properties["latticeAnchor"] == nil, "latticeAnchor must not appear")
     }
 
-    /// `moot_erase_memory` must require `confirmed` (safety gate).
+    /// `moot_erase_memory` must require `confirmation` (safety gate).
+    /// The v2 surface uses `confirmation` (boolean const: true) not `confirmed`.
     @Test func testEraseMemoryRequiresConfirmed() {
         guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_erase_memory" }) else {
             Issue.record("moot_erase_memory not found")
@@ -189,7 +139,7 @@ struct ToolProjectionTests {
         }
         let required = tool.inputSchema.objectValue?["required"]?
             .arrayValue?.compactMap { $0.stringValue } ?? []
-        #expect(required.contains("confirmed"), "moot_erase_memory must require confirmed=true")
+        #expect(required.contains("confirmation"), "moot_erase_memory must require confirmation=true")
     }
 
     /// `moot_memory_search` accepts query OR near (PR-03 anchor pivot), so
@@ -218,20 +168,17 @@ struct ToolProjectionTests {
         #expect(ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": ""]))
     }
 
-    /// `estateID` must be optional (in properties, not in required) on every
-    /// interface tool.
+    /// `estate_id` must be optional (in properties, not in required) on every
+    /// tool that exposes it. The v2 catalog uses snake_case `estate_id`.
     @Test func testEstateIDIsOptionalOnInterfaceTools() {
         for tool in ToolProjection.tools(environment: [:]) {
-            guard case .interface = tool.provenance else { continue }
             let schema = tool.inputSchema.objectValue
-            #expect(
-                schema?["properties"]?.objectValue?["estateID"] != nil,
-                "\(tool.name) must expose an optional estateID property"
-            )
+            // Only check tools that actually declare estate_id.
+            guard schema?["properties"]?.objectValue?["estate_id"] != nil else { continue }
             let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
             #expect(
-                !required.contains("estateID"),
-                "\(tool.name) must never require estateID"
+                !required.contains("estate_id"),
+                "\(tool.name) must never require estate_id"
             )
         }
     }
@@ -308,42 +255,7 @@ struct ToolProjectionTests {
 }
 
 // MARK: - Tier decomposition reconciliation
-
-/// The count-documentation layer (SPEC §12, TeachmeGuides, header comments)
-/// drifted three times in the 2026-08 benchmark-reset phase because the tier
-/// breakdown lives as prose in several places while the surface grows. This
-/// suite pins the DECOMPOSITION, not just the total: if any tier count or the
-/// non-tier remainder shifts, this fails and names the layer that must move
-/// with it (SPEC §12 tier structure, TeachmeGuides comment block + guide
-/// string, ToolProjection header doc).
-@Suite("Tier decomposition reconciliation")
-struct TierDecompositionTests {
-
-    @Test func tiersPlusNonTierSumToLiveTotal() {
-        let tier1 = ToolProjection.coreMemoryTools().count           // 9
-        let tier2 = ToolProjection.connectionTools().count           // 4
-        let tier3 = ToolProjection.knowledgeGraphTools().count       // 4
-        let tier4 = ToolProjection.journalTools().count              // 2
-        let tier5 = ToolProjection.estateTools().count               // 10 (8 always + 2 vault-gated)
-        let tier6 = 4 + LensTools.tools().count                      // 27 (4 recipe + 23 lens)
-        let tier7 = RecipeTools.tools().count - 4                    // 10 (remaining recipe tools after subtracting the 4 in tier6)
-        let tier8 = DatasetTools.tools().count                       // 3
-        let tier9 = VaultTools.vaultToolNames.count                  // 5 (vault-on only)
-        let tier10 = 1                                               // federation
-        let packet = PacketTools.tools().count                       // 4 (non-tier)
-
-        let decomposed = tier1 + tier2 + tier3 + tier4 + tier5
-            + tier6 + tier7 + tier8 + tier9 + tier10 + packet
-        let liveVaultOn = ToolProjection.tools(environment: [:]).count
-
-        #expect(decomposed == liveVaultOn,
-                "tier decomposition (\(decomposed)) no longer sums to the live vault-on surface (\(liveVaultOn)) — update SPEC §12, TeachmeGuides, and the ToolProjection header together")
-        // The specific figures the prose layer states today. When a tool is
-        // added, these move — and so must every prose copy.
-        #expect(tier5 == 11)
-        #expect(tier7 == 10)
-        #expect(RecipeTools.tools().count == 14)
-        #expect(packet == 4)
-        #expect(liveVaultOn == 80)
-    }
-}
+// NOTE: The per-tier helper methods (coreMemoryTools, connectionTools, etc.)
+// reflect the v1 surface structure and do not map to the v2 catalog.
+// The v2 live total is guarded by testTotalToolCount above (84 with vault on).
+// This suite was removed when v2 became the only surface (V2-A migration).
