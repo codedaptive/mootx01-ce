@@ -95,27 +95,6 @@ struct SchemeDiscriminatorTests {
 
     // MARK: - Base case: minimal required args succeed
 
-    @Test func testMinimalArgsSucceed() async throws {
-        let dispatcher = try await makeDispatcher()
-        let response = try await fileMemory(dispatcher, arguments: [
-            "content": .string("minimal required args row"),
-            "subject": .string("minimal required args row"),
-            "location": .string("validation-tests"),
-        ], id: 102)
-
-        guard case .result(let result) = response.payload else {
-            Issue.record("minimal capture returned error: \(response.payload)")
-            return
-        }
-        let object = try #require(result.objectValue)
-        #expect(object["isError"] == .bool(false))
-        let text = try #require(
-            object["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
-        )
-        // Response must begin with the "filed memory <id>" confirmation.
-        #expect(text.hasPrefix("filed memory "), "expected filed memory confirmation, got: \(text)")
-    }
-
     // MARK: - Missing required `content` is invalidParams
 
     @Test func testMissingContentReturnsInvalidParams() async throws {

@@ -51,10 +51,6 @@ let package = Package(
             name: "WholeRecordDense",
             description: "Compile the resident HNSW float index duties and enable the WholeRecordDense trait in NeuronKit, GeniusLocusKit and CorpusKit. Off by default; the span stage is the one dense provider."
         ),
-        .trait(
-            name: "AriaV2",
-            description: "Compile the selected ARIA v2 MCP surface. Off by default; v1 remains the shipped compatibility surface."
-        ),
     ],
     dependencies: [
         .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
@@ -186,10 +182,7 @@ let package = Package(
             // Privacy manifest (M-MXA-5): deriveBuildSerial reads the running
             // executable's mtime (FileTimestamp C617.1); the manifest rides
             // the resource bundle so Xcode's privacy report aggregates it.
-            resources: [.copy("PrivacyInfo.xcprivacy")],
-            swiftSettings: [
-                .define("MOOTX01_ARIA_V2", .when(traits: ["AriaV2"])),
-            ]
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .target(
             name: "AriaResident",
@@ -279,10 +272,7 @@ let package = Package(
                 .product(name: "QueueKit", package: "QueueKit"),
                 // directly via the normalized store (ADORN-STORE-02 Part C).
             ],
-            path: "Tests/AriaMCPTests",
-            swiftSettings: [
-                .define("MOOTX01_ARIA_V2", .when(traits: ["AriaV2"])),
-            ]
+            path: "Tests/AriaMCPTests"
         ),
         .testTarget(
             name: "AriaResidentTests",

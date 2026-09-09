@@ -79,7 +79,6 @@ fn tools_list_round_trips_over_in_memory_io() {
     );
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_tools_list_and_monitoring_status_round_trip_over_in_memory_io() {
     let list = serde_json::json!({
