@@ -1553,6 +1553,34 @@ impl Estate {
         self.store.count_span_index_debt()
     }
 
+    /// Set bit 28 (`FACTS_EXTRACTED`) after one extraction attempt has
+    /// completed successfully, including the valid zero-fact outcome.
+    pub fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.store.set_facts_extracted(drawer_id)
+    }
+
+    pub fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.store.set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+
+    /// The distilled-fact duty's active, non-empty work items, ordered by
+    /// drawer id and paged by `after_drawer_id`.
+    pub fn fact_extraction_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+
+    /// Count of drawers whose current content has not completed fact
+    /// extraction under the active recipe.
+    pub fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.store.count_fact_extraction_debt()
+    }
+
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
     /// over `DrawerStore::set_subject_representation` — the seam the
     /// filing surface, backfill, and the (future) subject rider write

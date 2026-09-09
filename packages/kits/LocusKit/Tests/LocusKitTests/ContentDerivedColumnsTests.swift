@@ -76,6 +76,7 @@ struct ContentDerivedColumnsTests {
         try await store.addDrawer(sampleDrawer(id: id, content: "derivable content"))
         _ = try await store.setSSCFacts("kind: note", for: id)
         _ = try await store.setSpanIndexed(drawerId: id)
+        _ = try await store.setFactsExtracted(drawerId: id)
         _ = try await store.expungeGated(drawerId: id, changedBy: "alice",
                                          reason: "erasure covers derived columns",
                                          now: now.addingTimeInterval(1))
@@ -83,5 +84,6 @@ struct ContentDerivedColumnsTests {
         #expect(after.content == "")
         #expect(after.sscFacts == nil)
         #expect(!after.isSpanIndexed, "bit 27 must clear with the content")
+        #expect(!after.areFactsExtracted, "bit 28 must clear with the content")
     }
 }

@@ -88,6 +88,11 @@ public enum LocusKitSchema {
 
     /// Current schema version.
     ///
+    /// v20 (Distilled Fact Extraction, 2026-09-08). Delta from v19:
+    /// `+ fact_extractor_models`, source-grounding and extractor-provenance
+    /// columns on `kg_facts`, and the rebuildable `searchProjection` field.
+    /// Drawer bit 28 records extraction completion for the active recipe.
+    ///
     /// v19 (Encoder Rerank Program, 2026-09-05). Delta from v18:
     /// `+ encoder_models` (the span-encoder registry, one row per shipped
     /// model, exactly one `is_active = 1`), `+ drawers.ssc_facts` (the
@@ -121,7 +126,7 @@ public enum LocusKitSchema {
     /// kg_facts identity trio; v14 idx_drawers_filedAt; v15 recall_trace
     /// door/composition/laneRanks; v16–v18 adornment and distilled storage,
     /// retired at v19.
-    public static let version = 19
+    public static let version = 20
 
     /// The lowest stored schema version `mootx01 upgrade` brings to
     /// `version` in one hop: the version CE 1.0.35 and 1.0.37 shipped.
@@ -135,7 +140,7 @@ public enum LocusKitSchema {
     public static func upgradePath(storedVersion: Int) -> SchemaUpgradePath {
         switch storedVersion {
         case 0: return .fresh
-        case supportedUpgradeFloor: return .upgrade(from: storedVersion)
+        case supportedUpgradeFloor, 19: return .upgrade(from: storedVersion)
         case version: return .current
         default: return .unsupported(found: storedVersion)
         }
@@ -170,6 +175,8 @@ public enum LocusKitSchema {
                 SnapshotSchema.attestationsTable,
                 // The span-encoder registry (Encoder Rerank Program, v19).
                 encoderModelsTable,
+                // Distilled Fact Extraction provider/model registry (v20).
+                factExtractorModelsTable,
             ],
             indices: indices,
             migrations: [
@@ -178,7 +185,7 @@ public enum LocusKitSchema {
                 // column, no distilled columns). Every operation is idempotent
                 // — addColumn skips a present column, the DDL is CREATE ... IF
                 // NOT EXISTS, addIndex is IF NOT EXISTS — so a fresh estate,
-                // which the runner creates at the v19 layout before replaying
+                // which the runner creates at the current layout before replaying
                 // the ladder, is unchanged by it. Populated estates exist at
                 // 10 (CE 1.0.35/1.0.37) and at 19; nothing in between is
                 // supported here (see `upgradePath(storedVersion:)`).
@@ -229,6 +236,33 @@ public enum LocusKitSchema {
                     // v19: ssc_facts — NULL on every existing row, which is the
                     // enrichment stage's "needs facts" predicate; no backfill.
                     .addColumn(table: "drawers", column: .text("ssc_facts", nullable: true)),
+                ]),
+                Migration(fromVersion: 19, toVersion: 20, operations: [
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "evidenceQuote", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "evidenceStart", type: .int, nullable: false, defaultValue: .int(-1))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "evidenceEnd", type: .int, nullable: false, defaultValue: .int(-1))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "evidenceStartUTF8Byte", type: .int, nullable: false, defaultValue: .int(-1))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "evidenceEndUTF8Byte", type: .int, nullable: false, defaultValue: .int(-1))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "sourceDigest", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "extractorProviderID", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "extractorModelID", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "extractorModelVersion", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "extractionSchemaVersion", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "searchProjection", type: .text, nullable: false, defaultValue: .text(""))),
+                    .addColumn(table: "kg_facts", column: ColumnDeclaration(
+                        name: "searchProjectionVersion", type: .text, nullable: false, defaultValue: .text(""))),
+                    .custom(sqlite: factExtractorModelsDDL, postgresql: factExtractorModelsDDL),
                 ]),
             ]
         )
@@ -549,6 +583,18 @@ public enum LocusKitSchema {
             .text("addedBy"),
             .text("foreignSourceKey"),
             .text("foreignRecordID"),
+            .text("evidenceQuote"),
+            ColumnDeclaration(name: "evidenceStart", type: .int, nullable: false, defaultValue: .int(-1)),
+            ColumnDeclaration(name: "evidenceEnd", type: .int, nullable: false, defaultValue: .int(-1)),
+            ColumnDeclaration(name: "evidenceStartUTF8Byte", type: .int, nullable: false, defaultValue: .int(-1)),
+            ColumnDeclaration(name: "evidenceEndUTF8Byte", type: .int, nullable: false, defaultValue: .int(-1)),
+            .text("sourceDigest"),
+            .text("extractorProviderID"),
+            .text("extractorModelID"),
+            .text("extractorModelVersion"),
+            .text("extractionSchemaVersion"),
+            .text("searchProjection"),
+            .text("searchProjectionVersion"),
             .bitmap("adjectiveBitmap"),
             .bitmap("operationalBitmap"),
             .bitmap("provenanceBitmap"),
@@ -991,15 +1037,51 @@ public enum LocusKitSchema {
             PRIMARY KEY ("model_id")
         )
         """
+
+    // MARK: - fact_extractor_models (Distilled Fact Extraction v20)
+
+    static let factExtractorModelsTable = TableDeclaration(
+        name: "fact_extractor_models",
+        columns: [
+            .text("recipe_id"),
+            .text("provider_id"),
+            .text("model_id"),
+            .text("model_version"),
+            .text("schema_version"),
+            .text("extractor_kind"),
+            .int("maximum_input_characters"),
+            .int("maximum_facts_per_source"),
+            ColumnDeclaration(name: "is_active", type: .int, nullable: false,
+                              defaultValue: .int(0)),
+            .json("ext", nullable: true),
+        ],
+        primaryKey: ["recipe_id"]
+    )
+
+    static let factExtractorModelsDDL = """
+        CREATE TABLE IF NOT EXISTS "fact_extractor_models" (
+            "recipe_id"                 TEXT NOT NULL,
+            "provider_id"               TEXT NOT NULL,
+            "model_id"                  TEXT NOT NULL,
+            "model_version"             TEXT NOT NULL,
+            "schema_version"            TEXT NOT NULL,
+            "extractor_kind"            TEXT NOT NULL,
+            "maximum_input_characters"  INTEGER NOT NULL,
+            "maximum_facts_per_source"  INTEGER NOT NULL,
+            "is_active"                 INTEGER NOT NULL DEFAULT 0,
+            "ext"                       TEXT NULL,
+            PRIMARY KEY ("recipe_id")
+        )
+        """
 }
 
 /// What `mootx01 upgrade` does with an estate whose LocusKit ledger row
 /// carries a given stored version (`LocusKitSchema.upgradePath(storedVersion:)`).
 /// Mirrors Rust `schema::SchemaUpgradePath`.
 public enum SchemaUpgradePath: Equatable, Sendable {
-    /// No ledger row (0): a fresh estate; opening creates the v19 layout.
+    /// No ledger row (0): a fresh estate; opening creates the v20 layout.
     case fresh
-    /// The supported floor (10): opening applies the single v10 → v19 hop.
+    /// Stored version 10 or 19: opening applies the remaining migration hops.
     case upgrade(from: Int)
     /// Already at the current version: nothing to apply.
     case current

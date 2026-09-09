@@ -837,6 +837,34 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Mark one drawer settled for the active distilled-fact recipe.
+    fn set_facts_extracted(&self, _drawer_id: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_facts_extracted not implemented for this DrawerStore impl".to_string()))
+    }
+
+    /// Compare-and-set settlement: writes bit 28 only if the drawer remains
+    /// live and its content equals the inference snapshot.
+    fn set_facts_extracted_if_content_matches(
+        &self, _drawer_id: &str, _expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_facts_extracted_if_content_matches not implemented for this DrawerStore impl".to_string()))
+    }
+
+    /// Active, non-empty drawers whose bit 28 is clear.
+    fn fact_extraction_debt_batch(
+        &self, _limit: usize, _after_drawer_id: Option<&str>
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "fact_extraction_debt_batch not implemented for this DrawerStore impl".to_string()))
+    }
+
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_fact_extraction_debt not implemented for this DrawerStore impl".to_string()))
+    }
+
     // (SUBJECT_LENGTH_CONTRACT is a module-level const below the trait.)
 
     /// Write the subject line of one drawer — all three subject columns
@@ -2421,6 +2449,22 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
         self.as_ref().count_span_index_debt()
+    }
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().set_facts_extracted(drawer_id)
+    }
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.as_ref().set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+    fn fact_extraction_debt_batch(
+        &self, limit: usize, after_drawer_id: Option<&str>
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.as_ref().count_fact_extraction_debt()
     }
     fn set_subject_representation(
         &self,
