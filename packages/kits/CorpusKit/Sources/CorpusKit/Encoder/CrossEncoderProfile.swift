@@ -99,7 +99,7 @@ public struct CrossEncoderProfile: Sendable, Equatable, Codable {
 
     public static let minilmL6 = CrossEncoderProfile(
         modelID: "ms-marco-minilm-l6-cross-v1",
-        modelVersion: "233902d2",
+        modelVersion: "233902d25c440f23af6f7d6e94d2946bac0bee0a",
         tokenizerHash: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
         maxSequence: 512,
         pool: 50,

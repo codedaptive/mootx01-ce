@@ -186,6 +186,15 @@ public actor GeniusLocusKit {
     /// See CrossEncoderActivation.swift.
     internal var pairScorers: [EstateHandle: PairScorerSlot] = [:]
 
+#if MOOTX01_CROSS_ENCODER
+    /// Test seam: when set, `pairScorer(profile:for:)` calls this factory
+    /// before consulting the model directory resolver. Tests inject a counting
+    /// factory here to verify cold-load behaviour without real model assets.
+    /// The seam intercepts first so no model directory or resolver setup is
+    /// required. Production code never sets this.
+    internal var testPairScorerMaker: ((CrossEncoderProfile, URL) throws -> any PairScorer)?
+#endif
+
     /// Per-estate grant persistence (GRT-01). Built lazily on the first
     /// grant verb against a handle via `ensureGrantSurface(for:)`; the
     /// `grants` table lives in the estate's storage. Dropped in `close`.

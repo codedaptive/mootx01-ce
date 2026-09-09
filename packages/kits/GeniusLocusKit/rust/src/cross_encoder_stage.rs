@@ -487,8 +487,17 @@ pub fn select_spans(
 /// Reorder `hits` so its first `pool` entries follow `order` (a permutation
 /// of their ids); entries beyond the pool keep their place. An id in `order`
 /// that is not in the pool is ignored, and pool hits absent from `order` keep
-/// their relative order after the ordered ones, so membership can never
-/// change. Twin of Swift `CrossEncoderStage.reorder`.
+/// their relative order after the ordered ones. Twin of Swift
+/// `CrossEncoderStage.reorder`.
+///
+/// **Assumes distinct ids within the pool.** `fuse` produces a permutation of
+/// the incoming ids without duplication, so this invariant holds whenever
+/// `reorder` is called from the stage. If the pool contains duplicate ids the
+/// first occurrence wins (`by_id.entry(..).or_insert(..)`) and duplicate ids
+/// are dropped; the output can be shorter than the pool, so membership is
+/// preserved only for distinct ids. The caller (`run_cross_encoder_stage` in
+/// `coordinator.rs`) passes the pool hits from `fuse`, which contains no
+/// duplicates, keeping this guarantee intact.
 pub fn reorder(hits: Vec<RecallHit>, pool: usize, order: &[String]) -> Vec<RecallHit> {
     let pool_count = pool.min(hits.len());
     let mut iter = hits.into_iter();

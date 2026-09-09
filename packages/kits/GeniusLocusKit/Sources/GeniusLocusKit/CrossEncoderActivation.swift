@@ -50,7 +50,7 @@ public extension GeniusLocusKit {
         [CrossEncoderProfile.minilmL6.modelID: CrossEncoderProfile.minilmL6]
     }
 
-    static var crossEncoderLog: Logger {
+    private static var crossEncoderLog: Logger {
         Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
@@ -63,6 +63,16 @@ public extension GeniusLocusKit {
     func registerPairScorer(_ scorer: any PairScorer, for handle: EstateHandle) {
         pairScorers[handle] = .loaded(scorer)
     }
+
+#if MOOTX01_CROSS_ENCODER
+    /// Install a test scorer factory. When set, `pairScorer(profile:for:)` calls
+    /// this closure instead of `PairScorerFactory.make`: the seam takes precedence
+    /// over the resolver, which allows tests to count cold loads without CoreML
+    /// assets. Production code never calls this.
+    func setTestPairScorerMaker(_ factory: @escaping @Sendable (CrossEncoderProfile, URL) throws -> any PairScorer) {
+        testPairScorerMaker = factory
+    }
+#endif
 
     /// Whether a loaded scorer is held for `handle` (registered or lazily
     /// loaded). False for a stale handle and after `close`.
@@ -113,9 +123,11 @@ public extension GeniusLocusKit {
     /// The scorer for `profile` on `handle`, loading it on the first call.
     ///
     /// Returns the scorer and whether THIS call loaded it (`coldLoad`), or
-    /// the `CrossEncoderStage.Reason` the stage reports. The load runs under
-    /// the actor with no suspension between the slot check and the insert,
-    /// so two concurrent first applies load once. A failed load is cached as
+    /// the `CrossEncoderStage.Reason` the stage reports. Because this method
+    /// is synchronous and runs under the actor, the slot check and insert
+    /// happen without any suspension point between them, so two concurrent
+    /// first applies in `runCrossEncoderStage` serialize through the actor and
+    /// only one produces `coldLoad == true`. A failed load is cached as
     /// `.unavailable` until `close`.
     internal func pairScorer(profile: CrossEncoderProfile, for handle: EstateHandle) -> PairScorerLoad {
         switch pairScorers[handle] {
@@ -127,6 +139,32 @@ public extension GeniusLocusKit {
             break
         }
 #if MOOTX01_CROSS_ENCODER
+        // Test seam: check before the resolver so tests that inject a counting
+        // factory never need real model assets on disk. Matches Rust coordinator.rs,
+        // which checks test_pair_scorer_maker before model_directory_resolver.
+        // The method is synchronous under the actor so the slot check above
+        // and the insert below happen without a suspension point — exactly one
+        // concurrent first-apply loads the scorer (coldLoad == true) and the
+        // other hits the already-filled slot (coldLoad == false).
+        // Production code never sets testPairScorerMaker.
+        if let seam = testPairScorerMaker {
+            do {
+                // The URL is ignored by the seam; pass the temporary directory
+                // as a stand-in to satisfy the closure signature.
+                let scorer = try seam(profile, FileManager.default.temporaryDirectory)
+                pairScorers[handle] = .loaded(scorer)
+                Self.crossEncoderLog.info(
+                    "cross encoder: loaded \(profile.modelID, privacy: .public) (\(scorer.backend, privacy: .public)) via test seam (estate: \(handle.estateUUID, privacy: .public))"
+                )
+                return .loaded(scorer: scorer, coldLoad: true)
+            } catch {
+                Self.crossEncoderLog.warning(
+                    "cross encoder: \(profile.modelID, privacy: .public) test seam failed (\(String(describing: error), privacy: .public)); apply degrades (estate: \(handle.estateUUID, privacy: .public))"
+                )
+                pairScorers[handle] = .unavailable(CrossEncoderStage.Reason.modelUnavailable)
+                return .unavailable(CrossEncoderStage.Reason.modelUnavailable)
+            }
+        }
         guard let directory = modelDirectoryResolver.encoderModelDirectory(for: profile.modelID) else {
             Self.crossEncoderLog.warning(
                 "cross encoder: no model directory for \(profile.modelID, privacy: .public); apply degrades (estate: \(handle.estateUUID, privacy: .public))"
@@ -290,6 +328,10 @@ extension GeniusLocusKit {
                 : (hits, .degraded(directive, reason: reason, limits: limits), true)
         }
 
+        // ContinuousClock reads here are telemetry only (stageMillis); they never
+        // feed the hit order or the scores. This is the same pattern as QueueKit's
+        // drain loop, which also reads ContinuousClock inside its header without
+        // violating the engine-determinism rule.
         let clock = ContinuousClock()
         let started = clock.now
 
