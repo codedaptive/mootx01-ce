@@ -1708,7 +1708,7 @@ enum RecipeTools {
         // confirm below refuses any non-active branch.
 
         do {
-            try await MigrationBenchmark().confirmPromotion(
+            _ = try await MigrationBenchmark().confirmPromotion(
                 winnerBranchID: winner,
                 discardBranchIDs: discard,
                 estate: handle, kit: kit)

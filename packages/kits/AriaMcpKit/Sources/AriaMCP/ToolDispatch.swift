@@ -23,6 +23,90 @@ import struct SubstrateTypes.HLC
 import struct NeuronKit.TimingAuditEvent
 import func NeuronKit.deriveTimings
 
+private struct DispatcherV2MemoryUsageLedger: AriaV2MemoryUsageLedger {
+    let surfaced: SurfacedRecallLedger
+
+    func recordSurfaced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
+        _ = (estateID, callerID)
+        await surfaced.recordSurfaced(
+            memoryIDs.map(AriaV2ArgumentDecoder.canonicalUUID),
+            at: at
+        )
+    }
+
+    func recordDereferenced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
+        // The existing ledger records search surfacing. Reward marking remains
+        // owned by the established typed GLK path; this adapter does not invent
+        // a second session store or mutate recall state during a read.
+        _ = (memoryIDs, estateID, callerID, at)
+    }
+}
+
+private struct DispatcherV2DreamAuthority: AriaV2Dream.Authority {
+    let handle: EstateHandle
+    let callerBinding: String
+    let now: Date
+
+    func admit(requestedEstateID: UUID?) async -> Result<AriaV2Dream.Admission, AriaV2Dream.Failure> {
+        guard requestedEstateID == nil || requestedEstateID == handle.estateUUID else {
+            return .failure(.refusal(.init(
+                code: "estate_unavailable",
+                message: "The requested estate is not available to this caller.",
+                retryable: false)))
+        }
+        return .success(.init(
+            estateID: handle.estateUUID,
+            handle: handle,
+            callerBinding: callerBinding,
+            authorizationGeneration: "selected-v2-public",
+            now: now))
+    }
+
+    func revalidate(_ admission: AriaV2Dream.Admission) async -> Result<Void, AriaV2Dream.Failure> {
+        guard admission.estateID == handle.estateUUID else {
+            return .failure(.refusal(.init(
+                code: "estate_unavailable",
+                message: "The selected estate is no longer available to this caller.",
+                retryable: true)))
+        }
+        return .success(())
+    }
+}
+
+/// The selected public v2 lane has one immutable caller, policy, and default
+/// estate for the lifetime of a dispatcher session.  The authorization
+/// generation is derived only from those immutable fields, so grants, clocks,
+/// and pagination calls cannot change it under an active cursor.
+private struct DispatcherV2MemoryListAuthorizationAuthority: AriaV2MemoryListAuthorizationAuthority {
+    let state: AriaV2MemoryListAuthorizationState
+
+    init(estateID: UUID, callerID: String) {
+        let canonicalEstateID = AriaV2ArgumentDecoder.canonicalUUID(estateID)
+        let contextID = "selected-v2-public"
+        let policyVersion = "aria-v2-memory-list-public-v1"
+        self.state = .init(
+            estateID: estateID,
+            callerID: callerID,
+            contextID: contextID,
+            policyVersion: policyVersion,
+            generation: "v1:\(canonicalEstateID):\(callerID.utf8.count):\(callerID)"
+        )
+    }
+
+    func authorizeMemoryList(
+        estateID: UUID,
+        authorization: AriaV2MemoryListAuthorization
+    ) async throws -> AriaV2MemoryListAuthorizationState {
+        guard estateID == state.estateID,
+              authorization.callerID == state.callerID,
+              authorization.contextID == state.contextID,
+              authorization.policyVersion == state.policyVersion else {
+            throw AriaV2MemoryListProductionSnapshotError.authorizationMismatch
+        }
+        return state
+    }
+}
+
 /// Dispatch a parsed `tools/call` against one or more GeniusLocusKit
 /// estates opened in the same kit instance.
 ///
@@ -193,6 +277,10 @@ public struct ToolDispatcher: Sendable {
     /// `ModeSessionState` doc comment for the extension point description).
     let modeSessionState: ModeSessionState
 
+    /// Retained current-state cursors for the selected v2 memory inventory.
+    /// Shared by every value-semantic dispatcher derived from this session.
+    let v2MemoryListCursorSession: AriaV2MemoryListCursorSession
+
     /// Construct a single-estate dispatcher. `handle` is registered as
     /// the sole addressable estate and is the default target for calls
     /// that omit `estateID`. This is the v1.0 path; every existing
@@ -233,6 +321,7 @@ public struct ToolDispatcher: Sendable {
         // a custom dict with or without the pin key as needed.
         self.benchClock = BenchClock(environment: environment)
         self.modeSessionState = modeSessionState
+        self.v2MemoryListCursorSession = AriaV2MemoryListCursorSession()
         // Hosts that parse `--frozen` pass the posture explicitly; everyone
         // else (the aria-mcp dev server, tests) gets the environment twin.
         self.posture = posture ?? EstatePosture.resolve(frozenFlag: false, environment: environment)
@@ -259,6 +348,7 @@ public struct ToolDispatcher: Sendable {
                               environment: environment,
                               benchClock: benchClock,
                               modeSessionState: modeSessionState,
+                              v2MemoryListCursorSession: v2MemoryListCursorSession,
                               posture: posture)
     }
 
@@ -278,6 +368,7 @@ public struct ToolDispatcher: Sendable {
                        environment: environment,
                        benchClock: benchClock,
                        modeSessionState: modeSessionState,
+                       v2MemoryListCursorSession: v2MemoryListCursorSession,
                        posture: posture)
     }
 
@@ -298,6 +389,7 @@ public struct ToolDispatcher: Sendable {
         environment: [String: String],
         benchClock: BenchClock,
         modeSessionState: ModeSessionState,
+        v2MemoryListCursorSession: AriaV2MemoryListCursorSession,
         posture: EstatePosture
     ) {
         self.kit = kit
@@ -314,6 +406,7 @@ public struct ToolDispatcher: Sendable {
         self.environment = environment
         self.benchClock = benchClock
         self.modeSessionState = modeSessionState
+        self.v2MemoryListCursorSession = v2MemoryListCursorSession
         self.posture = posture
     }
 
@@ -452,7 +545,36 @@ public struct ToolDispatcher: Sendable {
     /// recipe → lens → vault → dataset → interface → methodNotFound →
     /// unknown-arg hint → per-call coaching hint → periodic coaching block.
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
-        let args = arguments.objectValue ?? [:]
+        let decodedArguments = arguments.objectValue
+        let args = decodedArguments ?? [:]
+
+        // V2 admits names from its selected catalog before any legacy early
+        // return, clock sample, teaching lookup, frozen-name inventory, or
+        // session mutation.  V1 intentionally keeps its legacy unknown-name
+        // teachme behavior and notice-only compatibility route.
+        if AriaSurface.isV2 {
+            guard decodedArguments != nil else {
+                let message = "tools/call arguments must be an object for the active ARIA v2 surface"
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: message,
+                    data: .object([
+                        "code": .string("invalid_argument"),
+                        "path": .string("arguments"),
+                        "message": .string(message),
+                        "correction": .string("Call moot_monitoring_status with an empty arguments object."),
+                    ])
+                )
+            }
+            guard ToolProjection.admitsDispatch(name: name, environment: environment) else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.methodNotFound,
+                    message: "Unknown tool: \(name)"
+                )
+            }
+            let request = try AriaSurfaceDecoder.decode(name: name, arguments: args)
+            return await dispatchV2(request)
+        }
 
         // moot_drain_status is a pure-read polling call used by waitForEncodeDrain.
         // It does not participate in temporal scoring and must NOT advance the bench
@@ -629,6 +751,274 @@ public struct ToolDispatcher: Sendable {
             // a failed tool call, which makes field failures undiagnosable.
             fputs("aria-mcp: tool \(name) failed: \(error)\n", stderr)
             return Self.errorResult("unexpected error in \(name): \(error)")
+        }
+    }
+
+    /// Shared v2 policy/context handoff.  Effect identity, not a legacy name,
+    /// determines the frozen-posture decision.  The only Mission01 operation
+    /// is an inspection, so frozen posture allows it to reach its typed read.
+    private func dispatchV2(_ request: AriaSurfaceRequest) async -> JSONValue {
+        switch request.operation.effect {
+        case .inspection:
+            break
+        case .mutation:
+            if posture == .frozen {
+                return AriaV2Envelope.refusal(
+                    tool: request.toolName,
+                    error: .init(
+                        code: "estate_frozen",
+                        message: EstatePosture.refusalMessage(tool: request.toolName),
+                        retryable: false
+                    )
+                )
+            }
+        }
+
+        let now = benchClock.now()
+        let effectiveRegistry = AriaV2SelectedCatalog.registry(environment: environment)
+        let capabilityDigest = try! AriaV2CapabilityDigest.digest(registry: effectiveRegistry)
+        let sensitivityGrant = await sensitivityUnlockLedger.ceilingSensitivity(now: now)
+        let maximumSensitivity = sensitivityGrant ?? .elevated
+        let memoryOperations = AriaV2MemoryOperations(
+            backend: AriaV2GeniusLocusMemoryBackend(kit: kit, handle: handle),
+            context: .init(
+                estateID: handle.estateUUID,
+                callerID: serverIdentity,
+                serverIdentity: serverIdentity,
+                now: { now },
+                maximumSensitivity: maximumSensitivity,
+                recallOrigin: posture == .frozen ? .internal : .external,
+                usageLedger: DispatcherV2MemoryUsageLedger(surfaced: recallLedger)
+            )
+        )
+        let packetOperations = AriaV2PacketOperations(
+            kit: kit, handle: handle, context: memoryOperations.context,
+            grantCeiling: sensitivityGrant)
+        let knowledgeJournal = AriaV2KnowledgeJournalService(
+            backend: AriaV2GeniusLocusKnowledgeJournalBackend(kit: kit, handle: handle),
+            context: memoryOperations.context)
+        let contradictions = AriaV2ContradictionsService(
+            kit: kit, handle: handle,
+            context: .init(estateID: handle.estateUUID, callerBinding: serverIdentity,
+                           authorizationRevision: "selected-v2-public"),
+            now: { now })
+        let estateDiagnostics = AriaV2EstateDiagnostics(
+            provider: AriaV2GeniusLocusEstateDiagnosticsProvider(kit: kit, handle: handle),
+            context: .init(
+                estateID: handle.estateUUID,
+                estateName: handle.estateName,
+                callerID: serverIdentity,
+                serverIdentity: serverIdentity,
+                sessionID: "selected-v2-public",
+                buildSerial: buildSerial,
+                now: { now }))
+        let cognitionCatalog = AriaV2CognitionCatalogService(
+            estateID: handle.estateUUID,
+            callableToolNames: Set(effectiveRegistry.operations.map(\.publicName)),
+            buildID: buildSerial,
+            capabilityDigest: capabilityDigest)
+        let memoryMutations = AriaV2MemoryMutations(
+            kit: kit, handle: handle, context: memoryOperations.context)
+        let recallLens = AriaV2RecallLensService(
+            authority: AriaV2GeniusLocusRecallLensAuthority(kit: kit, handle: handle))
+        let lensLower = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: now))
+        let orchestration = AriaV2Orchestration(
+            provider: AriaV2GeniusLocusOrchestrationProvider(
+                kit: kit,
+                handle: handle,
+                // Bind typed federation to the dispatcher-owned local peer
+                // registry. The lower adapter excludes this requester before
+                // reaching GLK's grant gate, so self recall cannot become a
+                // federated success.
+                federationSources: estates.values.sorted {
+                    $0.estateUUID.uuidString < $1.estateUUID.uuidString
+                }),
+            context: .init(
+                estateID: handle.estateUUID,
+                serverIdentity: serverIdentity,
+                sessionID: "selected-v2-public",
+                now: { now }))
+        let dream = AriaV2Dream.Service(
+            authority: DispatcherV2DreamAuthority(
+                handle: handle, callerBinding: serverIdentity, now: now),
+            lower: AriaV2Dream.GeniusLocusLower(kit: kit))
+        let dataMobility = AriaV2DataMobility(
+            authority: AriaV2SelectedDataMobilityAuthority(
+                lifecycle: AriaV2VaultLifecycleAuthority(
+                    jobRegistry: jobRegistry, kit: kit, handle: handle,
+                    selectedEstateID: handle.estateUUID),
+                direct: AriaV2GeniusLocusDataMobilityAuthority(
+                    kit: kit, handle: handle, selectedEstateID: handle.estateUUID,
+                    now: now)))
+
+        do {
+            switch request {
+            case .help(let helpRequest):
+                return AriaV2HelpService(
+                    registry: effectiveRegistry, buildID: buildSerial).render(helpRequest)
+            case .fileMemory(let fileRequest):
+                return try await memoryOperations.file(fileRequest)
+            case .memorySearch(let searchRequest):
+                return try await memoryOperations.search(searchRequest)
+            case .memoryList(let listRequest):
+                let authority = DispatcherV2MemoryListAuthorizationAuthority(
+                    estateID: handle.estateUUID,
+                    callerID: serverIdentity)
+                let service = AriaV2MemoryListService(
+                    provider: AriaV2MemoryListProductionSnapshotProvider(
+                        kit: kit,
+                        handle: handle,
+                        authorizationAuthority: authority),
+                    cursorSession: v2MemoryListCursorSession,
+                    defaultEstateID: handle.estateUUID,
+                    authorization: .init(
+                        callerID: authority.state.callerID,
+                        contextID: authority.state.contextID,
+                        policyVersion: authority.state.policyVersion),
+                    now: { now })
+                return try await service.list(listRequest)
+            case .memoryGet(let getRequest):
+                return try await memoryOperations.get(getRequest)
+            case .transcriptRecall(let transcriptRequest):
+                let service = AriaV2TranscriptRecallService(
+                    backend: AriaV2GeniusLocusTranscriptRecallBackend(kit: kit, handle: handle),
+                    context: memoryOperations.context)
+                return try await service.recall(transcriptRequest)
+            case .recallLens(let request):
+                if AriaV2LensLower.supported.contains(request.operation) {
+                    return try await lensLower.execute(request)
+                }
+                return try await recallLens.execute(
+                    tool: request.operation.rawValue,
+                    arguments: .object(request.arguments))
+            case .synthesize(let request):
+                return try await orchestration.synthesize(request)
+            case .dream(let request):
+                return try await dream.execute(request)
+            case .migrationRun(let request):
+                return try await orchestration.runMigration(request)
+            case .migrationConfirm(let request):
+                return try await orchestration.confirmMigration(request)
+            case .federatedRecall(let request):
+                return try await orchestration.federatedSearch(request)
+            case .huntContradictions(let request):
+                return try await contradictions.hunt(request)
+            case .proposeContradictions(let request):
+                return try await contradictions.propose(request)
+            case .connectionSearch(let request):
+                return try await knowledgeJournal.connectionSearch(request)
+            case .connectionMap(let request):
+                return try await knowledgeJournal.connectionMap(request)
+            case .fileFact(let request):
+                return try await knowledgeJournal.fileFact(request)
+            case .factSearch(let request):
+                return try await knowledgeJournal.factSearch(request)
+            case .retireFact(let request):
+                return try await knowledgeJournal.retireFact(request)
+            case .factTimeline(let request):
+                return try await knowledgeJournal.factTimeline(request)
+            case .writeJournal(let request):
+                return try await knowledgeJournal.writeJournal(request)
+            case .readJournal(let request):
+                return try await knowledgeJournal.readJournal(request)
+            case .filePacket(let packetRequest):
+                return try await packetOperations.file(packetRequest)
+            case .packetGet(let packetRequest):
+                return try await packetOperations.get(packetRequest)
+            case .packetList(let packetRequest):
+                return try await packetOperations.list(packetRequest)
+            case .packetLineage(let packetRequest):
+                return try await packetOperations.lineage(packetRequest)
+            case .monitoringSet(let monitoringRequest):
+                let result = await AriaV2MonitoringSet.execute(
+                    monitoringRequest, monitoringControl: monitoringControl)
+                return AriaV2MonitoringSet.render(
+                    result,
+                    buildID: buildSerial,
+                    capabilityDigest: capabilityDigest)
+            case .monitoringStatus(let request):
+                let result = await AriaV2MonitoringInspection.execute(
+                    request, monitoringControl: monitoringControl)
+                return AriaV2MonitoringInspection.render(
+                    result,
+                    buildID: buildSerial,
+                    capabilityDigest: capabilityDigest)
+            case .estatePing:
+                return try await estateDiagnostics.ping(arguments: requestArguments(request))
+            case .estateStatus:
+                return try await estateDiagnostics.status(arguments: requestArguments(request))
+            case .estateMap:
+                return try await estateDiagnostics.map(arguments: requestArguments(request))
+            case .drainStatus:
+                return try await estateDiagnostics.drainStatus(arguments: requestArguments(request))
+            case .rebuildStatus:
+                return try await estateDiagnostics.rebuildStatus(arguments: requestArguments(request))
+            case .timingReport:
+                return try await estateDiagnostics.timingReport(arguments: requestArguments(request))
+            case .listLenses(let request):
+                return try cognitionCatalog.lenses(request)
+            case .listRecipes(let request):
+                return try cognitionCatalog.recipes(request)
+            case .updateMemory(let request):
+                return try await memoryMutations.update(request)
+            case .withdrawMemory(let request):
+                return try await memoryMutations.withdraw(request)
+            case .eraseMemory(let request):
+                return try await memoryMutations.erase(request)
+            case .confirmMemory(let request):
+                return try await memoryMutations.confirm(request)
+            case .moveMemory(let request):
+                return try await memoryMutations.move(request)
+            case .linkMemories(let request):
+                return try await memoryMutations.link(request)
+            case .reviewTunnel(let request):
+                return try await memoryMutations.review(request)
+            case .dataMobility(let request):
+                return try await dataMobility.execute(request)
+            }
+        } catch let error as JSONRPCError {
+            return AriaV2Envelope.refusal(
+                tool: request.toolName,
+                error: .init(code: "operation_failed", message: error.message, retryable: false)
+            )
+        } catch {
+            return AriaV2Envelope.refusal(
+                tool: request.toolName,
+                error: .init(code: "operation_failed", message: String(describing: error), retryable: false)
+            )
+        }
+    }
+
+    private func requestArguments(_ request: AriaSurfaceRequest) -> JSONValue {
+        switch request {
+        case .estatePing(let request), .estateStatus(let request), .estateMap(let request), .drainStatus(let request), .rebuildStatus(let request), .timingReport(let request):
+            if let estateID = request.estateID {
+                return .object(["estate_id": .string(estateID.uuidString)])
+            }
+            return .object([:])
+        default:
+            return .object([:])
+        }
+    }
+
+    private func requestArguments(_ request: AriaV2DataMobilityRequest) -> JSONValue {
+        switch request {
+        case .vaultExport(let path, let scope, let estateID):
+            var values: [String: JSONValue] = ["vaultPath": .string(path)]
+            if let scope { values["scope"] = .string(scope) }
+            if let estateID { values["estate_id"] = .string(AriaV2ArgumentDecoder.canonicalUUID(estateID)) }
+            return .object(values)
+        case .vaultImport(let path, let mode, let estateID):
+            var values: [String: JSONValue] = ["vaultPath": .string(path)]
+            if let mode { values["mode"] = .string(mode) }
+            if let estateID { values["estate_id"] = .string(AriaV2ArgumentDecoder.canonicalUUID(estateID)) }
+            return .object(values)
+        case .vaultJob(let jobID):
+            return .object(["job_id": .string(AriaV2ArgumentDecoder.canonicalUUID(jobID))])
+        default:
+            preconditionFailure("unselected data-mobility request reached the v2 dispatcher")
         }
     }
 
@@ -3896,8 +4286,25 @@ extension ToolDispatcher {
     /// direct runner calls in tests.
     func runReindex(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        guard await Self.reindexGuard.tryStart() else {
+        switch await Self.startReindex(kit: kit, handle: handle, now: now) {
+        case .alreadyRunning:
             return Self.textResult("reindex already running — poll moot_drain_status to watch progress")
+        case .running:
+            return Self.textResult(
+                "reindex started: backfilling every unindexed drawer to full coverage in the background — poll moot_drain_status to watch the encode queue converge")
+        }
+    }
+
+    /// Typed shared launch seam for v1 and v2. The same process-wide actor
+    /// owns the in-flight state, so a call through either surface observes the
+    /// other and never starts duplicate deferred work.
+    static func startReindex(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async -> AriaV2ReindexReceipt {
+        guard await reindexGuard.tryStart() else {
+            return .alreadyRunning
         }
         Task.detached { [kit] in
             defer { Task { await Self.reindexGuard.finish() } }
@@ -3908,8 +4315,7 @@ extension ToolDispatcher {
                 fputs("reindex: background backfill failed: \(error)\n", stderr)
             }
         }
-        return Self.textResult(
-            "reindex started: backfilling every unindexed drawer to full coverage in the background — poll moot_drain_status to watch the encode queue converge")
+        return .running
     }
 
     /// `moot_drain_status` — report every long-running background drain the
