@@ -317,13 +317,16 @@ public actor Estate {
         // NodeStore shares the same storage — schema already opened.
         let nodeStore = NodeStore(storage: storage)
         // ensure root node exists. createRoot is idempotent —
-        // returns existing root if already seeded.
+        // returns existing root if already seeded. A frozen open never seeds:
+        // the snapshot must already carry its root. `now` is the manifest's
+        // own lastModified so the open reads no clock (the engine
+        // determinism rule); the Rust twin passes `manifest.last_modified`.
         if frozen {
             guard try await nodeStore.rootNode() != nil else {
                 throw EstateError.substrateUnavailable("frozen estate has no root node")
             }
         } else {
-            _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
+            _ = try await nodeStore.createRoot(displayName: "Estate", now: manifest.lastModified)
         }
         // Backfill so the aggregate covers every active row and is
         // therefore sound to prune against. One full scan at open.
@@ -425,9 +428,11 @@ public actor Estate {
             throw EstateError.substrateUnavailable("\(error)")
         }
         let nodeStore = NodeStore(storage: storage)
-        // seed root node on create. createRoot is idempotent.
-        _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
         let manifest = try await store.readManifest()
+        // seed root node on create. createRoot is idempotent. `now` is the
+        // manifest's lastModified, which DrawerStore stamped at schema
+        // creation, so create reads no clock; the Rust twin does the same.
+        _ = try await nodeStore.createRoot(displayName: "Estate", now: manifest.lastModified)
         // Estate.create does not mint the Ed25519 keypair — that happens in
         // Estate.open (the first open after create). The created estate carries
         // no identity key store and no cached private key; callers that need

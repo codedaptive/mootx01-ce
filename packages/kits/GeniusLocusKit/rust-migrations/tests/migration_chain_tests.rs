@@ -12,6 +12,8 @@
 //!   3. A current estate is a no-op: `Ok`, stamp unchanged.
 //!   4. An unstamped estate is stamped current and no capsule runs.
 //!   5. Every refusal is an error a caller can print (`Display`).
+//!   6. Every `Ok` leaves the estate stamped CURRENT: the postcondition
+//!      `refresh_after_chain` records in the manifest.
 
 use std::sync::Arc;
 
@@ -141,4 +143,35 @@ fn unstamped_estate_is_stamped_current() {
         Some(EstateFormatVersion::CURRENT),
         "a fresh estate is born at the current format, as the Swift catalog stamps it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// §6 Every Ok leaves the estate at CURRENT
+// ---------------------------------------------------------------------------
+
+/// `refresh_after_chain` records `EstateFormatVersion::CURRENT` without
+/// re-reading the stamp, on the strength of this postcondition: whatever path
+/// the chain took to `Ok`, the estate is at CURRENT afterwards. The Swift twin
+/// reads `GLKMigrationPreparation.format`, which every success path sets to
+/// `.current`; this test is what makes the Rust shortcut a fact rather than a
+/// claim.
+#[test]
+fn a_chain_that_returns_ok_leaves_the_estate_current() {
+    for stamp in [None, Some(EstateFormatVersion::CURRENT)] {
+        let (mut coord, handle, storage) = make_estate(stamp);
+        coord
+            .run_migration_chain(&handle, NOW, default_ensemble())
+            .expect("an unstamped or current estate returns Ok");
+        assert_eq!(read_stamp(&storage), Some(EstateFormatVersion::CURRENT), "stamp {stamp:?} -> Ok -> CURRENT");
+    }
+    // A historical stamp one step below CURRENT runs the last capsule, which
+    // writes the CURRENT stamp as the chain's final write.
+    #[cfg(feature = "migration-v1-6-to-v1-7")]
+    {
+        let (mut coord, handle, storage) = make_estate(Some(EstateFormatVersion::V1_6));
+        coord
+            .run_migration_chain(&handle, NOW, default_ensemble())
+            .expect("the 1.6 -> 1.7 capsule runs on an in-memory estate");
+        assert_eq!(read_stamp(&storage), Some(EstateFormatVersion::CURRENT));
+    }
 }

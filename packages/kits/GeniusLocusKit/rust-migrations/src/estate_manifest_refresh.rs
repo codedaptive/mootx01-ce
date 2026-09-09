@@ -7,9 +7,13 @@
 // Twin of Swift `EstateManifestRefresh` (GeniusLocusKitMigrations). The
 // manifest is written through the catalog, the one place that spells estate
 // files. `created` is preserved from an existing manifest and set to `now`
-// only when there was none. Lives in the migrations crate because the chain
-// whose result it records is defined here: a chain that returns `Ok` leaves
-// the estate at `EstateFormatVersion::CURRENT`.
+// only when there was none. A manifest that is present but refused by the
+// catalog (an unknown key, a foreign name, a symbolic link among the estate
+// files) is never overwritten: the refusal is returned to the caller, because
+// replacing the file would erase the evidence and reset `created`. Lives in
+// the migrations crate because the chain whose result it records is defined
+// here: a chain that returns `Ok` leaves the estate at
+// `EstateFormatVersion::CURRENT`.
 
 use genius_locus_kit::estate_catalog::{
     EstateCatalog, EstateCatalogError, EstateManifest, EstateManifestEncryption, EstateRecord,
@@ -18,6 +22,15 @@ use genius_locus_kit::estate_format::EstateFormatVersion;
 
 /// Rewrite `estate.json` after the migration chain ran. Returns whether the
 /// file changed. `now_millis` is the wall clock at the command boundary.
+///
+/// The format recorded is `EstateFormatVersion::CURRENT` because that is the
+/// postcondition of every `Ok` from `run_migration_chain`: an unstamped
+/// estate is stamped CURRENT, a current estate returns at once, and the last
+/// capsule of a compiled chain writes the CURRENT stamp before the chain
+/// returns (`migration_chain_tests::a_chain_that_returns_ok_leaves_the_estate_current`
+/// pins it). The Swift twin `afterPrepare` reads the same fact from
+/// `GLKMigrationPreparation.format`, which every success path sets to
+/// `.current`; both ports record what the chain guarantees.
 pub fn refresh_after_chain(
     estate: &EstateRecord,
     encryption: EstateManifestEncryption,
@@ -28,14 +41,16 @@ pub fn refresh_after_chain(
 
 /// Write the manifest the estate should carry: its name, the composite schema
 /// version, `format`, `encryption`, and the existing `created` (or `now`).
-/// Returns false when the manifest already said exactly this.
+/// Returns false when the manifest already said exactly this. Returns the
+/// catalog's `UnreadableEstateManifest` when a manifest is present and
+/// refused, leaving the file untouched.
 pub fn refresh(
     estate: &EstateRecord,
     format: EstateFormatVersion,
     encryption: EstateManifestEncryption,
     now_millis: i64,
 ) -> Result<bool, EstateCatalogError> {
-    let existing = EstateCatalog::read_manifest(estate).ok();
+    let existing = existing_manifest(estate)?;
     let created = existing
         .as_ref()
         .map(|m| m.created.clone())
@@ -54,11 +69,21 @@ pub fn refresh(
     Ok(true)
 }
 
-/// Whether the estate's manifest declares plaintext.
+/// Whether the estate's manifest declares plaintext. A missing manifest means
+/// the encrypted default; a manifest the catalog refuses is not read as a
+/// declaration either (the open path refuses it in `EstateOpenPosture`).
 pub fn declares_plaintext(estate: &EstateRecord) -> bool {
-    EstateCatalog::read_manifest(estate)
-        .map(|m| m.encryption == EstateManifestEncryption::Plaintext)
-        .unwrap_or(false)
+    matches!(existing_manifest(estate), Ok(Some(m)) if m.encryption == EstateManifestEncryption::Plaintext)
+}
+
+/// The manifest on disk, `None` when there is none, or the catalog's refusal
+/// when one is present and unreadable. "No manifest" and "refused manifest"
+/// are the two cases the refresh must tell apart.
+fn existing_manifest(estate: &EstateRecord) -> Result<Option<EstateManifest>, EstateCatalogError> {
+    if !estate.manifest_path().exists() {
+        return Ok(None);
+    }
+    EstateCatalog::read_manifest(estate).map(Some)
 }
 
 /// The composite GLK schema version (the live sum of the component
@@ -93,6 +118,67 @@ pub fn iso8601_utc(epoch_millis: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use genius_locus_kit::estate_catalog::{EstateBackend, EstateRecordKind};
+
+    fn scratch_record(tag: &str) -> EstateRecord {
+        let dir = std::env::temp_dir().join(format!("estate-manifest-refresh-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        EstateRecord::with("scratch", dir.join("scratch"), EstateRecordKind::Transient, EstateBackend::Sqlite)
+    }
+
+    fn cleanup(record: &EstateRecord) {
+        let _ = std::fs::remove_dir_all(record.directory.parent().unwrap());
+    }
+
+    /// Twin of the Swift `EstateManifestRefreshTests`: a first refresh writes
+    /// `created` from `now`; a later refresh with a different clock and
+    /// posture preserves `created` and rewrites the rest; an equal manifest
+    /// returns false and leaves the bytes alone.
+    #[test]
+    fn refresh_writes_once_preserves_created_and_reports_no_change() {
+        let record = scratch_record("created");
+        assert!(refresh(&record, EstateFormatVersion::CURRENT, EstateManifestEncryption::Encrypted, 1_788_825_600_000).unwrap());
+        let first = EstateCatalog::read_manifest(&record).unwrap();
+        assert_eq!(first.created, "2026-09-08T00:00:00Z");
+        assert_eq!(first.encryption, EstateManifestEncryption::Encrypted);
+        assert_eq!(first.schema_version, composite_schema_version());
+        assert!(!declares_plaintext(&record));
+        // Same facts, later clock: nothing written, bytes untouched.
+        let bytes = std::fs::read(record.manifest_path()).unwrap();
+        assert!(!refresh(&record, EstateFormatVersion::CURRENT, EstateManifestEncryption::Encrypted, 1_788_912_000_000).unwrap());
+        assert_eq!(std::fs::read(record.manifest_path()).unwrap(), bytes);
+        // A changed posture: rewritten, `created` preserved from the first write.
+        assert!(refresh_after_chain(&record, EstateManifestEncryption::Plaintext, 1_788_912_000_000).unwrap());
+        let second = EstateCatalog::read_manifest(&record).unwrap();
+        assert_eq!(second.created, "2026-09-08T00:00:00Z", "`created` is the first write's instant");
+        assert_eq!(second.encryption, EstateManifestEncryption::Plaintext);
+        assert_eq!(second.format_version, EstateFormatVersion::CURRENT);
+        assert!(declares_plaintext(&record));
+        cleanup(&record);
+    }
+
+    /// A manifest the catalog refuses is returned as the catalog's error and
+    /// is never overwritten: the file's bytes and its `created` survive.
+    #[test]
+    fn refresh_refuses_to_overwrite_a_manifest_it_could_not_read() {
+        let record = scratch_record("refused");
+        std::fs::create_dir_all(&record.directory).unwrap();
+        let rogue = r#"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2020-01-01T00:00:00Z","path":"/elsewhere"}"#;
+        std::fs::write(record.manifest_path(), rogue).unwrap();
+        let refused = refresh(&record, EstateFormatVersion::CURRENT, EstateManifestEncryption::Encrypted, 1_788_825_600_000);
+        match refused {
+            Err(EstateCatalogError::UnreadableEstateManifest { detail, .. }) => assert!(detail.contains("path"), "{detail}"),
+            other => panic!("expected the catalog's refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(record.manifest_path()).unwrap(), rogue, "the refused file is untouched");
+        // A foreign name is refused the same way; the declaration helper reads it as no declaration.
+        std::fs::write(record.manifest_path(),
+            r#"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2020-01-01T00:00:00Z"}"#).unwrap();
+        assert!(matches!(refresh(&record, EstateFormatVersion::CURRENT, EstateManifestEncryption::Encrypted, 0),
+                         Err(EstateCatalogError::UnreadableEstateManifest { .. })));
+        assert!(!declares_plaintext(&record));
+        cleanup(&record);
+    }
 
     #[test]
     fn iso8601_matches_known_instants() {
