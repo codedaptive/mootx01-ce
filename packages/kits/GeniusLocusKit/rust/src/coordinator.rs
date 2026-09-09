@@ -1397,6 +1397,14 @@ pub struct EstateCoordinator {
     #[cfg(any(test, feature = "test-seams"))]
     pub(crate) test_force_embed_error: std::cell::RefCell<Option<String>>,
 
+    /// Test-only: when `Some`, `load_pair_scorer` calls this factory instead of
+    /// `PairScorerFactory::make`. Tests that need to count cold loads inject a
+    /// counting factory here and set a model directory resolver that returns a
+    /// valid path. The coordinator is single-threaded (accessed under `Mutex` in
+    /// tests), so `RefCell` is sound. Mirrors Swift `testPairScorerMaker`.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub(crate) test_pair_scorer_maker: std::cell::RefCell<Option<Box<dyn Fn(&CrossEncoderProfile) -> Result<Arc<dyn PairScorer>, String> + Send + Sync>>>,
+
     // The transient encode-ingest failure seam relocated into CorpusKit with the
     // drain: it is now `Corpus::arm_ingest_failure_hook` (see
     // corpus_kit::corpus_ingest_queue). Tests arm it on the estate's Corpus,
@@ -1559,6 +1567,8 @@ impl EstateCoordinator {
             test_force_vector_hamming_error: std::cell::RefCell::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             test_force_embed_error: std::cell::RefCell::new(None),
+            #[cfg(any(test, feature = "test-seams"))]
+            test_pair_scorer_maker: std::cell::RefCell::new(None),
         }
     }
 
@@ -1607,6 +1617,23 @@ impl EstateCoordinator {
     #[cfg(any(test, feature = "test-seams"))]
     pub fn inject_vector_hamming_error(&self, msg: impl Into<String>) {
         *self.test_force_vector_hamming_error.borrow_mut() = Some(msg.into());
+    }
+
+    /// Inject a counting pair-scorer factory for cross-encoder tests.
+    ///
+    /// Replaces the production `PairScorerFactory` with `factory` for all
+    /// subsequent `load_pair_scorer` calls on this coordinator. Allows
+    /// integration tests to verify cold-load counting without Candle model
+    /// assets. The seam is checked before any real factory call.
+    ///
+    /// Available when `test` or `feature = "test-seams"` is active.
+    /// Mirrors Swift `GeniusLocusKit.testPairScorerMaker`.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn set_test_pair_scorer_maker(
+        &self,
+        factory: Box<dyn Fn(&CrossEncoderProfile) -> Result<Arc<dyn PairScorer>, String> + Send + Sync>,
+    ) {
+        *self.test_pair_scorer_maker.borrow_mut() = Some(factory);
     }
 
     /// Inject an embed error for the next `recall_scored` multi-lane call.
@@ -3679,14 +3706,26 @@ impl EstateCoordinator {
         loaded.map(|scorer| (scorer, true))
     }
 
-    /// Resolve the model directory and build the scorer through
-    /// `PairScorerFactory` (candle runtime). One stderr line on failure.
+    /// Resolve the model directory and build the scorer. Uses the
+    /// `test_pair_scorer_maker` seam when injected; otherwise calls
+    /// `PairScorerFactory` (candle runtime). The seam allows tests to count
+    /// cold loads without model assets. Swift reads the ceiling from the
+    /// CoreML `input_ids` shape constraint; Rust reads `max_position_embeddings`
+    /// from `config.json`. One stderr line on failure.
     #[cfg(feature = "cross-encoder")]
     fn load_pair_scorer(
         &self,
         handle: &EstateHandle,
         profile: &CrossEncoderProfile,
     ) -> Result<Arc<dyn PairScorer>, String> {
+        // Test seam: if injected, use it instead of the production factory.
+        // The coordinator is single-threaded under Mutex in tests, so the
+        // RefCell borrow is always exclusive — no concurrent borrow can occur.
+        #[cfg(any(test, feature = "test-seams"))]
+        if let Some(ref factory) = *self.test_pair_scorer_maker.borrow() {
+            return factory(profile);
+        }
+
         let Some(dir) = self.model_directory_resolver.model_dir_for(&profile.model_id) else {
             eprintln!(
                 "mootx01 cross encoder: estate {} no model directory for {}; apply degrades",
@@ -3844,6 +3883,10 @@ impl EstateCoordinator {
             }
         };
 
+        // `Instant::now()` reads here are telemetry only (`stage_millis`); they never
+        // feed the hit order or the scores. Same pattern as QueueKit's drain loop,
+        // which reads `Instant::now()` inside its flush header without violating the
+        // engine-determinism rule.
         let started = std::time::Instant::now();
         let pool = strict_pool.len();
         let head = limits.head.min(pool);
@@ -10558,15 +10601,20 @@ impl EstateCoordinator {
         // Swift provision order), and `seed_default_wings` indexes each hint inline
         // through the encode path so hints are searchable and fingerprinted exactly
         // as user content is at drain. Seeding failure closes
-        // the estate (no half-provisioned zombie). Provision-time wall clock (epoch
-        // MILLISECONDS) at the app boundary — the engine interior never reads the
-        // clock. Milliseconds is what the store and HLC boundary consume; seconds
-        // here would stamp every default-wing hint drawer in every estate as 1970.
+        // the estate (no half-provisioned zombie). `now` is the estate's own
+        // creation instant (epoch MILLISECONDS, what the store and HLC boundary
+        // consume), read back from the manifest row the store stamped when the
+        // schema was created in step 1: the hint drawers are filed at the
+        // estate's birth and provision reads no clock of its own. Swift twin:
+        // `EstateLifecycle.provision` reads `manifest.createdAt` the same way.
         {
-            let seed_now: i64 = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
+            let seed_now: i64 = self
+                .estate_for(&handle)?
+                .manifest()
+                .map(|m| m.created_at)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("manifest read before wing seeding failed: {e:?}"),
+                })?;
             if let Err(e) = self.seed_default_wings(&handle, seed_now) {
                 let _ = self.close(&handle);
                 return Err(e);

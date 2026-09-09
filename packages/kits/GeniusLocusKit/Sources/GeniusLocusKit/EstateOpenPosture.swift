@@ -14,8 +14,15 @@
 //   file present, ciphertext                  → load the EXISTING key; FAIL CLOSED
 //                                               when it is missing
 //   file present, plaintext                   → open plaintext, unchanged
-//   transient estate (not a catalog record)   → plaintext only; ciphertext with no
-//                                               harness key file is refused
+//   transient estate (not a catalog record)   → plaintext only; ciphertext is
+//                                               refused, key or no key
+//
+// The manifest is a gate, not a hint. `resolve(for:)` reads the record's
+// `estate.json` for the plaintext declaration, and a manifest the catalog
+// refuses (unknown key, foreign name, symlinked estate file) refuses the open
+// with `Error.manifestRefused` rather than being read as "no declaration".
+// An absent manifest is not a refusal; the estate files are still checked to
+// be regular files inside the directory.
 //
 // The ciphertext branch has teeth. It must NOT mint a key when none is found:
 // minting would hand SQLCipher a brand-new wrong key for a file already
@@ -36,7 +43,15 @@
 // shared-group entitlement, so it mints into the default group.
 //
 // Only a REGISTERED estate (a catalog record) may hold a Keychain key. A
-// transient estate never touches the Keychain.
+// transient estate never touches the Keychain, so a transient ciphertext file
+// has no key it may use and is refused. The Rust twin follows the same table
+// with `db.key` beside the database as its custody; a transient ciphertext
+// file with a key file beside it is refused there too.
+//
+// HARNESS BUILDS (`MOOTX01_HARNESS_KEYFILE`; Rust feature `harness-keyfile`)
+// consult a key file beside the database before any of the above, for every
+// record kind: the benchmark harness serves scratch estates it converted
+// moments earlier. Absent from every shipping binary in both ports.
 //
 // FAIL CLOSED
 // Every key path either returns 32 key bytes or throws. Nothing returns nil and
@@ -90,6 +105,11 @@ public enum EstateOpenPosture {
         /// (PostgreSQL), so there is no file whose header decides a posture
         /// and no per-estate key. The caller opens the backend directly.
         case backendHasNoDatabaseFile(name: String, backend: String)
+        /// The record's `estate.json`, or the files beside it, failed the
+        /// catalog's manifest gate (an unknown key, a foreign name, a
+        /// symbolic link among the estate files). Carries the catalog's
+        /// refusal; the open does not proceed on a guessed declaration.
+        case manifestRefused(EstateCatalogError)
 
         public var description: String {
             switch self {
@@ -124,6 +144,8 @@ public enum EstateOpenPosture {
                 return "estate encryption key is malformed: expected \(EstateOpenPosture.keyByteCount) bytes, got \(count)"
             case .unsupportedPlatform:
                 return "estate encryption key custody is not available on this platform"
+            case let .manifestRefused(underlying):
+                return "estate manifest refused before the open posture could be decided: \(underlying)"
             }
         }
     }
@@ -178,14 +200,35 @@ public enum EstateOpenPosture {
     /// Resolve the posture for a catalog record. The record's kind decides
     /// whether a Keychain key may exist at all, and its manifest, when present,
     /// carries the plaintext declaration made at create.
+    ///
+    /// The manifest read is the catalog's gate: a present manifest that the
+    /// catalog refuses, or a symbolic link among the estate files, throws
+    /// `Error.manifestRefused` instead of resolving as "declares nothing". An
+    /// absent manifest declares nothing (the encrypted default) and the files
+    /// are still required to be regular files inside the directory.
     public static func resolve(for record: EstateRecord) throws -> (encryption: EstateEncryptionConfig, posture: Posture) {
         guard case .sqlite = record.backend else {
             throw Error.backendHasNoDatabaseFile(name: record.name, backend: record.backend.kindName)
         }
-        let declaresPlaintext = (try? EstateCatalog.readManifest(of: record))?.encryption == .plaintext
+        let declaresPlaintext = try manifestDeclaresPlaintext(record)
         return try resolve(databaseURL: record.databaseURL,
                            registered: record.kind == .registered,
                            declaresPlaintext: declaresPlaintext)
+    }
+
+    /// The record's plaintext declaration, or `Error.manifestRefused` when the
+    /// catalog refuses the manifest or the files beside it. Twin of the Rust
+    /// `manifest_declares_plaintext`; both ports refuse the same manifests.
+    static func manifestDeclaresPlaintext(_ record: EstateRecord) throws -> Bool {
+        do {
+            if FileManager.default.fileExists(atPath: record.manifestURL.path) {
+                return try EstateCatalog.readManifest(of: record).encryption == .plaintext
+            }
+            try EstateCatalog.verifyFilesStayInside(record)
+            return false
+        } catch let error as EstateCatalogError {
+            throw Error.manifestRefused(error)
+        }
     }
 
     /// Resolve the posture for an estate file that is not a catalog record (the
@@ -199,21 +242,28 @@ public enum EstateOpenPosture {
         #if MOOTX01_HARNESS_KEYFILE
         // HARNESS BUILDS ONLY — absent from every shipping binary. The benchmark
         // harness serves databases it converted moments earlier and deletes
-        // minutes later; a key file beside the databases (the Rust port's own
-        // mechanism) is consulted BEFORE the Keychain so a harness run never
-        // reaches Keychain custody on any branch.
+        // minutes later; a key file beside the databases (the Rust port's
+        // custody file) is consulted BEFORE the Keychain and before the
+        // record's kind, so a harness run never reaches Keychain custody on
+        // any branch and may serve a converted transient estate. The file's
+        // state and the manifest's declaration still decide as they do below:
+        // a declared-plaintext estate is created plaintext, key file or not.
+        // Rust twin: the `harness-keyfile` feature branch of `resolve_file`.
         if let key = try harnessInstallKey(for: databaseURL) {
             switch fileState(at: databaseURL) {
             case .plaintext: return (.plaintext, .existingPlaintext)
             case .ciphertext: return (.fullDatabase(key: key), .existingEncrypted)
-            case .absent: return (.fullDatabase(key: key), .newEncrypted)
+            case .absent:
+                if declaresPlaintext { return (.plaintext, .newPlaintextDeclared) }
+                return (.fullDatabase(key: key), .newEncrypted)
             }
         }
         #endif
 
         if !registered {
-            // Transient: plaintext, never a Keychain key. Ciphertext with no
-            // harness key file is refused rather than guessed at.
+            // Transient: plaintext, never a Keychain key. Ciphertext is refused
+            // rather than guessed at, whether or not a key exists for the path:
+            // a transient estate has no custody to use one with.
             switch fileState(at: databaseURL) {
             case .absent: return (.plaintext, .newPlaintextDeclared)
             case .plaintext: return (.plaintext, .existingPlaintext)

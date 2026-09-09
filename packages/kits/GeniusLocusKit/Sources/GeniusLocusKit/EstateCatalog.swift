@@ -55,9 +55,16 @@
 //
 // `--db <value>` and `register <value>` share one rule (`EstateSelector`):
 // `<value>` splits into a path and a name, the name being the last component.
-// A registered name selects its record. An unregistered name with a path is a
-// transient attach at `path/name/`. An unregistered name without a path is a
-// format error: registering is a separate command, `--db` never registers.
+// A bare `~` or a leading `~/` is the process home; `~user` is a literal
+// component in both ports (the Rust port follows Linux conventions and has
+// no user-database lookup). A registered name selects its record. An
+// unregistered name with a path is a transient attach at `path/name/`. An
+// unregistered name without a path is a format error: registering is a
+// separate command, `--db` never registers. `registeredRecord(selecting:)`
+// answers the other question a caller has about a `<value>`: whether it
+// names a registered estate, by name or by the canonical path of its
+// directory, so a guard that must protect registered estates can tell one
+// named by its directory from a genuine transient.
 //
 // Rust twin: `rust/src/estate_catalog.rs`. Both ports read and write the same
 // `estatecatalog.json` and must produce the same records for the same file.
@@ -358,8 +365,10 @@ public struct EstateCatalog: Sendable, Equatable {
     }
 
     /// Test seam only. Not public: production code cannot point the catalog
-    /// anywhere but the platform directory.
-    nonisolated(unsafe) static var configurationDirectoryOverride: URL?
+    /// anywhere but the platform directory. Import with
+    /// `@_spi(Testing) import GeniusLocusKit` to access from test targets.
+    @_spi(Testing)
+    nonisolated(unsafe) public static var configurationDirectoryOverride: URL?
 
     /// The default database location, read from the file. Absolute. Bare
     /// estate names resolve under it. Changed only by `moveDefault`.
@@ -480,6 +489,37 @@ public struct EstateCatalog: Sendable, Equatable {
     /// The record with this name, if registered.
     public func record(named name: String) -> EstateRecord? {
         records.first { $0.name == name }
+    }
+
+    /// The registered record whose directory is `directory`, compared by
+    /// canonical path: symbolic links in both are resolved (for the part of
+    /// each path that exists) and the results standardised, so a registered
+    /// estate reached through a linked volume or an alias resolves to its
+    /// record. Transient records are never matched. Nil when no registered
+    /// record lives there.
+    public func record(atDirectory directory: URL) -> EstateRecord? {
+        let wanted = Self.canonicalPath(of: directory)
+        return records.first { $0.kind == .registered && Self.canonicalPath(of: $0.directory) == wanted }
+    }
+
+    /// The registered record a `--db <value>` names, or nil when the value
+    /// names none: a bare name is looked up by name; a pathname is looked up
+    /// by the canonical path of `path/name/`. Throws only for a value that
+    /// is not a valid selector. Does not select and does not attach: this is
+    /// the question "is that a registered estate?", asked before a caller
+    /// decides whether a transient attach at that path is appropriate.
+    public func registeredRecord(selecting value: String) throws -> EstateRecord? {
+        let selector = try EstateSelector(value)
+        guard let directory = selector.directory else { return record(named: selector.name) }
+        return record(atDirectory: directory)
+    }
+
+    /// The comparison form of a directory path: symbolic links resolved and
+    /// the result standardised. `resolvingSymlinksInPath` resolves the
+    /// existing prefix of a path that does not fully exist, which is what the
+    /// Rust twin's `canonical` does, so both ports compare the same string.
+    static func canonicalPath(of directory: URL) -> String {
+        directory.resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     // MARK: Update and delete
@@ -668,14 +708,16 @@ public struct EstateCatalog: Sendable, Equatable {
 
     /// The split of a `--db <value>` or `register <value>` argument into the
     /// path before the last component and the name that is the last component.
-    /// `~` expands; a relative pathname is relative to the working directory.
-    /// A value with no separator has a nil path.
+    /// A bare `~` or a leading `~/` expands to the process home and nothing
+    /// else does (`~user` stays literal, as in the Rust port); a relative
+    /// pathname is relative to the working directory. A value with no
+    /// separator has a nil path.
     public struct EstateSelector: Sendable, Equatable {
         public let name: String
         public let path: URL?
 
         public init(_ value: String) throws {
-            let expanded = (value as NSString).expandingTildeInPath
+            let expanded = Self.expandingTilde(value)
             let trimmed = expanded.hasSuffix("/") && expanded.count > 1
                 ? String(expanded.dropLast()) : expanded
             guard !trimmed.isEmpty else { throw EstateCatalogError.invalidName(value) }
@@ -696,6 +738,17 @@ public struct EstateCatalog: Sendable, Equatable {
         /// `path/name/` when a path was given, nil otherwise.
         public var directory: URL? {
             path?.appendingPathComponent(name, isDirectory: true).standardizedFileURL
+        }
+
+        /// `~` and `~/...` become the process home; every other value is
+        /// returned unchanged. Deliberately not `expandingTildeInPath`, which
+        /// also expands `~user`: the Rust port has no user-database lookup, so
+        /// `~user/...` would name different directories in the two ports.
+        static func expandingTilde(_ value: String) -> String {
+            let home = NSHomeDirectory()
+            if value == "~" { return home }
+            if value.hasPrefix("~/") { return home + value.dropFirst(1) }
+            return value
         }
     }
 
