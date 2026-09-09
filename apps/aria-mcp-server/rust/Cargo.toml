@@ -23,3 +23,8 @@ aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
 # The estate catalog and open posture the entry point resolves its estate through.
 genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 moot-product-identity = { path = "../../../packages/libs/MootProductIdentity/rust" }
+
+[features]
+# Forward the compile-time ARIA public-surface selection to the server logic.
+# No default features are changed, so this binary remains v1 unless selected.
+aria-v2 = ["aria-mcp/aria-v2"]

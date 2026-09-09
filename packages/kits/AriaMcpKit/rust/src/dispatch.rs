@@ -961,7 +961,7 @@ pub fn bench_clock_now() -> i64 {
 /// Copied from the private `parse_iso8601_to_ms` in `interface_tools.rs`
 /// so `bench_clock_now` can live in `dispatch.rs` without a cross-module
 /// private dependency.
-fn bench_clock_parse_iso8601_ms(s: &str) -> Option<i64> {
+pub(crate) fn bench_clock_parse_iso8601_ms(s: &str) -> Option<i64> {
     let s = s
         .trim_end_matches('Z')
         .trim_end_matches("+00:00")

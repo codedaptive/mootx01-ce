@@ -201,6 +201,44 @@ struct HTTPServerTests {
         #expect(!tools.isEmpty)
     }
 
+    #if MOOTX01_ARIA_V2
+    @Test func v2HTTPToolsListAndMonitoringStatusRoundTrip() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        let listReply = try #require(httpRequest(
+            port: port,
+            method: "POST",
+            body: #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#
+        ))
+        #expect(listReply.status == 200)
+        let listJSON = try #require(
+            try JSONSerialization.jsonObject(with: listReply.body) as? [String: Any])
+        let listResult = try #require(listJSON["result"] as? [String: Any])
+        let listedNames = Set((try #require(listResult["tools"] as? [[String: Any]])).compactMap {
+            $0["name"] as? String
+        })
+        let selectedNames = Set(ToolProjection.tools(environment: [:]).map(\.name))
+        #expect(listedNames == selectedNames)
+        #expect(listedNames.contains("moot_monitoring_status"))
+
+        let callReply = try #require(httpRequest(
+            port: port,
+            method: "POST",
+            body: #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_monitoring_status","arguments":{}}}"#
+        ))
+        #expect(callReply.status == 200)
+        let callJSON = try #require(
+            try JSONSerialization.jsonObject(with: callReply.body) as? [String: Any])
+        let callResult = try #require(callJSON["result"] as? [String: Any])
+        let structured = try #require(callResult["structuredContent"] as? [String: Any])
+        #expect(structured["surface_version"] as? String == "v2")
+        #expect(structured["tool"] as? String == "moot_monitoring_status")
+        #expect((structured["meta"] as? [String: Any])?["effect"] as? String == "read")
+    }
+    #endif
+
     @Test func httpNonPostReturns405() async throws {
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(dispatcher)

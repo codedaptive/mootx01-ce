@@ -92,6 +92,13 @@ struct AriaMCPMain {
             exit(1)
         }
 
+        let environment = ProcessInfo.processInfo.environment
+        let frozen = EstatePosture.resolve(frozenFlag: false, environment: environment) == .frozen
+        if frozen && (arguments.inMemory || !(environment["MOOTX01_HTTP_PORT"] ?? "").isEmpty) {
+            fputs("ARIA_MCP fatal: frozen mode requires an existing estate over stdio.\n", stderr)
+            exit(1)
+        }
+
         // The catalog is the one place that knows which estates exist and
         // where. `--db` selects a registered estate by name or attaches a
         // transient one by path; absent, the active estate serves.
@@ -147,6 +154,10 @@ struct AriaMCPMain {
                 Logging.stderr.log("ARIA_MCP starting (estate: \(estate.name) [\(estate.kind.rawValue)] at \(estate.directory.path), SQLite backend)")
                 // Fail closed: never fall back to a plaintext open of an encrypted
                 // estate, and never create a new estate over one that would not open.
+                if frozen && !FileManager.default.fileExists(atPath: estate.databaseURL.path) {
+                    fputs("ARIA_MCP fatal: frozen mode requires an existing estate.\n", stderr)
+                    exit(1)
+                }
                 let resolved: (encryption: EstateEncryptionConfig, posture: EstateOpenPosture.Posture)
                 do {
                     resolved = try EstateOpenPosture.resolve(for: estate)
@@ -204,14 +215,14 @@ struct AriaMCPMain {
             // validates the bitmap layout version and issues the EstateHandle.
             // For PostgreSQL this is where the lazy pool opens its first TCP
             // connection, so an unreachable server surfaces here.
-            _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+            if !frozen { _ = try await LocusKit.Estate.create(storage: storage, owner: owner) }
             handle = try await kit.open(storage: storage, owner: owner,
-                                        identityKeyStore: identityKeyStore, federate: registered)
+                                        identityKeyStore: identityKeyStore, federate: registered, frozen: frozen)
             // This entry point creates on every open (Estate.create above is an
             // idempotent re-stamp), so the create-time default belongs here too:
             // the span encoder becomes the recall stage of an estate that names
             // no provider; an estate that already names one is left alone.
-            try await kit.provisionDefaultEncoderIfAbsent(for: handle)
+            if !frozen { try await kit.provisionDefaultEncoderIfAbsent(for: handle) }
         } catch {
             Logging.stderr.log("ARIA_MCP fatal: failed to open estate: \(redacted(error))")
             exit(1)
@@ -237,6 +248,11 @@ struct AriaMCPMain {
         // idempotent `migrate`, so reopening re-registers against migrated
         // tables and re-reads persisted vectors; nothing is dropped or rewritten.
         do {
+            if frozen {
+                guard try await EstateFormatStore(storage: storage).readIfPresent() == .current else {
+                    throw EstateError.substrateUnavailable("frozen estate requires migration before serving")
+                }
+            } else {
             let preparation = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
             // The manifest must say what is on disk: after a migration, or for
             // an estate that predates manifests, rewrite estate.json. Only a
@@ -245,7 +261,8 @@ struct AriaMCPMain {
                 preparation, estate: estate, encryption: encryption, now: Date()) {
                 Logging.stderr.log("ARIA_MCP: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
             }
-            try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+            }
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage, frozen: frozen)
             // Rebuild + register the matrix tier from the persisted audit log so
             // matrix-driven recall (co-occurrence/temporal scoring — the
             // matrixAware scoring and the matrix/lattice/weighted-all
@@ -256,7 +273,7 @@ struct AriaMCPMain {
             // = nil, so without this every matrix score column reads 0.0 until
             // the next in-process dreaming cycle. Same rebuild moot_dream performs
             // as its "un-starving" step; deterministic, so idempotent.
-            try await kit.rebuildDerivedAccelerators(for: handle)
+            try await kit.rebuildDerivedAccelerators(for: handle, frozen: frozen)
             Logging.stderr.log("ARIA_MCP recall lit: LocusKit semantic recall (structural/BM25) + CorpusKit/SynapseKit vector recall + matrix tier registered.")
         } catch {
             fputs("ARIA_MCP fatal: cannot wire semantic recall: \(redacted(error))\n", stderr)

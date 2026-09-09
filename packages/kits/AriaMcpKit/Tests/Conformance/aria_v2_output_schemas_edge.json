@@ -1,0 +1,1119 @@
+{
+  "schema_version": 1,
+  "catalog_indices": [
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82
+  ],
+  "operation_count": 15,
+  "operations": {
+    "moot_file_dataset": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/dataset_tools.rs:300-370",
+        "docs_internal/specs/ARIA_V2_CONTRACT.md:20-37"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "handle_memory_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "wing": {
+            "type": "string"
+          },
+          "columns": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source": {
+            "type": "string"
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "elevated",
+              "restricted",
+              "secret"
+            ]
+          },
+          "signatures": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "handle_memory_id",
+          "name",
+          "location",
+          "columns",
+          "rows",
+          "source",
+          "sensitivity",
+          "signatures"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_dataset_query": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/dataset_tools.rs:470-519",
+        "docs_internal/specs/ARIA_V2_CONTRACT.md:20-37"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "handle_memory_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "handle_row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string"
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "elevated",
+              "restricted",
+              "secret"
+            ]
+          },
+          "rows_returned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "integer",
+                  "number",
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "required": [
+          "dataset_id",
+          "handle_memory_id",
+          "state",
+          "sensitivity",
+          "rows_returned",
+          "limit",
+          "rows"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_dataset_stats": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/dataset_tools.rs:590-634",
+        "docs_internal/specs/ARIA_V2_CONTRACT.md:20-37"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "handle_memory_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "stats": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "distinct_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "null_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "min": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "count",
+                "distinct_count",
+                "null_count",
+                "min",
+                "max"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "dataset_id",
+          "handle_memory_id",
+          "stats"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_vault_export": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/vault_tools.rs:430-465"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "vault": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "datasets_exported": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "poll": {
+            "const": "moot_vault_job"
+          }
+        },
+        "required": [
+          "job_id",
+          "vault",
+          "scope",
+          "poll"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_vault_import": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/vault_tools.rs:690-726"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "vault": {
+            "type": "string"
+          },
+          "note_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "complete",
+              "failed"
+            ]
+          },
+          "drawers_written": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drawers_updated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "items_skipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tunnels_created": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fdc_classified": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fdc_unclassified": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "datasets_imported": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "poll": {
+            "const": "moot_vault_job"
+          }
+        },
+        "required": [
+          "job_id",
+          "vault",
+          "note_count",
+          "status"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_vault_status": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/vault_tools.rs:729-748"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "manifest_present": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string"
+          },
+          "note_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_export": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "manifest_present",
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_vault_reconcile": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/vault_tools.rs:818-1025"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "added": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "modified": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stable_source_key": {
+                  "type": "string"
+                },
+                "vault_path": {
+                  "type": "string"
+                },
+                "sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "stable_source_key",
+                "vault_path",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "import_set_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "candidate_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "missing_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "import_report": {
+            "type": "object",
+            "properties": {
+              "drawers_written": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "drawers_updated": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "items_skipped": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tunnels_created": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "fdc_classified": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "fdc_unclassified": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "drawers_skipped_unchanged": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "drawers_skipped_tombstoned": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "drawers_written",
+              "drawers_updated",
+              "items_skipped",
+              "tunnels_created",
+              "fdc_classified",
+              "fdc_unclassified",
+              "drawers_skipped_unchanged",
+              "drawers_skipped_tombstoned"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "added",
+          "modified",
+          "deleted",
+          "missing",
+          "import_set_count",
+          "candidate_count",
+          "missing_count",
+          "applied"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_vault_job": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/vault_tools.rs:1032-1110"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "import",
+              "export"
+            ]
+          },
+          "vault": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "complete",
+              "failed"
+            ]
+          },
+          "elapsed_s": {
+            "type": "number",
+            "minimum": 0
+          },
+          "drawers_written": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drawers_updated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "items_skipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tunnels_created": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fdc_classified": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fdc_unclassified": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drawers_skipped_unchanged": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drawers_skipped_tombstoned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "note_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "exported_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "kind",
+          "vault",
+          "status",
+          "elapsed_s"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_file_packet": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2PacketOperations.swift",
+        "packages/kits/AriaMcpKit/rust/src/v2/packets.rs"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "drawer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "packet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "objective": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "claims": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uncertainties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_steps": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lineage_links": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "elevated",
+              "restricted",
+              "secret"
+            ]
+          }
+        },
+        "required": [
+          "drawer_id",
+          "packet_id",
+          "schema_version",
+          "objective",
+          "sources",
+          "claims",
+          "uncertainties",
+          "next_steps",
+          "lineage_links",
+          "sensitivity"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_packet_get": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2PacketOperations.swift",
+        "packages/kits/AriaMcpKit/rust/src/v2/packets.rs"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "packet": {
+            "type": "object",
+            "properties": {
+              "drawer_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "packet_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "schema_version": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "future_schema": {
+                "type": "boolean"
+              },
+              "objective": {
+                "type": "string"
+              },
+              "sources": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "uri": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "description",
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "claims": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "statement": {
+                      "type": "string"
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "supporting_source_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "statement",
+                    "confidence",
+                    "supporting_source_ids"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "uncertainties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "next_steps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "provenance": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "agent": {
+                    "type": "string"
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "updated_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "model",
+                  "agent",
+                  "created_at",
+                  "updated_at"
+                ],
+                "additionalProperties": false
+              },
+              "lineage_links": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "derivesFrom",
+                        "respondsTo"
+                      ]
+                    },
+                    "target_packet_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "target_packet_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "drawer_id",
+              "packet_id",
+              "schema_version",
+              "future_schema",
+              "objective",
+              "sources",
+              "claims",
+              "uncertainties",
+              "next_steps",
+              "provenance",
+              "lineage_links"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "packet"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_packet_list": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2PacketOperations.swift",
+        "packages/kits/AriaMcpKit/rust/src/v2/packets.rs"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "packets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "drawer_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "packet_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "objective": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "lineage_count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "drawer_id",
+                "packet_id",
+                "objective",
+                "model",
+                "agent",
+                "lineage_count"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "packets",
+          "total"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_packet_lineage": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2PacketOperations.swift",
+        "packages/kits/AriaMcpKit/rust/src/v2/packets.rs"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "antecedents": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "root",
+          "antecedents",
+          "count"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_help": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/rust/src/v2/help.rs:38-111",
+        "docs_internal/specs/ARIA_V2_CONTRACT.md:39-45"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "build_id": {
+            "type": "string"
+          },
+          "capability_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "effective_features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "completeness": {
+            "const": "incomplete"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "callable": {
+                  "type": "boolean"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "availability": {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                },
+                "schema": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                },
+                "effects": {
+                  "type": [
+                    "object",
+                    "string",
+                    "null"
+                  ],
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                },
+                "example": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": true
+                },
+                "callable_tools": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "callable",
+                "description",
+                "availability",
+                "schema",
+                "effects",
+                "example",
+                "callable_tools"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "build_id",
+          "capability_digest",
+          "effective_features",
+          "completeness",
+          "entries"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_monitoring_set": {
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2MonitoringInspection.swift:3-5",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2MonitoringInspection.swift:28-73",
+        "docs_internal/specs/ARIA_V2_CONTRACT.md:85-87"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "monitoring": {
+            "type": "string",
+            "enum": [
+              "enabled",
+              "disabled"
+            ]
+          }
+        },
+        "required": [
+          "monitoring"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "moot_propose_contradictions": {
+      "source_anchors": [
+        "docs_internal/specs/ARIA_V2_CONTRACT.md:85-95",
+        "packages/kits/AriaMcpKit/Tests/Conformance/aria_v2_mission02_vectors.json:7062-7113"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "analysis_ref": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "candidate_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "tunnel_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "lifecycle": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "candidate_id",
+                "status"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "analysis_ref",
+          "expires_at",
+          "candidates"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "unresolved_source_gaps": [
+    {
+      "operation": "moot_monitoring_set",
+      "gap": "The current v2 source implements inspection only; no typed write service or result renderer exists. The data shape preserves the established monitoring state vocabulary and the frozen write-effect requirement."
+    },
+    {
+      "operation": "moot_propose_contradictions",
+      "gap": "The frozen contract specifies the request identity and analysis-reference result fields, but no current typed proposal service or renderer fixes candidate status/lifecycle spellings. The schema therefore keeps status and lifecycle as strings while requiring the frozen analysis_ref, expires_at, and candidate_id fields."
+    },
+    {
+      "operation": "moot_help",
+      "gap": "The current typed HelpResult lacks capability_digest even though the frozen contract requires it; the schema follows the contract."
+    }
+  ]
+}

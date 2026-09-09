@@ -61,7 +61,7 @@ use crate::dispatch::{
     bench_clock_now, clamp_limit, decode_filter_chain, error_result, optional_bool,
     optional_integer, optional_string, require_string, text_result, text_result_blocks,
 };
-use crate::estate_registry::EstateRegistry;
+use crate::estate_registry::{EstateRegistry, OpenEstate};
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 use crate::estate_posture::EstatePosture;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
@@ -3440,6 +3440,51 @@ fn run_monitoring_status(
 // Maintenance
 // ===========================================================================
 
+/// Typed receipt for a scheduled reindex. The v1 renderer supplies prose over
+/// this direct lower result; v2 consumes it without entering that renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReindexLaunch {
+    Running,
+}
+
+/// Source-faithful typed receipt from a MemPalace import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PalaceImportReceipt {
+    pub drawers_written: usize,
+    pub drawers_updated: usize,
+    pub drawers_skipped_unchanged: usize,
+    pub drawers_skipped_tombstoned: usize,
+    pub drawers_skipped_partial_write: usize,
+    pub tunnels_created: usize,
+    pub items_skipped: usize,
+    pub fdc_classified: usize,
+    pub fdc_unclassified: usize,
+    pub fields_dropped: std::collections::BTreeMap<String, usize>,
+    pub enqueued_for_encode: usize,
+}
+
+/// Source-faithful typed receipt from a seed JSON import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonImportReceipt {
+    pub seed_name: String,
+    pub drawers_written: usize,
+    pub facts_written: usize,
+    pub tunnels_created: usize,
+    pub enqueued_for_encode: usize,
+    pub subjects_provided: i64,
+    pub subjects_debt: i64,
+    pub seed_sha256: String,
+    pub drawer_id_by_record_id: std::collections::BTreeMap<String, String>,
+}
+
+/// Import failures preserve the v1 distinction between an input refusal and
+/// an operational import failure while giving v2 a typed, non-rendered seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonImportFailure {
+    Adapter(String),
+    Failed(String),
+}
+
 /// Enqueue encode jobs for every active drawer that is not yet BM25/vector-
 /// indexed in the estate. Returns the count enqueued. Idempotent. Mirrors
 /// Swift `ToolDispatch.runReindex`. Requires `&mut` coord because
@@ -3675,21 +3720,18 @@ fn run_reindex_responsive(
     Ok(total)
 }
 
-fn run_reindex(
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = registry.resolve_direct(args)?;
-    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
-    let now = bench_clock_now();
+/// Schedule the source-faithful asynchronous reindex for one admitted estate.
+/// The spawn failure remains intentionally non-fatal because the v1 behavior
+/// has always acknowledged the request after opening the rebuild span.
+pub fn start_reindex(open: &OpenEstate, now: i64) -> Result<ReindexLaunch, String> {
     // reindex now AUTO-CONTINUES (enqueue a pass → await its drain → re-collect)
     // to FULL coverage, which can take minutes on a large estate. Run it on a
     // detached worker so the HTTP handler returns immediately; the resident
     // daemon's encode-drain converges in the background. Poll moot_drain_status
     // to watch it finish. (Mirrors the palace-import background-processing model —
     // no repeated moot_reindex calls are needed, at any corpus size.)
-    let bg_coord = std::sync::Arc::clone(&estate.coord);
-    let bg_handle = estate.handle;
+    let bg_coord = std::sync::Arc::clone(&open.coord);
+    let bg_handle = open.handle;
     // moot_rebuild_status span: opened BEFORE the worker thread spawns so the
     // status never reads idle in the scheduling gap between "reindex started"
     // and the backfill actually running; closed by the thread on every exit
@@ -3707,6 +3749,19 @@ fn run_reindex(
             bg_coord.lock().unwrap().derived_rebuild_span(&bg_handle, false);
         })
         .ok();
+    Ok(ReindexLaunch::Running)
+}
+
+fn run_reindex(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve_direct(args)?;
+    // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
+    let now = bench_clock_now();
+    start_reindex(estate, now).map_err(|message| {
+        JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, message)
+    })?;
     Ok(text_result(
         "reindex started: backfilling every unindexed drawer to full coverage in the background — poll moot_drain_status to watch the encode queue converge",
     ))
@@ -3998,6 +4053,85 @@ struct FdcReclassifyChange {
     old_qid: Option<String>,
     new_code: String,
     new_qid: Option<String>,
+}
+
+/// Typed default-mode receipt for the selected v2 reclassification operation.
+/// The v2 request has no legacy apply, mode, or limit arguments, so it uses
+/// the source tool's default dry-run `suspectOnly` scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdcReclassifySnapshot {
+    pub applied: bool,
+    pub mode: String,
+    pub scanned: usize,
+    pub unchanged: usize,
+    pub candidates: usize,
+    pub updated: usize,
+    pub unclassified_after: usize,
+}
+
+/// Run the default FDC reclassification scan without the v1 dispatcher or its
+/// rendered output. This is intentionally dry-run only: v2 has no `apply`,
+/// `mode`, or `limit` request fields and must retain the v1 defaults.
+pub fn reclassify_fdc_snapshot(open: &OpenEstate) -> Result<FdcReclassifySnapshot, String> {
+    let drawers = {
+        let coord = open.coord.lock().unwrap();
+        coord.all_drawers(&open.handle)
+            .map_err(|error| describe_verb_dispatch_error(&error))?
+    };
+    let active: Vec<_> = drawers.into_iter()
+        .filter(|drawer| {
+            drawer.tombstoned_at.is_none()
+                && drawer.is_currently_believed()
+                && drawer.content_kind() != ContentKind::Dataset
+        })
+        .take(50_000)
+        .collect();
+    let inputs: Vec<(&str, lattice_lib::FdcContentKind)> = active.iter().map(|drawer| {
+        let kind = if drawer.content_kind() == ContentKind::Code {
+            lattice_lib::FdcContentKind::Code
+        } else {
+            lattice_lib::FdcContentKind::Text
+        };
+        (drawer.content.as_str(), kind)
+    }).collect();
+    let anchors = classify_contents_in_parallel(&inputs);
+
+    let mut unchanged = 0usize;
+    let mut candidates = 0usize;
+    let mut unclassified_after = 0usize;
+    for (index, drawer) in active.iter().enumerate() {
+        let old_code = normalized_fdc_code(&drawer.udc_code);
+        let old_qid = normalized_qid(drawer.wikidata_qid.as_deref());
+        let anchor = &anchors[index];
+        let new_code = normalized_fdc_code(&anchor.code);
+        let new_qid = normalized_qid(anchor.wikidata_qid.as_deref());
+        if old_code == new_code && old_qid == new_qid {
+            unchanged += 1;
+            continue;
+        }
+        if !should_repair_fdc_anchor(
+            FdcReclassifyMode::SuspectOnly,
+            &old_code,
+            old_qid.as_deref(),
+            &new_code,
+            new_qid.as_deref(),
+        ) {
+            continue;
+        }
+        candidates += 1;
+        if new_code == DEFAULT_LATTICE_CODE {
+            unclassified_after += 1;
+        }
+    }
+    Ok(FdcReclassifySnapshot {
+        applied: false,
+        mode: FdcReclassifyMode::SuspectOnly.as_str().to_owned(),
+        scanned: active.len(),
+        unchanged,
+        candidates,
+        updated: 0,
+        unclassified_after,
+    })
 }
 
 impl FdcReclassifyChange {
@@ -4341,6 +4475,55 @@ fn classify_contents_in_parallel(
         .collect()
 }
 
+/// Import a MemPalace through the typed VaultKit bridge and schedule its
+/// source-required background index continuation without rendering a v1 result.
+pub fn import_palace(
+    open: &OpenEstate,
+    palace_root: &std::path::Path,
+    mode: EncodeSpeed,
+    now: i64,
+) -> Result<PalaceImportReceipt, String> {
+    let mut coord = open.coord.lock().unwrap();
+    let mut bridge = PalaceBridge::new(&mut coord);
+    let report = bridge.import_palace(
+        palace_root,
+        &open.handle,
+        now,
+        Some(&|processed, total| eprintln!("palace import: {processed}/{total} drawers")),
+        mode,
+    ).map_err(|error| format!("palace import failed: {error}"))?;
+    let receipt = PalaceImportReceipt {
+        drawers_written: report.drawers_written,
+        drawers_updated: report.drawers_updated,
+        drawers_skipped_unchanged: report.drawers_skipped_unchanged,
+        drawers_skipped_tombstoned: report.drawers_skipped_tombstoned,
+        drawers_skipped_partial_write: report.drawers_skipped_partial_write,
+        tunnels_created: report.tunnels_created,
+        items_skipped: report.items_skipped,
+        fdc_classified: report.fdc_classified,
+        fdc_unclassified: report.fdc_unclassified,
+        fields_dropped: report.fields_dropped,
+        enqueued_for_encode: report.enqueued_for_encode,
+    };
+    drop(bridge);
+    drop(coord);
+
+    let bg_coord = std::sync::Arc::clone(&open.coord);
+    let bg_handle = open.handle;
+    std::thread::Builder::new()
+        .name("palace-import-reindex".into())
+        .spawn(move || {
+            match run_reindex_responsive(&bg_coord, &bg_handle, now) {
+                Ok(count) => eprintln!(
+                    "palace import: background processing complete — {count} drawers indexed to full coverage (auto-continued reindex), corpus embedding-basis retrained on the full import, Merkle rolled up; semantic/vector recall now live"
+                ),
+                Err(error) => eprintln!("palace import: background reindex failed: {error}"),
+            }
+        })
+        .ok();
+    Ok(receipt)
+}
+
 /// `moot_palace_import` — import a MemPalace directly into the estate,
 /// bypassing NoteIR. Reads palace/chroma.sqlite3, tunnels.json, and
 /// knowledge_graph.sqlite3 from `palace_path`, then applies all four
@@ -4355,9 +4538,6 @@ fn run_palace_import(
     let palace_root = std::path::Path::new(&palace_path);
     // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
     let now = bench_clock_now();
-    // mut: PalaceBridge holds &mut EstateCoordinator (same pattern as VaultBridge).
-    let mut coord = estate.coord.lock().unwrap();
-    let mut bridge = PalaceBridge::new(&mut coord);
     // mode (encode SPEED, default foreground): foreground drains the encode queue
     // hard on the performance cores; background yields for very large imports. The
     // WRITE strategy (bulk vs stream) is chosen automatically by source size inside
@@ -4372,49 +4552,10 @@ fn run_palace_import(
             ));
         }
     };
-    let report = match bridge.import_palace(palace_root, &estate.handle, now,
-        Some(&|processed, total| {
-            // Live progress to stderr, fired by the bridge every 10 records.
-            // The MCP response is returned only at completion, so stderr is the
-            // sole live-progress channel during a long background import.
-            eprintln!("palace import: {processed}/{total} drawers");
-        }),
-        mode)
-    {
+    let report = match import_palace(estate, palace_root, mode, now) {
         Ok(report) => report,
-        Err(e) => return Ok(error_result(&format!("palace import failed: {e}"))),
+        Err(error) => return Ok(error_result(&error)),
     };
-    // Release the bridge's &mut borrow AND the lock guard before handing off, so
-    // the background thread can re-acquire the estate lock.
-    drop(bridge);
-    drop(coord);
-    // DESIGN: the import TRIGGERS its own post-import processing in the BACKGROUND
-    // and releases the caller immediately — it does NOT rely on the AI to run
-    // moot_reindex / moot_dream next (that is not the design). A detached worker
-    // thread runs `reindex_missing`, which enqueues an encode job for every imported
-    // drawer (the resident daemon's encode-drain worker then ingests them into the
-    // BM25 + vector lanes and rolls up the touched rooms off the write path) and runs
-    // the O(N) Merkle `rollup_all`; the governor's dreaming duty builds the
-    // association matrix on its cadence. This call returns the moment the import rows
-    // are durable, so the AI is freed while indexing/rollup/dreaming proceed in the
-    // background on the resident daemon. (In a stdio one-shot the process exits when
-    // its input closes, so a caller that needs the background work to finish must keep
-    // the connection open — the resident HTTP daemon is the intended host.)
-    let bg_coord = std::sync::Arc::clone(&estate.coord);
-    let bg_handle = estate.handle;
-    std::thread::Builder::new()
-        .name("palace-import-reindex".into())
-        .spawn(move || {
-            // Lock-free enqueue so the daemon stays responsive to other HTTP
-            // calls during this 49k-drawer reindex (see run_reindex_responsive).
-            match run_reindex_responsive(&bg_coord, &bg_handle, now) {
-                Ok(n) => eprintln!(
-                    "palace import: background processing complete — {n} drawers indexed to full coverage (auto-continued reindex), corpus embedding-basis retrained on the full import, Merkle rolled up; semantic/vector recall now live"
-                ),
-                Err(e) => eprintln!("palace import: background reindex failed: {e}"),
-            }
-        })
-        .ok();
     Ok(text_result(&format!(
         "palace import complete: {} written, {} updated, {} unchanged, {} tombstoned, {} tunnels, {} skipped. \
          Rows are durable NOW, but recall lights up in stages — background indexing has started and is not yet finished (no follow-up call is needed). \
@@ -4428,6 +4569,41 @@ fn run_palace_import(
         report.tunnels_created,
         report.items_skipped,
     )))
+}
+
+/// Import a schema-v1 seed file through the typed bridge. The result carries
+/// the exact source receipt, including subject accounting and minted drawer IDs.
+pub fn import_json_seed(
+    open: &OpenEstate,
+    seed_path: &std::path::Path,
+    wing: Option<&str>,
+    mode: EncodeSpeed,
+    now: i64,
+) -> Result<JsonImportReceipt, JsonImportFailure> {
+    let mut coord = open.coord.lock().unwrap();
+    let mut bridge = JsonImportBridge::new(&mut coord);
+    let report = bridge.import_seed(
+        seed_path,
+        &open.handle,
+        wing,
+        now,
+        Some(&|processed, total| eprintln!("json import: {processed}/{total} drawers")),
+        mode,
+    ).map_err(|error| match error {
+        vault_kit::VaultKitError::AdapterError(message) => JsonImportFailure::Adapter(message),
+        error => JsonImportFailure::Failed(format!("json import failed: {error}")),
+    })?;
+    Ok(JsonImportReceipt {
+        seed_name: report.seed_name,
+        drawers_written: report.drawers_written,
+        facts_written: report.facts_written,
+        tunnels_created: report.tunnels_created,
+        enqueued_for_encode: report.enqueued_for_encode,
+        subjects_provided: report.subjects_provided,
+        subjects_debt: report.subjects_debt,
+        seed_sha256: report.seed_sha256,
+        drawer_id_by_record_id: report.drawer_id_by_record_id,
+    })
 }
 
 /// `moot_json_import` — import a seed file (rigid versioned JSON, schema
@@ -4496,28 +4672,13 @@ fn run_json_import(
         })?,
     };
 
-    let mut coord = estate.coord.lock().unwrap();
-    let mut bridge = JsonImportBridge::new(&mut coord);
-    let report = match bridge.import_seed(
-        seed_path,
-        &estate.handle,
-        wing.as_deref(),
-        now,
-        Some(&|processed, total| {
-            // Live progress to stderr, fired by the bridge every 10 records
-            // — the sole live-progress channel during a long import.
-            eprintln!("json import: {processed}/{total} drawers");
-        }),
-        mode,
-    ) {
+    let report = match import_json_seed(estate, seed_path, wing.as_deref(), mode, now) {
         Ok(report) => report,
         // Validation / collision failures are tool-level errors: the estate
         // is untouched (zero-partial-write contract) and the message names
         // the first offending element.
-        Err(vault_kit::VaultKitError::AdapterError(message)) => {
-            return Ok(error_result(&message))
-        }
-        Err(e) => return Ok(error_result(&format!("json import failed: {e}"))),
+        Err(JsonImportFailure::Adapter(message)) => return Ok(error_result(&message)),
+        Err(JsonImportFailure::Failed(message)) => return Ok(error_result(&message)),
     };
 
     let receipt = format!(
