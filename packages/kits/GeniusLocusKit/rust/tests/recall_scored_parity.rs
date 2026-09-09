@@ -313,6 +313,7 @@ fn a9_glk_recall_result_drawers_filters_none() {
         union_profile: None,
         // A-9 is a structural parity test — dense_lane_status is None for
         // a hand-constructed result (no lane was run).
+        #[cfg(feature = "whole-record-dense")]
         dense_lane_status: None,
         // No lane was run — degraded_stages is empty per contract.
         degraded_stages: vec![],
@@ -2349,5 +2350,32 @@ fn h2_two_provider_dense_consensus_records_provenance_and_outranks() {
             "consensus final {} must be >= weak-agreement final {}",
             consensus_hit.score.final_score, single_final
         );
+    }
+}
+
+#[test]
+fn internal_scored_recall_never_inherits_inner_trace_budget() {
+    use locus_kit::drawer_store::DrawerStore;
+    for mode in [GLKRecallMode::LocusOnly, GLKRecallMode::Hybrid,
+                 GLKRecallMode::UnionBest, GLKRecallMode::CorpusOnly,
+                 GLKRecallMode::NodeTreeNative] {
+        let store = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+        let mut coord = EstateCoordinator::new();
+        let handle = coord.open(store.clone(), OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let drawer = coord.capture(&handle, cap_frame("orchard radio calibration", "Lab"), NOW).unwrap();
+        let corpus = make_corpus_for_test();
+        corpus.ingest(&drawer.content, &drawer.id, NOW).unwrap();
+        coord.register_corpus(&handle, corpus);
+        let mut request = unconfirmed_request(mode, GLKRecallScoring::MatrixAware, 10)
+            .with_query_text("orchard radio calibration");
+        request.frame.trace_limit = Some(10);
+        request.trace_limit = Some(10);
+        let result = coord.recall_scored(&handle, request.clone(), NOW + 1).unwrap();
+        assert!(!result.hits.is_empty(), "{mode:?}");
+        assert_eq!(store.count_recall_traces().unwrap(), 0, "internal {mode:?}");
+        request.origin = RecallOrigin::External;
+        let result = coord.recall_scored(&handle, request, NOW + 2).unwrap();
+        assert_eq!(store.count_recall_traces().unwrap(), result.hits.len().min(10),
+            "external traces come only from the central writer for {mode:?}");
     }
 }

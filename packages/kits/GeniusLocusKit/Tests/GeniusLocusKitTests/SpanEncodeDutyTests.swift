@@ -32,6 +32,50 @@ import SynapseKit
 @Suite("SpanEncodeDuty — span-encode drain duty (ENCODER_RERANK_CONTRACT §W4)")
 struct SpanEncodeDutyTests {
 
+    @Test("span content version is the persisted FNV-1a UTF-8 value")
+    func spanContentVersionUsesFNV1a() {
+        #expect(SpanContentVersion.fnv1a64("hello") == "a430d84680aabd0b")
+        #expect(SpanContentVersion.fnv1a64("hello") != SpanContentVersion.fnv1a64("hello!"))
+    }
+
+    @Test("indexed old, absent, or malformed span sets are repair debt")
+    func indexedStaleSpanSetsRequireRepair() {
+        let content = "legacy transcript"
+        let expected = SpanContentVersion.fnv1a64(content)
+        let valid = SpanVectorRow(
+            index: 0, int8: [1, 2], scale: 0.5,
+            startWord: 0, endWord: 2, contentVersion: expected)
+        #expect(!SpanContentVersion.requiresRepair(
+            content: content, expectedDimension: 2, maxSpans: 3,
+            rows: [valid], hasMalformedRows: false))
+        #expect(SpanContentVersion.requiresRepair(
+            content: content, expectedDimension: 2, maxSpans: 3,
+            rows: [SpanVectorRow(index: 0, int8: [1, 2], scale: 0.5,
+                                 startWord: 0, endWord: 2, contentVersion: "old-content-hash")],
+            hasMalformedRows: false))
+        #expect(SpanContentVersion.requiresRepair(
+            content: content, expectedDimension: 2, maxSpans: 3,
+            rows: [SpanVectorRow(index: 0, int8: [1, 2, 3], scale: 0.5,
+                                 startWord: 0, endWord: 2, contentVersion: expected)],
+            hasMalformedRows: false))
+        #expect(SpanContentVersion.requiresRepair(
+            content: content, expectedDimension: 2, maxSpans: 3,
+            rows: [SpanVectorRow(index: 0, int8: [1, 2], scale: .nan,
+                                 startWord: 0, endWord: 2, contentVersion: expected)],
+            hasMalformedRows: false))
+        #expect(SpanContentVersion.requiresRepair(
+            content: content, expectedDimension: 2, maxSpans: 3,
+            rows: [SpanVectorRow(index: 0, int8: [1, 2], scale: 0.5,
+                                 startWord: 0, endWord: 3, contentVersion: expected)],
+            hasMalformedRows: false))
+        #expect(SpanContentVersion.requiresRepair(
+            content: content, expectedDimension: 2, maxSpans: 3,
+            rows: [], hasMalformedRows: false))
+        #expect(SpanContentVersion.requiresRepair(
+            content: content, expectedDimension: 2, maxSpans: 3,
+            rows: [valid], hasMalformedRows: true))
+    }
+
     // MARK: - Fake encoder
 
     /// Fake SpanEncoder that returns deterministic float vectors.
