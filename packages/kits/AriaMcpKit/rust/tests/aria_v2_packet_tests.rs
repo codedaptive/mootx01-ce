@@ -4,7 +4,6 @@
 //! wiring.  Keeping this feature-gated makes that integration explicit while
 //! retaining the source-faithful packet cases beside the implementation unit.
 
-#![cfg(feature = "aria-v2")]
 
 use std::collections::BTreeMap;
 

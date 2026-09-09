@@ -273,10 +273,7 @@ pub fn apply_codex_plugin(
 
 /// The committed, embedded install bundle (compact JSON). Self-contained: the
 /// installed binary carries the skill, the host map, and every package.
-#[cfg(feature = "aria-v2")]
 const INSTALL_BUNDLE_JSON: &str = include_str!("../embedded/install-bundle-v2.json");
-#[cfg(not(feature = "aria-v2"))]
-const INSTALL_BUNDLE_JSON: &str = include_str!("../embedded/install-bundle.json");
 
 /// Requested integration depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,15 +389,10 @@ pub struct InstallBundle {
 
 impl InstallBundle {
     fn selected_aria_version() -> &'static str {
-        #[cfg(feature = "aria-v2")]
         {
             // The Rust vertical reads the public selected-surface authority,
             // enabled only by the explicit Cargo feature forwarding.
             aria_mcp::v2::render::V2_SURFACE_VERSION
-        }
-        #[cfg(not(feature = "aria-v2"))]
-        {
-            "v1"
         }
     }
 
@@ -1047,7 +1039,6 @@ mod tests {
         assert!(b.host("kiro").is_none());
     }
 
-    #[cfg(feature = "aria-v2")]
     #[test]
     fn v2_embedded_bundle_identity_matches_registry() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
