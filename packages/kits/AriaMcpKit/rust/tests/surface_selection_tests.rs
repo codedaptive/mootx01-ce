@@ -1,32 +1,23 @@
 //! Selected-surface regressions.
 //!
-//! These tests keep the v1 public facade pinned while proving the bounded v2
-//! catalog, admission, frozen policy, typed MonitoringControl read seam, and
-//! independent v2 envelope. They are intentionally feature-selected: each
-//! binary has one active public surface.
+//! These tests prove the v2 catalog, admission, frozen policy, typed
+//! MonitoringControl read seam, and independent v2 envelope.
 
-#[cfg(feature = "aria-v2")]
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
-#[cfg(feature = "aria-v2")]
 use std::{fs, path::Path};
 
-#[cfg(feature = "aria-v2")]
 use aria_mcp::{
     dispatcher::Dispatcher, estate_registry::EstateRegistry, jsonrpc::JSONRPCRequest,
     v2::catalog::selected_capability_digest,
 };
 
-#[cfg(feature = "aria-v2")]
 use aria_mcp::{estate_posture::EstatePosture, monitoring_control::MonitoringControl};
 
-#[cfg(not(feature = "aria-v2"))]
-use aria_mcp::tool_list::build_tool_list_with_flags;
 
-#[cfg(feature = "aria-v2")]
 fn call(dispatcher: &Dispatcher, name: &str, arguments: serde_json::Value) -> serde_json::Value {
     let request = JSONRPCRequest::decode(&serde_json::json!({
         "jsonrpc": "2.0",
@@ -38,7 +29,6 @@ fn call(dispatcher: &Dispatcher, name: &str, arguments: serde_json::Value) -> se
     serde_json::to_value(dispatcher.handle(&request)).expect("response must serialize")
 }
 
-#[cfg(feature = "aria-v2")]
 fn tool_list(dispatcher: &Dispatcher) -> serde_json::Value {
     let request = JSONRPCRequest::decode(&serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/list"
@@ -47,7 +37,6 @@ fn tool_list(dispatcher: &Dispatcher) -> serde_json::Value {
     serde_json::to_value(dispatcher.handle(&request)).expect("response must serialize")
 }
 
-#[cfg(feature = "aria-v2")]
 fn shared_vectors() -> serde_json::Value {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR must be set during cargo test");
@@ -60,7 +49,6 @@ fn shared_vectors() -> serde_json::Value {
     serde_json::from_str(&raw).expect("shared ARIA v2 vectors must be valid JSON")
 }
 
-#[cfg(feature = "aria-v2")]
 fn mission02_catalog_operation(name: &str) -> serde_json::Value {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR must be set during cargo test");
@@ -129,7 +117,6 @@ fn mission02_catalog_operation(name: &str) -> serde_json::Value {
     operation
 }
 
-#[cfg(feature = "aria-v2")]
 fn resolve_local_schema_refs(
     value: serde_json::Value,
     definitions: &serde_json::Value,
@@ -155,7 +142,6 @@ fn resolve_local_schema_refs(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn vector<'a>(fixture: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
     fixture["vectors"]
         .as_array()
@@ -165,14 +151,12 @@ fn vector<'a>(fixture: &'a serde_json::Value, name: &str) -> &'a serde_json::Val
         .unwrap_or_else(|| panic!("shared vector missing: {name}"))
 }
 
-#[cfg(feature = "aria-v2")]
 struct MonitoringProbe {
     enabled: AtomicBool,
     reads: AtomicUsize,
     writes: AtomicUsize,
 }
 
-#[cfg(feature = "aria-v2")]
 impl MonitoringProbe {
     fn enabled() -> Self {
         Self {
@@ -183,7 +167,6 @@ impl MonitoringProbe {
     }
 }
 
-#[cfg(feature = "aria-v2")]
 impl MonitoringControl for MonitoringProbe {
     fn read(&self) -> Option<bool> {
         self.reads.fetch_add(1, Ordering::SeqCst);
@@ -196,7 +179,6 @@ impl MonitoringControl for MonitoringProbe {
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn v2_dispatcher(probe: Arc<MonitoringProbe>) -> Dispatcher {
     Dispatcher::new(
         EstateRegistry::new_inmemory(),
@@ -208,7 +190,6 @@ fn v2_dispatcher(probe: Arc<MonitoringProbe>) -> Dispatcher {
     )
 }
 
-#[cfg(feature = "aria-v2")]
 fn seed_provenance_memory(
     registry: &EstateRegistry,
     content: &str,
@@ -233,7 +214,6 @@ fn seed_provenance_memory(
         .expect("provenance fixture capture").id
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_catalog_and_admission_are_the_same_ready_subset() {
     let probe = Arc::new(MonitoringProbe::enabled());
@@ -321,7 +301,6 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
     assert!(concepts["result"]["structuredContent"]["data"]["coverDeltas"].is_array());
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_recall_recipe_family_is_selected_and_strict_before_legacy_dispatch() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -340,7 +319,6 @@ fn v2_recall_recipe_family_is_selected_and_strict_before_legacy_dispatch() {
     assert_eq!(temporal["result"]["structuredContent"]["meta"]["effect"], "read");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_vault_lifecycle_uses_the_selected_estate_and_dispatcher_job_ledger() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -398,7 +376,6 @@ fn v2_vault_lifecycle_uses_the_selected_estate_and_dispatcher_job_ledger() {
     fs::remove_dir_all(vault).expect("remove isolated vault fixture");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_contradiction_hunt_is_selected_and_proposal_is_a_frozen_write() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -426,7 +403,6 @@ fn v2_contradiction_hunt_is_selected_and_proposal_is_a_frozen_write() {
     assert_eq!(proposal["result"]["structuredContent"]["error"]["code"], "estate_frozen");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_knowledge_journal_is_selected_and_projects_optional_fact_source() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -453,7 +429,6 @@ fn v2_knowledge_journal_is_selected_and_projects_optional_fact_source() {
         .iter().any(|entry| entry["entry"] == "selected journal entry"));
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_preserves_mission01_monitoring_semantics_with_v2_effect_vocabulary() {
     let fixture = shared_vectors();
@@ -496,7 +471,6 @@ fn v2_preserves_mission01_monitoring_semantics_with_v2_effect_vocabulary() {
     assert_eq!(probe.writes.load(Ordering::SeqCst), 0);
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_rejects_inactive_names_and_arguments_before_any_control_call() {
     let probe = Arc::new(MonitoringProbe::enabled());
@@ -526,7 +500,6 @@ fn v2_rejects_inactive_names_and_arguments_before_any_control_call() {
     assert_eq!(probe.writes.load(Ordering::SeqCst), 0);
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_files_searches_gets_and_explains_through_typed_handlers() {
     let probe = Arc::new(MonitoringProbe::enabled());
@@ -596,7 +569,6 @@ fn v2_files_searches_gets_and_explains_through_typed_handlers() {
     assert_eq!(unknown["result"]["structuredContent"]["error"]["code"],"unknown_operation");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_memory_search_and_get_exclude_provenance_sensitive_rows() {
     use locus_kit::provenance::Sensitivity;
@@ -642,7 +614,6 @@ fn v2_memory_search_and_get_exclude_provenance_sensitive_rows() {
     assert!(!summary.contains("secret"));
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_synthesis_ranks_an_older_query_match_above_recent_distractors() {
     use locus_kit::provenance::Sensitivity;
@@ -719,7 +690,6 @@ fn v2_synthesis_ranks_an_older_query_match_above_recent_distractors() {
     assert_eq!(rows[0]["memory_id"], relevant.to_lowercase(), "{synthesized}");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_memory_mutations_are_selected_writes_before_legacy_dispatch() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -761,7 +731,6 @@ fn v2_memory_mutations_are_selected_writes_before_legacy_dispatch() {
     assert_eq!(refused["result"]["structuredContent"]["error"]["code"], "estate_frozen");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_review_tunnel_endorse_uses_the_selected_coordinator_ladder() {
     use locus_kit::{
@@ -794,7 +763,6 @@ fn v2_review_tunnel_endorse_uses_the_selected_coordinator_ladder() {
     }));
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_cognition_directories_advertise_only_selected_handlers_and_typed_recipes() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -857,7 +825,6 @@ fn v2_cognition_directories_advertise_only_selected_handlers_and_typed_recipes()
     assert_eq!(unavailable["result"]["structuredContent"]["error"]["code"], "estate_unavailable");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_estate_diagnostics_are_direct_read_only_selected_operations() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -894,7 +861,6 @@ fn v2_estate_diagnostics_are_direct_read_only_selected_operations() {
     assert_eq!(frozen_ping["result"]["isError"], false, "frozen inspection must proceed: {frozen_ping}");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_memory_list_is_selected_typed_and_keeps_its_cursor_between_calls() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
@@ -939,7 +905,6 @@ fn v2_memory_list_is_selected_typed_and_keeps_its_cursor_between_calls() {
     assert_eq!(invalid_filter["error"]["data"]["correction"], "correct the argument and retry moot_memory_list");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn frozen_v2_file_refuses_before_writing() {
     let probe = Arc::new(MonitoringProbe::enabled());
@@ -951,7 +916,6 @@ fn frozen_v2_file_refuses_before_writing() {
     assert_eq!(refused["result"]["structuredContent"]["error"]["code"], "estate_frozen");
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_monitoring_inspection_is_read_only_when_frozen() {
     let probe = Arc::new(MonitoringProbe::enabled());
@@ -970,7 +934,6 @@ fn v2_monitoring_inspection_is_read_only_when_frozen() {
     assert_eq!(probe.writes.load(Ordering::SeqCst), 0);
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_monitoring_set_writes_only_when_live_and_returns_confirmed_state() {
     let live_probe = Arc::new(MonitoringProbe::enabled());
@@ -989,21 +952,3 @@ fn v2_monitoring_set_writes_only_when_live_and_returns_confirmed_state() {
     assert_eq!(frozen_probe.writes.load(Ordering::SeqCst), 0);
 }
 
-#[cfg(not(feature = "aria-v2"))]
-#[test]
-fn v1_public_catalog_facade_remains_full_and_monitoring_keeps_legacy_schema() {
-    let tools = build_tool_list_with_flags(true, false);
-    let tools = tools.as_array().expect("v1 catalog must be an array");
-    assert_eq!(tools.len(), 76, "v1 catalog count changed");
-    let monitoring = tools
-        .iter()
-        .find(|tool| tool["name"] == "moot_monitoring_status")
-        .expect("v1 monitoring tool");
-    assert!(monitoring["inputSchema"]["properties"]
-        .get("enabled")
-        .is_some());
-    assert!(tools.iter().any(|tool| tool["name"] == "moot_file_memory"));
-    assert!(!tools.iter().any(|tool| tool["name"] == "moot_help"));
-    assert!(tools.iter().all(|tool| tool.get("annotations").is_none()),
-        "selected-v2 annotations must not change the v1 wire catalog");
-}

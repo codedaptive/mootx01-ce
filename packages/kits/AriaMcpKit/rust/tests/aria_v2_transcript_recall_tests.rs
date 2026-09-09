@@ -2,7 +2,6 @@
 //! strict model, so this proves the required-rerank refusal without loading a
 //! native model.
 
-#![cfg(feature = "aria-v2")]
 
 use aria_mcp::{
     dispatcher::Dispatcher,
