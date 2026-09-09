@@ -776,9 +776,12 @@ pub fn structured_recall_row(
     }
 }
 
-/// The structured twin of `render_s2_row_unhydrated` — id plus the absence
-/// marker only. Room and content stay absent: an id the text renders opaquely
-/// (gated or unhydrated) must be exactly as opaque in the structured block.
+/// Opaque structured row for an id the text path renders without a drawer
+/// (gated or unhydrated). Subject is set to `NO_SUBJECT_MARKER` so the row
+/// carries a non-nil subject (structurally admissible) while being
+/// identifiable as opaque; room and content are absent. Readers that filter
+/// on the marker skip opaque rows rather than surfacing them as "(no subject)"
+/// entries for content the caller cannot see.
 /// Mirrors Swift `ToolDispatcher.opaqueStructuredRow`.
 pub fn opaque_structured_row(id: &str) -> StructuredRow {
     StructuredRow {
