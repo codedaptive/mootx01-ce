@@ -34,7 +34,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use aria_mcp::estate_posture::EstatePosture;
-use aria_mcp::estate_registry::SqliteOpening;
+use aria_mcp::estate_registry::EstateOpening;
 use aria_mcp::server::RuntimeEstate;
 use genius_locus_kit::{
     EstateBackend, EstateCatalog, EstateOpenPosture, EstateOpenPostureKind, EstateRecord, EstateRecordKind,
@@ -98,12 +98,9 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
 
     // The catalog is the one place that knows which estates exist and where.
     // `--db` selects a registered estate by name or attaches a transient one by
-    // path; absent, the active estate serves.
-    let catalog = match db.as_deref() {
-        Some(value) => EstateCatalog::open_selecting(value),
-        None => EstateCatalog::open(),
-    };
-    let record: EstateRecord = match catalog {
+    // path; absent, the active estate serves. Routes through the funnel so the
+    // Windows base-directory adoption always precedes the catalog open.
+    let record: EstateRecord = match crate::core::estate_open::catalog(db.as_deref()) {
         Ok(catalog) => catalog.active().clone(),
         Err(e) => {
             eprintln!("mootx01 serve fatal: {e}");
@@ -134,16 +131,27 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
         // C1 (benchmark reset, RAM accuracy shape): the estate exists only for
         // this process. Intended for the benchmark harness; a durable estate
         // never selects it, and no environment value turns it on.
+        //
+        // R8 (2026-09-08): `--in-memory` serves a TRANSIENT estate whatever
+        // the record above says. The record is still resolved first, so a bad
+        // `--db` is refused before the backend is chosen, but nothing that
+        // outlives the process is minted: no federation identity, and no
+        // charter drawers in the candidate pool a RAM benchmark arm measures.
+        // Same rule in Swift `ServeCommand` and in both ports of `aria-mcp`.
         eprintln!(
             "mootx01 serve: IN-MEMORY backend (--in-memory) — \
-             estate exists only for this process; accuracy-measurement posture."
+             estate exists only for this process; accuracy-measurement posture \
+             (transient: no federation, no charters)."
         );
-        RuntimeEstate::InMemory
+        RuntimeEstate::InMemory { opening: EstateOpening::TRANSIENT }
     } else {
         match &record.backend {
             EstateBackend::Postgresql { connection_string } => {
                 eprintln!("mootx01 serve: estate '{}' on PostgreSQL", record.name);
-                RuntimeEstate::Postgresql { connection_string: connection_string.clone() }
+                RuntimeEstate::Postgresql {
+                    connection_string: connection_string.clone(),
+                    opening: EstateOpening::for_record(&record),
+                }
             }
             EstateBackend::Sqlite => {
                 let open_posture = match EstateOpenPosture::resolve(&record) {
@@ -171,7 +179,7 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
                     record.directory.display()
                 );
                 RuntimeEstate::Sqlite {
-                    opening: SqliteOpening::for_record(&record),
+                    opening: EstateOpening::for_record(&record),
                     encryption: open_posture.manifest_encryption(),
                     record: record.clone(),
                 }
