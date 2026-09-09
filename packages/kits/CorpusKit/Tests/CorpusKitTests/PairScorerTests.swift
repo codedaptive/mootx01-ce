@@ -169,5 +169,8 @@ struct RerankDirectiveTests {
         // A reason-less directive decodes from the Rust twin's shape (key absent).
         let rust = Data("{\"action\":\"bypass\",\"profile_id\":\"ms-marco-minilm-l6-cross-v1\"}".utf8)
         #expect(try JSONDecoder().decode(RerankDirective.self, from: rust) == RerankDirective.bypass())
+        let strict = try encoder.encode(RerankDirective.strictTranscript())
+        #expect(String(decoding: strict, as: UTF8.self).contains("\"requirement\":\"strict_transcript\""))
+        #expect(try JSONDecoder().decode(RerankDirective.self, from: strict) == .strictTranscript())
     }
 }

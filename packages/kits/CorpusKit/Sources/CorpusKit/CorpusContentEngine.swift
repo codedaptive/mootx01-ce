@@ -405,12 +405,22 @@ public actor CorpusContentEngine {
         storage: any Storage,
         configuration: CorpusContentConfiguration,
         source: any CorpusContentSource,
-        models: [EmbeddingModel] = [.default]
+        models: [EmbeddingModel] = [.default],
+        frozen: Bool = false
     ) async throws {
         guard !models.isEmpty else {
             throw CorpusKitError.invalidConfiguration(
                 "CorpusContentEngine requires at least one embedding model")
         }
+        if frozen {
+            guard configuration.mode == .attached else {
+                throw CorpusKitError.invalidConfiguration("frozen corpus requires attached storage")
+            }
+            for schema in [CorpusSchemaProfile.attachedDeclaration, VectorStore.schemaDeclaration,
+                           VectorRepresentationClaims.schemaDeclaration] {
+                try await storage.openExisting(schema: schema)
+            }
+        } else {
         switch configuration.mode {
         case .standalone:
 #if CORPUSKIT_STANDALONE_PASSAGES
@@ -439,12 +449,13 @@ public actor CorpusContentEngine {
         try await VectorRepresentationClaims.prepareSchemaLedger(storage: storage)
         try await storage.migrate(to: VectorRepresentationClaims.schemaDeclaration)
 
+        }
         self.storage = storage
         self.configuration = configuration
         self.source = source
         self.invertedIndex = InvertedIndexStore(storage: storage)
         self.vectorStore = VectorStore(
-            storage: storage, sidecarURL: VectorStore.defaultSidecarURL(for: storage))
+            storage: storage, sidecarURL: frozen ? nil : VectorStore.defaultSidecarURL(for: storage))
         self.basisStore = BasisStore(storage: storage)
         self.countsStore = CorpusProviderCountsStore(storage: storage)
         self.indexState = CorpusIndexStateStore(storage: storage)

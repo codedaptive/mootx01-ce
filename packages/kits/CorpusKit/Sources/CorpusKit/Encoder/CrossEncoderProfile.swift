@@ -92,6 +92,11 @@ public struct CrossEncoderProfile: Sendable, Equatable, Codable {
     /// `tokenizerHash` is `sha256(vocab.txt)` of that revision, which is the
     /// same 30 522-entry uncased BERT vocabulary the floor sentence encoder
     /// ships (`EncoderModelSpec.floor.tokenizerHash`).
+    ///
+    /// `modelVersion` remains the established short display value. Strict
+    /// transcript recall reads `minilmL6Revision` to prove the full source pin.
+    public static let minilmL6Revision = "233902d25c440f23af6f7d6e94d2946bac0bee0a"
+
     public static let minilmL6 = CrossEncoderProfile(
         modelID: "ms-marco-minilm-l6-cross-v1",
         modelVersion: "233902d2",
