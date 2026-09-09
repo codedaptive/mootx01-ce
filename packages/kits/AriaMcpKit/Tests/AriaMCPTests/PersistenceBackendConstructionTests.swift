@@ -85,7 +85,7 @@ struct PersistenceBackendConstructionTests {
     /// SQLite backend construction from a record's database URL.
     @Test func testSQLiteBackendConfigurationUsesPath() throws {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("PgPrecedenceTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("PersistenceBackendConstructionTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let dbURL = dir.appendingPathComponent("test.sqlite")
 

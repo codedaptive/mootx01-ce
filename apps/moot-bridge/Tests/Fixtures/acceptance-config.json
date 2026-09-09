@@ -7,8 +7,14 @@
       "query": "mempalace_search",
       "contentArg": "content",
       "queryArg": "query",
-      "constantArgs": { "wing": "scratch", "room": "notes" },
-      "resultFormat": { "kind": "jsonObjects", "contentKey": "text" }
+      "constantArgs": {
+        "wing": "scratch",
+        "room": "notes"
+      },
+      "resultFormat": {
+        "kind": "jsonObjects",
+        "contentKey": "text"
+      }
     }
   },
   "backendB": {
@@ -20,8 +26,13 @@
       "contentArg": "content",
       "queryArg": "query",
       "subjectArg": "subject",
-      "constantArgs": { "location": "scratch/notes" },
-      "resultFormat": { "kind": "mootText" }
+      "constantArgs": {
+        "wing": "scratch",
+        "location": "notes"
+      },
+      "resultFormat": {
+        "kind": "mootText"
+      }
     }
   },
   "primary": "mempalace"

@@ -342,14 +342,23 @@ final class BridgeServer {
 
     /// The subject the bridge derives for a write tool that requires one: the
     /// content's first non-empty line, whitespace-trimmed, cut to the 120
-    /// characters mootx01 accepts. Exposed as `static` for unit testing.
+    /// UNICODE SCALARS mootx01 accepts. Exposed as `static` for unit testing.
+    ///
+    /// Scalars, not Characters. The receiving contract counts scalars (the
+    /// Rust server's `subject.chars().count()`), and a grapheme cluster can
+    /// carry several scalars, so a 120-Character cut could emit a subject the
+    /// server refuses — the mirror would be dropped for content whose first
+    /// line runs to combining marks or emoji. Cutting on the same unit the
+    /// receiver counts means whatever the bridge emits, the server accepts.
+    /// The two ports cut identically: Rust's `chars().take(...)` is the same
+    /// unit.
     static let derivedSubjectLimit = 120
     static func derivedSubject(from content: String) -> String {
         let firstLine = content
             .split(omittingEmptySubsequences: true, whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty } ?? "memory"
-        return String(firstLine.prefix(derivedSubjectLimit))
+        return String(String.UnicodeScalarView(firstLine.unicodeScalars.prefix(derivedSubjectLimit)))
     }
 
     /// Forwards an arbitrary id-bearing method (e.g. initialize) to the primary
