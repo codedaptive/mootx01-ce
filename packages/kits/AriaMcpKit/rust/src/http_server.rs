@@ -1482,13 +1482,19 @@ fn get_graph_snapshot(
 
 /// GET /api/admin/estates — list all estates in the registry.
 ///
-/// The backend is the one the registry opened its default estate on, never
-/// read from the environment — the same words Swift's
-/// `HTTPServer.adminEstatesSnapshot` takes from `kit.storageBackend(for:)`.
+/// The backend is read PER ESTATE from its own registry entry, never from the
+/// environment and never from the default's backend: a registry whose default
+/// is SQLite can carry a PostgreSQL or in-memory extra. Twin of Swift's
+/// `HTTPServer.adminEstatesSnapshot`, which calls `kit.storageBackend(for:)`
+/// inside its per-handle loop and reports `"closed"` for a handle that went
+/// away between the listing and the read; the Rust twin of that race is an
+/// estate id in the key set whose entry is already gone.
 /// Estate name and mount state are read from the registry entry (defaulting
 /// to UUID-as-name and "mounted" when not set).
 fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry) -> (u16, Vec<u8>) {
-    let backend = registry.backend.label();
+    /// The label Swift reports for a handle whose backend can no longer be
+    /// read because the estate closed under the snapshot.
+    const CLOSED: &str = "closed";
 
     let mut estates: Vec<serde_json::Value> = Vec::new();
     let default_uuid = registry.default.estate_id.to_string();
@@ -1496,7 +1502,7 @@ fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry)
         "estateUUID": default_uuid,
         "estateName": registry.default.estate_name,
         "kind": "GLK",
-        "backend": backend,
+        "backend": registry.default.backend.label(),
         "mountState": "mounted"
     }));
     // Extras keyed by UUID; sort for deterministic output.
@@ -1509,11 +1515,9 @@ fn get_admin_estates_snapshot(registry: &crate::estate_registry::EstateRegistry)
     extra_uuids.sort();
     for uuid_str in &extra_uuids {
         let uuid_parsed = uuid::Uuid::parse_str(uuid_str).unwrap_or_default();
-        let name = registry
-            .extras
-            .get(&uuid_parsed)
-            .map(|e| e.estate_name.as_str())
-            .unwrap_or(uuid_str.as_str());
+        let entry = registry.extras.get(&uuid_parsed);
+        let name = entry.map(|e| e.estate_name.as_str()).unwrap_or(uuid_str.as_str());
+        let backend = entry.map(|e| e.backend.label()).unwrap_or(CLOSED);
         estates.push(serde_json::json!({
             "estateUUID": uuid_str, "estateName": name,
             "kind": "GLK", "backend": backend, "mountState": "mounted"
