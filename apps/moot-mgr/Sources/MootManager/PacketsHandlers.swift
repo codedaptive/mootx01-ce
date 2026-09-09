@@ -157,7 +157,11 @@ public actor PacketsEngine {
             filterChain: [.currentlyBelieve, .exportable, .inWing(wing), .inRoom(WorkPacketStore.room)],
             hydrationLevel: .full
         )
-        let drawers = try await client.getDrawers(ids: [drawerID], matchingFrame: frame)
+        // The manager reads packets it filed itself, so the typed UUID lookup
+        // is enough; only the portable ARIA v2 read seam opts in to the
+        // physical UUID spelling.
+        let drawers = try await client.getDrawers(
+            ids: [drawerID], matchingFrame: frame, preservePhysicalUUIDSpellings: false)
         guard let drawer = drawers.first else { return nil }
         guard let packet = try? decode(content: drawer.content) else { return nil }
         return PacketDetailPayload(
@@ -190,7 +194,11 @@ public actor PacketsEngine {
             filterChain: [.currentlyBelieve, .exportable, .inWing(wing), .inRoom(WorkPacketStore.room)],
             hydrationLevel: .full
         )
-        let drawers = try await client.getDrawers(ids: [drawerID], matchingFrame: frame)
+        // The manager reads packets it filed itself, so the typed UUID lookup
+        // is enough; only the portable ARIA v2 read seam opts in to the
+        // physical UUID spelling.
+        let drawers = try await client.getDrawers(
+            ids: [drawerID], matchingFrame: frame, preservePhysicalUUIDSpellings: false)
         guard let drawer = drawers.first else { return nil }
         guard let packet = try? decode(content: drawer.content) else { return nil }
         return PacketLineagePayload(drawerID: drawerID,
