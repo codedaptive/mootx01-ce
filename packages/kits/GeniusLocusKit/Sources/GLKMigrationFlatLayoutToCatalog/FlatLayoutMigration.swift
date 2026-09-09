@@ -9,8 +9,15 @@
 // populated flat estate that no catalog record names; without this capsule
 // the first catalog open would create an empty default record beside it and
 // every later step, and the next `serve`, would treat the machine as a first
-// run. `mootx01 upgrade` is the only migration vehicle, so this is where the
-// move lives.
+// run.
+//
+// Two commands call it, not one. `upgrade` is the migration vehicle for a
+// machine already installed, and `install` re-run over a 1.0.x machine meets
+// the same flat estate as a mandatory reuse before it can wire anything
+// (ruling R1, 2026-09-08: install may invoke a catalogued capsule; the
+// capsule code stays here in the upgrade machinery rather than moving into
+// the installer). Both go through `FlatLayoutStep`, which is where the two
+// call sites are named.
 //
 // What the capsule does:
 //   1. Looks for the flat database at `<configuration>/estate.sqlite`. Absent
@@ -38,17 +45,40 @@
 // database. Had the database moved first, a crash would leave its WAL behind
 // at the old path and the next run would see nothing to do.
 //
+// What did NOT move, and why there is no base-directory capsule on this port:
+// the Apple base directory is `~/Library/Application Support/com.mootx01.ce`
+// on a 1.0.x install and on this one alike; the folder name is
+// `MootProductIdentity.Storage.applicationSupportFolder` and it has held that
+// value since before the catalog. Only the layout inside the base moved,
+// which is this capsule. The Rust port has the opposite case: its layout was always
+// `databases/<name>/` but its Windows base moved from `%LOCALAPPDATA%\MOOTx01`
+// to `%LOCALAPPDATA%\com.mootx01.ce`, so that port carries a base-directory
+// capsule (`rust-migrations/src/windows_base_directory_adoption.rs`) and no
+// layout capsule. The two ports' capsule sets differ for that reason and no
+// other.
+//
 // The caller owns the daemon. A flat estate has no PID marker (the marker
 // arrived with the catalog), so the marker-based quiesce the other upgrade
 // steps use cannot see the resident that serves it; the command stops the
 // launchd daemon unconditionally around this capsule because a flat estate at
 // the configuration directory is by definition the resident's estate.
 //
-// Compiled only under the `MigrationFlatLayoutToCatalog` trait, which every
-// migration floor from 1.0 through 1.7 enables: every flat estate that ever
-// shipped is at or below format 1.7. Retirement: raise the product's floor
-// above 1.7, delete this target, its trait, its test target, the umbrella
-// entry in `GLKMigrationCatalog`, and the one block in `UpgradeCommand`.
+// Compiled under the `MigrationFlatLayoutToCatalog` trait, which the package
+// enables by default and which every migration floor from 1.0 through 1.7
+// also enables: every flat estate that ever shipped is at or below format
+// 1.7. The trait is default-on because this target's only dependencies are
+// GeniusLocusKit and MootProductIdentity, both already in every plain build,
+// so a bare `swift test` runs its tests at no cost in build graph.
+//
+// Retirement: raise the product's floor above 1.7, then delete
+//   - this target, its trait, its default-trait entry and its test target
+//     (`packages/kits/GeniusLocusKit/Package.swift`),
+//   - the umbrella entry in `GeniusLocusKitMigrations/GLKMigrationCatalog`,
+//   - `apps/mootx01/Sources/mootx01/Commands/FlatLayoutStep.swift`, the whole
+//     file, which is the product's only caller of this enum, and
+//   - both of its call sites: the `FlatLayoutStep.pending`/`migrate` block in
+//     `UpgradeCommand.run` and the one in
+//     `InstallCommand.handleExistingDatabase`.
 // Nothing else in the product knows the flat layout existed.
 
 import Foundation
