@@ -54,8 +54,6 @@ import MootProductIdentity
 import OSLog
 import AriaMCP
 import LocusKit
-import PersistenceKit
-import PersistenceKitSQLite
 
 private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.Capture")
 
