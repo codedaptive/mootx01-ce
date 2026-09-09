@@ -83,10 +83,12 @@ public enum KGFactIdentityBackfill {
     ///                        before PAR-MCP-2 corrected it to
     ///                        "mootx01"; estates written by that build
     ///                        carry it.
-    ///   - "Gateway"         — the App's `MootBridge.attachSQLite`
-    ///                        default `serverName`, forwarded verbatim
-    ///                        as the host identity for disk estates
-    ///                        served through the App gateway.
+    ///   - "Gateway"         — the App's `MootBridge` default
+    ///                        `serverName` (`attachInMemory(serverName:)`
+    ///                        and the catalog-record attach pass the
+    ///                        same value), forwarded verbatim as the
+    ///                        host identity for estates served through
+    ///                        the App gateway.
     /// A value outside this set is never treated as a host identity.
     public static let knownHostIdentities: Set<String> = [
         "mootx01", "aria-mcp-server", "aria-mcp", "Gateway",

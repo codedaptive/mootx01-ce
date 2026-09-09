@@ -1,4 +1,3 @@
-import Darwin   // Darwin.getenv — live env read for the charter-skip seam
 import Foundation
 import MootProductIdentity
 import IntellectusLib
@@ -191,6 +190,12 @@ public extension GeniusLocusKit {
         // identity is minted here into the caller's key store.
         let handle = try await open(storage: storage, owner: owner,
                                     identityKeyStore: identityKeyStore, federate: true)
+        // The one instant provision stamps with: the estate's own creation
+        // time, read back from the manifest DrawerStore wrote when the schema
+        // was created in step 1. The format stamp (2b) and the wing hints (2c)
+        // both carry it, so provision reads no clock of its own (the engine
+        // determinism rule). Rust twin: `provision` reads `manifest().created_at`.
+        let createdAt = try await estate(for: handle).manifest.createdAt
 
         // Step 2a: a fresh estate is born with the span encoder as its default
         // recall stage. Written BEFORE wiring so this same open activates it
@@ -217,7 +222,7 @@ public extension GeniusLocusKit {
         do {
             // A fresh GLK provision is born at the current estate format. This
             // is the only non-migration path allowed to create the format stamp.
-            try await EstateFormatStore(storage: formatStorage).stamp(.current, now: Date())
+            try await EstateFormatStore(storage: formatStorage).stamp(.current, now: createdAt)
             // Wire via the shared seam (also called by the serve entry points so a
             // bare-opened served estate gets the same Corpus + VectorStore + encode
             // queue — the semantic recall lanes — without re-stamping
@@ -236,8 +241,9 @@ public extension GeniusLocusKit {
 
         // Step 2c: Seed the seven default wings.
         // Delegates to `seedDefaultWings(for:now:)` — the single seam that owns
-        // the idempotent seeding loop. Provision passes a fresh Date() as `now`;
-        // the serve open path calls the same method unconditionally so bare estates
+        // the idempotent seeding loop. Provision passes the estate's creation
+        // instant as `now`; the serve open path calls the same method
+        // unconditionally so bare estates
         // opened via `mootx01 serve` receive the same wings without re-stamping
         // the manifest. The method skips wings whose `AI_Charter_Hint` drawer
         // already exists so calling it again on a pre-seeded estate is a safe no-op.
@@ -253,7 +259,7 @@ public extension GeniusLocusKit {
         // and an `underlyingEstateFailure` is thrown so the caller sees the error
         // rather than silently receiving an un-seeded estate.
         do {
-            try await seedDefaultWings(for: handle, now: Date())
+            try await seedDefaultWings(for: handle, now: createdAt)
         } catch {
             // Close the half-seeded estate to avoid a zombie in the registry.
             try? await close(handle)

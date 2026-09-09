@@ -16,7 +16,7 @@
 
 import Foundation
 import GeniusLocusKit
-import GLKMigrationFlatLayoutToCatalog
+@testable import GLKMigrationFlatLayoutToCatalog   // moveOrder, to pin the fixture against the capsule's list
 import Testing
 
 @Suite("FlatLayoutMigration")
@@ -61,12 +61,16 @@ struct FlatLayoutMigrationTests {
     func fullSetMoves() throws {
         let configuration = try makeConfigurationDirectory()
         let record = defaultRecord(in: configuration)
+        // Every entry of `moveOrder`, including the manifest and PID marker a
+        // pre-catalog build may have left, so the fixture covers the whole list.
         let names = [
             EstateCatalogNames.database, EstateCatalogNames.databaseWAL, EstateCatalogNames.databaseSHM,
             EstateCatalogNames.queue, EstateCatalogNames.queueWAL, EstateCatalogNames.queueSHM,
             EstateCatalogNames.vectors, EstateCatalogNames.drainLease,
+            EstateCatalogNames.manifest, EstateCatalogNames.pid,
             EstateCatalogNames.legacyEncryptionOptOut,
         ]
+        #expect(Set(names) == Set(FlatLayoutMigration.moveOrder), "the fixture names every file the capsule moves")
         try write(names + ["daemon.port"], in: configuration)
         #expect(FlatLayoutMigration.pending(configurationDirectory: configuration, record: record))
 

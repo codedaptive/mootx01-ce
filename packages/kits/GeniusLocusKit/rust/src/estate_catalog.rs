@@ -20,9 +20,13 @@
 // - A record names its backend: SQLite (the default) keeps the database in
 //   the directory; PostgreSQL keeps it at a connection string on the record.
 // - `--db <value>` and `register <value>` share `EstateSelector`: the value
-//   splits into a path and a name (the last component). A registered name
-//   selects its record; an unregistered name with a path attaches a
-//   transient record at `path/name/`; an unregistered bare name is refused.
+//   splits into a path and a name (the last component). A bare `~` or a
+//   leading `~/` is the process home; `~user` is a literal component (Linux
+//   conventions, no user-database lookup; the Swift port matches). A
+//   registered name selects its record; an unregistered name with a path
+//   attaches a transient record at `path/name/`; an unregistered bare name
+//   is refused. `registered_record_selecting` answers whether a value names
+//   a registered estate, by name or by the canonical path of its directory.
 //
 // Paths are `std::path::PathBuf`s. The Swift port standardises URLs
 // lexically (`standardizedFileURL`); `normalize` here does the same so the
@@ -608,6 +612,34 @@ impl EstateCatalog {
         self.records.iter().find(|r| r.name == name)
     }
 
+    /// The registered record whose directory is `directory`, compared by
+    /// canonical path: symbolic links in both are resolved (for the part of
+    /// each path that exists) and the results normalised, so a registered
+    /// estate reached through a linked volume resolves to its record.
+    /// Transient records are never matched. None when no registered record
+    /// lives there. Twin of Swift `record(atDirectory:)`.
+    pub fn record_at_directory(&self, directory: &Path) -> Option<&EstateRecord> {
+        let wanted = canonical(directory);
+        self.records
+            .iter()
+            .find(|r| r.kind == EstateRecordKind::Registered && canonical(&r.directory) == wanted)
+    }
+
+    /// The registered record a `--db <value>` names, or None when the value
+    /// names none: a bare name is looked up by name; a pathname by the
+    /// canonical path of `path/name/`. Fails only for a value that is not a
+    /// valid selector. Selects nothing and attaches nothing: this is the
+    /// question "is that a registered estate?", asked before a caller decides
+    /// whether a transient attach at that path is appropriate. Twin of Swift
+    /// `registeredRecord(selecting:)`.
+    pub fn registered_record_selecting(&self, value: &str) -> Result<Option<&EstateRecord>, EstateCatalogError> {
+        let selector = EstateSelector::parse(value)?;
+        Ok(match selector.directory() {
+            Some(directory) => self.record_at_directory(&directory),
+            None => self.record_named(&selector.name),
+        })
+    }
+
     // MARK: Update and delete
 
     /// Register a new estate at a directory of the caller's choosing and save.
@@ -818,6 +850,34 @@ impl EstateCatalog {
 /// when it does not (a transient attach may name a directory not yet created).
 fn resolve(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
+}
+
+/// The comparison form of a directory path: the longest existing prefix
+/// canonicalised (symbolic links resolved) with the remaining components
+/// appended as given, then normalised. A path that does not fully exist still
+/// compares by where it would be. Twin of Swift's `resolvingSymlinksInPath()`
+/// followed by `standardizedFileURL`, which resolves the existing prefix the
+/// same way, so both ports compare the same string for the same input.
+fn canonical(path: &Path) -> PathBuf {
+    let normalized = normalize(path);
+    let mut existing = normalized.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(resolved) = fs::canonicalize(existing) {
+            let mut out = resolved;
+            for component in tail.iter().rev() {
+                out.push(component);
+            }
+            return normalize(&out);
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return normalized,
+        }
+    }
 }
 
 /// Write through a sibling temporary file and rename it into place, so a
@@ -1100,6 +1160,57 @@ mod tests {
         assert_eq!(attached.active().selector_argument(), "/Volumes/tmp/scratch7");
         assert_eq!(EstateCatalog::open_selecting(&attached.active().selector_argument()).unwrap().active(),
                    attached.active());
+    }
+
+    /// `~` and `~/` expand; `~user` is a literal component in both ports (the
+    /// Swift selector was aligned to this rule; `expandingTildeInPath` is not used).
+    #[test]
+    fn selector_expands_a_bare_tilde_only() {
+        let home = identity::process_home();
+        assert_eq!(EstateSelector::parse("~/moot/x").unwrap().directory(), Some(normalize(&home.join("moot/x"))));
+        let user = EstateSelector::parse("~bob/x").unwrap();
+        let cwd = normalize(&std::env::current_dir().unwrap());
+        assert_eq!(user.path, Some(cwd.join("~bob")), "`~bob` is a directory named `~bob` under the working directory");
+        assert_eq!(user.name, "x");
+    }
+
+    /// A registered estate named by its directory (through a symbolic link or
+    /// not) is found as its record; a genuine transient path and a bare
+    /// unregistered name are not. `open_selecting` still attaches a transient
+    /// for any pathname; this is the question a guard asks before it does.
+    #[test]
+    fn registered_record_resolves_by_canonical_directory() {
+        let s = configuration();
+        let real = s.dir.join("volumes/big");
+        fs::create_dir_all(real.join("research")).unwrap();
+        let mut catalog = EstateCatalog::create().unwrap();
+        catalog.register("research", &real.join("research"), EstateBackend::Sqlite).unwrap();
+        // By name.
+        assert_eq!(catalog.registered_record_selecting("research").unwrap().map(|r| r.name.as_str()), Some("research"));
+        assert_eq!(catalog.registered_record_selecting("nowhere").unwrap(), None);
+        // By directory, plain and with a `..` in the value.
+        let direct = format!("{}/research", real.display());
+        assert_eq!(catalog.registered_record_selecting(&direct).unwrap().map(|r| r.name.as_str()), Some("research"));
+        let dotted = format!("{}/other/../research", real.display());
+        assert_eq!(catalog.registered_record_selecting(&dotted).unwrap().map(|r| r.name.as_str()), Some("research"));
+        // Through a symbolic link to the volume.
+        #[cfg(unix)]
+        {
+            let link = s.dir.join("linked-volume");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let via_link = format!("{}/research", link.display());
+            assert_eq!(catalog.registered_record_selecting(&via_link).unwrap().map(|r| r.name.as_str()), Some("research"));
+            assert_eq!(catalog.record_at_directory(&link.join("research")).map(|r| r.name.as_str()), Some("research"));
+        }
+        // An unregistered directory, and a registered directory's sibling: none.
+        assert_eq!(catalog.registered_record_selecting(&format!("{}/scratch", real.display())).unwrap(), None);
+        assert_eq!(catalog.record_at_directory(&real.join("research2")), None);
+        // A transient record in the array is never matched by directory.
+        let attached = EstateCatalog::open_selecting(&format!("{}/scratch", real.display())).unwrap();
+        assert_eq!(attached.active().kind, EstateRecordKind::Transient);
+        assert_eq!(attached.record_at_directory(&real.join("scratch")), None);
+        // A malformed value is a selector error, not "none".
+        assert!(matches!(catalog.registered_record_selecting("a/.."), Err(EstateCatalogError::InvalidName(_))));
     }
 
     #[test]

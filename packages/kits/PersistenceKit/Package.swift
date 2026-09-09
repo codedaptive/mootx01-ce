@@ -148,7 +148,11 @@ let package = Package(
         .target(
             name: "PersistenceKitSQLite",
             dependencies: [
-                .product(name: "MootProductIdentity", package: "MootProductIdentity"),"PersistenceKit", "SubstrateTypes", "SQLCipher"],
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+                "PersistenceKit",
+                "SubstrateTypes",
+                "SQLCipher",
+            ],
             path: "Sources/PersistenceKitSQLite"
         ),
         .target(
@@ -175,7 +179,10 @@ let package = Package(
         .target(
             name: "PersistenceKitReplication",
             dependencies: [
-                .product(name: "MootProductIdentity", package: "MootProductIdentity"),"PersistenceKit", "SubstrateTypes"],
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+                "PersistenceKit",
+                "SubstrateTypes",
+            ],
             path: "Sources/PersistenceKitReplication"
         ),
 

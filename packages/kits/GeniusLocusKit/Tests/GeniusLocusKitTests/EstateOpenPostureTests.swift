@@ -27,6 +27,9 @@ import PersistenceKitSQLite
 #if os(macOS) && canImport(LocalAuthentication)
 import LocalAuthentication
 #endif
+#if MOOTX01_HARNESS_KEYFILE
+import EstateEncryption   // the harness key file the table's harness rows write
+#endif
 
 @Suite("EstateOpenPosture — new, ciphertext, plaintext and transient paths, and key custody")
 struct EstateOpenPostureTests {
@@ -209,7 +212,7 @@ struct EstateOpenPostureTests {
 
     // MARK: - Transient estates never touch the Keychain
 
-    @Test("A transient estate opens plaintext whatever the declaration, and refuses ciphertext")
+    @Test("A transient estate opens plaintext whatever the declaration, and refuses ciphertext with or without a key")
     func transientEstateIsPlaintextOnly() throws {
         let directory = try makeTempDirectory()
         defer { cleanup(directory) }
@@ -222,6 +225,176 @@ struct EstateOpenPostureTests {
         #expect(throws: EstateOpenPosture.Error.self) {
             _ = try EstateOpenPosture.resolve(for: record)
         }
+        // The row the ports once decided differently: a key exists for the
+        // path, and the transient record still may not use it. The Rust twin
+        // refuses a `db.key` beside a transient ciphertext file the same way.
+        guard EstateOpenPosture.isKeyCustodyAvailable else { return }
+        defer { deleteKeychainKey(for: record.databaseURL) }
+        do { _ = try EstateOpenPosture.provideKey(databaseURL: record.databaseURL) } catch { return }
+        #expect(throws: EstateOpenPosture.Error.self) {
+            _ = try EstateOpenPosture.resolve(for: record)
+        }
+    }
+
+    // MARK: - The shared decision table
+
+    private struct PostureRow: Decodable {
+        let id: String
+        let registered: Bool
+        let declaresPlaintext: Bool
+        let file: String
+        let key: Bool
+        let harness: Bool
+        let expected: String
+    }
+    private struct PostureFixture: Decodable { let rows: [PostureRow] }
+
+    /// Resolves Tests/Conformance/estate_open_posture_fixture.json relative to
+    /// this file, the way the other cross-port fixtures are found.
+    private func postureFixtureURL() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Conformance")
+            .appendingPathComponent("estate_open_posture_fixture.json")
+    }
+
+    /// The name of an outcome as the shared fixture spells it.
+    private func outcomeName(_ run: () throws -> (encryption: EstateEncryptionConfig, posture: EstateOpenPosture.Posture)) -> String {
+        do {
+            switch try run().posture {
+            case .newEncrypted: return "newEncrypted"
+            case .newPlaintextDeclared: return "newPlaintextDeclared"
+            case .existingEncrypted: return "existingEncrypted"
+            case .existingPlaintext: return "existingPlaintext"
+            }
+        } catch let error as EstateOpenPosture.Error {
+            switch error {
+            case .encryptedEstateKeyMissing: return "encryptedEstateKeyMissing"
+            case .keychainUnavailable: return "keychainUnavailable"
+            case .malformedKey: return "malformedKey"
+            case .unsupportedPlatform: return "unsupportedPlatform"
+            case .backendHasNoDatabaseFile: return "backendHasNoDatabaseFile"
+            case .manifestRefused: return "manifestRefused"
+            }
+        } catch {
+            return "\(error)"
+        }
+    }
+
+    /// Every row of the shared decision table, driven through
+    /// `resolve(databaseURL:registered:declaresPlaintext:)`. The Rust twin
+    /// (`estate_open_posture::tests::posture_table_matches_the_shared_fixture`)
+    /// reads the same file and runs every row unconditionally; it is the model.
+    /// Here the key-bearing rows need a Keychain item. On a machine whose
+    /// Keychain is usable every shipping row runs and a skipped row is a
+    /// failure; where the Keychain is unusable the key-bearing rows are
+    /// skipped and reported as a count, never silently folded into the pass.
+    @Test("The posture decision table matches the shared cross-port fixture row by row")
+    func postureTableMatchesTheSharedFixture() throws {
+        let fixture = try JSONDecoder().decode(PostureFixture.self, from: Data(contentsOf: postureFixtureURL()))
+        #expect(fixture.rows.count >= 12, "the table has at least the twelve shipping rows")
+        #if MOOTX01_HARNESS_KEYFILE
+        let harnessBuild = true
+        #else
+        let harnessBuild = false
+        #endif
+        let rows = fixture.rows.filter { $0.harness == harnessBuild }
+        // Probe once: can this machine mint and read back an estate key?
+        let keychainUsable: Bool = {
+            guard EstateOpenPosture.isKeyCustodyAvailable else { return false }
+            let probe = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                .appendingPathComponent("posture-table-probe-\(UUID().uuidString)/estate.sqlite")
+            defer { EstateOpenPosture.disposeKey(databaseURL: probe) }
+            return (try? EstateOpenPosture.provideKey(databaseURL: probe)) != nil
+        }()
+        var exercised = 0
+        var skipped: [String] = []
+        for row in rows {
+            let directory = try makeTempDirectory()
+            defer { cleanup(directory) }
+            let databaseURL = directory.appendingPathComponent("estate.sqlite")
+            defer { deleteKeychainKey(for: databaseURL) }
+            switch row.file {
+            case "absent": break
+            case "plaintext": try Data("SQLite format 3\u{0} and a body".utf8).write(to: databaseURL)
+            case "ciphertext": try ciphertextBytes(seed: 53).write(to: databaseURL)
+            default: Issue.record("\(row.id): unknown file state \(row.file)"); continue
+            }
+            // A row needs a key when the fixture says one exists, or when the
+            // expected outcome mints one (the shipping absent-registered row).
+            let needsKeychain = !harnessBuild && (row.key || row.expected == "newEncrypted")
+            if needsKeychain && !keychainUsable {
+                skipped.append(row.id)
+                continue
+            }
+            if row.key {
+                #if MOOTX01_HARNESS_KEYFILE
+                // In a harness build the key is the file beside the database.
+                _ = try EstateEncryptionMigrator.loadOrCreateInstallKey(inDirectory: directory)
+                #else
+                // A shipping build's key is a Keychain item for the path. The
+                // probe passed, so a failure here is a finding, not a skip.
+                _ = try EstateOpenPosture.provideKey(databaseURL: databaseURL)
+                #endif
+            }
+            let outcome = outcomeName {
+                try EstateOpenPosture.resolve(databaseURL: databaseURL, registered: row.registered,
+                                              declaresPlaintext: row.declaresPlaintext)
+            }
+            #expect(outcome == row.expected, "row \(row.id)")
+            exercised += 1
+        }
+        #expect(exercised + skipped.count == rows.count, "every row of this build's half was either exercised or counted as skipped")
+        #expect(skipped.isEmpty || !keychainUsable,
+                "key-bearing rows were skipped on a machine whose Keychain is usable: \(skipped)")
+        if !skipped.isEmpty {
+            // Reported as a known issue, not hidden and not a failure: the
+            // table was only partly proven on this runner.
+            withKnownIssue("Keychain unusable on this runner; \(skipped.count) key-bearing rows skipped: \(skipped)") {
+                Issue.record("skipped rows: \(skipped)")
+            }
+        }
+        #expect(exercised >= rows.count - 5, "at most the five key-bearing shipping rows may be skipped (\(exercised) of \(rows.count) exercised)")
+    }
+
+    // MARK: - The manifest gate
+
+    @Test("A refused manifest refuses the open with the catalog's error; an absent one does not")
+    func refusedManifestRefusesTheOpen() throws {
+        let directory = try makeTempDirectory()
+        defer { cleanup(directory) }
+        let record = EstateRecord(name: "scratch", directory: directory.appendingPathComponent("scratch"), kind: .transient)
+        try FileManager.default.createDirectory(at: record.directory, withIntermediateDirectories: true)
+        // Absent manifest, absent database: plaintext, nothing refused.
+        #expect(try EstateOpenPosture.resolve(for: record).posture == .newPlaintextDeclared)
+        // A manifest carrying a redirect key: refused, typed, with the catalog's detail inside.
+        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z","path":"/elsewhere"}"#
+            .write(to: record.manifestURL, atomically: true, encoding: .utf8)
+        var thrown: EstateOpenPosture.Error?
+        do { _ = try EstateOpenPosture.resolve(for: record) } catch let e as EstateOpenPosture.Error { thrown = e }
+        guard case .manifestRefused(.unreadableEstateManifest(_, let detail))? = thrown, detail.contains("path") else {
+            Issue.record("expected manifestRefused with the catalog's detail, got \(String(describing: thrown))"); return
+        }
+        #expect(thrown?.description.contains("manifest refused") == true)
+        // A manifest for another estate: refused too.
+        try #"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
+            .write(to: record.manifestURL, atomically: true, encoding: .utf8)
+        thrown = nil
+        do { _ = try EstateOpenPosture.resolve(for: record) } catch let e as EstateOpenPosture.Error { thrown = e }
+        guard case .manifestRefused? = thrown else { Issue.record("foreign name: \(String(describing: thrown))"); return }
+        // A correct manifest declaring plaintext: read.
+        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
+            .write(to: record.manifestURL, atomically: true, encoding: .utf8)
+        #expect(try EstateOpenPosture.manifestDeclaresPlaintext(record))
+        // No manifest but a symlinked database: refused by the same gate.
+        try FileManager.default.removeItem(at: record.manifestURL)
+        let elsewhere = directory.appendingPathComponent("elsewhere.sqlite")
+        try Data("x".utf8).write(to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: record.databaseURL, withDestinationURL: elsewhere)
+        thrown = nil
+        do { _ = try EstateOpenPosture.resolve(for: record) } catch let e as EstateOpenPosture.Error { thrown = e }
+        guard case .manifestRefused? = thrown else { Issue.record("symlink: \(String(describing: thrown))"); return }
     }
 
     // MARK: - Key custody

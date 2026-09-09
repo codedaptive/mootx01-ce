@@ -3,11 +3,13 @@
   "vendorRoot": "com.codedaptive.mootx01",
   "storage": {
     "applicationSupportFolder": "com.mootx01.ce",
+    "unixDataFolder": "mootx01",
     "latticeFolder": "com.mootx01.lattice",
     "catalogFile": "estatecatalog.json",
     "databasesFolder": "databases",
     "defaultEstateName": "default",
-    "estateDatabaseFile": "estate.sqlite"
+    "estateDatabaseFile": "estate.sqlite",
+    "communityDaemonFolder": "community-daemon"
   },
   "logging": {
     "subsystem": "com.mootx01.kit"

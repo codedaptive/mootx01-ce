@@ -7,6 +7,25 @@
 //! Geometry normalization is unconditional — it is a file-geometry concern, not
 //! a schema concern, and runs on ANY plaintext estate with nonzero
 //! reserved-bytes-per-page regardless of migration floor.
+//!
+//! Layout capsules: none, on purpose. The Swift umbrella carries two
+//! (`GLKMigrationFlatLayoutToCatalog`, `GLKMigrationAppContainerToCatalog`)
+//! because pre-catalog Swift installs kept their estate flat in the
+//! configuration directory or in the Apple app container. No pre-catalog Rust
+//! install ever had a flat layout: every Rust estate this port has written
+//! lived under `<data directory>/databases/<name>/` (the shape the catalog
+//! records as `<defaultLocation>/<name>/`), so there is nothing for a Rust
+//! layout capsule to move (ruling R3, 2026-09-08; recorded in
+//! ESTATE_CATALOG_S8_BLAST_RADIUS.md).
+//!
+//! Base-directory capsule: one, Rust only. The layout inside the base did not
+//! move on this port, but on Windows the base ITSELF did, from
+//! `%LOCALAPPDATA%\MOOTx01` to `%LOCALAPPDATA%\com.mootx01.ce`.
+//! `windows_base_directory_adoption` moves the old base's whole content into
+//! the new one before the catalog opens (ruling R4, 2026-09-08). The Swift
+//! port needs no twin: its Apple base is `com.mootx01.ce` before the catalog
+//! and after it. So the capsule sets of the two ports differ by the two
+//! Swift-only layout steps and this one Rust-only base-directory step.
 
 // Geometry normalization: unconditional — format-agnostic, not gated on any
 // migration trait because the SQLCipher attachFunc heuristic bug affects any
@@ -14,6 +33,13 @@
 // the estate's schema version.
 mod estate_manifest_refresh;
 pub use estate_manifest_refresh::*;
+
+// Windows base-directory adoption: unconditional, for the same reason
+// geometry normalization is. The old base can hold an estate of any format,
+// so gating it on a migration floor would strand the machines furthest
+// behind. It runs before the catalog opens, not inside the chain.
+mod windows_base_directory_adoption;
+pub use windows_base_directory_adoption::*;
 
 mod geometry_normalization;
 pub use geometry_normalization::*;

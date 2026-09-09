@@ -9,8 +9,12 @@
 //
 // The manifest is written through the catalog, the one place that spells
 // estate files. `created` is preserved from an existing manifest and set to
-// `now` only when there was none. Lives in the migrations umbrella because
-// the prepare result it reads is defined here.
+// `now` only when there was none. A manifest that is present but refused by
+// the catalog (an unknown key, a foreign name, a symbolic link among the
+// estate files) is never overwritten: the refusal is thrown to the caller,
+// because replacing the file would erase the evidence and reset `created`.
+// Lives in the migrations umbrella because the prepare result it reads is
+// defined here.
 
 import Foundation
 import GeniusLocusKit
@@ -32,11 +36,13 @@ public enum EstateManifestRefresh {
     }
 
     /// Write `estate.json` with the given format and posture if it is missing
-    /// or differs. Returns true when a manifest was written.
+    /// or differs. Returns true when a manifest was written. Throws the
+    /// catalog's `unreadableEstateManifest` when a manifest is present and
+    /// refused, leaving the file untouched.
     @discardableResult
     public static func refresh(estate: EstateRecord, format: EstateFormatVersion,
                                encryption: EstateManifest.Encryption, now: Date) throws -> Bool {
-        let existing = (try? EstateCatalog.readManifest(of: estate))
+        let existing = try existingManifest(of: estate)
         let created = existing?.created ?? ISO8601DateFormatter().string(from: now)
         let current = EstateManifest(
             name: estate.name,
@@ -51,8 +57,17 @@ public enum EstateManifestRefresh {
 
     /// The posture the manifest declares for an estate that may not exist yet,
     /// used to decide how a NEW estate file is created. Missing manifest means
-    /// the encrypted default.
+    /// the encrypted default; a manifest the catalog refuses is not read as a
+    /// declaration either (the open path refuses it in `EstateOpenPosture`).
     public static func declaresPlaintext(_ estate: EstateRecord) -> Bool {
-        (try? EstateCatalog.readManifest(of: estate))?.encryption == .plaintext
+        ((try? existingManifest(of: estate)) ?? nil)?.encryption == .plaintext
+    }
+
+    /// The manifest on disk, nil when there is none, or the catalog's
+    /// refusal when one is present and unreadable. "No manifest" and
+    /// "refused manifest" are the two cases the refresh must tell apart.
+    static func existingManifest(of estate: EstateRecord) throws -> EstateManifest? {
+        guard FileManager.default.fileExists(atPath: estate.manifestURL.path) else { return nil }
+        return try EstateCatalog.readManifest(of: estate)
     }
 }
