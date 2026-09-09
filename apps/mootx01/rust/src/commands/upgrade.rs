@@ -62,7 +62,7 @@ pub fn run(
     // --converge-only: we ARE the freshly installed binary, re-executed by the
     // upgrade that placed us. Run the convergence steps and nothing else.
     if converge_only {
-        run_convergence(&record);
+        run_convergence(&record, !estate_only);
         return ExitCode::from(exit::OK);
     }
 
@@ -143,6 +143,8 @@ pub fn run(
         Some(true) => {}
         Some(false) => {
             println!("Already up to date (v{CURRENT_VERSION}).");
+            // Installed plugins still need convergence when the binary is current.
+            refresh_installed_codex_plugin(&home);
             // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle,
             // and it converges whether or not a new version is available — so
             // the up-to-date early return still runs all migration steps and offers.
@@ -226,7 +228,7 @@ fn converge_after_install(record: &EstateRecord, db: Option<&str>, home: &std::p
         return;
     }
     println!("Note: converging with the previous binary — the installed one could not run.");
-    run_convergence(record);
+    run_convergence(record, false);
 }
 
 /// Re-execute `binary` with `--converge-only`. Returns false when it could not
@@ -267,7 +269,7 @@ fn reexec_convergence(binary: &std::path::Path, db: Option<&str>, no_restart: bo
 /// The convergence sequence itself, in order. The migration steps and the reclaim
 /// both need a quiesced estate; the reclaim additionally repairs foreign SQLite
 /// geometry before its VACUUM.
-fn run_convergence(record: &EstateRecord) {
+fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
     // Return values are intentionally ignored in the full convergence path —
     // each step is independent and retryable; the next `mootx01 upgrade` catches failures.
     // A refused schema version skips every data step: each of them would
@@ -283,7 +285,9 @@ fn run_convergence(record: &EstateRecord) {
         let _ = run_vector_reclaim(record);
     }
     run_corpus_counts_migration(record);
-    remove_redundant_codex_direct_entry();
+    if refresh_plugins && record.kind != EstateRecordKind::Transient {
+        refresh_installed_codex_plugin(&super::install::home_dir());
+    }
 }
 
 /// Schema 10 → 19 (ENCODER_RERANK_CONTRACT §12): the one product schema
@@ -1306,21 +1310,15 @@ fn run_corpus_counts_migration(record: &EstateRecord) {
     }
 }
 
-/// MXE-NS-CODEX: at upgrade time, when the Codex plugin owns the MCP
-/// connection (plugin enabled + version installed), remove the redundant
-/// direct `[mcp_servers.mootx01]` entry from `~/.codex/config.toml`.
-/// Thin wrapper that resolves the home directory and delegates to
-/// `remove_redundant_codex_direct_entry_from`.
-fn remove_redundant_codex_direct_entry() {
-    let home = super::install::home_dir();
-    remove_redundant_codex_direct_entry_from(&home);
-}
+// Legacy regression fixtures below. Production registration now verifies the
+// live Codex registry and uses depth's conservative default-HTTP cleanup.
 
 /// Core logic for the Codex direct-entry cleanup, with an injected home
 /// directory for testability. The plugin wiring is sufficient; keeping both
 /// opens a second connection under the same `mootx01` key. A
 /// `.mootx01-backup` copy is made before the removal. Idempotent: absent
 /// file or absent table are both silent no-ops.
+#[cfg(test)]
 fn remove_redundant_codex_direct_entry_from(home: &std::path::Path) {
     let config_path = join_rel(home, ".codex/config.toml");
     if !config_path.exists() {
@@ -1369,6 +1367,7 @@ fn remove_redundant_codex_direct_entry_from(home: &std::path::Path) {
 /// True when the `mootx01@mootx01` Codex plugin is both enabled in config
 /// and has at least one installed version under the Codex plugin cache.
 /// Mirrors Swift's `PluginDetector.ownsCodexConnection`.
+#[cfg(test)]
 fn codex_plugin_owns_connection(home: &std::path::Path) -> bool {
     codex_plugin_is_enabled(home) && codex_plugin_is_installed(home)
 }
@@ -1378,6 +1377,7 @@ fn codex_plugin_owns_connection(home: &std::path::Path) -> bool {
 /// section contains `enabled = true`. Fails closed on any read or parse
 /// error — keeping a redundant direct entry is far less harmful than
 /// removing the only working connection.
+#[cfg(test)]
 fn codex_plugin_is_enabled(home: &std::path::Path) -> bool {
     let config_path = join_rel(home, ".codex/config.toml");
     let content = match std::fs::read_to_string(&config_path) {
@@ -1414,6 +1414,7 @@ fn codex_plugin_is_enabled(home: &std::path::Path) -> bool {
 /// exists under `~/.codex/plugins/cache/mootx01/mootx01/`. Recognises
 /// both `.codex-plugin/plugin.json` (native) and `.claude-plugin/plugin.json`
 /// (shared marketplace legacy format).
+#[cfg(test)]
 fn codex_plugin_is_installed(home: &std::path::Path) -> bool {
     let cache = join_rel(home, ".codex/plugins/cache/mootx01/mootx01");
     let entries = match std::fs::read_dir(&cache) {
@@ -1833,6 +1834,16 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
     }
 }
 
+/// Refresh only an enabled Codex plugin confirmed by the live registry.
+fn refresh_installed_codex_plugin(home: &std::path::Path) {
+    if depth::codex_cli_home_matches(home) {
+        if let Err(e) = depth::apply_codex_plugin(home, false, true, &depth::ProcessCodexCliRunner) {
+            println!("  ✗ Codex: could not update plugin: {e}");
+        }
+    }
+}
+
+
 /// Rematerialize plugin-depth packages for every host that already has one
 /// on disk (never CREATES a new plugin-depth install for a host that never
 /// had one — upgrade only converges existing installs), and — for Claude
@@ -1845,9 +1856,13 @@ fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: b
 /// matters lives in the resident daemon's own
 /// service-manager environment, which `mootx01 upgrade` does not touch (it
 /// restarts the daemon from its EXISTING unit/task, never rewriting it).
+
 fn rematerialize_plugin_depth(home: &std::path::Path) {
     let bundle = depth::InstallBundle::embedded();
     for host in bundle.plugin_capable_hosts() {
+        // Codex refresh runs in the newly installed binary's convergence pass,
+        // so it uses that binary's embedded plugin rather than this old image.
+        if host.id == "codex" { continue; }
         let dir = depth::plugin_install_directory(host, home);
         if !dir.exists() {
             continue;
