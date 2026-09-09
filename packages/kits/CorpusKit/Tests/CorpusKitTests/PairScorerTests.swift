@@ -47,7 +47,7 @@ struct CrossEncoderProfileTests {
     func qualifiedProfile() {
         let p = CrossEncoderProfile.minilmL6
         #expect(p.modelID == "ms-marco-minilm-l6-cross-v1")
-        #expect(p.modelVersion == "233902d2")
+        #expect(p.modelVersion == "233902d25c440f23af6f7d6e94d2946bac0bee0a")
         #expect(p.tokenizerHash == EncoderModelSpec.floor.tokenizerHash)
         #expect(p.maxSequence == 512)
         #expect(p.pool == 50)
@@ -59,6 +59,35 @@ struct CrossEncoderProfileTests {
     @Test("artifactName is the Pascal-cased model id (same string as the Rust twin)")
     func artifactName() {
         #expect(CrossEncoderProfile.minilmL6.artifactName == "MsMarcoMinilmL6CrossV1")
+    }
+
+    /// Mirrors `encoder_model_seed.rs:89 seed_matches_checked_in_manifests`.
+    /// The code profile carries the full 40-char HF revision; both manifests must
+    /// record the same string so a version bump is caught in one place.
+    @Test("model_version matches both cross-encoder manifests")
+    func modelVersionMatchesManifests() throws {
+        // Locate the two manifest files relative to this source file.
+        // #filePath = …/packages/kits/CorpusKit/Tests/CorpusKitTests/<file>
+        // Walk up six components to reach the repo root.
+        let here = URL(fileURLWithPath: #filePath)
+        let repoRoot = here
+            .deletingLastPathComponent()  // CorpusKitTests/
+            .deletingLastPathComponent()  // Tests/
+            .deletingLastPathComponent()  // CorpusKit/
+            .deletingLastPathComponent()  // kits/
+            .deletingLastPathComponent()  // packages/
+            .deletingLastPathComponent()  // repo root
+        let manifestDir = repoRoot.appendingPathComponent("tools/encoder-models", isDirectory: true)
+        for name in ["cross-encoder-models-linux.json", "cross-encoder-models-apple.json"] {
+            let url = manifestDir.appendingPathComponent(name)
+            let data = try Data(contentsOf: url)
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let version = json?["model_version"] as? String
+            #expect(
+                version == CrossEncoderProfile.minilmL6.modelVersion,
+                "\(name): model_version '\(version ?? "nil")' != profile '\(CrossEncoderProfile.minilmL6.modelVersion)'"
+            )
+        }
     }
 
     @Test("a profile serialises with column-style keys and round-trips")
@@ -102,6 +131,15 @@ struct ProviderPairScorerTests {
         let logits = try await scorer.score(query: "q", spans: [])
         #expect(logits.isEmpty)
         #expect(await recorder.batches.isEmpty)
+    }
+
+    @Test("a batch size below 1 is stored as 1")
+    func batchSizeFloor() {
+        // Structural twin of Rust `batch_size_below_one_acts_as_one`: checks the
+        // stored property directly, mirroring `scorer.batch_size() == 1` in Rust.
+        let scorer = ProviderPairScorer(
+            profile: .minilmL6, inference: FakePairInference(recorder: PairRecorder()), batchSize: 0)
+        #expect(scorer.batchSize == 1)
     }
 
     @Test("a batch size below 1 acts as 1")

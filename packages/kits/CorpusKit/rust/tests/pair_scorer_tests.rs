@@ -59,7 +59,7 @@ impl PairInference for FakePairInference {
 fn qualified_profile_carries_the_lab_values() {
     let p = CrossEncoderProfile::minilm_l6();
     assert_eq!(p.model_id, "ms-marco-minilm-l6-cross-v1");
-    assert_eq!(p.model_version, "233902d2");
+    assert_eq!(p.model_version, "233902d25c440f23af6f7d6e94d2946bac0bee0a");
     assert_eq!(p.tokenizer_hash, EncoderModelSpec::floor().tokenizer_hash);
     assert_eq!((p.max_sequence, p.pool, p.head, p.spans, p.rrf_k), (512, 50, 30, 3, 60));
 }
@@ -174,4 +174,34 @@ fn directive_serialises_with_shared_keys_and_round_trips() {
         serde_json::to_string(&RerankDirective::bypass(None)).unwrap(),
         "{\"action\":\"bypass\",\"profile_id\":\"ms-marco-minilm-l6-cross-v1\"}"
     );
+}
+
+/// Twin of `PairScorerTests.swift` `modelVersionMatchesManifests`.
+/// The code profile carries the full 40-char HF revision; both manifests must
+/// record the same string so a version bump is caught in one place.
+/// Mirrors `encoder_model_seed.rs`'s manifest parity pattern for the sentence encoder.
+#[test]
+fn cross_encoder_model_version_matches_manifests() {
+    // CARGO_MANIFEST_DIR is the `rust/` crate directory; navigate up to the repo
+    // root and across to `tools/encoder-models/`.
+    let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = crate_dir
+        .parent().unwrap() // CorpusKit/
+        .parent().unwrap() // kits/
+        .parent().unwrap() // packages/
+        .parent().unwrap(); // repo root
+    let manifest_dir = repo_root.join("tools/encoder-models");
+    let profile = CrossEncoderProfile::minilm_l6();
+    for name in &["cross-encoder-models-linux.json", "cross-encoder-models-apple.json"] {
+        let path = manifest_dir.join(name);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let manifest: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("failed to parse {name}: {e}"));
+        assert_eq!(
+            manifest["model_version"].as_str().unwrap(),
+            profile.model_version,
+            "{name}: model_version mismatch"
+        );
+    }
 }
