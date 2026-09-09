@@ -1034,6 +1034,10 @@ impl AutonomicGovernor {
     /// live closure runs one `spanEncode` batch per fire (contract sheet §10);
     /// `None` registers the no-op default spec.
     ///
+    /// `fact_extraction_cycle` is the matching injection seam for one bounded
+    /// distilled-fact batch. Product callers pass `None` until the harness arm
+    /// is qualified and an extractor recipe has been activated.
+    ///
     /// Returns the registered `(name, SignalID)` pairs in registration order.
     /// `model_id` defaults to the Swift default `"minilm-v6"` at the call site.
     pub fn register_default_standing_signals(
@@ -1043,6 +1047,7 @@ impl AutonomicGovernor {
         hunt_cycle: Option<Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync>>,
         anomaly_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
         span_encode_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        fact_extraction_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
     ) -> Result<Vec<(String, SchedulerSignalID)>, String> {
         // Read the live VectorStore the same way the Swift resident does. No
         // fabricated fallback store — a missing store means "skip registration",
@@ -1066,7 +1071,8 @@ impl AutonomicGovernor {
 
         let model_id = model_id.into();
         let specs = default_standing_signal_specs(
-            vector_store, model_id, corpus, hunt_cycle, anomaly_cycle, span_encode_cycle);
+            vector_store, model_id, corpus, hunt_cycle, anomaly_cycle,
+            span_encode_cycle, fact_extraction_cycle);
         let now_nanos = system_time_to_nanos(now);
         let scheduler = self.ensure_scheduler();
         let mut registered = Vec::with_capacity(specs.len());

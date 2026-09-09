@@ -2,16 +2,17 @@ import Foundation
 import LocusKit
 import SynapseKit
 
-/// Registration helper for the twelve standing signals — architecture
+/// Registration helper for the thirteen standing signals — architecture
 /// spec §11.2 plus the contradiction scout (signal 10, the hunter's
 /// background half), consolidation sweep (signal 11), the
 /// anomaly-flag sweep (signal 12, P3a), and the span-encode drain
-/// (signal 13, ENCODER_RERANK_CONTRACT §10 — replaces adornment pass).
+/// (signal 13, ENCODER_RERANK_CONTRACT §10 — replaces adornment pass),
+/// and the harness-gated distilled-fact drain (signal 14).
 /// Signal 8's slot (the stored-distillation sweep) is empty: the distilled
 /// rendering is computed inline at read time, so nothing sweeps for it.
 ///
 /// Calling `registerDefaultStandingSignals(in:now:)` registers all
-/// twelve default signal specs against the addressed estate's scheduler
+/// thirteen default signal specs against the addressed estate's scheduler
 /// at their architecture-spec cadences. The returned dictionary maps
 /// each signal's stable name to its freshly-minted `SignalID` so the
 /// application can subscribe, inspect, or unregister selectively.
@@ -47,7 +48,7 @@ import SynapseKit
 /// int8 span vectors (contract §3) and sets bit 27 (spanIndexed) on success.
 public extension GeniusLocusKit {
 
-    /// Names of the twelve standing signals, in the order they are
+    /// Names of the thirteen standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -65,6 +66,7 @@ public extension GeniusLocusKit {
             ConsolidationSignal.signalName,
             AnomalySweepSignal.signalName,
             SpanEncodeSignal.signalName,
+            FactExtractionSignal.signalName,
         ]
     }
 
@@ -115,6 +117,10 @@ public extension GeniusLocusKit {
     ///     int8 span rows and sets bit 27 (spanIndexed, contract §5) on success.
     ///     Defaults to a no-op returning zero — correct for test registration
     ///     where no live encoder is wired.
+    ///   - factExtractionCycle: async closure forwarded to
+    ///     `FactExtractionSignal.spec(factExtractionCycle:)`. It runs one
+    ///     bounded batch under the active extractor recipe. The default is
+    ///     inert while the feature remains in harness qualification.
     ///   - modelID: the embedding model whose stored vectors are scanned
     ///     by the vector-similarity signal. Default `"minilm-v6"`.
     ///   - now: the deterministic clock — flowed through to the
@@ -133,6 +139,7 @@ public extension GeniusLocusKit {
             = { _ in (0, 0) },
         anomalyCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         spanEncodeCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
+        factExtractionCycle: @escaping @Sendable (Date) async throws -> Int = { _ in 0 },
         modelID: String = "minilm-v6",
         now: Date
     ) async throws -> [String: SignalID] {
@@ -194,6 +201,10 @@ public extension GeniusLocusKit {
             // the default no-op is appropriate for test registration where
             // no live encoder is wired.
             SpanEncodeSignal.spec(spanEncodeCycle: spanEncodeCycle),
+            // Signal 14: bounded fact extraction over bit-28 debt. The host
+            // closure calls runFactExtractionBatch only after explicit recipe
+            // activation; otherwise the default is a diagnostic no-op.
+            FactExtractionSignal.spec(factExtractionCycle: factExtractionCycle),
         ]
         var registered: [String: SignalID] = [:]
         for spec in specs {
