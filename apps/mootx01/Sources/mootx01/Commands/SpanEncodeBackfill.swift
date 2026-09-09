@@ -49,6 +49,8 @@ enum SpanEncodeBackfill {
 
     /// Drawers per encode call: the default `encoder_batch` outside iOS (§7).
     static let batchSize = 64
+    static let repairPageSize = 200
+    static let spanIndexedBit: Int64 = 1 << 27
 
     /// Encode every drawer whose bit 27 is clear under the active model.
     ///
@@ -90,32 +92,52 @@ enum SpanEncodeBackfill {
         let vectors = VectorStore(storage: storage)
         var drawersDone = 0
         var spansWritten = 0
+
+        // Pre-release builds stamped upgrade-produced rows with the drawer's
+        // SHA content_hash while the resident and strict reader use FNV-1a64.
+        // Those rows already carry bit 27, so the ordinary debt scan cannot
+        // discover them. Walk indexed drawers in bounded pages and replace
+        // only missing, malformed, or stale serving-generation span sets.
+        var repairCursor: String? = nil
+        while true {
+            let page = try await drawers.activeDrawersAfterStrict(id: repairCursor, limit: repairPageSize)
+            guard !page.isEmpty else { break }
+            let indexed = page.filter {
+                !$0.content.isEmpty && $0.operationalBitmap & spanIndexedBit != 0
+            }
+            if !indexed.isEmpty {
+                let snapshot = try await vectors.strictSpanVectorSnapshot(
+                    itemIDs: indexed.map(\.id), modelID: row.modelID)
+                let malformedIDs = Set(snapshot.malformedRows.map(\.itemID))
+                for drawer in indexed {
+                    guard SpanContentVersion.requiresRepair(
+                        content: drawer.content,
+                        expectedDimension: spec.dim,
+                        maxSpans: spec.maxSpans,
+                        rows: snapshot.rows[drawer.id, default: []],
+                        hasMalformedRows: malformedIDs.contains(drawer.id)
+                    ) else { continue }
+                    spansWritten += try await encode(
+                        drawer: drawer, spec: spec, encoder: encoder, vectors: vectors,
+                        modelID: row.modelID, modelVersion: row.modelVersion, now: now)
+                    drawersDone += 1
+                }
+            }
+            let shortPage = page.count < repairPageSize
+            repairCursor = page.last?.id
+            if shortPage { break }
+        }
+
         var cursor: String? = nil
         while true {
             let batch = try await drawers.spanIndexDebtBatch(limit: batchSize, afterDrawerID: cursor)
             guard !batch.isEmpty else { break }
             for drawer in batch {
-                let words = Spanner.words(drawer.content)
-                let bounds = Spanner.spans(wordCount: words.count, windowWords: spec.windowWords,
-                                           overlapDivisor: spec.overlapDivisor, maxSpans: spec.maxSpans)
-                let texts = bounds.map { words[$0.start..<$0.end].joined(separator: " ") }
-                let floats = try await encoder.encodeSpans(texts)
-                let contentVersion = try await contentVersion(of: drawer.id, storage: storage)
-                var inputs: [SpanVectorInput] = []
-                inputs.reserveCapacity(floats.count)
-                for (index, vector) in floats.enumerated() {
-                    let (q, scale) = Int8Vec.quantize(vector)
-                    inputs.append(SpanVectorInput(
-                        index: UInt32(index), int8: q, scale: scale,
-                        startWord: bounds[index].start, endWord: bounds[index].end,
-                        contentVersion: contentVersion))
-                }
-                try await vectors.writeSpanVectors(
-                    itemID: drawer.id, modelID: row.modelID, modelVersion: row.modelVersion,
-                    spans: inputs, filedAt: now)
+                spansWritten += try await encode(
+                    drawer: drawer, spec: spec, encoder: encoder, vectors: vectors,
+                    modelID: row.modelID, modelVersion: row.modelVersion, now: now)
                 _ = try await drawers.setSpanIndexed(drawerId: drawer.id)
                 drawersDone += 1
-                spansWritten += inputs.count
             }
             cursor = batch.last?.id
         }
@@ -123,17 +145,34 @@ enum SpanEncodeBackfill {
         return .encoded(drawers: drawersDone, spans: spansWritten, remaining: remaining)
     }
 
-    /// The drawer's `content_hash` column as lowercase hex, the span rows'
-    /// `contentVersion` (§3). `Drawer` does not carry the hash (the
-    /// hash-on-write hook owns the column), so it is read per row here.
-    /// Empty when the row predates hash-on-write; a later content write
-    /// always produces a hash, so a stale span set is still recognised.
-    static func contentVersion(of drawerID: String, storage: any Storage) async throws -> String {
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .eq(Column(table: "drawers", name: "id"), .text(drawerID)),
-            orderBy: [], limit: 1, offset: nil, columns: ["content_hash"])
-        guard case let .blob(bytes)? = rows.first?["content_hash"] else { return "" }
-        return bytes.map { String(format: "%02x", $0) }.joined()
+    private static func encode(
+        drawer: Drawer,
+        spec: CorpusKit.EncoderModelSpec,
+        encoder: any SpanEncoder,
+        vectors: VectorStore,
+        modelID: String,
+        modelVersion: String,
+        now: Date
+    ) async throws -> Int {
+        let words = Spanner.words(drawer.content)
+        let bounds = Spanner.spans(
+            wordCount: words.count, windowWords: spec.windowWords,
+            overlapDivisor: spec.overlapDivisor, maxSpans: spec.maxSpans)
+        let texts = bounds.map { words[$0.start..<$0.end].joined(separator: " ") }
+        let floats = try await encoder.encodeSpans(texts)
+        var inputs: [SpanVectorInput] = []
+        inputs.reserveCapacity(floats.count)
+        let contentVersion = SpanContentVersion.fnv1a64(drawer.content)
+        for (index, vector) in floats.enumerated() {
+            let (q, scale) = Int8Vec.quantize(vector)
+            inputs.append(SpanVectorInput(
+                index: UInt32(index), int8: q, scale: scale,
+                startWord: bounds[index].start, endWord: bounds[index].end,
+                contentVersion: contentVersion))
+        }
+        try await vectors.writeSpanVectors(
+            itemID: drawer.id, modelID: modelID, modelVersion: modelVersion,
+            spans: inputs, filedAt: now)
+        return inputs.count
     }
 }
