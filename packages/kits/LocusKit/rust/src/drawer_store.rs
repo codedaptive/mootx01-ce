@@ -99,6 +99,67 @@ use std::sync::Arc;
 use substrate_lib::row_state::RowVerb;
 use substrate_types::fingerprint256::Fingerprint256;
 
+/// Policy-neutral request for one selected contradiction proposal. The caller
+/// supplies the existing decline-matrix function; this lower layer owns the
+/// transactional fresh reads, evidence comparison, sensitivity inheritance,
+/// and tunnel insertion.
+pub struct AtomicConflictProposalRequest {
+    pub source_drawer_id: String,
+    pub target_drawer_id: String,
+    pub tier: u8,
+    pub renewal_identity: String,
+    pub label: String,
+    pub replay_identity: String,
+    pub source_digest: String,
+    pub evidence_digest: String,
+    pub decline_suppresses: fn(u8, &str, &[(u8, String)]) -> bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicConflictProposalOutcome {
+    Created { tunnel_id: String, lifecycle: String },
+    Existing { tunnel_id: String, lifecycle: String },
+    Settled,
+}
+
+/// Compute the two digests binding a temporary ARIA candidate to fresh lower
+/// rows. Length prefixes preserve every field boundary.
+pub fn conflict_proposal_digests(
+    source: &Drawer,
+    target: &Drawer,
+    tier: u8,
+    renewal_identity: &str,
+) -> (String, String) {
+    fn append(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+    fn hex(bytes: [u8; 32]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+    fn drawer_material(drawer: &Drawer) -> Vec<u8> {
+        let mut out = Vec::new();
+        for value in [drawer.id.as_str(), drawer.parent_node_id.as_str(), drawer.content.as_str(), drawer.subject.as_deref().unwrap_or(""), drawer.added_by.as_str()] {
+            append(&mut out, value);
+        }
+        out.extend_from_slice(&drawer.event_time.to_be_bytes());
+        out.extend_from_slice(&drawer.filed_at.to_be_bytes());
+        out.extend_from_slice(&drawer.adjective_bitmap.to_be_bytes());
+        out.extend_from_slice(&drawer.operational_bitmap.to_be_bytes());
+        out.extend_from_slice(&drawer.tombstoned_at.unwrap_or(i64::MIN).to_be_bytes());
+        out
+    }
+    let source_material = drawer_material(source);
+    let target_material = drawer_material(target);
+    let source_digest = hex(substrate_kernel::sha256::hash(&source_material));
+    let mut evidence = Vec::new();
+    append(&mut evidence, &source_digest);
+    append(&mut evidence, &hex(substrate_kernel::sha256::hash(&target_material)));
+    evidence.push(tier);
+    append(&mut evidence, renewal_identity);
+    (source_digest, hex(substrate_kernel::sha256::hash(&evidence)))
+}
+
 /// Contract every LocusKit storage backend conforms to.
 ///
 /// `Send + Sync` lets an `Arc<dyn DrawerStore>` cross thread
@@ -185,6 +246,18 @@ pub trait DrawerStore: Send + Sync {
     /// default; concrete production stores override.
     fn storage(&self) -> Option<Arc<dyn Storage>> {
         None
+    }
+
+    /// Atomically revalidate and file one selected contradiction proposal.
+    /// Backends without the storage transaction seam fail closed.
+    fn atomic_file_conflict_proposal(
+        &self,
+        _request: &AtomicConflictProposalRequest,
+        _now: i64,
+    ) -> Result<AtomicConflictProposalOutcome, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "atomic conflict proposal filing is unavailable for this drawer store".to_owned(),
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -2210,6 +2283,13 @@ pub trait DrawerStore: Send + Sync {
 impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     fn storage(&self) -> Option<Arc<dyn Storage>> {
         self.as_ref().storage()
+    }
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<AtomicConflictProposalOutcome, LocusKitError> {
+        self.as_ref().atomic_file_conflict_proposal(request, now)
     }
     fn resolve_node_names(
         &self,
