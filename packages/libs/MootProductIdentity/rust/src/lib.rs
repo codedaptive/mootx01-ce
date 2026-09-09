@@ -12,8 +12,10 @@
 //
 // The Swift library at `Sources/MootProductIdentity/MootProductIdentity.swift`
 // is the reference; `Fixtures/product_identity.json` pins every value, and
-// `tests/fixture_parity.rs` refuses any drift between this file and the
-// fixture. Change a value in the fixture and in both ports together.
+// `tests/fixture_parity.rs` refuses any drift between the constants it lists
+// and the fixture, in both directions. Every `pub const` in this file is in
+// that list, including `storage::UNIX_DATA_FOLDER`, which only this port
+// uses. Change a value in the fixture and in both ports together.
 //
 // The Rust port targets Linux and Windows (macOS only for developer runs), so
 // the Apple and Keychain namespaces are carried as strings for parity and
@@ -41,7 +43,9 @@ pub mod storage {
     /// The folder under `${XDG_DATA_HOME:-~/.local/share}` on every Unix
     /// target (Linux in production; macOS developer runs follow the same
     /// convention): the program name, as every program under `.local/share`
-    /// is named.
+    /// is named. Pinned by the fixture (`storage.unixDataFolder`) and carried
+    /// by the Swift library for parity even though the Swift product never
+    /// uses it: it decides which catalog a Linux install opens.
     pub const UNIX_DATA_FOLDER: &str = "mootx01";
     /// The lattice cache folder beside the product folder.
     pub const LATTICE_FOLDER: &str = "com.mootx01.lattice";
@@ -55,6 +59,10 @@ pub mod storage {
     pub const DEFAULT_ESTATE_NAME: &str = "default";
     /// The estate database file inside an estate directory.
     pub const ESTATE_DATABASE_FILE: &str = "estate.sqlite";
+
+    /// The community daemon's sidecar directory name, beside `estatecatalog.json`
+    /// in the configuration directory.
+    pub const COMMUNITY_DAEMON_FOLDER: &str = "community-daemon";
 
     /// The process home: `HOME` on Unix, `USERPROFILE` on Windows. The Rust
     /// port never runs sandboxed, so the family home is always the user's.
@@ -200,4 +208,179 @@ pub mod queues {
     pub const MANAGER_HTTP_READ_API_ACCEPT: &str = "com.mootx01.mgr.http-read-api.accept";
     pub const LAN_DISCOVERY: &str = "com.mootx01.lan-discovery";
     pub const LAN_BROWSER: &str = "com.mootx01.lan-browser";
+}
+
+/// Product settings read from `config.json` at the root of the configuration
+/// directory. Twin of Swift `MootProductIdentity.Settings`.
+///
+/// JSON shape: `{"daemon": {"stats_store": "<absolute-path>"}}`. Additional
+/// keys are ignored.  All consumers load through this module so a single edit
+/// to `config.json` is reflected by every component.
+pub mod settings {
+    use std::path::Path;
+
+    /// Name of the settings file inside the configuration directory.
+    const FILE_NAME: &str = "config.json";
+
+    /// Parsed product settings. `None` fields mean the key was absent in the
+    /// file — the consumer falls back to its computed default.
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub struct ProductSettings {
+        /// Override path for the daemon stats store (`daemon.stats_store`).
+        /// `None` means absent in the file; the consumer should use
+        /// `<config-dir>/moot-mgr/stats.sqlite` as the default.
+        pub daemon_stats_store: Option<String>,
+    }
+
+    /// Load settings from `<config_dir>/config.json`.
+    ///
+    /// A missing file, unreadable file, or absent keys all produce `None` for
+    /// the corresponding field — never a fatal error. Unknown JSON keys are
+    /// silently ignored. Twin of Swift `Settings.load(configurationDirectory:)`.
+    pub fn load(config_dir: &Path) -> ProductSettings {
+        load_from_file(config_dir, FILE_NAME)
+    }
+
+    /// Internal loader with the file name as a parameter (for unit tests in this crate).
+    pub(crate) fn load_from_file(config_dir: &Path, file_name: &str) -> ProductSettings {
+        let path = config_dir.join(file_name);
+        let data = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return ProductSettings::default(),
+        };
+        parse_settings(&data)
+    }
+
+    /// Parse the settings JSON string. Separated so unit tests in this crate can drive it directly.
+    pub(crate) fn parse_settings(json: &str) -> ProductSettings {
+        let root: serde_json::Value = match serde_json::from_str(json) {
+            Ok(v) => v,
+            Err(_) => return ProductSettings::default(),
+        };
+        // `daemon.stats_store` is the only key in this version.
+        let daemon_stats_store = root
+            .get("daemon")
+            .and_then(|d| d.get("stats_store"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        ProductSettings { daemon_stats_store }
+    }
+
+    /// Write the default `config.json` when the `daemon.stats_store` key is
+    /// absent. Idempotent: a second call with the same or a user-chosen value
+    /// leaves the file untouched. Twin of Swift
+    /// `Settings.seedDefaultsIfAbsent(defaultStatsStorePath:configurationDirectory:)`.
+    ///
+    /// Called by `mootx01 install`; never called by `mootx01 upgrade`.
+    ///
+    /// Returns `Ok(true)` when the key was already present (no-op),
+    /// `Ok(false)` when the file was written, and `Err` when the write failed.
+    pub fn seed_defaults_if_absent(
+        config_dir: &Path,
+        default_stats_store_path: &str,
+    ) -> std::io::Result<bool> {
+        let path = config_dir.join(FILE_NAME);
+        // Read the existing file if any.
+        let mut root: serde_json::Map<String, serde_json::Value> = if path.exists() {
+            let text = std::fs::read_to_string(&path)?;
+            match serde_json::from_str(&text) {
+                Ok(serde_json::Value::Object(map)) => map,
+                _ => serde_json::Map::new(),
+            }
+        } else {
+            serde_json::Map::new()
+        };
+        // If the key is already present (non-empty), leave the file untouched.
+        let existing = root
+            .get("daemon")
+            .and_then(|d| d.get("stats_store"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        if existing.is_some() {
+            return Ok(true);
+        }
+        // Set the key and write the file.
+        let daemon = root
+            .entry("daemon")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(ref mut d) = daemon {
+            d.insert(
+                "stats_store".to_owned(),
+                serde_json::Value::String(default_stats_store_path.to_owned()),
+            );
+        }
+        // Ensure the parent directory exists.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(root))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&path, text.as_bytes())?;
+        Ok(false)
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // Unit tests for pub(crate) helpers — these are the only callers that can
+        // reach them, since the integration tests in tests/ are a separate crate.
+
+        #[test]
+        fn parse_settings_extracts_daemon_stats_store() {
+            let json = r#"{"daemon":{"stats_store":"/tmp/test.sqlite"}}"#;
+            let s = parse_settings(json);
+            assert_eq!(s.daemon_stats_store.as_deref(), Some("/tmp/test.sqlite"));
+        }
+
+        #[test]
+        fn parse_settings_absent_key_returns_none() {
+            let json = r#"{"daemon":{}}"#;
+            let s = parse_settings(json);
+            assert!(s.daemon_stats_store.is_none());
+        }
+
+        #[test]
+        fn parse_settings_empty_string_is_absent() {
+            let json = r#"{"daemon":{"stats_store":""}}"#;
+            let s = parse_settings(json);
+            assert!(s.daemon_stats_store.is_none());
+        }
+
+        #[test]
+        fn load_from_file_missing_file_returns_default() {
+            let dir = std::env::temp_dir().join("mpi-unit-test-missing");
+            std::fs::create_dir_all(&dir).ok();
+            let s = load_from_file(&dir, "no_such_file.json");
+            assert!(s.daemon_stats_store.is_none());
+        }
+    }
+
+}
+
+/// Path helpers — pure computation over product-identity constants.
+///
+/// These functions produce canonical filesystem paths without calling platform
+/// APIs. Every caller that previously inlined the join arithmetic should use
+/// these instead so the paths are spelled once and drift is prevented.
+///
+/// Twin of the Swift `MootPaths` helpers in `MootInstallerCore`.
+pub mod paths {
+    use std::path::Path;
+
+    /// The canonical stats-store path for the moot-mgr / daemon pair:
+    /// `<config_dir>/moot-mgr/stats.sqlite`.
+    ///
+    /// Callers (install seeder, resident daemon, moot-mgr config) use this
+    /// function instead of spelling the join independently, so both the
+    /// subdirectory name and the filename are spelled exactly once.
+    ///
+    /// Twin of Swift `MootPaths.daemonStatsStoreDefault(dataDir:)`.
+    pub fn daemon_stats_store_default(config_dir: &Path) -> String {
+        config_dir
+            .join("moot-mgr")
+            .join("stats.sqlite")
+            .to_string_lossy()
+            .into_owned()
+    }
 }

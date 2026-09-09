@@ -300,10 +300,4 @@ struct EstateIdentityKeyStoreTests {
             "federating reopen must cache the freshly-minted signing key"
         )
     }
-
-    // MARK: - 9. Environment-value parse contract
-
-    /// Only the exact value "false" (any case) disables federation; absence
-    /// and every other value keep the default minting behavior. The parse is
-    /// a pure function so this test never mutates process environment.
 }

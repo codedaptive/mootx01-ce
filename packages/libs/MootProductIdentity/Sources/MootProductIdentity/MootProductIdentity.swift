@@ -29,9 +29,10 @@
 // from `project.yml` and the entitlements as literals; `Apple` mirrors them
 // so code refers to them by name, and the fixture pins the mirror.
 //
-// No Rust twin exists yet: the Rust port keeps its own folder and labels
-// until the Rust estate catalog lands, when a twin crate is built against
-// this same fixture.
+// The Rust twin is `rust/src/lib.rs` (crate `moot-product-identity`), pinned
+// to the same `Fixtures/product_identity.json` by `rust/tests/fixture_parity.rs`
+// leaf by leaf. A value changes in the fixture and in both ports together;
+// either port's parity test fails until all three agree.
 
 import Foundation
 #if canImport(Security)
@@ -72,10 +73,24 @@ public enum MootProductIdentity {
         public static let defaultEstateName = "default"
         public static let estateDatabaseFile = "estate.sqlite"
 
+        /// The community daemon's sidecar directory name, a subdirectory of
+        /// the configuration directory beside `estatecatalog.json`. Sidecar
+        /// JSON files (capture ledger, review state, Obsidian authorization,
+        /// LAN state, estate metadata and operation state) live here.
+        public static let communityDaemonFolder = "community-daemon"
+
         /// Folder under Application Support for the lattice novel-token pool
         /// (`com.mootx01.lattice`), a machine-wide resource shared across
         /// installs rather than a per-install configuration file.
         public static let latticeFolder = product("lattice")
+
+        /// The Rust port's configuration folder on Unix targets, under
+        /// `${XDG_DATA_HOME:-~/.local/share}`: the program name, as every
+        /// program under `.local/share` is named. Never used by the Swift
+        /// product (its folder is `applicationSupportFolder`); carried here so
+        /// the fixture pins the most load-bearing Rust-only path string the
+        /// way it pins every other identity value.
+        public static let unixDataFolder = "mootx01"
 
         /// `<home>/Library/Application Support/<applicationSupportFolder>`.
         /// Pure path arithmetic; touches nothing.
@@ -265,5 +280,123 @@ public enum MootProductIdentity {
         public static let managerHTTPReadAPIAccept = product("mgr.http-read-api.accept")
         public static let lanDiscovery = product("lan-discovery")
         public static let lanBrowser = product("lan-browser")
+    }
+
+    // MARK: Settings
+
+    /// Product settings read from `config.json` at the root of the configuration
+    /// directory. This file is written by `mootx01 install` with default values
+    /// when the file is absent, and left untouched by `mootx01 upgrade`. All
+    /// consumers read through this type so a single edit to `config.json` is
+    /// reflected by every component.
+    ///
+    /// JSON shape: `{"daemon": {"stats_store": "<absolute-path>"}}`. Additional
+    /// top-level keys may be added in future versions; unknown keys are ignored.
+    public struct Settings: Sendable {
+
+        /// The name of the settings file inside the configuration directory.
+        static let fileName = "config.json"
+
+        /// JSON key path for the daemon stats-store setting, as a display string.
+        /// The actual parsing reads `json["daemon"]["stats_store"]`.
+        static let daemonStatsStoreKeyPath = "daemon.stats_store"
+
+        // MARK: Resolved values
+
+        /// Override path for the daemon stats store (`daemon.stats_store`).
+        /// `nil` means the key was absent — the consumer should fall back to
+        /// the platform-default path (`<config-dir>/moot-mgr/stats.sqlite`).
+        /// An empty string in the file is treated the same as absent.
+        public let daemonStatsStore: String?
+
+        // MARK: Loading
+
+        /// Load settings from `config.json` in the given configuration directory.
+        ///
+        /// Missing file, unreadable file, or absent keys all produce `nil` for
+        /// the corresponding property — never a fatal error. Unknown keys in the
+        /// file are silently ignored.
+        ///
+        /// - Parameter configurationDirectory: The directory that contains
+        ///   `config.json`. Defaults to `Storage.configurationDirectory`, the
+        ///   one shared by all components in this product family.
+        /// - Returns: A `Settings` value with whatever keys were found.
+        public static func load(
+            configurationDirectory: URL = Storage.configurationDirectory
+        ) -> Settings {
+            let url = configurationDirectory.appendingPathComponent(fileName)
+            guard
+                let data = try? Data(contentsOf: url),
+                let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                return Settings(daemonStatsStore: nil)
+            }
+            let daemon = root["daemon"] as? [String: Any]
+            let statsStore = daemon?["stats_store"] as? String
+            // Treat an empty string the same as absent — a manually-cleared
+            // value should not produce an empty path string downstream.
+            let storeOrNil = statsStore.flatMap { $0.isEmpty ? nil : $0 }
+            return Settings(daemonStatsStore: storeOrNil)
+        }
+
+        // MARK: Writing
+
+        /// Write the default `config.json` into the configuration directory,
+        /// but only when the key is not already set. Idempotent: a second call
+        /// with the same or a user-chosen value leaves the file untouched.
+        ///
+        /// This is called by `mootx01 install` to seed the file with the
+        /// computed default so operators can discover and edit it. It is never
+        /// called by `mootx01 upgrade`.
+        ///
+        /// - Parameters:
+        ///   - defaultStatsStorePath: The path to write when the key is absent.
+        ///   - configurationDirectory: Target directory (defaults to `Storage.configurationDirectory`).
+        /// - Returns: `true` when the file was written or already contained the
+        ///   key; `false` when the write failed.
+        @discardableResult
+        public static func seedDefaultsIfAbsent(
+            defaultStatsStorePath: String,
+            configurationDirectory: URL = Storage.configurationDirectory
+        ) -> Bool {
+            let url = configurationDirectory.appendingPathComponent(fileName)
+            // Load existing settings — if the key is already present (any non-nil
+            // value), this call is a no-op.
+            let existing = load(configurationDirectory: configurationDirectory)
+            if existing.daemonStatsStore != nil {
+                return true
+            }
+            // Build the minimal JSON object and write it.
+            // Round-trip through JSONSerialization so existing keys are preserved
+            // when the file already exists but lacks only this key.
+            var root: [String: Any]
+            if let data = try? Data(contentsOf: url),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                root = parsed
+            } else {
+                root = [:]
+            }
+            var daemon = root["daemon"] as? [String: Any] ?? [:]
+            daemon["stats_store"] = defaultStatsStorePath
+            root["daemon"] = daemon
+            guard
+                let written = try? JSONSerialization.data(
+                    withJSONObject: root,
+                    options: [.prettyPrinted, .sortedKeys]
+                )
+            else { return false }
+            // Ensure the parent directory exists before writing.
+            let fm = FileManager.default
+            try? fm.createDirectory(
+                at: configurationDirectory, withIntermediateDirectories: true
+            )
+            return fm.createFile(atPath: url.path, contents: written)
+        }
+
+        // MARK: Private init
+
+        private init(daemonStatsStore: String?) {
+            self.daemonStatsStore = daemonStatsStore
+        }
     }
 }
