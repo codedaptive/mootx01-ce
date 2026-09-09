@@ -15,6 +15,10 @@ use crate::blob_store::BlobStore;
 use crate::error::{StorageError, StorageResult};
 use crate::storage::SchemaKitRenameOutcome;
 use crate::generated_column::GeneratedColumn;
+use crate::inventory_snapshot::{
+    InventorySnapshot, InventorySnapshotBuilder, InventorySnapshotLimits, InventorySnapshotResult,
+    INVENTORY_SNAPSHOT_DRAWERS_TABLE, INVENTORY_SNAPSHOT_NODES_TABLE,
+};
 use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ChangeOrigin, ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use crate::caching_row_store::CachingRowStore;
@@ -184,6 +188,38 @@ impl Storage for InMemoryStorage {
             hub: self.hub.clone(),
             blob_hub: self.blob_hub.clone(),
         })
+    }
+
+    fn capture_inventory_snapshot(
+        &self,
+        limits: InventorySnapshotLimits,
+    ) -> InventorySnapshotResult<InventorySnapshot> {
+        // One lock covers both count checks and copies. Do not route through
+        // RowStore::query: that API builds an unbounded Vec before this
+        // primitive can apply its limits.
+        let state = self.state.lock().unwrap();
+        let drawers = state
+            .tables
+            .get(INVENTORY_SNAPSHOT_DRAWERS_TABLE)
+            .ok_or_else(|| StorageError::InvalidQuery {
+                detail: "inventory snapshot: drawers table not found".to_owned(),
+            })?;
+        let nodes = state
+            .tables
+            .get(INVENTORY_SNAPSHOT_NODES_TABLE)
+            .ok_or_else(|| StorageError::InvalidQuery {
+                detail: "inventory snapshot: nodes table not found".to_owned(),
+            })?;
+        let mut snapshot = InventorySnapshotBuilder::new(limits, drawers.rows.len(), nodes.rows.len())?;
+        for row in drawers.rows.values() {
+            // Account while still borrowing the stored row, before cloning any
+            // body into the retained snapshot.
+            snapshot.copy_drawer_values(row)?;
+        }
+        for row in nodes.rows.values() {
+            snapshot.copy_node_values(row)?;
+        }
+        Ok(snapshot.finish())
     }
 
     /// Dataset store override: returns the storage's single shared
