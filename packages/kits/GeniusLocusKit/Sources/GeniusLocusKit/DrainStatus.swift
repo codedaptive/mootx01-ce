@@ -95,6 +95,13 @@ public struct DrainStatus: Sendable, Equatable {
     /// `SUBJECT_BACKFILL_LANE_NAME`.
     public static let subjectBackfillName = "subject_backfill"
 
+    /// Canonical name of the span-encode row-debt lane. It is rendered only
+    /// while a span encoder is registered for the estate; `pending` is the
+    /// count of active, non-empty drawers whose span-indexed bit is clear.
+    /// This lane remains non-gating for `encodeSettled` because the detached
+    /// corpus finisher does not own the standing span duty.
+    public static let spanEncodeName = "span_encode"
+
     /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
     /// detached `mootx01 drain` finisher may exit and release the encode
     /// DrainLease, and a stdio serve need not spawn one.
@@ -181,6 +188,18 @@ extension GeniusLocusKit {
                 pending: debt,
                 inFlight: 0,
                 detail: "pipeline: \(producer.pipelineVersion)"
+            ))
+        }
+
+        // Drain 4 of N: span encode. This is row debt, not the corpus queue;
+        // surface it only when a loaded encoder can actually pay it down.
+        if let encoder = spanEncoders[handle] {
+            let debt = try await estate.countSpanIndexDebt()
+            statuses.append(DrainStatus(
+                name: DrainStatus.spanEncodeName,
+                pending: debt,
+                inFlight: 0,
+                detail: "model: \(encoder.spec.modelID)"
             ))
         }
 

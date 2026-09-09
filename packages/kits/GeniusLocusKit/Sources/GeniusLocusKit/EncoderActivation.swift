@@ -268,16 +268,27 @@ public extension GeniusLocusKit {
         return EncoderModelSpec(row: row)
     }
 
+    /// The actual active registry row, without the floor-profile convenience
+    /// fallback. Strict callers use this to prove the serving record rather
+    /// than treating a read failure as an Arctic activation.
+    func activeEncoderModelRecord(for handle: EstateHandle) async throws -> EncoderModelRow? {
+        guard let storage = storages[handle] else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        return try await EncoderModelStore(storage: storage).active()
+    }
+
     /// Build and register the span encoder for `handle` from the active
     /// registry row, applying the failure contract: nil encoder + one log
     /// line on any failure, no throw.
-    func activateSpanEncoder(for handle: EstateHandle) async {
+    func activateSpanEncoder(for handle: EstateHandle, frozen: Bool = false) async {
         // Seed before reading: an estate whose manifest names the encoder is
         // encoder-active from its first open (ruling 2026-09-04: upgrade never
         // creates content; seeding belongs to provision and serve). The span
         // rows are the span-encode standing signal's work and drain in the
         // background, so the open stays fast. A seed failure is logged once and
         // activation reads the registry as it stands.
+        if !frozen {
         do {
             if try await seedDefaultEncoderModelIfAbsent(for: handle) {
                 Self.encoderLog.info(
@@ -289,7 +300,22 @@ public extension GeniusLocusKit {
                 "encoder: could not seed the default encoder_models row (\(String(describing: error), privacy: .public)); activation reads the registry as it stands (estate: \(handle.estateUUID, privacy: .public))"
             )
         }
-        let spec = await activeEncoderModelSpec(for: handle)
+        }
+        let spec: EncoderModelSpec
+        if frozen {
+            do {
+                guard let row = try await activeEncoderModelRecord(for: handle) else {
+                    Self.encoderLog.warning("encoder: frozen estate has no active encoder model; span rerank unavailable")
+                    return
+                }
+                spec = EncoderModelSpec(row: row)
+            } catch {
+                Self.encoderLog.warning("encoder: frozen active model unavailable; span rerank unavailable")
+                return
+            }
+        } else {
+            spec = await activeEncoderModelSpec(for: handle)
+        }
         guard let directory = modelDirectoryResolver.encoderModelDirectory(for: spec.modelID) else {
             Self.encoderLog.warning(
                 "encoder: no model directory for \(spec.modelID, privacy: .public); recall runs lexical-only (estate: \(handle.estateUUID, privacy: .public))"

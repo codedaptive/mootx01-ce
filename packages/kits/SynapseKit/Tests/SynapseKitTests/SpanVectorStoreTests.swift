@@ -61,6 +61,48 @@ struct SpanVectorStoreTests {
         #expect(other.isEmpty)
     }
 
+    @Test("strict snapshot retains a malformed serving row and its receipt fails after a generation flip")
+    func strictSnapshotReceipt() async throws {
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_757_000_000)
+        let model = "minilm-l6-v2-w60"
+        try await store.writeSpanVectors(itemID: "strict-item", modelID: model, modelVersion: "r1", spans: [
+            span(0, [1, 2, 3, 4], scale: 1, start: 0, end: 4),
+            span(1, [5, 6, 7, 8], scale: 1, start: 2, end: 6),
+            span(2, [9, 10, 11, 12], scale: 1, start: 4, end: 8),
+        ], filedAt: now)
+        _ = try await store.storage.rowStore.delete(
+            table: "vectors",
+            where: .and([
+                .eq(Column(table: "vectors", name: "item_id"), .text("strict-item")),
+                .eq(Column(table: "vectors", name: "model_id"), .text(model)),
+                .eq(Column(table: "vectors", name: "vector_index"), .int(1)),
+                .eq(Column(table: "vectors", name: "kind"), .int(Int64(VectorKind.int8.rawValue))),
+                .eq(Column(table: "vectors", name: "generation"), .int(0)),
+            ]))
+        _ = try await store.storage.rowStore.insert(table: "vectors", values: [
+            "id": .uuid(UUID()), "item_id": .text("strict-item"), "vector_index": .int(1),
+            "model_id": .text(model), "model_version": .text("r1"),
+            "kind": .int(Int64(VectorKind.int8.rawValue)), "dim": .int(4),
+            "payload": .blob(Data([5, 6, 7, 8])), "scale": .float(1),
+            "filed_at": .timestamp(now), "ext": .text("not-json"), "generation": .int(0),
+        ])
+
+        let receipt = try await store.strictSpanVectorSnapshot(itemIDs: ["strict-item"], modelID: model)
+        #expect(receipt.servingGeneration == 0)
+        #expect(receipt.rows["strict-item"]?.map(\.index) == [0, 2])
+        #expect(receipt.malformedRows == [StrictSpanVectorMalformedRow(itemID: "strict-item", index: 1)])
+        #expect(try await store.spanVectors(itemIDs: ["strict-item"], modelID: model)["strict-item"]?.count == 2,
+                "the generic tolerant API keeps skipping the malformed row")
+        #expect(try await store.revalidatesStrictSpanVectorSnapshot(receipt))
+
+        _ = try await store.beginShadowGeneration(modelIDs: [model])
+        try await store.publishShadowGeneration(modelIDs: [model])
+        #expect(try await store.revalidatesStrictSpanVectorSnapshot(receipt) == false)
+    }
+
     @Test("a second write replaces the span set; it never appends")
     func replaceNotAppend() async throws {
         await GlobalTestLock.shared.acquire()

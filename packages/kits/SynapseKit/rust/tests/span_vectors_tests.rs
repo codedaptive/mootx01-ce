@@ -16,7 +16,7 @@ use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use synapsekit::engine::payload::VectorPayload;
-use synapsekit::{SpanVectorInput, VectorStore};
+use synapsekit::{SpanVectorInput, StrictSpanVectorMalformedRow, VectorStore};
 use uuid::Uuid;
 
 /// The store and the storage it wraps (the same `Arc`), so a test can write
@@ -62,6 +62,61 @@ fn three_spans_round_trip_in_index_order() {
     assert_eq!((got[2].start_word, got[2].end_word), (60, 120));
     assert_eq!(got[2].content_version, "cv-2");
     assert!(store.span_vectors(&["item-a"], "minilm-l6-v2-w150").unwrap().is_empty());
+}
+
+#[test]
+fn strict_snapshot_keeps_malformed_row_and_receipt_rejects_generation_flip() {
+    use synapsekit::engine::payload::VectorKind;
+
+    let (store, storage) = make_store();
+    let model = "minilm-l6-v2-w60";
+    store
+        .write_span_vectors(
+            "strict-item", model, "r1",
+            &[
+                span(0, vec![1, 2, 3, 4], 1.0, 0, 4),
+                span(1, vec![5, 6, 7, 8], 1.0, 2, 6),
+                span(2, vec![9, 10, 11, 12], 1.0, 4, 8),
+            ],
+            NOW,
+        )
+        .unwrap();
+    let predicate = StoragePredicate::And(vec![
+        StoragePredicate::Eq(persistence_kit::Column::new("vectors", "item_id"), TypedValue::Text("strict-item".into())),
+        StoragePredicate::Eq(persistence_kit::Column::new("vectors", "model_id"), TypedValue::Text(model.into())),
+        StoragePredicate::Eq(persistence_kit::Column::new("vectors", "vector_index"), TypedValue::Int(1)),
+        StoragePredicate::Eq(persistence_kit::Column::new("vectors", "kind"), TypedValue::Int(VectorKind::Int8.raw())),
+        StoragePredicate::Eq(persistence_kit::Column::new("vectors", "generation"), TypedValue::Int(0)),
+    ]);
+    storage.row_store().delete("vectors", &predicate).unwrap();
+    let mut malformed = BTreeMap::new();
+    malformed.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
+    malformed.insert("item_id".to_string(), TypedValue::Text("strict-item".into()));
+    malformed.insert("vector_index".to_string(), TypedValue::Int(1));
+    malformed.insert("model_id".to_string(), TypedValue::Text(model.into()));
+    malformed.insert("model_version".to_string(), TypedValue::Text("r1".into()));
+    malformed.insert("kind".to_string(), TypedValue::Int(VectorKind::Int8.raw()));
+    malformed.insert("dim".to_string(), TypedValue::Int(4));
+    malformed.insert("payload".to_string(), TypedValue::Blob(vec![5, 6, 7, 8]));
+    malformed.insert("scale".to_string(), TypedValue::Float(1.0));
+    malformed.insert("filed_at".to_string(), TypedValue::Timestamp(NOW));
+    malformed.insert("ext".to_string(), TypedValue::Text("not-json".into()));
+    malformed.insert("generation".to_string(), TypedValue::Int(0));
+    storage.row_store().insert("vectors", malformed).unwrap();
+
+    let receipt = store.strict_span_vector_snapshot(&["strict-item"], model).unwrap();
+    assert_eq!(receipt.serving_generation, 0);
+    assert_eq!(receipt.rows["strict-item"].iter().map(|row| row.index).collect::<Vec<_>>(), vec![0, 2]);
+    assert_eq!(receipt.malformed_rows, vec![StrictSpanVectorMalformedRow {
+        item_id: "strict-item".to_string(), index: Some(1),
+    }]);
+    assert_eq!(store.span_vectors(&["strict-item"], model).unwrap()["strict-item"].len(), 2,
+        "the tolerant API continues to skip malformed rows");
+    assert!(store.revalidates_strict_span_vector_snapshot(&receipt).unwrap());
+
+    store.begin_shadow_generation(&[model]).unwrap();
+    store.publish_shadow_generation(&[model]).unwrap();
+    assert!(!store.revalidates_strict_span_vector_snapshot(&receipt).unwrap());
 }
 
 #[test]

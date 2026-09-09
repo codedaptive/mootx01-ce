@@ -124,7 +124,12 @@ public extension GeniusLocusKit {
         var laneRequest = request
         if let directive, directive.action == .apply,
            let profile = Self.packagedCrossEncoderProfiles[directive.profileID] {
-            let limits = await provisionedCrossEncoderLimits(profile: profile, for: handle)
+            // Strict transcript recall uses the frozen product recipe. A
+            // lowered manifest limit would otherwise apply its classifier to
+            // only part of the required head.
+            let limits = directive.requirement == .strictTranscript
+                ? CrossEncoderLimits(profile: .minilmL6)
+                : await provisionedCrossEncoderLimits(profile: profile, for: handle)
             crossEncoderProfile = profile
             crossEncoderLimits = limits
             if request.limit < limits.pool {

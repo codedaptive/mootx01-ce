@@ -193,7 +193,8 @@ public extension GeniusLocusKit {
     ///           Any storage-tier error surfaced by `AuditLog.iterate`.
     func rebuildDerivedAccelerators(
         for handle: EstateHandle,
-        now: Date = Date()
+        now: Date = Date(),
+        frozen: Bool = false
     ) async throws {
         // Step 3 — Load the unified audit log.
         // `feedAuditLog` (N+1 per-drawer queries into a grow-only RAM dict)
@@ -220,9 +221,17 @@ public extension GeniusLocusKit {
 
         // Steps 4 + 5 — Matrix tier: LOAD from disk and fold the tail forward,
         // else cold-start full rebuild.
-        let store = try await matrixSnapshotStore(for: handle)
+        let store: MatrixSnapshotStore?
+        if frozen {
+            // Derived state may be absent: rebuild privately without creating its table.
+            if let storage = storages[handle],
+               try await storage.currentSchemaVersion(for: MatrixSnapshotStore.schemaDeclaration.kitID) == MatrixSnapshotStore.schemaDeclaration.version {
+                try await storage.openExisting(schema: MatrixSnapshotStore.schemaDeclaration)
+                store = MatrixSnapshotStore(storage: storage)
+            } else { store = nil }
+        } else { store = try await matrixSnapshotStore(for: handle) }
         var tier: MatrixTier
-        if let snapshot = try await store.load(estateID: handle.estateUUID) {
+        if let snapshot = try await store?.load(estateID: handle.estateUUID) {
             // Persisted snapshot present: fold only the entries past its watermark
             // onto the loaded tier. incrementalUpdate is conformance-proven equal
             // to fullRebuild cell-for-cell, including cross-cursor expunge/withdraw
@@ -274,7 +283,7 @@ public extension GeniusLocusKit {
             calibration: calibrationRegistries[handle] ?? MatrixCalibrationRegistry(),
             hlcWatermark: tier.lastHLC
         )
-        try await store.upsert(estateID: handle.estateUUID, snapshot: snapshot, now: now)
+        if !frozen { try await store?.upsert(estateID: handle.estateUUID, snapshot: snapshot, now: now) }
 
         // Persist the dense vector store's resident-array sidecar alongside the
         // matrix snapshot — both are derived accelerators that must live on disk so
@@ -282,7 +291,7 @@ public extension GeniusLocusKit {
         // The sidecar is write-behind; this is the periodic flush point (runs on
         // launch and on every dreaming cycle). No-op when the store has no sidecar
         // (in-memory backend) or no pending writes.
-        if let vectorStore = vectorStores[handle] {
+        if !frozen, let vectorStore = vectorStores[handle] {
             do {
                 try await vectorStore.flush()
             } catch {

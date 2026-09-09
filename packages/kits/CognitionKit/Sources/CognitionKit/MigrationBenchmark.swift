@@ -147,6 +147,17 @@ public struct MigrationComparisonReport: Sendable, Equatable, Codable {
     }
 }
 
+/// Per-branch cleanup observation recorded after an explicit promotion.  The
+/// promotion identity is retained even when one loser cannot be discarded.
+public enum MigrationDiscardStatus: String, Sendable, Equatable {
+    case discarded, alreadyDiscarded = "already_discarded", winnerSkipped = "winner_skipped", unknown, failed
+}
+public struct MigrationDiscardOutcome: Sendable, Equatable {
+    public let branchID: BranchID
+    public let status: MigrationDiscardStatus
+    public init(branchID: BranchID, status: MigrationDiscardStatus) { self.branchID = branchID; self.status = status }
+}
+
 /// Compare candidate migration plans by branch recall fidelity.
 public struct MigrationBenchmark: Recipe {
 
@@ -555,7 +566,7 @@ public struct MigrationBenchmark: Recipe {
         discardBranchIDs: [BranchID],
         estate: EstateHandle,
         kit: GeniusLocusKit
-    ) async throws {
+    ) async throws -> [MigrationDiscardOutcome] {
         guard let winner = await kit.branchHandle(for: winnerBranchID) else {
             throw RecipeError.userConfirmationRequired(
                 action: "promote unknown branch \(winnerBranchID)")
@@ -578,10 +589,19 @@ public struct MigrationBenchmark: Recipe {
         try await NeuronKit.promoteBranch(winner, replacing: estate, in: kit)
         // Discard the losers; rows retained for audit (I-15). An id that
         // no longer resolves is skipped — discarding is idempotent intent.
-        for id in discardBranchIDs where id != winnerBranchID {
-            if let branch = await kit.branchHandle(for: id) {
-                try await branch.discard()
+        return await withTaskGroup(of: MigrationDiscardOutcome.self) { group in
+            for id in discardBranchIDs {
+                group.addTask {
+                    if id == winnerBranchID { return .init(branchID: id, status: .winnerSkipped) }
+                    guard let branch = await kit.branchHandle(for: id) else { return .init(branchID: id, status: .unknown) }
+                    if branch.status == .discarded { return .init(branchID: id, status: .alreadyDiscarded) }
+                    do { try await branch.discard(); return .init(branchID: id, status: branch.status == .discarded ? .discarded : .failed) }
+                    catch { return .init(branchID: id, status: .failed) }
+                }
             }
+            var outcomes: [MigrationDiscardOutcome] = []
+            for await outcome in group { outcomes.append(outcome) }
+            return outcomes.sorted { $0.branchID.uuidString < $1.branchID.uuidString }
         }
     }
 }

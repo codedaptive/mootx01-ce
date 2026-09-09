@@ -24,18 +24,54 @@ struct SpanEncoderQuerySeam: SpanRerankEncoding {
 }
 
 /// SynapseKit's span rows as the span rerank stage reads them (sheet §3 rows,
-/// serving generation only). `contentVersion` is the duty's staleness key and
-/// is not consulted by recall, so it does not travel.
+/// serving generation only). `contentVersion` crosses the seam so strict
+/// transcript recall can reject stale source spans.
 struct SynapseSpanVectorReader: SpanVectorReading {
     let store: VectorStore
     func spanVectors(itemIDs: [String], modelID: String) async throws -> [String: [SpanRerankVector]] {
         try await store.spanVectors(itemIDs: itemIDs, modelID: modelID).mapValues { rows in
             rows.map {
                 SpanRerankVector(index: $0.index, int8: $0.int8, scale: $0.scale,
-                                 startWord: $0.startWord, endWord: $0.endWord)
+                                 startWord: $0.startWord, endWord: $0.endWord,
+                                 contentVersion: $0.contentVersion)
             }
         }
     }
+
+    /// The strict read lane is intentionally not part of `SpanVectorReading`:
+    /// generic rerank continues to use its tolerant protocol seam, while
+    /// strict transcript rerank receives malformed-row evidence and a serving
+    /// generation receipt from the concrete Synapse authority.
+    func strictSpanVectorSnapshot(
+        itemIDs: [String], modelID: String
+    ) async throws -> StrictSynapseSpanRerankSnapshot {
+        let snapshot = try await store.strictSpanVectorSnapshot(itemIDs: itemIDs, modelID: modelID)
+        return StrictSynapseSpanRerankSnapshot(
+            receipt: snapshot,
+            rows: snapshot.rows.mapValues { rows in
+                rows.map {
+                    SpanRerankVector(index: $0.index, int8: $0.int8, scale: $0.scale,
+                                     startWord: $0.startWord, endWord: $0.endWord,
+                                     contentVersion: $0.contentVersion)
+                }
+            })
+    }
+
+    func revalidatesStrictSpanVectorSnapshot(
+        _ snapshot: StrictSynapseSpanRerankSnapshot
+    ) async throws -> Bool {
+        try await store.revalidatesStrictSpanVectorSnapshot(snapshot.receipt)
+    }
+}
+
+/// Strict-only bridge receipt. Kept below the generic `SpanVectorReading`
+/// protocol so test and host implementations retain tolerant behavior.
+struct StrictSynapseSpanRerankSnapshot: Sendable {
+    let receipt: StrictSpanVectorSnapshot
+    let rows: [String: [SpanRerankVector]]
+
+    var malformedRows: [StrictSpanVectorMalformedRow] { receipt.malformedRows }
+    var servingGeneration: Int64 { receipt.servingGeneration }
 }
 
 extension CorpusKit.EncoderModelSpec {

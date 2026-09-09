@@ -146,6 +146,12 @@ public struct GLKRecallResult: Sendable {
     /// `degradedStages`.
     public let crossEncoder: CrossEncoderReport?
 
+    /// Typed evidence for a strict transcript rerank request. Generic recalls
+    /// remain nil and retain the existing cross-encoder report contract.
+    public var strictTranscriptRerank: StrictTranscriptRerankOutcome? {
+        crossEncoder?.strictTranscript
+    }
+
     /// Convenience accessor — the hydrated `Drawer` for each hit that has one.
     public var drawers: [LocusKit.Drawer] { hits.compactMap(\.drawer) }
 

@@ -449,7 +449,8 @@ public extension GeniusLocusKit {
         for handle: EstateHandle,
         kind: EstateKind,
         backingStorage: any Storage,
-        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble(),
+        frozen: Bool = false
     ) async throws {
         switch kind {
         case .glk:
@@ -467,7 +468,11 @@ public extension GeniusLocusKit {
             // migration-version record for "GeniusLocusKit". This is the same
             // composite open the hydrate launch path performs in
             // open(inMemory:hydrateFrom:).
-            try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            if frozen {
+                try await backingStorage.openExisting(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            } else {
+                try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            }
             // Read the provisioned embedding_provider manifest key and augment the
             // ensemble with the matching float/dense provider. Absent key or unknown
             // ID → caller-supplied ensemble unchanged (byte-identical to today's
@@ -487,8 +492,8 @@ public extension GeniusLocusKit {
                 configuration: CorpusContentConfiguration(
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
-                models: resolvedModels)
-            try await corpus.reconcileConfiguredProviders(now: Date())
+                models: resolvedModels, frozen: frozen)
+            if !frozen { try await corpus.reconcileConfiguredProviders(now: Date()) }
             registerCorpus(corpus, for: handle)
             // BORROW Corpus's single dense VectorStore for GLK's scored-recall
             // vector lane rather than constructing a second VectorStore over the
@@ -513,7 +518,7 @@ public extension GeniusLocusKit {
             // coordinator.rs wire_substores calls apply_provisioned_embedding_provider
             // after register_vector_store, and every aria-mcp serve path reaches
             // it through wire_glk_substores.
-            await activateSpanEncoderIfProvisioned(for: handle)
+            await activateSpanEncoderIfProvisioned(for: handle, frozen: frozen)
             // CorpusKit owns the encode pipeline: mount the Corpus's own ingest
             // queue + drain worker pool, and wire its onEncoded callback to roll
             // up the touched LocusKit rooms for each encoded batch. GLK's only
@@ -532,8 +537,10 @@ public extension GeniusLocusKit {
             // (wire_corpus_on_encoded) before its eager mount for the same
             // reason. Provision mounts an empty queue, so this ordering is
             // equally correct there.
-            await wireCorpusRoomRollup(corpus, for: handle)
-            try await corpus.mountIngestQueue()
+            if !frozen {
+                await wireCorpusRoomRollup(corpus, for: handle)
+                try await corpus.mountIngestQueue()
+            }
             Self.lifecycleLog.info(
                 "wired GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore + encode queue)"
             )
@@ -553,20 +560,22 @@ public extension GeniusLocusKit {
                 configuration: CorpusContentConfiguration(
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
-                models: resolvedModels)
-            try await corpus.reconcileConfiguredProviders(now: Date())
+                models: resolvedModels, frozen: frozen)
+            if !frozen { try await corpus.reconcileConfiguredProviders(now: Date()) }
             registerCorpus(corpus, for: handle)
             // No VectorStore on a CorpusOnly estate: activation registers the
             // duty-side encoder only and logs that the rerank stage is absent.
-            await activateSpanEncoderIfProvisioned(for: handle)
+            await activateSpanEncoderIfProvisioned(for: handle, frozen: frozen)
             // A CorpusOnly estate also feeds its Corpus from capture: wire the
             // room rollup and mount the Corpus-owned ingest queue + drain
             // worker. Rider BEFORE mount, same ordering rule as the .glk case
             // above: the mount starts the drain worker on the persisted queue,
             // and a resumed serve-open backlog must never encode ahead of the
             // encode rider.
-            await wireCorpusRoomRollup(corpus, for: handle)
-            try await corpus.mountIngestQueue()
+            if !frozen {
+                await wireCorpusRoomRollup(corpus, for: handle)
+                try await corpus.mountIngestQueue()
+            }
             Self.lifecycleLog.info(
                 "wired CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus + encode queue)"
             )
@@ -594,11 +603,12 @@ public extension GeniusLocusKit {
     func wireGLKSubstores(
         for handle: EstateHandle,
         backingStorage: any Storage,
-        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble(),
+        frozen: Bool = false
     ) async throws {
         try await wireSubstores(
             for: handle, kind: .glk,
-            backingStorage: backingStorage, embeddingModels: embeddingModels)
+            backingStorage: backingStorage, embeddingModels: embeddingModels, frozen: frozen)
     }
 
     // MARK: - mountState(for:)
@@ -912,12 +922,12 @@ public extension GeniusLocusKit {
     /// to the store. Absent or other keys do nothing; the failure contract of
     /// `activateSpanEncoder` applies (seed failure logged once, activation
     /// reads the registry as it stands).
-    private func activateSpanEncoderIfProvisioned(for handle: EstateHandle) async {
+    private func activateSpanEncoderIfProvisioned(for handle: EstateHandle, frozen: Bool = false) async {
         guard let provisionedID = try? await provisionedEmbeddingProvider(for: handle),
               provisionedID == Self.encoderProviderID else {
             return
         }
-        await activateSpanEncoder(for: handle)
+        await activateSpanEncoder(for: handle, frozen: frozen)
     }
 
     private func applyProvisionedEmbeddingProvider(

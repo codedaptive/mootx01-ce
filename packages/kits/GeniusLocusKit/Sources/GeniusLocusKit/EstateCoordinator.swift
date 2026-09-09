@@ -4,6 +4,7 @@ import IntellectusLib
 import OSLog
 import LocusKit
 import PersistenceKit
+import PersistenceKitInMemory
 
 /// The multi-estate coordinator surface on `GeniusLocusKit`.
 ///
@@ -85,7 +86,8 @@ public extension GeniusLocusKit {
         storage: any Storage,
         owner: OwnerCredentials,
         identityKeyStore: (any EstateIdentityKeyStore)? = nil,
-        federate: Bool = false
+        federate: Bool = false,
+        frozen: Bool = false
     ) async throws -> EstateHandle {
         let estate: LocusKit.Estate
         do {
@@ -93,7 +95,9 @@ public extension GeniusLocusKit {
                 storage: storage,
                 owner: owner,
                 identityKeyStore: identityKeyStore,
-                federate: federate
+                federate: federate,
+                frozen: frozen,
+                fingerprintStorage: frozen ? InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)) : nil
             )
         } catch {
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")

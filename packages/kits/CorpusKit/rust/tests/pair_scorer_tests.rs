@@ -145,10 +145,18 @@ fn directive_factories_name_the_qualified_profile() {
         RerankDirective {
             action: RerankAction::Apply,
             profile_id: "ms-marco-minilm-l6-cross-v1".into(),
-            reason: None
+            reason: None,
+            requirement: Default::default(),
         }
     );
     assert_eq!(RerankDirective::bypass(Some("lab")).reason.as_deref(), Some("lab"));
+}
+
+#[test]
+fn strict_transcript_directive_is_explicit_and_round_trips() {
+    let directive = RerankDirective::strict_transcript(Some("transcript"));
+    assert!(directive.is_strict_transcript());
+    assert!(serde_json::to_string(&directive).unwrap().contains("strict_transcript"));
 }
 
 #[test]

@@ -47,9 +47,37 @@ pub trait SpanRerankEncoding: Send + Sync {
     /// span rows are read under this id, so a model swap re-keys the lookup.
     fn model_id(&self) -> &str;
 
+    /// The registered encoder contract, when the seam can attest it.  Legacy
+    /// generic seams may omit this; strict transcript recall then fails
+    /// closed instead of assuming an id proves the complete contract.
+    fn model_spec(&self) -> Option<corpus_kit::encoder::EncoderModelSpec> {
+        None
+    }
+
     /// Encode one query: applies the model's query prefix, pools, and
     /// L2-normalises, so a dot product against a stored span is a cosine.
     fn encode_query(&self, text: &str) -> Result<Vec<f32>, SpanRerankError>;
+}
+
+/// A stored source span with its persisted content-version evidence.  The
+/// ordinary rerank path intentionally remains tolerant; strict transcript
+/// recall consumes this separate seam so it cannot accidentally lose the
+/// version while projecting a generic span vector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrictSpanRerankVector {
+    pub vector: SpanRerankVector,
+    pub content_version: String,
+}
+
+/// Strict-only source receipt. It preserves malformed-row evidence and the
+/// serving-generation identity that generic `span_vectors` deliberately does
+/// not carry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrictSpanRerankSnapshot {
+    pub model_id: String,
+    pub serving_generation: i64,
+    pub rows: HashMap<String, Vec<StrictSpanRerankVector>>,
+    pub malformed_rows: Vec<synapsekit::StrictSpanVectorMalformedRow>,
 }
 
 /// One stored span vector as the recall stage reads it: the sheet §3 span row
@@ -73,11 +101,48 @@ pub struct SpanRerankVector {
 /// `VectorStore::span_vectors(item_ids, model_id)`). Items with no rows under
 /// the model are absent from the result.
 pub trait SpanVectorReading: Send + Sync {
+    /// Only the concrete Synapse adapter may attest strict source receipts.
+    /// Generic readers remain eligible for tolerant rerank alone.
+    fn is_strict_synapse_authority(&self) -> bool {
+        false
+    }
+
     fn span_vectors(
         &self,
         item_ids: &[String],
         model_id: &str,
     ) -> Result<HashMap<String, Vec<SpanRerankVector>>, SpanRerankError>;
+
+    /// Strict source rows preserve the persisted content-version field.  A
+    /// generic reader has no such guarantee and must not be used by the
+    /// transcript operation.
+    fn strict_span_vectors(
+        &self,
+        _item_ids: &[String],
+        _model_id: &str,
+    ) -> Result<HashMap<String, Vec<StrictSpanRerankVector>>, SpanRerankError> {
+        Err(SpanRerankError("strict span provenance unavailable".to_string()))
+    }
+
+    /// Strict snapshot with malformed-row and serving-generation evidence.
+    /// Generic readers retain their tolerant `span_vectors` behaviour; only
+    /// the concrete Synapse reader can satisfy this stricter request.
+    fn strict_span_vector_snapshot(
+        &self,
+        _item_ids: &[String],
+        _model_id: &str,
+    ) -> Result<StrictSpanRerankSnapshot, SpanRerankError> {
+        Err(SpanRerankError("strict span receipt unavailable".to_string()))
+    }
+
+    /// Revalidate a strict snapshot immediately before and after classifier
+    /// scoring. A generic reader cannot attest the serving generation.
+    fn revalidates_strict_span_vector_snapshot(
+        &self,
+        _snapshot: &StrictSpanRerankSnapshot,
+    ) -> Result<bool, SpanRerankError> {
+        Err(SpanRerankError("strict span receipt unavailable".to_string()))
+    }
 }
 
 /// One head entry handed to the stage: the item and its 1-based lexical rank.
@@ -242,17 +307,25 @@ impl SpanRerankEncoding for SpanEncoderQuerySeam {
         &self.0.spec().model_id
     }
 
+    fn model_spec(&self) -> Option<corpus_kit::encoder::EncoderModelSpec> {
+        Some(self.0.spec().clone())
+    }
+
     fn encode_query(&self, text: &str) -> Result<Vec<f32>, SpanRerankError> {
         self.0.encode_query(text).map_err(|e| SpanRerankError(e.to_string()))
     }
 }
 
 /// SynapseKit's span rows as the stage reads them (sheet §3 rows, serving
-/// generation only). `content_version` is the duty's staleness key and is not
-/// consulted by recall, so it does not travel.
+/// generation only). Generic reads remain tolerant; the strict receipt path
+/// additionally preserves content versions, malformed rows, and generation.
 pub struct SynapseSpanVectorReader(pub Arc<synapsekit::vector_store::VectorStore>);
 
 impl SpanVectorReading for SynapseSpanVectorReader {
+    fn is_strict_synapse_authority(&self) -> bool {
+        true
+    }
+
     fn span_vectors(
         &self,
         item_ids: &[String],
@@ -279,6 +352,90 @@ impl SpanVectorReading for SynapseSpanVectorReader {
                 (id, rows)
             })
             .collect())
+    }
+
+    fn strict_span_vectors(
+        &self,
+        item_ids: &[String],
+        model_id: &str,
+    ) -> Result<HashMap<String, Vec<StrictSpanRerankVector>>, SpanRerankError> {
+        let refs: Vec<&str> = item_ids.iter().map(String::as_str).collect();
+        let rows = self
+            .0
+            .span_vectors(&refs, model_id)
+            .map_err(|e| SpanRerankError(format!("{e:?}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, rows)| {
+                let rows = rows
+                    .into_iter()
+                    .map(|r| StrictSpanRerankVector {
+                        vector: SpanRerankVector {
+                            index: r.index,
+                            int8: r.int8,
+                            scale: r.scale,
+                            start_word: r.start_word,
+                            end_word: r.end_word,
+                        },
+                        content_version: r.content_version,
+                    })
+                    .collect();
+                (id, rows)
+            })
+            .collect())
+    }
+
+    fn strict_span_vector_snapshot(
+        &self,
+        item_ids: &[String],
+        model_id: &str,
+    ) -> Result<StrictSpanRerankSnapshot, SpanRerankError> {
+        let refs: Vec<&str> = item_ids.iter().map(String::as_str).collect();
+        let snapshot = self
+            .0
+            .strict_span_vector_snapshot(&refs, model_id)
+            .map_err(|e| SpanRerankError(format!("{e:?}")))?;
+        let rows = snapshot
+            .rows
+            .iter()
+            .map(|(id, rows)| {
+                let rows = rows
+                    .iter()
+                    .map(|row| StrictSpanRerankVector {
+                        vector: SpanRerankVector {
+                            index: row.index,
+                            int8: row.int8.clone(),
+                            scale: row.scale,
+                            start_word: row.start_word,
+                            end_word: row.end_word,
+                        },
+                        content_version: row.content_version.clone(),
+                    })
+                    .collect();
+                (id.clone(), rows)
+            })
+            .collect();
+        Ok(StrictSpanRerankSnapshot {
+            model_id: snapshot.model_id,
+            serving_generation: snapshot.serving_generation,
+            rows,
+            malformed_rows: snapshot.malformed_rows,
+        })
+    }
+
+    fn revalidates_strict_span_vector_snapshot(
+        &self,
+        snapshot: &StrictSpanRerankSnapshot,
+    ) -> Result<bool, SpanRerankError> {
+        let receipt = synapsekit::StrictSpanVectorSnapshot {
+            model_id: snapshot.model_id.clone(),
+            serving_generation: snapshot.serving_generation,
+            rows: Default::default(),
+            malformed_rows: Vec::new(),
+        };
+        self.0
+            .revalidates_strict_span_vector_snapshot(&receipt)
+            .map_err(|e| SpanRerankError(format!("{e:?}")))
     }
 }
 

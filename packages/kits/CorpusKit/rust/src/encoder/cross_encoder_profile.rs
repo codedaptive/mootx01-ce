@@ -49,6 +49,12 @@ pub struct CrossEncoderProfile {
 }
 
 impl CrossEncoderProfile {
+    /// Full source revision for the qualified MiniLM classifier. `model_version`
+    /// remains the established short display value; strict transcript recall
+    /// validates and reports this complete pin.
+    pub const MINILM_L6_REVISION: &'static str =
+        "233902d25c440f23af6f7d6e94d2946bac0bee0a";
+
     /// Base name of the packaged model artifact: `<artifact_name>.mlmodelc`
     /// on Apple platforms; the Rust runtime reads the fixed HF file triple
     /// instead and does not use it. Derived from `model_id` so a second

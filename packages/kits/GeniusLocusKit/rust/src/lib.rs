@@ -72,6 +72,7 @@ pub mod estate_open_posture;
 pub mod estate_format;
 pub mod branches;
 pub mod coordinator;
+pub mod span_content_version;
 pub mod encoder_activation;
 pub use encoder_activation::{
     BundledModelDirectoryResolver, ModelDirectoryResolving, NilModelDirectoryResolver,
@@ -217,6 +218,9 @@ pub use recall::{
     RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
     RecallOrigin, RecallPlan, RecallScoreVector, RecallShape, RecallUnionProfile, RecallWeights,
 };
+/// Request-borne rerank contract re-exported for recipes.  This keeps
+/// CognitionKit downstream of GLK rather than adding a direct CorpusKit edge.
+pub use corpus_kit::encoder::RerankDirective;
 // PACKAGER mission: GLKResultsPackager public surface. Re-exported from
 // packager.rs so downstream crates (AriaMcpKit) import from `genius_locus_kit`
 // without reaching into module internals.

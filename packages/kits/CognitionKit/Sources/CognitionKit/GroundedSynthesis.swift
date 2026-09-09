@@ -58,9 +58,8 @@ public struct GroundedSynthesis: Recipe {
         /// pool; the cap bounds the synthesizer's work while the cue-pool
         /// bound keeps the ranking lane wide.
         public let cap: Int?
-        /// Raw query text for the SCORED second lane (BM25 + vector via
-        /// the GLK `.unionBest`/`.raw` request — the lane PreciseRecall's
-        /// coarse grab uses). The scored lane reaches relevant rows that
+        /// Raw query text for the SCORED second lane (BM25 + vector through
+        /// a GLK `.unionBest` request). The scored lane reaches relevant rows that
         /// share NO cue terms with the question — the semantic gap that
         /// capped the lexical-only pool at 34/50 misses in trial 4. nil =
         /// lexical-only grounding (previous behaviour).
@@ -69,6 +68,10 @@ public struct GroundedSynthesis: Recipe {
         /// MCP read surfaces enable this because recall-frame sensitivity
         /// filters cover the adjective axis, not provenance bits 30...35.
         public let excludeProvenanceSensitive: Bool
+        /// Scoring used by the optional query lane. `.raw` preserves the
+        /// historical recipe contract; selected ARIA v2 requests matrix-aware
+        /// relevance so recency cannot outrank an older exact match.
+        public let scoredLaneScoring: GLKRecallScoring
 
         public init(
             frame: RecallFrame,
@@ -76,7 +79,8 @@ public struct GroundedSynthesis: Recipe {
             cueTerms: [String] = [],
             cap: Int? = nil,
             query: String? = nil,
-            excludeProvenanceSensitive: Bool = false
+            excludeProvenanceSensitive: Bool = false,
+            scoredLaneScoring: GLKRecallScoring = .raw
         ) {
             self.frame = frame
             self.tuning = tuning
@@ -84,6 +88,7 @@ public struct GroundedSynthesis: Recipe {
             self.cap = cap
             self.query = query
             self.excludeProvenanceSensitive = excludeProvenanceSensitive
+            self.scoredLaneScoring = scoredLaneScoring
         }
     }
 
@@ -198,7 +203,8 @@ public struct GroundedSynthesis: Recipe {
                 scoredLane = ScoredLane(
                     frame: laneBFrame,
                     queryText: query,
-                    traceLimit: input.cap ?? input.tuning.pageSize)
+                    traceLimit: input.cap ?? input.tuning.pageSize,
+                    scoring: input.scoredLaneScoring)
             }
         }
 
@@ -227,7 +233,7 @@ public struct GroundedSynthesis: Recipe {
         }
         let recalledRows = pages.flatMap { $0.rows }
         let allRows = input.excludeProvenanceSensitive
-            ? recalledRows.filter { $0.sensitivity != .restricted && $0.sensitivity != .secret }
+            ? recalledRows.filter { Self.publicCaptureProvenance($0.provenance) }
             : recalledRows
 
         // Apply cap BEFORE synthesis so the synthesizer's work is bounded
@@ -264,5 +270,13 @@ public struct GroundedSynthesis: Recipe {
             context: context,
             drawerCount: rowsToSynthesize.count,
             rankedIDs: rowsToSynthesize.map(\.id))
+    }
+
+    /// Public synthesis admits only the two explicitly public provenance
+    /// sensitivity encodings. Unknown/reserved encodings fail closed rather
+    /// than inheriting `Drawer.sensitivity`'s compatibility fallback.
+    static func publicCaptureProvenance(_ provenance: Int64) -> Bool {
+        let raw = (provenance >> 30) & 0x3f
+        return raw == 0 || raw == 16
     }
 }
