@@ -42,6 +42,10 @@ interprocess = { version = "2" }
 # these kits (it is the composition/host layer, not a primitive). Recorded as
 # CONSUMED in the mission blast-radius report.
 #
+# moot-product-identity: settings::load() reads config.json for the
+# daemon.stats_store R6 setting used by resolve_store_path in manager_config.rs.
+# Per in-repository dependency direction (host → lib); no inversion.
+moot-product-identity = { path = "../../../packages/libs/MootProductIdentity/rust" }
 # observer-sink: the central StatsStore (SQLite) the manager owns — the global
 # monitoring switch, the retention window, and the read/status surface.
 observer-sink    = { path = "../../../packages/libs/ObserverSink/rust" }
