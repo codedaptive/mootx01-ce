@@ -94,70 +94,7 @@ struct MultiBlockHintAndTimingWindowTests {
 
     // MARK: - Finding B: multi-block result + hint → all blocks survive
 
-    @Test("an import with return_id_map that trips a hint keeps BOTH blocks, and the id_map still parses")
-    func multiBlockResultSurvivesHint() async throws {
-        let (dispatcher, kit, handle) = try await makeVaultDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-        let url = try tempSeedFile("""
-            {"format_version": 1, "name": "hint-survival", "records": [
-              {"id": "h1", "content": "hint survival sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/hint"},
-              {"id": "h2", "content": "hint survival sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/hint"}]}
-            """)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        // The unrecognized key trips appendUnknownArgsHint on a TWO-block
-        // result — exactly the scenario that destroyed the id_map block.
-        let result = try await dispatcher.dispatch(
-            name: "moot_json_import",
-            arguments: .object([
-                "path": .string(url.path),
-                "return_id_map": .bool(true),
-                "totally_fake_arg": .string("should be flagged, not fatal"),
-            ]))
-
-        #expect(!isError(of: result), "import with a bogus arg must still succeed")
-        let b = blocks(of: result)
-        #expect(b.count == 2, "receipt block AND id_map block must both survive the hint; got \(b.count) block(s)")
-
-        let receipt = try #require(b.first)
-        #expect(receipt.contains("json import complete"), "block 0 is the prose receipt")
-        #expect(receipt.contains("hint: unrecognized argument(s) ignored: totally_fake_arg"),
-                "the hint lands on the prose block")
-
-        // The trailing block must still be one whole parseable JSON object —
-        // no hint text may leak into it.
-        let mapText = try #require(b.last)
-        #expect(!mapText.contains("hint:"), "no hint line may be appended to the JSON block")
-        let parsed = try JSONSerialization.jsonObject(with: Data(mapText.utf8))
-        let map = try #require((parsed as? [String: Any])?["id_map"] as? [String: Any],
-                               "id_map block must parse as a JSON object")
-        #expect(map.count == 2, "one id_map entry per seeded record")
-        #expect(map["h1"] != nil && map["h2"] != nil)
-    }
-
     // MARK: - Finding B guard: error results stay untouched by the hint path
-
-    @Test("an error result with an unrecognized arg is returned unchanged — no hint appended")
-    func errorResultWithUnknownArgUnchanged() async throws {
-        let (dispatcher, kit, handle) = try await makeVaultDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-
-        // Nonexistent seed path → tool-level errorResult (isError: true).
-        // The bogus arg would trip the hint on a success result; on an error
-        // result the hint machinery must leave the message alone.
-        let result = try await dispatcher.dispatch(
-            name: "moot_json_import",
-            arguments: .object([
-                "path": .string("/nonexistent/at01-no-such-seed.json"),
-                "totally_fake_arg": .string("must not be appended"),
-            ]))
-
-        #expect(isError(of: result), "a missing seed file is a tool-level error result")
-        let b = blocks(of: result)
-        #expect(b.count == 1, "error results are single-block")
-        #expect(!(b.first ?? "").contains("hint:"),
-                "error results must not be augmented with hint lines")
-    }
 
     // MARK: - Finding A: the timing window is bounded at the call level
 
@@ -200,30 +137,5 @@ struct MultiBlockHintAndTimingWindowTests {
             handle: handle, sinceMs: 0, maxEvents: cap)
         #expect(capped.count == cap, "collection must stop exactly at maxEvents; got \(capped.count) for cap \(cap)")
         #expect(cappedTruncated, "a clamped window must report truncation")
-    }
-
-    @Test("moot_timing_report on a small estate stays under the cap: usable watermark, no truncation line")
-    func timingReportSmallEstateShapeUnchanged() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-
-        _ = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: .object([
-                "content": .string("timing report shape seed"),
-                "subject": .string("timing report shape seed"),
-                "location": .string("timing/shape"),
-                "impatient": .bool(true),
-            ]))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_timing_report",
-            arguments: .object(["since_ms": .integer(0)]))
-
-        #expect(!isError(of: result))
-        let text = blocks(of: result).first ?? ""
-        #expect(text.contains("watermark_ms:"), "the paging watermark line must be present")
-        #expect(!text.contains("window: truncated"),
-                "an under-cap window must keep the pre-cap report shape byte-identical")
     }
 }

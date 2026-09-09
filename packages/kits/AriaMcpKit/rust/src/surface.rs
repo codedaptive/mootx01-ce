@@ -1,50 +1,36 @@
-//! Selected ARIA public-surface facade.
+//! Selected ARIA v2 public-surface facade.
 //!
-//! V1 retains its existing catalog and dispatch path. The `aria-v2` feature
-//! selects the deliberately small Mission01 catalog, whose decoder, stable
-//! operation identity, policy effect, typed operation, and projection live
-//! together here. This prevents a v2 operation from entering legacy teachme,
-//! mode, or runner paths.
+//! The Mission01 catalog is the only surface. Its decoder, stable operation
+//! identity, policy effect, typed operation, and projection live together here.
+//! V2 operations never enter legacy teachme, mode, or runner paths.
 
 use std::collections::BTreeMap;
 
-#[cfg(feature = "aria-v2")]
 use std::path::Path;
 
-#[cfg(feature = "aria-v2")]
 use std::collections::HashSet;
-#[cfg(feature = "aria-v2")]
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "aria-v2")]
 use serde_json::json;
-#[cfg(feature = "aria-v2")]
 use serde::Serialize;
-#[cfg(feature = "aria-v2")]
 use uuid::Uuid;
 
 use crate::jsonrpc::{JSONRPCError, JsonValue};
 
-#[cfg(feature = "aria-v2")]
 use crate::jsonrpc::JSONRPCErrorCode;
-#[cfg(feature = "aria-v2")]
 use crate::monitoring_control::MonitoringControl;
 
 /// The one catalog selected for a running binary.
 pub(crate) struct SelectedSurface {
     tools: serde_json::Value,
-    #[cfg(feature = "aria-v2")]
     registry: crate::v2::registry::V2EffectiveRegistry,
-    #[cfg(feature = "aria-v2")]
     memory_list_cursors: Arc<crate::v2::memory_list::MemoryListCursorStore>,
-    #[cfg(feature = "aria-v2")]
     contradiction_analyses: Arc<Mutex<crate::v2::contradictions::V2ContradictionAnalysisCache>>,
 }
 
 /// A decoded v2 operation. Its identity, rather than a public name, drives
 /// shared policy decisions.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(feature = "aria-v2")]
 pub(crate) enum SurfaceRequest {
     Help(crate::v2::help::V2HelpRequest),
     FileMemory(crate::v2::core_memory::V2FileMemoryRequest),
@@ -80,7 +66,6 @@ pub(crate) enum SurfaceRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(feature = "aria-v2")]
 pub(crate) enum MemoryMutationRequest {
     Update(crate::v2::memory_mutations::V2UpdateMemoryRequest),
     Withdraw(crate::v2::memory_mutations::V2WithdrawMemoryRequest),
@@ -92,7 +77,6 @@ pub(crate) enum MemoryMutationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(feature = "aria-v2")]
 pub(crate) enum KnowledgeJournalRequest {
     ConnectionSearch(crate::v2::knowledge_journal::V2ConnectionSearchRequest),
     ConnectionMap(crate::v2::knowledge_journal::V2ConnectionMapRequest),
@@ -105,7 +89,6 @@ pub(crate) enum KnowledgeJournalRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(feature = "aria-v2")]
 pub(crate) enum VaultLifecycleRequest {
     Reindex(crate::v2::data_mobility::V2ReindexRequest),
     ReclassifyFdc(crate::v2::data_mobility::V2ReclassifyFdcRequest),
@@ -121,13 +104,9 @@ pub(crate) enum VaultLifecycleRequest {
     Job(crate::v2::data_mobility::V2VaultJobRequest),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(not(feature = "aria-v2"))]
-pub(crate) struct SurfaceRequest;
 
 /// The policy effect attached to a stable v2 operation identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(feature = "aria-v2")]
 pub(crate) enum SurfaceEffect {
     Inspection,
     Mutation,
@@ -137,7 +116,6 @@ impl SelectedSurface {
     /// Select the effective catalog. V1's public builders intentionally stay
     /// v1 facades for existing callers and regression fixtures.
     pub(crate) fn selected(vault_on: bool, memory_on: bool) -> Self {
-        #[cfg(feature = "aria-v2")]
         {
             let _ = memory_on;
             let registry = crate::v2::catalog::selected_registry_with_vault(vault_on);
@@ -149,31 +127,22 @@ impl SelectedSurface {
             }
         }
 
-        #[cfg(not(feature = "aria-v2"))]
-        {
-            Self {
-                tools: crate::tool_list::build_tool_list_with_flags(vault_on, memory_on),
-            }
-        }
     }
 
     pub(crate) fn catalog(&self) -> &serde_json::Value {
         &self.tools
     }
 
-    #[cfg(feature = "aria-v2")]
     pub(crate) fn registry(&self) -> &crate::v2::registry::V2EffectiveRegistry {
         &self.registry
     }
 
-    #[cfg(feature = "aria-v2")]
     pub(crate) fn capability_digest(&self) -> String {
         crate::v2::capability_digest::registry_capability_digest(&self.registry)
     }
 
     /// Return the keys advertised by this selected catalog. V2's decoder is
     /// deliberately stricter than the legacy hint-only accepted-key helper.
-    #[cfg(feature = "aria-v2")]
     pub(crate) fn accepted_arg_keys(&self, name: &str) -> Option<HashSet<String>> {
         let tools = self.tools.as_array()?;
         let tool = tools
@@ -191,7 +160,6 @@ impl SelectedSurface {
         name: &str,
         args: &BTreeMap<String, JsonValue>,
     ) -> Result<Option<SurfaceRequest>, JSONRPCError> {
-        #[cfg(feature = "aria-v2")]
         {
             if self.accepted_arg_keys(name).is_none() {
                 return Err(JSONRPCError::new(
@@ -427,15 +395,9 @@ impl SelectedSurface {
             Ok(Some(request))
         }
 
-        #[cfg(not(feature = "aria-v2"))]
-        {
-            let _ = (name, args, self);
-            Ok(None)
-        }
     }
 }
 
-#[cfg(feature = "aria-v2")]
 impl SurfaceRequest {
     pub(crate) fn effect(&self) -> SurfaceEffect {
         match self {
@@ -486,18 +448,14 @@ impl SurfaceRequest {
     }
 }
 
-#[cfg(feature = "aria-v2")]
 struct FixedV2Clock(i64);
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::core_memory::V2MemoryClock for FixedV2Clock {
     fn now_millis(&self) -> i64 { self.0 }
 }
 
-#[cfg(feature = "aria-v2")]
 struct SelectedV2Authorization;
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::core_memory::V2MemoryAuthorization for SelectedV2Authorization {
     fn authorize(
         &self,
@@ -507,7 +465,6 @@ impl crate::v2::core_memory::V2MemoryAuthorization for SelectedV2Authorization {
 }
 
 /// Execute one typed selected-surface request against direct typed services.
-#[cfg(feature = "aria-v2")]
 pub(crate) fn execute(
     selected_surface: &SelectedSurface,
     posture: crate::estate_posture::EstatePosture,
@@ -631,7 +588,6 @@ pub(crate) fn execute(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_memory_mutation(
     request: MemoryMutationRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -710,13 +666,11 @@ fn execute_memory_mutation(
 
 /// The selected v2 vault slice admits only the default estate and retains the
 /// caller binding through the direct lower call and its readback.
-#[cfg(feature = "aria-v2")]
 struct SelectedVaultMobilityAuthority<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     now_millis: i64,
 }
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::data_mobility::V2DataMobilityAuthority for SelectedVaultMobilityAuthority<'_> {
     fn admit(
         &self,
@@ -754,13 +708,11 @@ impl crate::v2::data_mobility::V2DataMobilityAuthority for SelectedVaultMobility
 /// Concrete selected-estate bridge for the three callable vault lifecycle
 /// operations.  It consumes the typed lower receipts and never reads v1 text
 /// or JSON back into a v2 result.
-#[cfg(feature = "aria-v2")]
 struct SelectedVaultMobilityLower<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     ledger: &'a crate::vault_tools::VaultJobLedger,
 }
 
-#[cfg(feature = "aria-v2")]
 impl SelectedVaultMobilityLower<'_> {
     fn direct_args(
         admission: &crate::v2::data_mobility::V2DataMobilityAdmission,
@@ -772,7 +724,6 @@ impl SelectedVaultMobilityLower<'_> {
     }
 }
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::data_mobility::V2DataMobilityLower for SelectedVaultMobilityLower<'_> {
     fn reindex(
         &self,
@@ -957,7 +908,6 @@ impl crate::v2::data_mobility::V2DataMobilityLower for SelectedVaultMobilityLowe
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_vault_lifecycle(
     request: VaultLifecycleRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -1063,7 +1013,6 @@ fn execute_vault_lifecycle(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn vault_lifecycle_data(
     result: crate::v2::data_mobility::V2DataMobilityResult,
 ) -> serde_json::Value {
@@ -1256,7 +1205,6 @@ fn vault_lifecycle_data(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_knowledge_journal(
     request: KnowledgeJournalRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -1340,7 +1288,6 @@ fn execute_knowledge_journal(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn knowledge_journal_data(result: crate::v2::knowledge_journal::V2KnowledgeJournalResult) -> serde_json::Value {
     use crate::v2::knowledge_journal::V2KnowledgeJournalResult;
     match result {
@@ -1361,7 +1308,6 @@ fn knowledge_journal_data(result: crate::v2::knowledge_journal::V2KnowledgeJourn
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn knowledge_tunnel_json(tunnel: crate::v2::knowledge_journal::V2KnowledgeTunnel) -> serde_json::Value {
     let mut value = json!({
         "tunnel_id": tunnel.tunnel_id.hyphenated().to_string(),
@@ -1373,7 +1319,6 @@ fn knowledge_tunnel_json(tunnel: crate::v2::knowledge_journal::V2KnowledgeTunnel
     value
 }
 
-#[cfg(feature = "aria-v2")]
 fn knowledge_fact_json(fact: crate::v2::knowledge_journal::V2KnowledgeFact) -> serde_json::Value {
     let mut value = json!({
         "fact_id": fact.fact_id.hyphenated().to_string(),
@@ -1391,7 +1336,6 @@ fn knowledge_fact_json(fact: crate::v2::knowledge_journal::V2KnowledgeFact) -> s
     value
 }
 
-#[cfg(feature = "aria-v2")]
 fn knowledge_journal_entry_json(entry: crate::v2::knowledge_journal::V2JournalEntry) -> serde_json::Value {
     json!({
         "agent_name": entry.agent_name,
@@ -1400,7 +1344,6 @@ fn knowledge_journal_entry_json(entry: crate::v2::knowledge_journal::V2JournalEn
     })
 }
 
-#[cfg(feature = "aria-v2")]
 fn epoch_millis_to_rfc3339(millis: i64) -> String {
     let seconds = millis.div_euclid(1_000);
     let fraction = millis.rem_euclid(1_000);
@@ -1426,7 +1369,6 @@ fn epoch_millis_to_rfc3339(millis: i64) -> String {
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn cognition_catalog_request(
     value: &JsonValue,
 ) -> Result<crate::v2::cognition_catalog::CognitionCatalogRequest, JSONRPCError> {
@@ -1434,7 +1376,6 @@ fn cognition_catalog_request(
         .map_err(crate::v2::codec::V2InvalidArgument::into_jsonrpc_error)
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_cognition_catalog(
     operation: crate::v2::cognition_catalog::CognitionCatalogOperation,
     request: crate::v2::cognition_catalog::CognitionCatalogRequest,
@@ -1478,7 +1419,6 @@ fn execute_cognition_catalog(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_synthesize(
     request: crate::v2::orchestration::V2SynthesizeRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -1511,10 +1451,8 @@ fn execute_synthesize(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 struct SelectedDreamAuthority<'a> { registry: &'a crate::estate_registry::EstateRegistry, now_millis: i64 }
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::dream::V2DreamAuthority for SelectedDreamAuthority<'_> {
     fn admit(&self, requested: Option<Uuid>) -> Result<crate::v2::dream::V2DreamAdmission, ()> {
         let estate = &self.registry.default;
@@ -1526,7 +1464,6 @@ impl crate::v2::dream::V2DreamAuthority for SelectedDreamAuthority<'_> {
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_dream(request: crate::v2::dream::V2DreamRequest, registry: &crate::estate_registry::EstateRegistry, meta: &crate::v2::render::V2ResultMeta, now_millis: i64) -> Result<serde_json::Value, JSONRPCError> {
     use crate::v2::dream::{V2DreamError, V2DreamService, V2DreamStatus, V2GeniusLocusDreamLower};
     let service = V2DreamService::new(SelectedDreamAuthority { registry, now_millis }, V2GeniusLocusDreamLower::new(Arc::clone(&registry.default.coord)));
@@ -1538,25 +1475,21 @@ fn execute_dream(request: crate::v2::dream::V2DreamRequest, registry: &crate::es
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_migration_run(request: crate::v2::orchestration::V2RunMigrationRequest, registry: &crate::estate_registry::EstateRegistry, meta: &crate::v2::render::V2ResultMeta) -> Result<serde_json::Value, JSONRPCError> {
     let service = crate::v2::orchestration::V2OrchestrationService::new(registry.default.estate_id, crate::v2::orchestration_lower::SelectedOrchestrationLower::new(registry));
     render_orchestration("moot_migration_run", service.run_migration(request), meta)
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_migration_confirm(request: crate::v2::orchestration::V2ConfirmMigrationRequest, registry: &crate::estate_registry::EstateRegistry, meta: &crate::v2::render::V2ResultMeta) -> Result<serde_json::Value, JSONRPCError> {
     let service = crate::v2::orchestration::V2OrchestrationService::new(registry.default.estate_id, crate::v2::orchestration_lower::SelectedOrchestrationLower::new(registry));
     render_orchestration("moot_migration_confirm", service.confirm_migration(request), &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write))
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_federated_recall(request: crate::v2::orchestration::V2FederatedSearchRequest, registry: &crate::estate_registry::EstateRegistry, meta: &crate::v2::render::V2ResultMeta) -> Result<serde_json::Value, JSONRPCError> {
     let service = crate::v2::orchestration::V2OrchestrationService::new(registry.default.estate_id, crate::v2::orchestration_lower::SelectedOrchestrationLower::new(registry));
     render_orchestration("moot_federated_recall", service.federated_search(request), meta)
 }
 
-#[cfg(feature = "aria-v2")]
 fn render_orchestration<T: Serialize>(tool: &str, result: Result<T, crate::v2::orchestration::V2OrchestrationFailure>, meta: &crate::v2::render::V2ResultMeta) -> Result<serde_json::Value, JSONRPCError> {
     match result {
         Ok(data) => crate::v2::render::success(tool, &data, meta, "The selected typed orchestration operation completed.").map_err(jsonrpc_internal),
@@ -1564,7 +1497,6 @@ fn render_orchestration<T: Serialize>(tool: &str, result: Result<T, crate::v2::o
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn synthesis_json(data: crate::v2::orchestration::V2SynthesisData) -> serde_json::Value {
     let results = data.results.into_iter().map(|memory| {
         let memory_id = memory.memory_id.to_string();
@@ -1588,7 +1520,6 @@ fn synthesis_json(data: crate::v2::orchestration::V2SynthesisData) -> serde_json
     value
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry: &crate::estate_registry::EstateRegistry, meta: &crate::v2::render::V2ResultMeta, now_millis: i64) -> Result<serde_json::Value, JSONRPCError> {
     use crate::v2::recall_lens::{V2PreciseRecallFailure, V2RecallLensOperation};
     let tool = request.operation.tool_name();
@@ -1680,7 +1611,6 @@ fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn estate_diagnostics_request(
     value: &JsonValue,
 ) -> Result<crate::v2::estate_diagnostics::EstateDiagnosticsRequest, JSONRPCError> {
@@ -1689,7 +1619,6 @@ fn estate_diagnostics_request(
     ).map_err(estate_diagnostics_decode_error)
 }
 
-#[cfg(feature = "aria-v2")]
 fn estate_diagnostics_decode_error(
     error: crate::v2::estate_diagnostics::EstateDiagnosticsFailure,
 ) -> JSONRPCError {
@@ -1703,14 +1632,12 @@ fn estate_diagnostics_decode_error(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn serialize_estate_diagnostics<T: Serialize>(
     result: Result<T, crate::v2::estate_diagnostics::EstateDiagnosticsFailure>,
 ) -> Result<serde_json::Value, crate::v2::estate_diagnostics::EstateDiagnosticsFailure> {
     result.map(|data| serde_json::to_value(data).expect("typed estate diagnostics data must serialize"))
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_estate_diagnostics(
     operation: crate::v2::estate_diagnostics::EstateDiagnosticsOperation,
     request: crate::v2::estate_diagnostics::EstateDiagnosticsRequest,
@@ -1762,7 +1689,6 @@ fn execute_estate_diagnostics(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_memory_list(
     request: crate::v2::memory_list::MemoryListRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -1791,7 +1717,6 @@ fn execute_memory_list(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn contradiction_binding(
     registry: &crate::estate_registry::EstateRegistry,
 ) -> crate::v2::contradictions::V2ContradictionAnalysisBinding {
@@ -1806,7 +1731,6 @@ fn contradiction_binding(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn contradiction_refusal(
     tool: &str,
     code: &str,
@@ -1819,7 +1743,6 @@ fn contradiction_refusal(
     }, meta)
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_contradiction_hunt(
     request: crate::v2::contradictions::V2ContradictionHuntRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -1878,7 +1801,6 @@ fn execute_contradiction_hunt(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn contradiction_endpoint(memory_id: String, excerpt: String) -> serde_json::Value {
     json!({
         "memory_id": memory_id.clone(),
@@ -1890,7 +1812,6 @@ fn contradiction_endpoint(memory_id: String, excerpt: String) -> serde_json::Val
     })
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_contradiction_proposal(
     request: crate::v2::contradictions::V2ContradictionProposalRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -1943,12 +1864,10 @@ fn execute_contradiction_proposal(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 struct SelectedMemoryListAuthority<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
 }
 
-#[cfg(feature = "aria-v2")]
 impl SelectedMemoryListAuthority<'_> {
     fn context(&self) -> crate::v2::memory_list_snapshot_provider::MemoryListAuthorizedContext {
         const CONTEXT: &str = "selected-v2-public";
@@ -1972,7 +1891,6 @@ impl SelectedMemoryListAuthority<'_> {
     }
 }
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::memory_list_snapshot_provider::MemoryListAuthorizationAuthority
     for SelectedMemoryListAuthority<'_>
 {
@@ -2011,7 +1929,6 @@ impl crate::v2::memory_list_snapshot_provider::MemoryListAuthorizationAuthority
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn selected_memory_list_estate_id(registry: &crate::estate_registry::EstateRegistry) -> Uuid {
     Uuid::from_bytes(registry.default.handle.estate_uuid)
 }
@@ -2019,13 +1936,11 @@ fn selected_memory_list_estate_id(registry: &crate::estate_registry::EstateRegis
 /// Selected-v2 mutation admission stays bound to the single public estate.
 /// The lower service revalidates this binding after every write before the
 /// surface can claim a completed result.
-#[cfg(feature = "aria-v2")]
 struct SelectedMemoryMutationAuthority<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     now_millis: i64,
 }
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::memory_mutations::V2MemoryMutationAuthority
     for SelectedMemoryMutationAuthority<'_>
 {
@@ -2062,14 +1977,12 @@ impl crate::v2::memory_mutations::V2MemoryMutationAuthority
     }
 }
 
-#[cfg(feature = "aria-v2")]
 struct SelectedKnowledgeJournalAuthority<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     now_millis: i64,
     maximum_sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
 }
 
-#[cfg(feature = "aria-v2")]
 impl crate::v2::knowledge_journal::V2KnowledgeJournalAuthority
     for SelectedKnowledgeJournalAuthority<'_>
 {
@@ -2092,7 +2005,6 @@ impl crate::v2::knowledge_journal::V2KnowledgeJournalAuthority
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn memory_list_refusal(
     error: crate::v2::memory_list::MemoryListError,
     meta: &crate::v2::render::V2ResultMeta,
@@ -2109,7 +2021,6 @@ fn memory_list_refusal(
     )
 }
 
-#[cfg(feature = "aria-v2")]
 fn memory_list_decode_error(error: crate::v2::memory_list::MemoryListError) -> JSONRPCError {
     let path = error.path.unwrap_or_else(|| "$".to_owned());
     JSONRPCError {
@@ -2121,7 +2032,6 @@ fn memory_list_decode_error(error: crate::v2::memory_list::MemoryListError) -> J
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn packet_json_args(
     args: &BTreeMap<String, JsonValue>,
 ) -> Result<BTreeMap<String, serde_json::Value>, JSONRPCError> {
@@ -2134,19 +2044,16 @@ fn packet_json_args(
         .collect()
 }
 
-#[cfg(feature = "aria-v2")]
 fn packet_estate_id(args: &BTreeMap<String, JsonValue>) -> Result<Option<Uuid>, JSONRPCError> {
     crate::v2::codec::optional_uuid(args, "estate_id")
         .map_err(crate::v2::codec::V2InvalidArgument::into_jsonrpc_error)
 }
 
-#[cfg(feature = "aria-v2")]
 fn packet_decode_error(error: crate::v2::packets::PacketToolError) -> JSONRPCError {
     crate::v2::codec::V2InvalidArgument::new(format!("$.{}", error.path), error.message)
         .into_jsonrpc_error()
 }
 
-#[cfg(feature = "aria-v2")]
 fn packet_meta(
     base: &crate::v2::render::V2ResultMeta,
     effect: crate::v2::operation::V2OperationEffect,
@@ -2156,7 +2063,6 @@ fn packet_meta(
     )
 }
 
-#[cfg(feature = "aria-v2")]
 fn execute_packet<T: Serialize>(
     tool: &str,
     estate_id: Option<Uuid>,
@@ -2205,7 +2111,6 @@ fn execute_packet<T: Serialize>(
     }
 }
 
-#[cfg(feature = "aria-v2")]
 fn packet_refusal(
     tool: &str,
     error: crate::v2::packets::PacketToolError,
@@ -2223,7 +2128,6 @@ fn packet_refusal(
     )
 }
 
-#[cfg(feature = "aria-v2")]
 fn render_monitoring_status(
     monitoring: &str,
     meta: &crate::v2::render::V2ResultMeta,
@@ -2248,12 +2152,10 @@ fn render_monitoring_status(
     })
 }
 
-#[cfg(feature = "aria-v2")]
 fn jsonrpc_internal(error: serde_json::Error) -> JSONRPCError {
     JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, error.to_string())
 }
 
-#[cfg(feature = "aria-v2")]
 fn invalid_argument(path: &str, message: &str) -> JSONRPCError {
     JSONRPCError {
         code: JSONRPCErrorCode::INVALID_PARAMS,
@@ -2274,7 +2176,6 @@ mod tests {
     #[test]
     fn selected_catalog_and_admission_match_each_other() {
         let surface = SelectedSurface::selected(false, true);
-        #[cfg(feature = "aria-v2")]
         {
             assert_eq!(surface.catalog().as_array().unwrap().len(), 77);
             assert!(surface
@@ -2313,14 +2214,6 @@ mod tests {
             assert!(help["operations"].as_array().unwrap().iter().all(|operation| {
                 operation["name"].as_str() != Some("moot_vault_export")
             }));
-        }
-        #[cfg(not(feature = "aria-v2"))]
-        {
-            assert!(surface.catalog().as_array().unwrap().len() > 1);
-            assert!(surface
-                .decode("moot_file_memory", &BTreeMap::new())
-                .unwrap()
-                .is_none());
         }
     }
 }

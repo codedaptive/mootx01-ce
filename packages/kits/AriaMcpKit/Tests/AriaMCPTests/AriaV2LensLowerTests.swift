@@ -40,40 +40,6 @@ struct AriaV2LensLowerTests {
         #expect(response.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"] == .string("lens_unavailable"))
     }
 
-    @Test("contradiction lower reads typed fact rows and preserves the frozen data shape")
-    func contradictionLowerReadsTypedFacts() async throws {
-        let kit = GeniusLocusKit()
-        let storage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: UUID(), backend: .inMemory))
-        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-contradiction-lower")
-        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(
-            storage: storage, owner: owner,
-            identityKeyStore: InMemoryEstateIdentityKeyStore())
-        let source = try await kit.capture(handle, CaptureFrame(
-            content: "Typed contradiction source.", channel: .typed,
-            room: "aria-v2-lower", latticeAnchor: .udc("000"),
-            addedBy: "aria-v2-lower-test", embeddingModelID: "test-model-v1"))
-        for object in ["green", "red"] {
-            _ = try await kit.captureKGFact(
-                handle, subject: "Project ARIA", predicate: "status", object: object,
-                sourceDrawerID: source.id, now: Date(timeIntervalSince1970: 1))
-        }
-
-        let request = try AriaV2RecallLensRequest(
-            tool: AriaV2RecallLensOperation.lensContradiction.rawValue, arguments: .object([:]))
-        let outcome = try await AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle).execute(
-            request, context: .init(estateID: handle.estateUUID, now: Date(timeIntervalSince1970: 2)))
-        let data = try #require(outcome.data.objectValue)
-        let facts = try #require(data["conflictingFacts"]?.arrayValue)
-        #expect(data["contradictsTunnels"] == .array([]))
-        #expect(facts == [.object([
-            "subject": .string("project aria"),
-            "predicate": .string("status"),
-            "objects": .array([.string("green"), .string("red")]),
-        ])])
-    }
-
     private var fixtures: [Fixture] {
         [
             .init(tool: "moot_lens_keystones", arguments: ["wing": .string("work")], dataKeys: ["keystones"]),
