@@ -147,6 +147,7 @@ pub mod frames;
 pub mod kg_fact;
 pub mod kg_fact_identity_backfill;
 pub mod kg_fact_operational;
+pub mod inventory_snapshot_decode;
 pub mod learned_reference;
 #[cfg(test)]
 mod learned_reference_tests;

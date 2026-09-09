@@ -105,6 +105,10 @@ public final class PostgreSQLStorage: Storage, Sendable {
         }
         return result
     }
+
+    public func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        try await backend.captureInventorySnapshot(limits: limits)
+    }
 }
 
 // MARK: - DatasetStore surface (MX-TAB-2)
@@ -149,6 +153,9 @@ actor PostgreSQLBackend {
     let pool: PostgreSQLPool
     let logger = Logger(label: "storagekit.postgres.backend")
     var schemaDeclaration: SchemaDeclaration?
+    // Snapshot-test observation seam. It changes only after PostgreSQL has
+    // yielded a full row to the strict decoder.
+    private(set) var inventorySnapshotFullRowMaterializations: Int = 0
     /// Cached DatasetSchema per dataset table name (MX-TAB-2).
     ///
     /// Keyed by `datasetTableName(id)` (e.g. `ds_<hex>`). Populated by
@@ -495,6 +502,238 @@ actor PostgreSQLBackend {
             await pool.release(conn)
             throw error
         }
+    }
+
+    /// Uses one checked-out connection and a REPEATABLE READ transaction so
+    /// drawers and nodes share one PostgreSQL visibility snapshot.
+    func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        let connection = try await pool.acquire()
+        do {
+            try await connection.executeSimple(
+                "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+                logger: logger
+            )
+            var serializedBytes = 0
+            let drawers = try await boundedInventoryRows(
+                table: InventorySnapshot.drawersTable,
+                limits: limits,
+                serializedBytes: &serializedBytes,
+                connection: connection
+            )
+            let nodes = try await boundedInventoryRows(
+                table: InventorySnapshot.nodesTable,
+                limits: limits,
+                serializedBytes: &serializedBytes,
+                connection: connection
+            )
+            try await connection.executeSimple("COMMIT", logger: logger)
+            await pool.release(connection)
+            return InventorySnapshot(drawers: drawers, nodes: nodes)
+        } catch {
+            try? await connection.executeSimple("ROLLBACK", logger: logger)
+            await pool.release(connection)
+            throw error
+        }
+    }
+
+    private func boundedInventoryRows(
+        table: String,
+        limits: InventorySnapshotLimits,
+        serializedBytes: inout Int,
+        connection: PostgresConnection
+    ) async throws -> [StorageRow] {
+        try validatePSQLIdentifier(table)
+        let columns = columns(for: table)
+        guard !columns.isEmpty else {
+            throw StorageError.invalidQuery(detail: "inventory snapshot: schema for \(table) not registered")
+        }
+        for column in columns { try validatePSQLIdentifier(column.name) }
+        try await preflightInventoryRows(
+            table: table,
+            columns: columns,
+            limits: limits,
+            serializedBytes: serializedBytes,
+            connection: connection
+        )
+        let select = columns.map { "\"\($0.name)\"" }.joined(separator: ", ")
+        let rows = try await connection.executeParameterized(
+            "SELECT \(select) FROM \"\(table)\" LIMIT \(limits.maxRowsPerTable + 1)",
+            bindings: [],
+            logger: logger
+        )
+
+        var captured: [StorageRow] = []
+        for try await postgresRow in rows {
+            guard captured.count < limits.maxRowsPerTable else {
+                throw InventorySnapshotError.rowLimitExceeded(
+                    table: table,
+                    limit: limits.maxRowsPerTable
+                )
+            }
+            inventorySnapshotFullRowMaterializations += 1
+            let decoded = try decryptedForRead(
+                try strictSnapshotRow(postgresRow, columns: columns),
+                table: table,
+                config: encryptionConfig
+            )
+            let row = StorageRow(values: decoded)
+            let rowBytes = InventorySnapshot.serializedByteCount(of: row)
+            guard rowBytes <= limits.maxSerializedBytes - serializedBytes else {
+                throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+            }
+            serializedBytes += rowBytes
+            captured.append(row)
+        }
+        return captured
+    }
+
+    private func preflightInventoryRows(
+        table: String,
+        columns: [ColumnDeclaration],
+        limits: InventorySnapshotLimits,
+        serializedBytes: Int,
+        connection: PostgresConnection
+    ) async throws {
+        let countRows = try await connection.executeParameterized(
+            "SELECT COUNT(*) AS \"inventory_count\" FROM \"\(table)\"",
+            bindings: [], logger: logger
+        )
+        var count: Int64 = 0
+        for try await countRow in countRows {
+            count = try countRow.makeRandomAccess()["inventory_count"].decode(Int64.self, context: .default)
+            break
+        }
+        guard count <= Int64(limits.maxRowsPerTable) else {
+            throw InventorySnapshotError.rowLimitExceeded(table: table, limit: limits.maxRowsPerTable)
+        }
+
+        let expressions = columns.map { column -> String in
+            let keyBytes = column.name.utf8.count + 1
+            let quoted = "\"\(column.name)\""
+            let exactValueBytes: String
+            switch column.type {
+            case .text:
+                let bytes = "OCTET_LENGTH(\(quoted)::text)::numeric"
+                exactValueBytes = "(3::numeric + LENGTH(\(bytes)::text)::numeric + \(bytes))"
+            case .blob:
+                let bytes = "OCTET_LENGTH(\(quoted))::numeric"
+                exactValueBytes = "(3::numeric + LENGTH(\(bytes)::text)::numeric + 2::numeric * \(bytes))"
+            case .json:
+                // JSONB::text is PostgreSQL's valid UTF-8 decoded payload.
+                let bytes = "OCTET_LENGTH(\(quoted)::text)::numeric"
+                exactValueBytes = "(3::numeric + LENGTH(\(bytes)::text)::numeric + \(bytes))"
+            case .uuid:
+                exactValueBytes = "38::numeric"
+            case .float:
+                exactValueBytes = "18::numeric"
+            case .bool:
+                exactValueBytes = "3::numeric"
+            case .int, .bitmap:
+                exactValueBytes = "(2::numeric + LENGTH(\(quoted)::text)::numeric)"
+            case .hlc:
+                let unsigned = "CASE WHEN \(quoted) < 0 THEN 18446744073709551616::numeric + \(quoted)::numeric ELSE \(quoted)::numeric END"
+                exactValueBytes = "(2::numeric + LENGTH((\(unsigned))::text)::numeric)"
+            case .timestamp:
+                let milliseconds = "ROUND(EXTRACT(EPOCH FROM \(quoted)) * 1000)::bigint"
+                exactValueBytes = "(2::numeric + LENGTH(\(milliseconds)::text)::numeric)"
+            case .fingerprint:
+                let bytes = "OCTET_LENGTH(\(quoted))::numeric"
+                // Valid fingerprints are fixed 32-byte values and encode to
+                // 66 canonical bytes. A malformed BYTEA remains subject to
+                // strict decode, but its raw body must first be bounded so a
+                // corrupt oversized value cannot reach the row materializer.
+                exactValueBytes = "CASE WHEN \(bytes) = 32::numeric THEN 66::numeric ELSE (3::numeric + LENGTH(\(bytes)::text)::numeric + 2::numeric * \(bytes)) END"
+            }
+            return "CASE WHEN \(quoted) IS NULL THEN \(keyBytes + 1)::numeric ELSE \(keyBytes)::numeric + \(exactValueBytes) END"
+        }
+        guard !expressions.isEmpty else { return }
+        let separators = max(columns.count - 1, 0)
+        let remainingBytes = limits.maxSerializedBytes - serializedBytes
+        let rows = try await connection.executeParameterized(
+            "SELECT COALESCE(SUM((\(expressions.joined(separator: " + ")) + \(separators)::numeric)), 0::numeric) > \(remainingBytes)::numeric AS \"inventory_exceeds_bytes\" FROM \"\(table)\"",
+            bindings: [], logger: logger
+        )
+        var exceedsByteLimit = false
+        for try await row in rows {
+            exceedsByteLimit = try row.makeRandomAccess()["inventory_exceeds_bytes"].decode(Bool.self, context: .default)
+            break
+        }
+        guard !exceedsByteLimit else {
+            throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+        }
+    }
+
+    /// Snapshot decoding is intentionally stricter than ordinary v1 reads:
+    /// SQL NULL remains `.null`, but a present value that cannot decode as its
+    /// declared type fails the complete inventory capture.
+    private func strictSnapshotRow(_ row: PostgresRow, columns: [ColumnDeclaration]) throws -> [String: TypedValue] {
+        let access = row.makeRandomAccess()
+        var values: [String: TypedValue] = [:]
+        for column in columns {
+            values[column.name] = try strictSnapshotValue(access[column.name], column: column)
+        }
+        return values
+    }
+
+    private func strictSnapshotValue(
+        _ cell: PostgresRandomAccessRow.Element,
+        column: ColumnDeclaration
+    ) throws -> TypedValue {
+        func mismatch(_ error: Error) -> StorageError {
+            StorageError.typeMismatch(column: column.name, expected: column.type, actual: String(describing: error))
+        }
+        do {
+            switch column.type {
+            case .uuid:
+                guard let value: UUID = try cell.decode(UUID?.self, context: .default) else { return .null }
+                return .uuid(value)
+            case .bitmap:
+                guard let value: Int64 = try cell.decode(Int64?.self, context: .default) else { return .null }
+                return .bitmap(value)
+            case .int:
+                guard let value: Int64 = try cell.decode(Int64?.self, context: .default) else { return .null }
+                return .int(value)
+            case .text:
+                guard let value: String = try cell.decode(String?.self, context: .default) else { return .null }
+                return .text(value)
+            case .timestamp:
+                guard let value: Date = try cell.decode(Date?.self, context: .default) else { return .null }
+                return .timestamp(value)
+            case .float:
+                guard let value: Double = try cell.decode(Double?.self, context: .default) else { return .null }
+                return .float(value)
+            case .bool:
+                guard let value: Bool = try cell.decode(Bool?.self, context: .default) else { return .null }
+                return .bool(value)
+            case .blob:
+                guard let value: ByteBuffer = try cell.decode(ByteBuffer?.self, context: .default) else { return .null }
+                return .blob(Data(buffer: value))
+            case .json:
+                guard let value: String = try cell.decode(String?.self, context: .default) else { return .null }
+                return .json(Data(value.utf8))
+            case .hlc:
+                guard let value: Int64 = try cell.decode(Int64?.self, context: .default) else { return .null }
+                return .hlc(HLC(packed: UInt64(bitPattern: value)))
+            case .fingerprint:
+                guard let value: ByteBuffer = try cell.decode(ByteBuffer?.self, context: .default) else { return .null }
+                let data = Data(buffer: value)
+                guard data.count == 32 else {
+                    throw StorageError.typeMismatch(column: column.name, expected: column.type, actual: "BYTEA length \(data.count)")
+                }
+                return .fingerprint(Self.snapshotFingerprint(data))
+            }
+        } catch let error as StorageError {
+            throw error
+        } catch {
+            throw mismatch(error)
+        }
+    }
+
+    private static func snapshotFingerprint(_ data: Data) -> Fingerprint256 {
+        func word(_ offset: Int) -> UInt64 {
+            data[offset..<(offset + 8)].withUnsafeBytes { $0.load(as: UInt64.self).littleEndian }
+        }
+        return Fingerprint256(block0: word(0), block1: word(8), block2: word(16), block3: word(24))
     }
 
     // Schema column lookup. Generated columns are included so query

@@ -22,6 +22,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use postgres::types::ToSql;
 use postgres::{Client, NoTls};
+use postgres::fallible_iterator::FallibleIterator;
 use postgres_native_tls::MakeTlsConnector;
 use native_tls::TlsConnector as NativeTlsConnector;
 use crate::postgres_tls::{effective_sslmode, PostgresTlsMode};
@@ -37,6 +38,10 @@ use crate::{
     TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
+use crate::inventory_snapshot::{
+    inventory_snapshot_columns, InventorySnapshot, InventorySnapshotBuilder, InventorySnapshotError, InventorySnapshotLimits,
+    InventorySnapshotResult, INVENTORY_SNAPSHOT_DRAWERS_TABLE, INVENTORY_SNAPSHOT_NODES_TABLE,
+};
 // Mode 2 (RowEncryption) content seam — shared with the SQLite backend so the
 // client-side AES-GCM-256 envelope is byte-identical across backends. Postgres
 // has no whole-file analogue (the server owns the schema), so per-row content
@@ -44,7 +49,7 @@ use crate::error::validate_sql_identifier;
 // Plaintext / FullDatabase (see EstateEncryptionConfig::uses_row_crypto).
 use crate::sqlite::{
     assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write,
-    projection_needs_key_id, KEY_ID_COL,
+    projection_needs_key_id, protected_cols_for_table, KEY_ID_COL,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -159,6 +164,55 @@ fn read_value(row: &postgres::Row, idx: usize, kit: Option<ColumnType>) -> Typed
 
 fn int_col(row: &postgres::Row, idx: usize) -> Option<i64> {
     row.try_get::<_, Option<i64>>(idx).ok().flatten()
+}
+
+/// Snapshot-only PostgreSQL decoder. Ordinary v1 reads intentionally retain
+/// their tolerant historical behavior; a strict inventory snapshot must never
+/// turn a non-null decode failure into a false `Null` value.
+fn strict_snapshot_read_value(
+    row: &postgres::Row,
+    idx: usize,
+    column_type: ColumnType,
+    table: &str,
+    column: &str,
+) -> StorageResult<TypedValue> {
+    macro_rules! optional {
+        ($type:ty) => {
+            row.try_get::<_, Option<$type>>(idx).map_err(|error| StorageError::CorruptStoredValue {
+                table: table.to_owned(),
+                column: column.to_owned(),
+                stored_text: format!("postgres inventory snapshot decode failed: {}", pg_err_text(&error)),
+            })?
+        }
+    }
+    Ok(match column_type {
+        ColumnType::Uuid => optional!(Uuid).map(TypedValue::Uuid).unwrap_or(TypedValue::Null),
+        ColumnType::Timestamp => optional!(DateTime<Utc>)
+            .map(|value| TypedValue::Timestamp(value.timestamp_millis()))
+            .unwrap_or(TypedValue::Null),
+        ColumnType::Bool => optional!(bool).map(TypedValue::Bool).unwrap_or(TypedValue::Null),
+        ColumnType::Float => optional!(f64).map(TypedValue::Float).unwrap_or(TypedValue::Null),
+        ColumnType::Text => optional!(String).map(TypedValue::Text).unwrap_or(TypedValue::Null),
+        ColumnType::Blob => optional!(Vec<u8>).map(TypedValue::Blob).unwrap_or(TypedValue::Null),
+        ColumnType::Json => optional!(String)
+            .map(|value| TypedValue::Json(value.into_bytes()))
+            .unwrap_or(TypedValue::Null),
+        ColumnType::Fingerprint => match optional!(Vec<u8>) {
+            None => TypedValue::Null,
+            Some(bytes) => substrate_types::fingerprint256::Fingerprint256::from_wire_bytes(&bytes)
+                .map(TypedValue::Fingerprint)
+                .map_err(|_| StorageError::CorruptStoredValue {
+                    table: table.to_owned(),
+                    column: column.to_owned(),
+                    stored_text: "postgres inventory snapshot fingerprint has invalid wire length".to_owned(),
+                })?,
+        },
+        ColumnType::Bitmap => optional!(i64).map(TypedValue::Bitmap).unwrap_or(TypedValue::Null),
+        ColumnType::Hlc => optional!(i64)
+            .map(|value| TypedValue::Hlc(unpack_hlc(value as u64)))
+            .unwrap_or(TypedValue::Null),
+        ColumnType::Int => optional!(i64).map(TypedValue::Int).unwrap_or(TypedValue::Null),
+    })
 }
 
 /// tokio-postgres `Error`'s Display is only the error *kind* ("db error");
@@ -1023,6 +1077,36 @@ impl Storage for PostgresStorage {
         })
     }
 
+    fn capture_inventory_snapshot(
+        &self,
+        limits: InventorySnapshotLimits,
+    ) -> InventorySnapshotResult<InventorySnapshot> {
+        // One checked-out connection remains pinned from BEGIN through both
+        // table scans. A pool-level transaction cannot give this guarantee.
+        let mut connection = self.pool.checkout().map_err(InventorySnapshotError::from)?;
+        let schema = self.schema.lock().unwrap().schema.clone();
+        let result = (|| {
+            connection
+                .get_mut()
+                .batch_execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .map_err(|error| InventorySnapshotError::from(map_pg_err(error, "inventory snapshot begin")))?;
+            match capture_postgres_inventory_snapshot(connection.get_mut(), schema.as_ref(), &self.config.encryption_config, limits) {
+                Ok(snapshot) => {
+                    connection
+                        .get_mut()
+                        .batch_execute("COMMIT")
+                        .map_err(|error| InventorySnapshotError::from(map_pg_err(error, "inventory snapshot commit")))?;
+                    Ok(snapshot)
+                }
+                Err(error) => {
+                    let _ = connection.get_mut().batch_execute("ROLLBACK");
+                    Err(error)
+                }
+            }
+        })();
+        result
+    }
+
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         let mut conn = self.checkout()?;
         apply_schema(&mut conn, &self.schema, schema)
@@ -1269,6 +1353,169 @@ impl Storage for PostgresStorage {
             schemas: self.dataset_schemas.clone(),
         }))
     }
+}
+
+fn capture_postgres_inventory_snapshot(
+    client: &mut Client,
+    schema: Option<&SchemaDeclaration>,
+    encryption_config: &EstateEncryptionConfig,
+    limits: InventorySnapshotLimits,
+) -> InventorySnapshotResult<InventorySnapshot> {
+    let drawer_count = postgres_snapshot_row_count(client, INVENTORY_SNAPSHOT_DRAWERS_TABLE, limits)?;
+    let node_count = postgres_snapshot_row_count(client, INVENTORY_SNAPSHOT_NODES_TABLE, limits)?;
+    let mut snapshot = InventorySnapshotBuilder::new(limits, drawer_count, node_count)?;
+    let drawer_columns = inventory_snapshot_columns(schema, INVENTORY_SNAPSHOT_DRAWERS_TABLE)?;
+    let node_columns = inventory_snapshot_columns(schema, INVENTORY_SNAPSHOT_NODES_TABLE)?;
+    // The lower-bound query reads only stored lengths. It does not reject an
+    // exact-fit canonical row; uncertain expansions are checked exactly while
+    // the bounded row stream below is decoded and retained.
+    let drawer_preflight = postgres_snapshot_raw_lower_bound_bytes(
+        client,
+        INVENTORY_SNAPSHOT_DRAWERS_TABLE,
+        &drawer_columns,
+        encryption_config,
+    )?;
+    let node_preflight = postgres_snapshot_raw_lower_bound_bytes(
+        client,
+        INVENTORY_SNAPSHOT_NODES_TABLE,
+        &node_columns,
+        encryption_config,
+    )?;
+    if drawer_preflight
+        .checked_add(node_preflight)
+        .filter(|total| *total <= limits.max_serialized_bytes())
+        .is_none()
+    {
+        return Err(InventorySnapshotError::ByteLimitExceeded {
+            limit: limits.max_serialized_bytes(),
+        });
+    }
+    postgres_snapshot_rows(
+        client,
+        encryption_config,
+        INVENTORY_SNAPSHOT_DRAWERS_TABLE,
+        &drawer_columns,
+        &mut snapshot,
+        InventorySnapshotBuilder::push_drawer,
+    )?;
+    postgres_snapshot_rows(
+        client,
+        encryption_config,
+        INVENTORY_SNAPSHOT_NODES_TABLE,
+        &node_columns,
+        &mut snapshot,
+        InventorySnapshotBuilder::push_node,
+    )?;
+    Ok(snapshot.finish())
+}
+
+fn postgres_snapshot_raw_lower_bound_bytes(
+    client: &mut Client,
+    table: &str,
+    columns: &[(String, ColumnType)],
+    encryption_config: &EstateEncryptionConfig,
+) -> InventorySnapshotResult<usize> {
+    let fields = columns.iter().map(|(name, column_type)| {
+        let column = format!("\"{name}\"");
+        let stored_bytes = match column_type {
+            ColumnType::Text => format!("octet_length({column})"),
+            ColumnType::Blob | ColumnType::Fingerprint => format!("octet_length({column})"),
+            ColumnType::Json => format!("octet_length({column}::text)"),
+            _ => "0".to_owned(),
+        };
+        if encryption_config.uses_row_crypto()
+            && protected_cols_for_table(table).contains(&name.as_str())
+        {
+            // The shared AES-GCM envelope is plaintext plus nonce and tag.
+            // This is a lower bound only; exact decoded bytes decide retention.
+            format!("CASE WHEN {column} IS NULL THEN 0 ELSE GREATEST({stored_bytes} - 28, 0) END")
+        } else {
+            match column_type {
+                ColumnType::Uuid => format!("CASE WHEN {column} IS NULL THEN 0 ELSE 38 END"),
+                ColumnType::Float => format!("CASE WHEN {column} IS NULL THEN 0 ELSE 18 END"),
+                ColumnType::Bool => format!("CASE WHEN {column} IS NULL THEN 0 ELSE 3 END"),
+                ColumnType::Text | ColumnType::Blob | ColumnType::Json | ColumnType::Fingerprint => {
+                    format!("COALESCE({stored_bytes}, 0)")
+                }
+                ColumnType::Bitmap | ColumnType::Int | ColumnType::Timestamp | ColumnType::Hlc => {
+                    format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END")
+                }
+            }
+        }
+    }).collect::<Vec<_>>().join(" + ");
+    let query = format!("SELECT COALESCE(SUM(({fields})::bigint), 0)::bigint FROM \"{table}\"");
+    let row = client
+        .query_one(&query, &[])
+        .map_err(|error| InventorySnapshotError::from(map_pg_err(error, table)))?;
+    let total: i64 = row
+        .try_get(0)
+        .map_err(|error| InventorySnapshotError::from(map_pg_err(error, table)))?;
+    usize::try_from(total).map_err(|_| InventorySnapshotError::from(StorageError::BackendError {
+        underlying: format!("inventory snapshot raw lower bound for {table} is outside usize"),
+    }))
+}
+
+fn postgres_snapshot_row_count(
+    client: &mut Client,
+    table: &str,
+    limits: InventorySnapshotLimits,
+) -> InventorySnapshotResult<usize> {
+    let scan_limit = i64::try_from(limits.max_rows_per_table().saturating_add(1)).map_err(|_| {
+        InventorySnapshotError::from(StorageError::BackendError {
+            underlying: "inventory snapshot row limit is outside PostgreSQL range".to_owned(),
+        })
+    })?;
+    let row = client
+        .query_one(
+            &format!("SELECT COUNT(*) FROM (SELECT 1 FROM \"{table}\" LIMIT $1) AS inventory_limit"),
+            &[&scan_limit],
+        )
+        .map_err(|error| InventorySnapshotError::from(map_pg_err(error, table)))?;
+    let count: i64 = row.get(0);
+    usize::try_from(count).map_err(|_| {
+        InventorySnapshotError::from(StorageError::BackendError {
+            underlying: format!("inventory snapshot count for {table} is outside usize"),
+        })
+    })
+}
+
+fn postgres_snapshot_rows(
+    client: &mut Client,
+    encryption_config: &EstateEncryptionConfig,
+    table: &str,
+    columns: &[(String, ColumnType)],
+    snapshot: &mut InventorySnapshotBuilder,
+    push: fn(&mut InventorySnapshotBuilder, StorageRow) -> InventorySnapshotResult<()>,
+) -> InventorySnapshotResult<()> {
+    // query_raw streams rows from the pinned connection. The regular query()
+    // path materializes every row before a byte-bound snapshot can reject it.
+    let select = columns.iter().map(|(name, column_type)| match column_type {
+        // postgres-rust does not decode JSONB as String without a serde_json
+        // feature. Cast only in the snapshot path, retaining JSON's typed
+        // representation while leaving ordinary v1 reads unchanged.
+        ColumnType::Json => format!("\"{name}\"::text AS \"{name}\""),
+        _ => format!("\"{name}\""),
+    }).collect::<Vec<_>>().join(", ");
+    let mut rows = client
+        .query_raw(&format!("SELECT {select} FROM \"{table}\""), std::iter::empty::<&str>())
+        .map_err(|error| InventorySnapshotError::from(map_pg_err(error, table)))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| InventorySnapshotError::from(map_pg_err(error, table)))?
+    {
+        let mut values = BTreeMap::new();
+        for (index, (name, column_type)) in columns.iter().enumerate() {
+            values.insert(
+                name.clone(),
+                strict_snapshot_read_value(&row, index, *column_type, table, name)
+                    .map_err(InventorySnapshotError::from)?,
+            );
+        }
+        let values = decrypted_for_read(values, table, encryption_config, &AesGcmAeadProvider)
+            .map_err(InventorySnapshotError::from)?;
+        push(snapshot, StorageRow::new(values))?;
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────

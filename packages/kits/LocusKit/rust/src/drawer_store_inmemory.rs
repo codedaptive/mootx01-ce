@@ -95,7 +95,7 @@ use crate::schema;
 use crate::source_catalog_entry::{SourceCatalogEntry, SourceKind};
 use crate::summaries::{RoomSummary, WingSummary};
 use crate::tunnel::Tunnel;
-use crate::tunnel_operational::{TunnelKind, TunnelLifecycle};
+use crate::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::row_store::RowStore;
@@ -1067,6 +1067,202 @@ impl DrawerStoreCore {
 impl DrawerStore for DrawerStoreCore {
     fn storage(&self) -> Option<Arc<dyn Storage>> {
         Some(Arc::clone(&self.storage))
+    }
+
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        use crate::drawer_store::{conflict_proposal_digests, AtomicConflictProposalOutcome};
+        use persistence_kit::error::StorageError;
+
+        let mut outcome = None;
+        let mut validation_error = None;
+        let transaction = self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let run = || -> Result<AtomicConflictProposalOutcome, LocusKitError> {
+                let row_store = txn.row_store();
+                let source_rows = row_store.query(
+                    T_DRAWERS,
+                    Some(&StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(request.source_drawer_id.clone()))),
+                    &[], Some(1), None,
+                ).map_err(map_storage_err)?;
+                let target_rows = row_store.query(
+                    T_DRAWERS,
+                    Some(&StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(request.target_drawer_id.clone()))),
+                    &[], Some(1), None,
+                ).map_err(map_storage_err)?;
+                let (Some(source_row), Some(target_row)) = (source_rows.first(), target_rows.first()) else {
+                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is unavailable".to_owned()));
+                };
+                let source = drawer_from_row(source_row)?;
+                let target = drawer_from_row(target_row)?;
+                if source.tombstoned_at.is_some() || target.tombstoned_at.is_some() {
+                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is unavailable".to_owned()));
+                }
+                let (source_digest, evidence_digest) = conflict_proposal_digests(&source, &target, request.tier, &request.renewal_identity);
+                if source_digest != request.source_digest || evidence_digest != request.evidence_digest {
+                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is stale".to_owned()));
+                }
+                // Atomic filing is an authority boundary, so inspect the raw
+                // bitmap fields here rather than using the retrieval-facing
+                // fallbacks. Reserved state raws must not become Active, and
+                // reserved sensitivity raws must not become Normal.
+                let source_state_raw = bit_field::extract_field(source.adjective_bitmap, 0, 6);
+                let target_state_raw = bit_field::extract_field(target.adjective_bitmap, 0, 6);
+                let source_sensitivity_raw = bit_field::extract_field(source.adjective_bitmap, 6, 6);
+                let target_sensitivity_raw = bit_field::extract_field(target.adjective_bitmap, 6, 6);
+                let is_currently_believed_raw = |raw| {
+                    matches!(
+                        raw,
+                        value if value == State::Active.raw_value()
+                            || value == State::Pending.raw_value()
+                            || value == State::Contested.raw_value()
+                            || value == State::Accepted.raw_value()
+                    )
+                };
+                let is_recognized_sensitivity_raw = |raw| matches!(raw, 0 | 16 | 32 | 48);
+                if !is_currently_believed_raw(source_state_raw)
+                    || !is_currently_believed_raw(target_state_raw)
+                    || !is_recognized_sensitivity_raw(source_sensitivity_raw)
+                    || !is_recognized_sensitivity_raw(target_sensitivity_raw)
+                {
+                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is stale".to_owned()));
+                }
+                // Endpoint placement is part of the write authority: resolve
+                // both active room/wing paths from the same serializable
+                // snapshot as the evidence, pair history, and insertion.
+                // Caller-supplied coordinates would create a TOCTOU seam.
+                let endpoint = |drawer: &Drawer| -> Result<(String, String), LocusKitError> {
+                    let unavailable = || {
+                        LocusKitError::InvalidContent(
+                            "selected contradiction endpoints are unavailable".to_owned(),
+                        )
+                    };
+                    let node_is_active_at_depth = |node: &StorageRow, expected_depth: i64| {
+                        matches!(node.get("depth"), Some(TypedValue::Int(depth)) if *depth == expected_depth)
+                            && matches!(node.get("lifecycle"), Some(TypedValue::Int(0)))
+                            && matches!(node.get("tombstoned_hlc"), None | Some(TypedValue::Null))
+                            && matches!(node.get("tombstoned_at"), None | Some(TypedValue::Null))
+                    };
+                    let node_value_is_null = |value: Option<&TypedValue>| {
+                        matches!(value, None | Some(TypedValue::Null))
+                    };
+                    if Uuid::parse_str(&drawer.parent_node_id).is_err() {
+                        return Err(unavailable());
+                    }
+                    let room_rows = row_store.query(
+                        T_NODES,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_NODES, "id"),
+                            TypedValue::Text(drawer.parent_node_id.clone()),
+                        )),
+                        &[], Some(1), None,
+                    ).map_err(map_storage_err)?;
+                    let room = room_rows.first().ok_or_else(unavailable)?;
+                    if !node_is_active_at_depth(room, 2) {
+                        return Err(unavailable());
+                    }
+                    let room_name = string_value_of(room.get("display_name"));
+                    let wing_id = string_value_of(room.get("parent_id"));
+                    if room_name.is_empty() || Uuid::parse_str(&wing_id).is_err() {
+                        return Err(unavailable());
+                    }
+                    let wing_rows = row_store.query(
+                        T_NODES,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_NODES, "id"),
+                            TypedValue::Text(wing_id),
+                        )),
+                        &[], Some(1), None,
+                    ).map_err(map_storage_err)?;
+                    let wing = wing_rows.first().ok_or_else(unavailable)?;
+                    let wing_name = string_value_of(wing.get("display_name"));
+                    let root_id = string_value_of(wing.get("parent_id"));
+                    if !node_is_active_at_depth(wing, 1)
+                        || wing_name.is_empty()
+                        || Uuid::parse_str(&root_id).is_err()
+                    {
+                        return Err(unavailable());
+                    }
+                    let root_rows = row_store.query(
+                        T_NODES,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_NODES, "id"),
+                            TypedValue::Text(root_id),
+                        )),
+                        &[], Some(1), None,
+                    ).map_err(map_storage_err)?;
+                    let root = root_rows.first().ok_or_else(unavailable)?;
+                    if !node_is_active_at_depth(root, 0)
+                        || !node_value_is_null(root.get("parent_id"))
+                    {
+                        return Err(unavailable());
+                    }
+                    Ok((wing_name, room_name))
+                };
+                let (source_wing, source_room) = endpoint(&source)?;
+                let (target_wing, target_room) = endpoint(&target)?;
+                let pair = StoragePredicate::Or(vec![
+                    StoragePredicate::And(vec![
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "sourceDrawerId"), TypedValue::Text(source.id.clone())),
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "targetDrawerId"), TypedValue::Text(target.id.clone())),
+                    ]),
+                    StoragePredicate::And(vec![
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "sourceDrawerId"), TypedValue::Text(target.id.clone())),
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "targetDrawerId"), TypedValue::Text(source.id.clone())),
+                    ]),
+                ]);
+                let tunnels: Vec<Tunnel> = row_store.query(T_TUNNELS, Some(&pair), &[], None, None)
+                    .map_err(map_storage_err)?.iter().map(tunnel_from_row)
+                    .filter(|t| t.kind == TunnelKind::Contradicts).collect();
+                if let Some(replay) = tunnels.iter().find(|t| t.label.ends_with(&request.replay_identity)) {
+                    return Ok(match replay.lifecycle() {
+                        TunnelLifecycle::Active | TunnelLifecycle::Proposed => AtomicConflictProposalOutcome::Existing {
+                            tunnel_id: replay.id.clone(), lifecycle: conflict_lifecycle_name(replay.lifecycle()).to_owned(),
+                        },
+                        TunnelLifecycle::Withdrawn | TunnelLifecycle::Superseded => AtomicConflictProposalOutcome::Settled,
+                    });
+                }
+                if let Some(existing) = tunnels.iter().find(|t| matches!(t.lifecycle(), TunnelLifecycle::Active | TunnelLifecycle::Proposed)) {
+                    return Ok(AtomicConflictProposalOutcome::Existing {
+                        tunnel_id: existing.id.clone(), lifecycle: conflict_lifecycle_name(existing.lifecycle()).to_owned(),
+                    });
+                }
+                let history: Vec<(u8, String)> = tunnels.iter().filter_map(|t| match t.lifecycle() {
+                    TunnelLifecycle::Withdrawn | TunnelLifecycle::Superseded => conflict_decline_tier(&t.label).map(|tier| (tier, t.label.clone())),
+                    _ => None,
+                }).collect();
+                if (request.decline_suppresses)(request.tier, &request.renewal_identity, &history) {
+                    return Ok(AtomicConflictProposalOutcome::Settled);
+                }
+                let mut tunnel = Tunnel::new(
+                    Uuid::new_v4().to_string(), source_wing, source_room, target_wing, target_room,
+                    format!("{} {}", request.label, request.replay_identity), "aria-v2-contradiction".to_owned(), now,
+                );
+                tunnel.source_drawer_id = Some(source.id.clone());
+                tunnel.target_drawer_id = Some(target.id.clone());
+                tunnel.kind = TunnelKind::Contradicts;
+                tunnel.operational_bitmap = substrate_kernel::bit_field::write_field(
+                    TunnelLifecycle::Proposed.raw_value(),
+                    substrate_kernel::bit_field::write_field(TunnelOriginClass::Derived.raw_value(), 0, 6, 3), 3, 3,
+                );
+                let maximum = source_sensitivity_raw.max(target_sensitivity_raw);
+                tunnel.adjective_bitmap = substrate_kernel::bit_field::write_field(maximum, 0, 6, 6);
+                row_store.insert(T_TUNNELS, tunnel_values(&tunnel)).map_err(map_storage_err)?;
+                Ok(AtomicConflictProposalOutcome::Created { tunnel_id: tunnel.id, lifecycle: "proposed".to_owned() })
+            };
+            match run() {
+                Ok(value) => { outcome = Some(value); Ok(()) }
+                Err(error) => {
+                    validation_error = Some(error);
+                    Err(StorageError::TransactionConflict { detail: "atomic conflict proposal validation failed".to_owned() })
+                }
+            }
+        });
+        if let Some(error) = validation_error { return Err(error); }
+        transaction.map_err(map_storage_err)?;
+        outcome.ok_or_else(|| LocusKitError::DatabaseUnavailable("atomic conflict proposal produced no outcome".to_owned()))
     }
 
     fn resolve_node_names(
@@ -5618,6 +5814,14 @@ impl DrawerStore for InMemoryDrawerStore {
         self.inner.storage()
     }
 
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        self.inner.atomic_file_conflict_proposal(request, now)
+    }
+
     fn resolve_node_names(
         &self,
         parent_node_ids: &[String],
@@ -7023,6 +7227,27 @@ fn tunnel_from_row(row: &StorageRow) -> Tunnel {
         // Json (BLOB storage), but legacy TEXT writes and the InMemory
         // backend can surface Text — tolerate both (house discipline).
         ext: opt_json_string_of(row.get("ext")),
+    }
+}
+
+fn conflict_lifecycle_name(lifecycle: TunnelLifecycle) -> &'static str {
+    match lifecycle {
+        TunnelLifecycle::Active => "active",
+        TunnelLifecycle::Proposed => "proposed",
+        TunnelLifecycle::Withdrawn => "withdrawn",
+        TunnelLifecycle::Superseded => "superseded",
+    }
+}
+
+fn conflict_decline_tier(label: &str) -> Option<u8> {
+    if label.starts_with("dcp: ") {
+        Some(1)
+    } else if label.starts_with("tier2:") {
+        Some(2)
+    } else if label.starts_with("tier3:") {
+        Some(3)
+    } else {
+        None
     }
 }
 
@@ -8514,6 +8739,190 @@ mod tests {
         assert_eq!(from_room.len(), 1);
         let to = store.tunnels_to_wing("w").unwrap();
         assert_eq!(to.len(), 1);
+    }
+
+    #[test]
+    fn atomic_conflict_proposal_revalidates_and_replays_the_actual_tunnel() {
+        use crate::drawer_store::{
+            conflict_proposal_digests, AtomicConflictProposalOutcome,
+            AtomicConflictProposalRequest,
+        };
+
+        fn never_suppress(_tier: u8, _renewal: &str, _history: &[(u8, String)]) -> bool {
+            false
+        }
+
+        let store = open_store();
+        let source_id = tid("atomic-conflict-source");
+        let target_id = tid("atomic-conflict-target");
+        let mut source = sample_drawer_with_nodes(
+            &store, &source_id, "memory", "source", "the service is enabled",
+        );
+        source.udc_code = "001".to_owned();
+        let mut target = sample_drawer_with_nodes(
+            &store, &target_id, "memory", "target", "the service is not enabled",
+        );
+        target.udc_code = "001".to_owned();
+        store.add_drawer(&source, NOW).unwrap();
+        store.add_drawer(&target, NOW).unwrap();
+        let (source_digest, evidence_digest) =
+            conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
+        let request = || AtomicConflictProposalRequest {
+            source_drawer_id: source_id.clone(), target_drawer_id: target_id.clone(),
+            tier: 2, renewal_identity: "tier2:negation@1".to_owned(),
+            label: "tier2:negation@1".to_owned(), replay_identity: "aria-v2:test-replay".to_owned(),
+            source_digest: source_digest.clone(), evidence_digest: evidence_digest.clone(),
+            decline_suppresses: never_suppress,
+        };
+
+        let created = store.atomic_file_conflict_proposal(&request(), NOW + 1).unwrap();
+        let tunnel_id = match created {
+            AtomicConflictProposalOutcome::Created { tunnel_id, lifecycle } => {
+                assert_eq!(lifecycle, "proposed");
+                tunnel_id
+            }
+            other => panic!("expected new proposed tunnel, got {other:?}"),
+        };
+        assert_eq!(store.all_tunnels().unwrap().len(), 1);
+        let tunnel = store.all_tunnels().unwrap().pop().unwrap();
+        assert_eq!((tunnel.source_wing, tunnel.source_room), ("memory".to_owned(), "source".to_owned()));
+        assert_eq!((tunnel.target_wing, tunnel.target_room), ("memory".to_owned(), "target".to_owned()));
+
+        let replay = store.atomic_file_conflict_proposal(&request(), NOW + 2).unwrap();
+        assert_eq!(
+            replay,
+            AtomicConflictProposalOutcome::Existing {
+                tunnel_id,
+                lifecycle: "proposed".to_owned(),
+            }
+        );
+        assert_eq!(store.all_tunnels().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn atomic_conflict_proposal_hunt_selected_then_withdrawn_is_stale_without_an_edge() {
+        use crate::drawer_store::{
+            conflict_proposal_digests, AtomicConflictProposalRequest,
+        };
+
+        fn never_suppress(_tier: u8, _renewal: &str, _history: &[(u8, String)]) -> bool {
+            false
+        }
+
+        let store = open_store();
+        let source_id = tid("atomic-conflict-withdrawn-source");
+        let target_id = tid("atomic-conflict-withdrawn-target");
+        let source = sample_drawer_with_nodes(
+            &store, &source_id, "memory", "source", "the service is enabled",
+        );
+        let target = sample_drawer_with_nodes(
+            &store, &target_id, "memory", "target", "the service is not enabled",
+        );
+        store.add_drawer(&source, NOW).unwrap();
+        store.add_drawer(&target, NOW).unwrap();
+
+        // The hunt selected this current pair. Its content digests remain
+        // valid after withdrawal, so filing must reject on the fresh raw
+        // state rather than replaying or inserting a contradiction edge.
+        let (source_digest, evidence_digest) =
+            conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
+        let request = AtomicConflictProposalRequest {
+            source_drawer_id: source_id.clone(),
+            target_drawer_id: target_id.clone(),
+            tier: 2,
+            renewal_identity: "tier2:negation@1".to_owned(),
+            label: "tier2:negation@1".to_owned(),
+            replay_identity: "aria-v2:withdrawn-selection".to_owned(),
+            source_digest,
+            evidence_digest,
+            decline_suppresses: never_suppress,
+        };
+        store
+            .mutate_state(
+                &source_id,
+                State::Withdrawn,
+                RowVerb::Retract,
+                "test",
+                None,
+                NOW + 1,
+            )
+            .unwrap();
+
+        let error = store
+            .atomic_file_conflict_proposal(&request, NOW + 2)
+            .unwrap_err();
+        assert!(
+            matches!(error, LocusKitError::InvalidContent(ref message) if message == "selected contradiction evidence is stale"),
+            "withdrawn hunt-selected evidence must be stale, got {error:?}"
+        );
+        assert!(
+            store.all_tunnels().unwrap().is_empty(),
+            "withdrawn hunt-selected evidence must not create a contradiction edge"
+        );
+    }
+
+    #[test]
+    fn atomic_conflict_proposal_malformed_room_endpoint_is_rejected_without_an_edge() {
+        use crate::drawer_store::{
+            conflict_proposal_digests, AtomicConflictProposalRequest,
+        };
+
+        fn never_suppress(_tier: u8, _renewal: &str, _history: &[(u8, String)]) -> bool {
+            false
+        }
+
+        let store = open_store();
+        let source_id = tid("atomic-conflict-malformed-room-source");
+        let target_id = tid("atomic-conflict-malformed-room-target");
+        let source = sample_drawer_with_nodes(
+            &store, &source_id, "memory", "source", "the service is enabled",
+        );
+        let target = sample_drawer_with_nodes(
+            &store, &target_id, "memory", "target", "the service is not enabled",
+        );
+        store.add_drawer(&source, NOW).unwrap();
+        store.add_drawer(&target, NOW).unwrap();
+        let (source_digest, evidence_digest) =
+            conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
+        let request = AtomicConflictProposalRequest {
+            source_drawer_id: source_id,
+            target_drawer_id: target_id,
+            tier: 2,
+            renewal_identity: "tier2:negation@1".to_owned(),
+            label: "tier2:negation@1".to_owned(),
+            replay_identity: "aria-v2:malformed-room".to_owned(),
+            source_digest,
+            evidence_digest,
+            decline_suppresses: never_suppress,
+        };
+
+        let mut malformed_room = BTreeMap::new();
+        malformed_room.insert("depth".to_owned(), TypedValue::Int(1));
+        let updated = store
+            .storage()
+            .row_store()
+            .update(
+                T_NODES,
+                malformed_room,
+                &StoragePredicate::Eq(
+                    Column::new(T_NODES, "id"),
+                    TypedValue::Text(source.parent_node_id.clone()),
+                ),
+            )
+            .unwrap();
+        assert_eq!(updated, 1, "fixture must corrupt exactly the source room role");
+
+        let error = store
+            .atomic_file_conflict_proposal(&request, NOW + 1)
+            .unwrap_err();
+        assert!(
+            matches!(error, LocusKitError::InvalidContent(ref message) if message == "selected contradiction endpoints are unavailable"),
+            "malformed source room must reject filing, got {error:?}"
+        );
+        assert!(
+            store.all_tunnels().unwrap().is_empty(),
+            "malformed source room must not create a contradiction edge"
+        );
     }
 
     #[test]
