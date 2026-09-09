@@ -26,6 +26,7 @@
 
 import Foundation
 import CorpusKit
+import LocusKit
 
 /// The three adjustable maxima the stage runs under, resolved from the estate
 /// manifest and clamped to the packaged profile (never above it).
@@ -46,6 +47,119 @@ public struct CrossEncoderLimits: Sendable, Equatable {
     /// The profile's own maxima.
     public init(profile: CrossEncoderProfile) {
         self.init(pool: profile.pool, head: profile.head, spans: profile.spans)
+    }
+}
+
+/// Evidence for the transcript recipe's non-degrading cross-encoder stage.
+/// It reports exactly which requirement held or failed for this request.
+public struct StrictTranscriptRerankOutcome: Sendable, Equatable {
+    public static let policyVersion = "transcript_strict_v1"
+    public enum Status: String, Sendable, Equatable { case applied, unavailable }
+    public enum Reason: String, Sendable, Equatable {
+        case activeEncoderUnavailable
+        case activeEncoderMismatch
+        case spanSourceUnavailable
+        case profileMismatch
+        case invalidQueryVector
+        case ineligibleTranscript
+        case spansUnavailable
+        case spansStaleOrMalformed
+        case servingStateChanged
+        case scorerUnavailable
+        case scorerFailed
+    }
+
+    public let status: Status
+    public let reason: Reason?
+    public let encoderModelID: String?
+    public let encoderModelVersion: String?
+    public let queryDimension: Int?
+    public let freshHeadCandidates: Int
+    public let scoredHeadCandidates: Int
+    /// The classifier receipt, deliberately separate from the Arctic source
+    /// encoder row above.
+    public let classifierProfileID: String?
+    public let classifierModelRevision: String?
+    /// The validated fixed recipe limits. They are captured after strict
+    /// validation, rather than supplied by an ARIA projection default.
+    public let validatedPoolLimit: Int?
+    public let validatedHeadLimit: Int?
+    public let validatedSpansLimit: Int?
+    public let validatedRRFK: Int?
+    /// Serving-generation receipt returned with the strict Synapse snapshot.
+    public let servingGeneration: Int64?
+    /// Every scored head member was checked against its FNV content version.
+    public let freshnessVerified: Bool
+    /// Version of the eligibility and strict-stage policy that produced this evidence.
+    public let policyVersion: String
+
+    public init(
+        status: Status, reason: Reason?, encoderModelID: String?,
+        encoderModelVersion: String?, queryDimension: Int?,
+        freshHeadCandidates: Int, scoredHeadCandidates: Int,
+        classifierProfileID: String? = nil,
+        classifierModelRevision: String? = nil,
+        validatedPoolLimit: Int? = nil, validatedHeadLimit: Int? = nil,
+        validatedSpansLimit: Int? = nil, validatedRRFK: Int? = nil,
+        servingGeneration: Int64? = nil, freshnessVerified: Bool = false,
+        policyVersion: String = Self.policyVersion
+    ) {
+        self.status = status
+        self.reason = reason
+        self.encoderModelID = encoderModelID
+        self.encoderModelVersion = encoderModelVersion
+        self.queryDimension = queryDimension
+        self.freshHeadCandidates = freshHeadCandidates
+        self.scoredHeadCandidates = scoredHeadCandidates
+        self.classifierProfileID = classifierProfileID
+        self.classifierModelRevision = classifierModelRevision
+        self.validatedPoolLimit = validatedPoolLimit
+        self.validatedHeadLimit = validatedHeadLimit
+        self.validatedSpansLimit = validatedSpansLimit
+        self.validatedRRFK = validatedRRFK
+        self.servingGeneration = servingGeneration
+        self.freshnessVerified = freshnessVerified
+        self.policyVersion = policyVersion
+    }
+}
+
+/// Source-based transcript admission. A declared transcript kind is
+/// authoritative; older seeds qualify only when the complete stored body is
+/// a sequence of role turns. Quoted dialogue inside ordinary prose therefore
+/// cannot qualify by itself.
+public enum TranscriptEligibility {
+    public static let policyVersion = StrictTranscriptRerankOutcome.policyVersion
+
+    public enum Reason: String, Sendable, Equatable {
+        case declaredTranscript
+        case legacyRoleTurns
+        case notTranscript
+    }
+
+    public static func classify(_ drawer: Drawer) -> Reason {
+        if drawer.contentKind == .transcript { return .declaredTranscript }
+        let roles: Set<String> = ["user", "assistant", "system", "human", "ai", "speaker", "agent", "customer"]
+        func header(_ line: Substring) -> String? {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let separator = trimmed.firstIndex(of: ":") else { return nil }
+            let role = trimmed[..<separator].trimmingCharacters(in: .whitespaces).lowercased()
+            return roles.contains(role) ? String(trimmed[trimmed.index(after: separator)...]) : nil
+        }
+        let lines = drawer.content.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        guard let first = lines.first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+              header(first) != nil else { return .notTranscript }
+        var turns = 0
+        var currentTurnHasBody = false
+        for line in lines {
+            if let headerBody = header(line) {
+                if turns > 0, !currentTurnHasBody { return .notTranscript }
+                turns += 1
+                currentTurnHasBody = !headerBody.trimmingCharacters(in: .whitespaces).isEmpty
+            } else if turns > 0, !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                currentTurnHasBody = true
+            }
+        }
+        return turns >= 2 && currentTurnHasBody ? .legacyRoleTurns : .notTranscript
     }
 }
 
@@ -85,11 +199,14 @@ public struct CrossEncoderReport: Sendable, Equatable {
     public let coldLoad: Bool
     /// Wall-clock milliseconds of the stage (scorer load excluded), when it ran.
     public let stageMillis: Int?
+    /// Strict transcript evidence, present only for `.strictTranscript`.
+    public let strictTranscript: StrictTranscriptRerankOutcome?
 
     public init(
         status: Status, requested: Bool, reason: String?, profileID: String,
         modelVersion: String?, backend: String?, pool: Int, head: Int, spans: Int,
-        scored: Int, coldLoad: Bool, stageMillis: Int?
+        scored: Int, coldLoad: Bool, stageMillis: Int?,
+        strictTranscript: StrictTranscriptRerankOutcome? = nil
     ) {
         self.status = status
         self.requested = requested
@@ -103,6 +220,7 @@ public struct CrossEncoderReport: Sendable, Equatable {
         self.scored = scored
         self.coldLoad = coldLoad
         self.stageMillis = stageMillis
+        self.strictTranscript = strictTranscript
     }
 
     /// A bypass report for `directive`.
@@ -114,12 +232,15 @@ public struct CrossEncoderReport: Sendable, Equatable {
     }
 
     /// A degraded report for an `apply` that could not run.
-    static func degraded(_ directive: RerankDirective, reason: String, limits: CrossEncoderLimits?) -> CrossEncoderReport {
+    static func degraded(
+        _ directive: RerankDirective, reason: String, limits: CrossEncoderLimits?,
+        strictTranscript: StrictTranscriptRerankOutcome? = nil
+    ) -> CrossEncoderReport {
         CrossEncoderReport(
             status: .degraded, requested: true, reason: reason,
             profileID: directive.profileID, modelVersion: nil, backend: nil,
             pool: limits?.pool ?? 0, head: limits?.head ?? 0, spans: limits?.spans ?? 0,
-            scored: 0, coldLoad: false, stageMillis: nil)
+            scored: 0, coldLoad: false, stageMillis: nil, strictTranscript: strictTranscript)
     }
 
     /// The one line the ARIA composer prints for this report.

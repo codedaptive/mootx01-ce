@@ -748,6 +748,45 @@ struct ConflictFilingState {
     suppressed: usize,
 }
 
+/// One selected candidate passed down from the typed ARIA custody cache. This
+/// contains no memory body; the LocusKit transaction recomputes and compares
+/// its source/evidence digests from fresh rows before it can write.
+#[derive(Debug, Clone)]
+pub struct SelectedConflictProposal {
+    pub source_drawer_id: String,
+    pub target_drawer_id: String,
+    pub tier: u8,
+    pub renewal_identity: String,
+    pub label: String,
+    pub replay_identity: String,
+    pub source_digest: String,
+    pub evidence_digest: String,
+}
+
+/// File explicitly selected contradiction candidates without re-running a
+/// hunt. Every candidate enters the lower serializable boundary independently;
+/// each boundary freshly reads both endpoints and their pair history before
+/// returning created, existing, or settled.
+impl EstateCoordinator {
+    pub fn file_selected_conflict_proposals(
+        &self,
+        handle: &EstateHandle,
+        selected: &[SelectedConflictProposal],
+        now: i64,
+    ) -> Result<Vec<locus_kit::drawer_store::AtomicConflictProposalOutcome>, VerbDispatchError> {
+        use crate::brain::conflict_projection_sweep::decline_matrix_suppresses;
+        let estate = self.estate_for_verb(handle)?;
+        selected.iter().map(|candidate| {
+            estate.atomic_file_conflict_proposal(&locus_kit::drawer_store::AtomicConflictProposalRequest {
+                source_drawer_id: candidate.source_drawer_id.clone(), target_drawer_id: candidate.target_drawer_id.clone(),
+                tier: candidate.tier, renewal_identity: candidate.renewal_identity.clone(), label: candidate.label.clone(),
+                replay_identity: candidate.replay_identity.clone(), source_digest: candidate.source_digest.clone(), evidence_digest: candidate.evidence_digest.clone(),
+                decline_suppresses: decline_matrix_suppresses,
+            }, now).map_err(|error| VerbDispatchError::from(remap("file_selected_conflict_proposals", "", error)))
+        }).collect()
+    }
+}
+
 /// Shared filing step for every tier: decline-matrix check, endpoint
 /// resolution (never file fabricated coordinates), capture as Proposed.
 /// Returns the new tunnel id, or `None` when the filing was suppressed
@@ -1458,6 +1497,11 @@ impl DrainStatus {
     /// name in the same change). Twin of Swift `DrainStatus.dreamingName`.
     pub const DREAMING_NAME: &'static str = "dreaming";
 
+    /// Canonical name of the span-encode row-debt lane. It is present only
+    /// while a span encoder is registered for the estate and remains
+    /// non-gating for the corpus-only detached finisher.
+    pub const SPAN_ENCODE_NAME: &'static str = "span_encode";
+
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
     pub fn is_draining(&self) -> bool {
@@ -1873,11 +1917,19 @@ impl EstateCoordinator {
         zoom_window_high: i64,
         federate: bool,
     ) -> Result<EstateHandle, GeniusLocusKitError> {
+        self.open_with_policy(store, owner, zoom_window_low, zoom_window_high, federate, false)
+    }
+
+    /// Frozen opens retain current pruning aggregates in memory only.
+    pub fn open_with_policy(
+        &mut self, store: Arc<dyn DrawerStore>, owner: OwnerCredentials,
+        zoom_window_low: i64, zoom_window_high: i64, federate: bool, frozen: bool,
+    ) -> Result<EstateHandle, GeniusLocusKitError> {
         // Capture the underlying Storage before Estate::open moves the
         // DrawerStore Arc. Used below for auto-registering the substrate
         // topology provider (node-tree integrity, NT-G1).
         let topology_storage = store.storage();
-        let estate = Estate::open_with_federation(store, owner, federate).map_err(|e| {
+        let estate = Estate::open_with_policy(store, owner, federate, frozen).map_err(|e| {
             GeniusLocusKitError::EstateOpenFailed { detail: format!("{e:?}") }
         })?;
         let estate_uuid: EstateUuid = estate.estate_uuid().into_bytes();
@@ -2478,6 +2530,22 @@ impl EstateCoordinator {
             })
     }
 
+    /// Return the storage registered with a live estate for a consistent
+    /// inventory capture. The storage is the same Arc supplied by the estate's
+    /// `DrawerStore`; callers must not construct a parallel backend connection.
+    pub fn inventory_snapshot_storage(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Arc<dyn Storage>, GeniusLocusKitError> {
+        self.estate_for(handle)?;
+        self.storages
+            .get(handle)
+            .map(Arc::clone)
+            .ok_or(GeniusLocusKitError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            })
+    }
+
     /// Narrow host seams for separately compiled historical migrations.
     #[doc(hidden)]
     pub fn migration_storage(&self, handle: &EstateHandle) -> Option<Arc<dyn Storage>> {
@@ -2586,6 +2654,22 @@ impl EstateCoordinator {
                 pending: debt,
                 in_flight: 0,
                 detail: Some(format!("pipeline: {}", producer.pipeline_version())),
+            });
+        }
+
+        // Drain 4 of N: span encode. This is row debt, not the corpus queue;
+        // surface it only when a loaded encoder can actually pay it down.
+        if let Some(encoder) = self.span_encoders.get(handle) {
+            let debt = estate.count_span_index_debt().map_err(|e| {
+                GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("count_span_index_debt: {e:?}"),
+                }
+            })?;
+            statuses.push(DrainStatus {
+                name: DrainStatus::SPAN_ENCODE_NAME.to_string(),
+                pending: debt,
+                in_flight: 0,
+                detail: Some(format!("model: {}", encoder.spec().model_id)),
             });
         }
 
@@ -3382,26 +3466,61 @@ impl EstateCoordinator {
     /// Recall then runs lexical-only. Mirrors Swift
     /// `GeniusLocusKit.activateSpanEncoder(for:)`.
     pub fn activate_span_encoder(&mut self, handle: &EstateHandle) {
+        self.activate_span_encoder_with_seed(handle, true);
+    }
+
+    /// Read the active encoder row and install the in-memory query/rerank
+    /// seams without seeding a missing row. Frozen selected-v2 startup uses
+    /// this path so an incomplete estate degrades without mutation.
+    pub fn activate_existing_span_encoder(&mut self, handle: &EstateHandle) {
+        self.activate_span_encoder_with_seed(handle, false);
+    }
+
+    fn activate_span_encoder_with_seed(
+        &mut self,
+        handle: &EstateHandle,
+        seed_if_absent: bool,
+    ) {
         // Seed before reading: an estate whose manifest names the encoder is
         // encoder-active from its first open (ruling 2026-09-04: upgrade never
         // creates content; seeding belongs to provision and serve). The span rows
         // are the span-encode standing signal's work and drain in the background,
         // so the open stays fast. A seed failure is logged once and activation
         // reads the registry as it stands.
-        match self.seed_default_encoder_model_if_absent(handle) {
-            Ok(true) => eprintln!(
-                "mootx01 encoder: estate {} seeded {} as the active encoder_models row",
-                uuid_to_str(&handle.estate_uuid),
-                EncoderModelSeed::MODEL_ID,
-            ),
-            Ok(false) => {}
-            Err(e) => eprintln!(
-                "mootx01 encoder: estate {} could not seed the default encoder_models row ({e:?}); \
-                 activation reads the registry as it stands",
-                uuid_to_str(&handle.estate_uuid),
-            ),
+        if seed_if_absent {
+            match self.seed_default_encoder_model_if_absent(handle) {
+                Ok(true) => eprintln!(
+                    "mootx01 encoder: estate {} seeded {} as the active encoder_models row",
+                    uuid_to_str(&handle.estate_uuid),
+                    EncoderModelSeed::MODEL_ID,
+                ),
+                Ok(false) => {}
+                Err(e) => eprintln!(
+                    "mootx01 encoder: estate {} could not seed the default encoder_models row ({e:?}); \
+                     activation reads the registry as it stands",
+                    uuid_to_str(&handle.estate_uuid),
+                ),
+            }
         }
-        let spec = self.active_encoder_model_spec(handle);
+        let spec = if seed_if_absent {
+            self.active_encoder_model_spec(handle)
+        } else {
+            let Some(storage) = self.storages.get(handle) else {
+                return;
+            };
+            let registry = locus_kit::encoder_model_store::EncoderModelStore::new(Arc::clone(storage));
+            match registry.active() {
+                Ok(Some(row)) => crate::span_rerank::encoder_spec_from_row(&row),
+                Ok(None) => {
+                    eprintln!("mootx01 encoder: estate {} has no active encoder_models row; frozen activation is unavailable", uuid_to_str(&handle.estate_uuid));
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("mootx01 encoder: estate {} could not read active encoder_models row ({error:?}); frozen activation is unavailable", uuid_to_str(&handle.estate_uuid));
+                    return;
+                }
+            }
+        };
         let Some(dir) = self.model_directory_resolver.model_dir_for(&spec.model_id) else {
             eprintln!(
                 "mootx01 encoder: estate {} no model directory for {}; recall runs lexical-only",
@@ -3627,25 +3746,197 @@ impl EstateCoordinator {
     ) -> (Vec<RecallHit>, CrossEncoderReport, bool) {
         use crate::cross_encoder_stage::{self as stage, reason};
 
+        let strict = directive.is_strict_transcript();
+        let strict_degraded = |reason: &str, active: Option<&locus_kit::encoder_model_store::EncoderModelRow>, query_dimension: Option<usize>, fresh_head_candidates: usize| {
+            let mut report = CrossEncoderReport::degraded(directive, reason, limits);
+            report.strict_transcript = Some(stage::StrictTranscriptEvidence {
+                available: false,
+                reason: Some(reason.to_string()),
+                active_model_id: active.map(|row| row.model_id.clone()),
+                active_model_version: active.map(|row| row.model_version.clone()),
+                query_dimension,
+                fresh_head_candidates,
+                scored_head_candidates: 0,
+                classifier_profile_id: None,
+                classifier_model_revision: None,
+                validated_pool_limit: None,
+                validated_head_limit: None,
+                validated_spans_limit: None,
+                validated_rrf_k: None,
+                serving_generation: None,
+                freshness_verified: false,
+            });
+            report
+        };
+
         if directive.action != RerankAction::Apply {
             return (hits, CrossEncoderReport::bypassed(directive), false);
         }
         let (Some(profile), Some(limits)) = (profile, limits) else {
-            return (hits, CrossEncoderReport::degraded(directive, reason::PROFILE_UNKNOWN, None), true);
+            let report = if strict { strict_degraded(reason::PROFILE_UNKNOWN, None, None, 0) } else { CrossEncoderReport::degraded(directive, reason::PROFILE_UNKNOWN, None) };
+            return (hits, report, true);
         };
-        let query = request.query_text.as_deref().unwrap_or("").trim().to_string();
-        if query.is_empty() {
+        let requested_pool = limits.pool.min(hits.len());
+        let strict_pool = if strict {
+            stage::strict_transcript_pool(&hits[..requested_pool])
+        } else {
+            hits[..requested_pool].to_vec()
+        };
+        if strict && strict_pool.is_empty() {
+            return (Vec::new(), strict_degraded(reason::STRICT_TRANSCRIPT_INELIGIBLE, None, None, 0), true);
+        }
+        let supplied_query = request.query_text.as_deref().unwrap_or("");
+        // The strict classifier receives the caller's original query bytes;
+        // only the ordinary path keeps its historical trimming behaviour.
+        let query = if strict { supplied_query.to_string() } else { supplied_query.trim().to_string() };
+        if query.trim().is_empty() {
+            if strict {
+                return (strict_pool, strict_degraded(reason::NO_QUERY_TEXT, None, None, 0), true);
+            }
             return (hits, CrossEncoderReport::degraded(directive, reason::NO_QUERY_TEXT, Some(limits)), true);
+        }
+        // Strict transcript recall reads the actual registry row.  The
+        // ordinary convenience accessor supplies a floor model on error and
+        // is deliberately not used here: strictness must not activate, seed,
+        // or infer an encoder.
+        let active_row = if strict {
+            let Some(storage) = self.storages.get(handle) else {
+                return (strict_pool.clone(), strict_degraded(reason::STRICT_SOURCE_UNAVAILABLE, None, None, 0), true);
+            };
+            match locus_kit::encoder_model_store::EncoderModelStore::new(Arc::clone(storage)).active() {
+                Ok(Some(row)) => row,
+                _ => return (strict_pool.clone(), strict_degraded(reason::STRICT_SOURCE_UNAVAILABLE, None, None, 0), true),
+            }
+        } else {
+            // Unused outside the strict branch; this value is never derived
+            // from the floor profile.
+            Self::default_encoder_model_row(false)
+        };
+        if strict {
+            let active_spec = crate::span_rerank::encoder_spec_from_row(&active_row);
+            let pinned = EncoderModelSpec {
+                model_id: EncoderModelSeed::MODEL_ID.to_string(), model_version: EncoderModelSeed::MODEL_VERSION.to_string(),
+                dim: EncoderModelSeed::DIM, query_prefix: EncoderModelSeed::QUERY_PREFIX.to_string(), doc_prefix: EncoderModelSeed::DOC_PREFIX.to_string(),
+                pooling: corpus_kit::encoder::Pooling::Cls, tokenizer_hash: EncoderModelSeed::TOKENIZER_HASH.to_string(),
+                window_words: EncoderModelSeed::WINDOW_WORDS, overlap_divisor: EncoderModelSeed::OVERLAP_DIVISOR,
+                max_spans: EncoderModelSeed::MAX_SPANS, max_sequence: EncoderModelSeed::MAX_SEQUENCE,
+            };
+            let source = self.span_rerank_sources.get(handle);
+            if profile != &CrossEncoderProfile::minilm_l6()
+                || CrossEncoderProfile::MINILM_L6_REVISION
+                    != "233902d25c440f23af6f7d6e94d2946bac0bee0a"
+                || active_spec != pinned
+                || limits != CrossEncoderLimits::from_profile(profile)
+                || source.and_then(|s| s.encoder.model_spec()).as_ref() != Some(&pinned)
+                || source.map(|s| s.encoder.model_id()) != Some(pinned.model_id.as_str())
+                || source.map(|s| s.store.is_strict_synapse_authority()) != Some(true)
+            {
+                return (strict_pool.clone(), strict_degraded(reason::STRICT_PROFILE_MISMATCH, Some(&active_row), None, 0), true);
+            }
         }
         let (scorer, cold_load) = match self.pair_scorer_for(handle, profile) {
             Ok(loaded) => loaded,
-            Err(why) => return (hits, CrossEncoderReport::degraded(directive, &why, Some(limits)), true),
+            Err(why) => {
+                if strict {
+                    return (strict_pool.clone(), strict_degraded(&why, Some(&active_row), None, 0), true);
+                }
+                return (hits, CrossEncoderReport::degraded(directive, &why, Some(limits)), true);
+            }
         };
 
         let started = std::time::Instant::now();
-        let pool = limits.pool.min(hits.len());
+        let pool = strict_pool.len();
         let head = limits.head.min(pool);
-        let head_ids: Vec<String> = hits[..head].iter().map(|h| h.id.clone()).collect();
+        let head_ids: Vec<String> = strict_pool[..head].iter().map(|h| h.id.clone()).collect();
+
+        if strict {
+            let source = self.span_rerank_sources.get(handle).expect("strict source was checked");
+            let query_vector = match source.encoder.encode_query(&query) {
+                Ok(vector) if vector.len() == EncoderModelSeed::DIM && vector.iter().all(|value| value.is_finite()) => vector,
+                _ => return (strict_pool.clone(), strict_degraded(reason::STRICT_QUERY_INVALID, Some(&active_row), None, 0), true),
+            };
+            let snapshot = match source.store.strict_span_vector_snapshot(&head_ids, source.encoder.model_id()) {
+                Ok(snapshot) if snapshot.malformed_rows.is_empty() => snapshot,
+                Ok(_) => return (strict_pool.clone(), strict_degraded(reason::STRICT_SPANS_STALE, Some(&active_row), Some(query_vector.len()), 0), true),
+                Err(_) => return (strict_pool.clone(), strict_degraded(reason::STRICT_SPANS_UNAVAILABLE, Some(&active_row), Some(query_vector.len()), 0), true),
+            };
+            // Revalidate the receipt before scoring. Unlike a second data
+            // read, this proves that all selected rows still belong to the
+            // exact serving generation the snapshot observed.
+            match source.store.revalidates_strict_span_vector_snapshot(&snapshot) {
+                Ok(true) => {}
+                _ => return (strict_pool.clone(), strict_degraded(reason::SERVING_STATE_CHANGED, Some(&active_row), Some(query_vector.len()), 0), true),
+            }
+            // Prove all heads have usable, fresh source spans before invoking
+            // the classifier.  Then score one complete pair batch so a later
+            // candidate cannot leave a partially-classified strict request.
+            let mut candidate_spans: Vec<(String, Vec<String>)> = Vec::with_capacity(head);
+            for (index, hit) in strict_pool[..head].iter().enumerate() {
+                let Some(content) = hit.drawer.as_ref().map(|drawer| drawer.content.as_str()) else {
+                    return (strict_pool.clone(), strict_degraded(reason::STRICT_SPANS_UNAVAILABLE, Some(&active_row), Some(query_vector.len()), index), true);
+                };
+                let rows = match snapshot.rows.get(&hit.id) {
+                    Some(rows) => rows,
+                    None => return (strict_pool.clone(), strict_degraded(reason::STRICT_SPANS_UNAVAILABLE, Some(&active_row), Some(query_vector.len()), index), true),
+                };
+                let spans = match stage::select_strict_spans(content, rows, &query_vector, limits.spans, &crate::span_content_version::span_content_version(content)) {
+                    Ok(spans) => spans,
+                    Err(why) => return (strict_pool.clone(), strict_degraded(why, Some(&active_row), Some(query_vector.len()), index), true),
+                };
+                candidate_spans.push((hit.id.clone(), spans));
+            }
+            let refs: Vec<&str> = candidate_spans.iter().flat_map(|(_, spans)| spans.iter().map(String::as_str)).collect();
+            let values = match scorer.score(&query, &refs) {
+                Ok(values) if values.len() == refs.len() && values.iter().all(|value| value.is_finite()) => values,
+                _ => return (strict_pool.clone(), strict_degraded(reason::STRICT_PARTIAL_CLASSIFIER, Some(&active_row), Some(query_vector.len()), 0), true),
+            };
+            // A generation or encoder swap during classifier work invalidates
+            // the complete strict receipt. Refuse rather than publishing a
+            // result scored from an obsolete serving lane.
+            let active_unchanged = self.storages.get(handle).and_then(|storage| {
+                locus_kit::encoder_model_store::EncoderModelStore::new(Arc::clone(storage))
+                    .active().ok().flatten()
+            }).as_ref() == Some(&active_row);
+            if !active_unchanged
+                || !matches!(source.store.revalidates_strict_span_vector_snapshot(&snapshot), Ok(true)) {
+                return (strict_pool.clone(), strict_degraded(reason::SERVING_STATE_CHANGED, Some(&active_row), Some(query_vector.len()), head), true);
+            }
+            let mut logits: HashMap<String, Vec<f32>> = HashMap::new();
+            let mut offset = 0usize;
+            for (id, spans) in candidate_spans {
+                let end = offset + spans.len();
+                logits.insert(id, values[offset..end].to_vec());
+                offset = end;
+            }
+            let incoming: Vec<String> = strict_pool[..pool].iter().map(|hit| hit.id.clone()).collect();
+            let order = stage::fuse(&incoming, head, &logits, profile.rrf_k);
+            let reordered = stage::reorder(strict_pool, pool, &order);
+            let report = CrossEncoderReport {
+                status: crate::cross_encoder_stage::CrossEncoderStatus::Applied, requested: true, reason: directive.reason.clone(),
+                profile_id: directive.profile_id.clone(), model_version: Some(profile.model_version.clone()), backend: Some(scorer.backend().to_string()),
+                pool, head, spans: limits.spans, scored: head, cold_load, stage_millis: Some(started.elapsed().as_millis() as u64),
+                strict_transcript: Some(stage::StrictTranscriptEvidence {
+                    available: true,
+                    reason: None,
+                    active_model_id: Some(active_row.model_id),
+                    active_model_version: Some(active_row.model_version),
+                    query_dimension: Some(query_vector.len()),
+                    fresh_head_candidates: head,
+                    scored_head_candidates: head,
+                    classifier_profile_id: Some(profile.model_id.clone()),
+                    classifier_model_revision: Some(
+                        CrossEncoderProfile::MINILM_L6_REVISION.to_string(),
+                    ),
+                    validated_pool_limit: Some(limits.pool),
+                    validated_head_limit: Some(limits.head),
+                    validated_spans_limit: Some(limits.spans),
+                    validated_rrf_k: Some(profile.rrf_k),
+                    serving_generation: Some(snapshot.serving_generation),
+                    freshness_verified: true,
+                }),
+            };
+            return (reordered, report, false);
+        }
 
         // Span rows and the query vector come from the registered span rerank
         // source when there is one; a read failure only means the windowed
@@ -3719,6 +4010,7 @@ impl EstateCoordinator {
             scored,
             cold_load,
             stage_millis: Some(started.elapsed().as_millis() as u64),
+            strict_transcript: None,
         };
         (reordered, report, false)
     }
@@ -3762,6 +4054,18 @@ impl EstateCoordinator {
     ///
     /// Mirrors Swift `EstateLifecycle.applyProvisionedEmbeddingProvider`.
     pub fn apply_provisioned_embedding_provider(&mut self, handle: &EstateHandle) {
+        self.apply_provisioned_embedding_provider_with_seed(handle, true);
+    }
+
+    pub fn apply_existing_provisioned_embedding_provider(&mut self, handle: &EstateHandle) {
+        self.apply_provisioned_embedding_provider_with_seed(handle, false);
+    }
+
+    fn apply_provisioned_embedding_provider_with_seed(
+        &mut self,
+        handle: &EstateHandle,
+        seed_if_absent: bool,
+    ) {
         // Fail-quiet: estate lookup errors here are non-fatal — the Corpus
         // construction that follows will also fail on a stale handle.
         let Ok(estate) = self.estate_for(handle) else { return };
@@ -3774,7 +4078,11 @@ impl EstateCoordinator {
             return;
         }
         if model_id == Self::ENCODER_PROVIDER_ID {
-            self.activate_span_encoder(handle);
+            if seed_if_absent {
+                self.activate_span_encoder(handle);
+            } else {
+                self.activate_existing_span_encoder(handle);
+            }
             return;
         }
         eprintln!(
@@ -6075,6 +6383,7 @@ impl EstateCoordinator {
                 drawer_b: db,
                 cue_kind: Some(cue.kind.as_str().to_string()),
                 rule_id: None,
+                rule_version: None,
                 score: Some(cue.score),
                 source_snippet: Some(first.content.chars().take(HUNT_SNIPPET_LIMIT).collect()),
                 target_snippet: Some(second.content.chars().take(HUNT_SNIPPET_LIMIT).collect()),
@@ -9904,6 +10213,18 @@ impl EstateCoordinator {
         embedding_models: Vec<EmbeddingModelConfig>,
         now_millis: i64,
     ) -> Result<(), GeniusLocusKitError> {
+        self.wire_substores_mode(handle, kind, backing_storage, embedding_models, now_millis, true)
+    }
+
+    fn wire_substores_mode(
+        &mut self,
+        handle: &EstateHandle,
+        kind: EstateKind,
+        backing_storage: Arc<dyn Storage>,
+        embedding_models: Vec<EmbeddingModelConfig>,
+        now_millis: i64,
+        allow_startup_persistence: bool,
+    ) -> Result<(), GeniusLocusKitError> {
         if kind == EstateKind::LocusOnly {
             // LocusKit only — no sub-store wiring needed.
             return Ok(());
@@ -9924,20 +10245,20 @@ impl EstateCoordinator {
         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
             reason: format!("engine configuration: {:?}", e),
         })?;
-        let corpus = CorpusContentEngine::open(
-            Arc::clone(&backing_storage),
-            config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
-            embedding_models,
-        )
+        let content_source = Arc::new(LocusDrawerContentSource::new(estate));
+        let corpus = if allow_startup_persistence {
+            CorpusContentEngine::open(Arc::clone(&backing_storage), config, content_source, embedding_models)
+        } else {
+            CorpusContentEngine::open_readonly(Arc::clone(&backing_storage), config, content_source, embedding_models)
+        }
         .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
             reason: format!("engine open failed for {:?} estate: {:?}", kind, e),
         })?;
-        corpus
-            .reconcile_configured_providers(now_millis)
-            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+        if allow_startup_persistence {
+            corpus.reconcile_configured_providers(now_millis).map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("provider reconciliation failed: {e:?}"),
             })?;
+        }
         let corpus = Arc::new(corpus);
         self.register_corpus(handle, Arc::clone(&corpus));
         if kind == EstateKind::Glk {
@@ -9951,11 +10272,28 @@ impl EstateCoordinator {
             // this estate. Idempotent (CREATE TABLE IF NOT EXISTS). Mirrors
             // Swift `wireSubstores` opening `GeniusLocusKitSchema
             // .estateSchemaDeclaration` on the backing storage.
-            backing_storage
-                .open(&crate::hydration::composite_schema())
-                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                    reason: format!("GLK composite schema open failed: {e:?}"),
+            if allow_startup_persistence {
+                backing_storage
+                    .open(&crate::hydration::composite_schema())
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("GLK composite schema open failed: {e:?}"),
+                    })?;
+            } else {
+                let composite = crate::hydration::composite_schema();
+                let required = composite.version;
+                let found = backing_storage.current_schema_version_for(&composite.kit_id).map_err(|e| {
+                    GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("GLK composite schema read failed: {e:?}"),
+                    }
                 })?;
+                if found != required {
+                    return Err(GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!(
+                            "frozen selected-v2 open requires GLK schema {required}, found {found}"
+                        ),
+                    });
+                }
+            }
         }
         // CorpusKit owns the encode pipeline: install the on_encoded encode
         // rider (rollup + structural fingerprint lane entry + A2 marker),
@@ -9966,19 +10304,25 @@ impl EstateCoordinator {
         // work. A provisioned estate mounts an empty queue, so the ordering
         // is equally correct there.
         // GLK only coordinates the two kits — it never performs the encode.
-        self.wire_corpus_on_encoded(handle);
+        if allow_startup_persistence {
+            self.wire_corpus_on_encoded(handle);
+        }
         // Act on the estate's `embedding_provider` manifest key here, inside
         // the wire step, so every path that wires a Corpus (provision, the
         // db-composition rebuild, a host open) sees the same activation —
         // the same place Swift `wireSubstores` calls
         // `applyProvisionedEmbeddingProvider`. "encoder" registers the span
         // encoder; the Corpus ensemble is never modified by this call.
-        self.apply_provisioned_embedding_provider(handle);
-        corpus
-            .mount_ingest_queue()
-            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+        if allow_startup_persistence {
+            self.apply_provisioned_embedding_provider(handle);
+        } else {
+            self.apply_existing_provisioned_embedding_provider(handle);
+        }
+        if allow_startup_persistence {
+            corpus.mount_ingest_queue().map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("Corpus::mount_ingest_queue failed: {e:?}"),
             })?;
+        }
         Ok(())
     }
 
@@ -9994,13 +10338,20 @@ impl EstateCoordinator {
         embedding_models: Vec<EmbeddingModelConfig>,
         now_millis: i64,
     ) -> Result<(), GeniusLocusKitError> {
-        self.wire_substores(
-            handle,
-            EstateKind::Glk,
-            backing_storage,
-            embedding_models,
-            now_millis,
-        )
+        self.wire_substores_mode(handle, EstateKind::Glk, backing_storage, embedding_models, now_millis, true)
+    }
+
+    /// Read-preserving v2 frozen startup: load the persisted query tiers,
+    /// without provider reconciliation, claim refresh, queue mounting, or
+    /// encoder-row seeding.
+    pub fn wire_glk_substores_readonly(
+        &mut self,
+        handle: &EstateHandle,
+        backing_storage: Arc<dyn Storage>,
+        embedding_models: Vec<EmbeddingModelConfig>,
+        now_millis: i64,
+    ) -> Result<(), GeniusLocusKitError> {
+        self.wire_substores_mode(handle, EstateKind::Glk, backing_storage, embedding_models, now_millis, false)
     }
 
     /// Provision a new estate: create, open, wire sub-stores, and record kind metadata.
@@ -10449,10 +10800,14 @@ impl EstateCoordinator {
     pub fn recall_scored(
         &self,
         handle: &EstateHandle,
-        request: GLKRecallRequest,
+        mut request: GLKRecallRequest,
         now: i64,
     ) -> Result<GLKRecallResult, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
+        // Only the central External-origin writer below may persist traces.
+        // Inner Locus frames are candidate acquisition, even when callers
+        // supply a legacy trace budget (for example temporal recall).
+        request.frame.trace_limit = None;
 
         // Frontier-K bounds candidate retrieval: min(max(limit * 4, 64), 256).
         // Mirrors Swift RecallDirector's frontierK computation — enough candidates

@@ -161,6 +161,9 @@ pub struct TierFinding {
     pub cue_kind: Option<String>,
     /// Tier 1: the typed rule that proved the pair. Tiers 2/3: None.
     pub rule_id: Option<String>,
+    /// Tier 1: the typed proof rule version. This stays separate from the
+    /// result identity because the decline matrix renews on rule versions.
+    pub rule_version: Option<String>,
     /// Tiers 2/3: the cue score. Tier 1: None — a typed proof has NO
     /// score; its lane ranks by endpoint recency, and the absence of a
     /// score is load-bearing (nothing may fold tiers into one ranked
@@ -297,6 +300,7 @@ pub fn tier_finding_from_proven(finding: &ConflictFinding) -> TierFinding {
         drawer_b: b,
         cue_kind: None,
         rule_id: Some(finding.outcome.rule_id.clone()),
+        rule_version: Some(finding.outcome.rule_version.to_string()),
         score: None,
         source_snippet: None,
         target_snippet: None,
@@ -497,6 +501,7 @@ mod tests {
                 .to_string(),
             ),
             rule_id: None,
+            rule_version: None,
             score: Some(score),
             source_snippet: Some("s".to_string()),
             target_snippet: Some("t".to_string()),
@@ -515,6 +520,7 @@ mod tests {
             drawer_b: db,
             cue_kind: None,
             rule_id: Some("employment.employer.v1".to_string()),
+            rule_version: Some("1".to_string()),
             score: None,
             source_snippet: None,
             target_snippet: None,

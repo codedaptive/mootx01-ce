@@ -222,9 +222,9 @@ public enum SpanEncodeDuty {
                 // version stamped on the spans; bit 27 stays clear, so a
                 // rewritten drawer is re-encoded on the next pump from its
                 // current content.
-                let encodedVersion = contentVersion(item.content)
+                let encodedVersion = SpanContentVersion.fnv1a64(item.content)
                 guard let liveContent = try await context.liveSpanEncodeContent(drawerID: item.id),
-                      contentVersion(liveContent) == encodedVersion else {
+                      SpanContentVersion.fnv1a64(liveContent) == encodedVersion else {
                     skipped += 1
                     log.info("spanEncode: drawer=\(item.id, privacy: .public) erased or rewritten during encode — span write skipped")
                     continue
@@ -291,9 +291,8 @@ public enum SpanEncodeDuty {
                 scale: scale,
                 startWord: bounds.start,
                 endWord: bounds.end,
-                // content_version = sha256 of content stored in content_hash column.
-                // W1 adds Drawer.contentHash; until then use a deterministic proxy.
-                contentVersion: contentVersion(content))
+                // Existing rows use FNV-1a 64-bit over UTF-8 content bytes.
+                contentVersion: SpanContentVersion.fnv1a64(content))
         }
     }
 
@@ -309,21 +308,6 @@ public enum SpanEncodeDuty {
     /// algorithm. At W1 merge, replace this helper with that call.
     // MARK: - content_version proxy
 
-    /// Derive a content version string matching the `ext.cv` field (contract §3).
-    ///
-    /// W1 adds `Drawer.contentHash` (sha256 hex of the content_hash column).
-    /// Until W1, we use FNV-1a 64-bit over UTF-8 content bytes — cheap,
-    /// deterministic, changes when content changes (same semantics).
-    /// At W1 merge: replace with `drawer.contentHash`.
-    private static func contentVersion(_ content: String) -> String {
-        let bytes = Array(content.utf8)
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in bytes {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
-        }
-        return String(format: "%016llx", hash)
-    }
 }
 
 // MARK: - GeniusLocusKit extension (standing signal entry point)

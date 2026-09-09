@@ -15,6 +15,7 @@
 //! Swift `EncoderActivationTests.provisionSeedsTheActiveEncoderRowAndActivatesUnderIt`
 //! and `serveOpenPathSeedsThroughWireGLKSubstores`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use locus_kit::{
     drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::OwnerCredentials,
 };
+use persistence_kit::{storage::Storage, TypedValue};
 
 const NOW: i64 = 1_700_000_000;
 
@@ -278,6 +280,56 @@ fn wire_glk_substores_seeds_through_the_open_path() {
         .span_vectors(&[drawer.id.as_str()], EncoderModelSeed::MODEL_ID)
         .expect("span_vectors must not fail");
     assert!(span_rows.is_empty(), "span rows are empty until the signal drains them");
+}
+
+fn rows(storage: &Arc<dyn Storage>, table: &str) -> Vec<BTreeMap<String, TypedValue>> {
+    storage.row_store().query(table, None, &[], None, None)
+        .unwrap_or_else(|error| panic!("read {table}: {error:?}"))
+        .into_iter()
+        .map(|row| row.values)
+        .collect()
+}
+
+#[test]
+fn readonly_glk_wiring_preserves_stale_receipts_and_keeps_query_tiers() {
+    use corpus_kit_providers::default_ensemble;
+    use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
+    use persistence_kit::inmemory::InMemoryStorage;
+    use uuid::Uuid;
+
+    let (mut coord, handle, _drawer) = open_one_with_store();
+    let backing: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    EstateFormatStore::new(Arc::clone(&backing))
+        .stamp(EstateFormatVersion::CURRENT, NOW)
+        .expect("current format");
+    coord.wire_glk_substores(&handle, Arc::clone(&backing), default_ensemble(), NOW)
+        .expect("live preparation");
+
+    let mut configuration = BTreeMap::new();
+    configuration.insert("singleton_id".to_string(), TypedValue::Int(1));
+    configuration.insert("generation_token".to_string(), TypedValue::Text("stale-ri-fingerprint".to_string()));
+    configuration.insert("updated_at".to_string(), TypedValue::Timestamp(17));
+    backing.row_store().upsert("corpus_provider_configuration", configuration, &["singleton_id".to_string()])
+        .expect("stale configuration");
+    for mut claim in rows(&backing, "vector_rep_claims") {
+        claim.insert("claimed_at".to_string(), TypedValue::Timestamp(19));
+        backing.row_store().upsert("vector_rep_claims", claim, &[
+            "model_id".to_string(), "model_version".to_string(),
+            "vector_index".to_string(), "consumer".to_string(),
+        ]).expect("stale claim");
+    }
+    let expected_configuration = rows(&backing, "corpus_provider_configuration");
+    let expected_claims = rows(&backing, "vector_rep_claims");
+    assert!(!expected_claims.is_empty(), "live preparation must create vector claims");
+
+    coord.wire_glk_substores_readonly(&handle, Arc::clone(&backing), default_ensemble(), NOW + 1_000)
+        .expect("read-preserving wire");
+    assert!(coord.has_corpus(&handle), "readonly wire keeps the corpus query tier");
+    assert!(coord.has_vector_store(&handle), "readonly wire keeps the vector/strict source tier");
+    assert_eq!(rows(&backing, "corpus_provider_configuration"), expected_configuration,
+        "readonly wire must not reconcile a stale provider receipt");
+    assert_eq!(rows(&backing, "vector_rep_claims"), expected_claims,
+        "readonly wire must not refresh claim timestamps");
 }
 
 /// When a real Arctic CoreML model directory is available, the rerank stage is
