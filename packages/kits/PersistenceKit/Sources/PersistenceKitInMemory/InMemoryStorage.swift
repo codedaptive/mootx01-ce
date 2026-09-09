@@ -134,6 +134,10 @@ public final class InMemoryStorage: Storage, Sendable {
             throw error
         }
     }
+
+    public func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        try await stateActor.captureInventorySnapshot(limits: limits)
+    }
 }
 
 // MARK: - StorageIntrospection
@@ -220,6 +224,49 @@ actor InMemoryStateActor {
     }
 
     func snapshot() -> InMemoryState { state }
+
+    /// Copies both tables inside one actor operation. Unlike the public
+    /// transaction closure, this operation cannot interleave with another
+    /// state mutation between the drawers and nodes reads.
+    func captureInventorySnapshot(limits: InventorySnapshotLimits) throws -> InventorySnapshot {
+        var serializedBytes = 0
+        let drawers = try boundedInventoryRows(
+            table: InventorySnapshot.drawersTable,
+            limits: limits,
+            serializedBytes: &serializedBytes
+        )
+        let nodes = try boundedInventoryRows(
+            table: InventorySnapshot.nodesTable,
+            limits: limits,
+            serializedBytes: &serializedBytes
+        )
+        return InventorySnapshot(drawers: drawers, nodes: nodes)
+    }
+
+    private func boundedInventoryRows(
+        table: String,
+        limits: InventorySnapshotLimits,
+        serializedBytes: inout Int
+    ) throws -> [StorageRow] {
+        guard let storedTable = state.tables[table] else {
+            throw StorageError.invalidQuery(detail: "inventory snapshot: table \(table) not found")
+        }
+        guard storedTable.rows.count <= limits.maxRowsPerTable else {
+            throw InventorySnapshotError.rowLimitExceeded(table: table, limit: limits.maxRowsPerTable)
+        }
+
+        var rows: [StorageRow] = []
+        for values in storedTable.rows.values {
+            let row = StorageRow(values: values)
+            let rowBytes = InventorySnapshot.serializedByteCount(of: row)
+            guard rowBytes <= limits.maxSerializedBytes - serializedBytes else {
+                throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+            }
+            serializedBytes += rowBytes
+            rows.append(row)
+        }
+        return rows
+    }
     func schemaVersion() -> Int { state.schemaVersion }
 
     /// Per-kit schema version, keyed by kitID. Returns 0 if no migrations
