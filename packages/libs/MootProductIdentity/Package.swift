@@ -8,9 +8,9 @@
 // its own copy. Foundation library: no dependencies, so every package can
 // import it without inverting layering.
 //
-// Pinned to Fixtures/product_identity.json by a conformance test. No Rust
-// twin exists yet; the Rust port builds one against the same fixture when its
-// estate catalog lands.
+// Pinned to Fixtures/product_identity.json by a conformance test. The Rust
+// twin, rust/ (crate moot-product-identity), is pinned to the same fixture by
+// its own parity test; a value changes in all three places together.
 import PackageDescription
 
 let package = Package(
