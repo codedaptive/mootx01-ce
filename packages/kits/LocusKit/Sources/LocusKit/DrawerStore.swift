@@ -33,6 +33,7 @@
 // per the deterministic-engine rule.
 
 import Foundation
+import CryptoKit
 import MootProductIdentity
 import OSLog
 import IntellectusLib
@@ -55,6 +56,71 @@ import SubstrateTypes
 import PersistenceKit
 
 private let drawerStoreLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LocusKit")
+
+/// Input for one contradiction proposal that must be checked and filed under
+/// the same serializable store transaction.  Higher layers retain only these
+/// digests; they never provide a cached drawer body to the write path.
+public struct AtomicConflictProposalRequest: Sendable {
+    public let sourceDrawerID: String
+    public let targetDrawerID: String
+    public let pairKey: String
+    public let tier: Int
+    public let renewalKey: String
+    public let evidenceID: String
+    public let sourceDigest: String
+    public let targetDigest: String
+    public let evidenceDigest: String
+    public let label: String
+    public let addedBy: String
+    public let filedAt: Date
+    public let declinePolicy: @Sendable ([(tier: Int, label: String)]) -> Bool
+
+    public init(
+        sourceDrawerID: String, targetDrawerID: String, pairKey: String,
+        tier: Int, renewalKey: String, evidenceID: String,
+        sourceDigest: String, targetDigest: String, evidenceDigest: String,
+        label: String, addedBy: String, filedAt: Date,
+        declinePolicy: @escaping @Sendable ([(tier: Int, label: String)]) -> Bool
+    ) {
+        self.sourceDrawerID = sourceDrawerID
+        self.targetDrawerID = targetDrawerID
+        self.pairKey = pairKey
+        self.tier = tier
+        self.renewalKey = renewalKey
+        self.evidenceID = evidenceID
+        self.sourceDigest = sourceDigest
+        self.targetDigest = targetDigest
+        self.evidenceDigest = evidenceDigest
+        self.label = label
+        self.addedBy = addedBy
+        self.filedAt = filedAt
+        self.declinePolicy = declinePolicy
+    }
+
+    public static func drawerDigest(id: String, content: String) -> String {
+        hexDigest("\(id.lowercased())\u{0}\(content)")
+    }
+
+    public static func evidenceDigest(
+        pairKey: String, tier: Int, renewalKey: String, evidenceID: String,
+        sourceDigest: String, targetDigest: String
+    ) -> String {
+        hexDigest("\(pairKey)\u{0}\(tier)\u{0}\(renewalKey)\u{0}\(evidenceID)\u{0}\(sourceDigest)\u{0}\(targetDigest)")
+    }
+
+    private static func hexDigest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// A serializable contradiction filing has a distinct replay, settlement and
+/// creation result.  A settled decision deliberately carries no tunnel id.
+public enum AtomicConflictProposalOutcome: Sendable {
+    case created(Tunnel)
+    case existing(Tunnel)
+    case settled
+    case stale
+}
 
 public actor DrawerStore {
 
@@ -89,9 +155,10 @@ public actor DrawerStore {
     ///   mode), or `nil` to make this store its own clock (top mode).
     ///   When made here, the node id is derived from the estate uuid so
     ///   a standalone estate has a stable, estate-specific maker id.
-    public init(storage: any Storage, hlc: HLCGenerator? = nil) async throws {
+    public init(storage: any Storage, hlc: HLCGenerator? = nil, frozen: Bool = false) async throws {
         self.storage = storage
-        try await storage.open(schema: LocusKitSchema.schema)
+        if frozen { try await storage.openExisting(schema: LocusKitSchema.schema) }
+        else { try await storage.open(schema: LocusKitSchema.schema) }
         // Stored-property init order matters: vocabulary, then the
         // manifest, then the estate uuid read back from it, then the
         // clock keyed on that uuid. The manifest population is a static
@@ -109,7 +176,7 @@ public actor DrawerStore {
         // same value. This keeps the store's stamping uuid, the manifest
         // uuid, and the HLC maker node id all consistent on first open
         // (mirrors the Rust port's construction order).
-        try await Self.populateV1ManifestDefaults(storage: storage, now: Date())
+        if !frozen { try await Self.populateV1ManifestDefaults(storage: storage, now: Date()) }
         // Resolve the estate identity once, distinguishing two cases that
         // must NOT be conflated (P1-7):
         //   • ABSENT manifest value (fresh estate, key never written) →
@@ -128,6 +195,7 @@ public actor DrawerStore {
         case .present(let uuid, _):
             self.estateUuid = uuid
         case .absent:
+            if frozen { throw EstateError.substrateUnavailable("frozen estate has no persisted identity") }
             // Fresh estate: no persisted identity to honour. Mint one for
             // this store's stamping. A corrupt value never reaches here.
             self.estateUuid = UUID()
@@ -850,6 +918,26 @@ public actor DrawerStore {
             offset: nil
         )
         return try decodeDrawerRowsResilient(rows, scan: "activeDrawersAfter(id:limit:)")
+    }
+
+    /// Bounded active-drawer page for maintenance operations that must not
+    /// skip a corrupt row and then mistake a short decoded page for EOF.
+    /// Unlike the recall-facing resilient scan above, any malformed drawer
+    /// fails the maintenance operation before its cursor advances.
+    public func activeDrawersAfterStrict(id afterID: String?, limit: Int) async throws -> [Drawer] {
+        let idColumn = Column(table: "drawers", name: "id")
+        let tombstoneClause = StoragePredicate.isNull(Column(table: "drawers", name: "tombstonedAt"))
+        let predicate: StoragePredicate = afterID.map {
+            .and([tombstoneClause, .gt(idColumn, .text($0))])
+        } ?? tombstoneClause
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: predicate,
+            orderBy: [OrderClause(column: idColumn, direction: .ascending)],
+            limit: limit,
+            offset: nil
+        )
+        return try decodeDrawerRows(rows)
     }
 
     // MARK: - Provenance mutation
@@ -2095,6 +2183,179 @@ public actor DrawerStore {
     }
 
     // MARK: - Tunnel CRUD
+
+    /// Re-read a selected contradiction pair and its complete tunnel history,
+    /// validate the retained evidence digests, then insert one proposed edge
+    /// in the same serializable transaction.  The policy callback is pure and
+    /// supplied by GeniusLocusKit so LocusKit does not depend on its decline
+    /// matrix vocabulary.
+    public func fileAtomicConflictProposal(
+        _ request: AtomicConflictProposalRequest
+    ) async throws -> AtomicConflictProposalOutcome {
+        let estateTag = estateUuid.uuidString
+        let outcome: AtomicConflictProposalOutcome = try await storage.transaction(isolation: .serializable) { txn in
+            let drawerRows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .in(Column(table: "drawers", name: "id"), [
+                    .text(request.sourceDrawerID), .text(request.targetDrawerID),
+                ]), orderBy: [], limit: nil, offset: nil, columns: nil)
+            let drawers = try drawerRows.map(Self.drawerFromRow)
+            let byID = Dictionary(uniqueKeysWithValues: drawers.map { ($0.id, $0) })
+            guard let source = byID[request.sourceDrawerID],
+                  let target = byID[request.targetDrawerID],
+                  source.tombstonedAt == nil,
+                  target.tombstonedAt == nil else {
+                return .stale
+            }
+            let ordered = [source.id.lowercased(), target.id.lowercased()].sorted()
+            guard request.pairKey == "\(ordered[0])|\(ordered[1])",
+                  AtomicConflictProposalRequest.drawerDigest(id: source.id, content: source.content) == request.sourceDigest,
+                  AtomicConflictProposalRequest.drawerDigest(id: target.id, content: target.content) == request.targetDigest,
+                  AtomicConflictProposalRequest.evidenceDigest(
+                    pairKey: request.pairKey, tier: request.tier,
+                    renewalKey: request.renewalKey, evidenceID: request.evidenceID,
+                    sourceDigest: request.sourceDigest, targetDigest: request.targetDigest) == request.evidenceDigest else {
+                return .stale
+            }
+
+            let sourceSensitivityRaw = Int(BitField.extractField(source.adjectiveBitmap, shift: 6, width: 6))
+            let targetSensitivityRaw = Int(BitField.extractField(target.adjectiveBitmap, shift: 6, width: 6))
+            let sourceStateRaw = Int(BitField.extractField(source.adjectiveBitmap, shift: 0, width: 6))
+            let targetStateRaw = Int(BitField.extractField(target.adjectiveBitmap, shift: 0, width: 6))
+            guard let sourceState = State(rawValue: sourceStateRaw), sourceState.isClusterA,
+                  let targetState = State(rawValue: targetStateRaw), targetState.isClusterA,
+                  let sourceSensitivity = AdjectiveSensitivity(rawValue: sourceSensitivityRaw),
+                  let targetSensitivity = AdjectiveSensitivity(rawValue: targetSensitivityRaw),
+                  let sourceEndpoint = try await Self.activeEndpoint(for: source, in: txn),
+                  let targetEndpoint = try await Self.activeEndpoint(for: target, in: txn) else {
+                return .stale
+            }
+
+            let tunnelRows = try await txn.rowStore.query(
+                table: "tunnels",
+                where: .eq(Column(table: "tunnels", name: "kind_id"), .int(Int64(TunnelKind.contradicts.rawValue))),
+                orderBy: [], limit: nil, offset: nil, columns: nil)
+            let history = try tunnelRows.map(Self.tunnelFromRow).filter { tunnel in
+                guard let a = tunnel.sourceDrawerId, let b = tunnel.targetDrawerId else { return false }
+                return [a.lowercased(), b.lowercased()].sorted() == ordered
+            }
+            if let replay = history.first(where: { $0.label.hasPrefix(request.renewalKey) }) {
+                switch replay.lifecycle {
+                case .active, .proposed:
+                    return .existing(replay)
+                case .withdrawn, .superseded:
+                    return .settled
+                }
+            }
+            if let live = history.first(where: { $0.tombstonedAt == nil && ($0.lifecycle == .active || $0.lifecycle == .proposed) }) {
+                return .existing(live)
+            }
+            let withdrawals = history.compactMap { tunnel -> (tier: Int, label: String)? in
+                switch tunnel.lifecycle {
+                case .withdrawn, .superseded:
+                    return (Self.rejectionTier(from: tunnel.label), tunnel.label)
+                case .active, .proposed:
+                    return nil
+                }
+            }
+            if request.declinePolicy(withdrawals) {
+                return .settled
+            }
+
+            var bitmap = BitField.writeField(Int64(TunnelOriginClass.derived.rawValue), into: 0, shift: 6, width: 3)
+            bitmap = BitField.writeField(Int64(TunnelLifecycle.proposed.rawValue), into: bitmap, shift: 3, width: 3)
+            let sensitivity = max(sourceSensitivity.rawValue, targetSensitivity.rawValue)
+            let adjective = BitField.writeField(Int64(sensitivity), into: 0, shift: 6, width: 6)
+            let tunnel = Tunnel(
+                id: UUID().uuidString, sourceWing: sourceEndpoint.wing, sourceRoom: sourceEndpoint.room,
+                sourceDrawerId: source.id, targetWing: targetEndpoint.wing, targetRoom: targetEndpoint.room,
+                targetDrawerId: target.id, label: request.label, kind: .contradicts,
+                adjectiveBitmap: adjective, operationalBitmap: bitmap, addedBy: request.addedBy,
+                filedAt: request.filedAt)
+            _ = try await txn.rowStore.insert(table: "tunnels", values: Self.tunnelValues(tunnel))
+            return .created(tunnel)
+        }
+        if case .created = outcome {
+            emitTunnelAdd(now: request.filedAt.timeIntervalSince1970, estateTag: estateTag)
+        }
+        return outcome
+    }
+
+    private static func rejectionTier(from label: String) -> Int {
+        if label.hasPrefix("dcp: ") { return 1 }
+        if label.hasPrefix("tier2:") { return 2 }
+        if label.hasPrefix("tier3:") { return 3 }
+        return Int.max
+    }
+
+    /// Resolve a drawer's room → wing → estate-root path from the same
+    /// transaction that validates and files a contradiction proposal.  A stale
+    /// or malformed topology must not be converted into caller-supplied edge
+    /// coordinates.
+    private static func activeEndpoint(
+        for drawer: Drawer,
+        in transaction: any StorageTransaction
+    ) async throws -> (wing: String, room: String)? {
+        guard let roomID = UUID(uuidString: drawer.parentNodeId) else { return nil }
+        let roomRows = try await transaction.rowStore.query(
+            table: "nodes",
+            where: .eq(Column(table: "nodes", name: "id"), .uuid(roomID)),
+            orderBy: [], limit: 1, offset: nil, columns: nil)
+        guard let room = roomRows.first,
+              activeNode(room, depth: 2),
+              let wingID = nodeUUID(room["parent_id"]),
+              !Self.string(room["display_name"]).isEmpty else {
+            return nil
+        }
+
+        let wingRows = try await transaction.rowStore.query(
+            table: "nodes",
+            where: .eq(Column(table: "nodes", name: "id"), .uuid(wingID)),
+            orderBy: [], limit: 1, offset: nil, columns: nil)
+        guard let wing = wingRows.first,
+              activeNode(wing, depth: 1),
+              let rootID = nodeUUID(wing["parent_id"]),
+              !Self.string(wing["display_name"]).isEmpty else {
+            return nil
+        }
+
+        let rootRows = try await transaction.rowStore.query(
+            table: "nodes",
+            where: .eq(Column(table: "nodes", name: "id"), .uuid(rootID)),
+            orderBy: [], limit: 1, offset: nil, columns: nil)
+        guard let root = rootRows.first,
+              activeNode(root, depth: 0),
+              nodeValueIsNull(root["parent_id"]) else {
+            return nil
+        }
+        return (wing: Self.string(wing["display_name"]), room: Self.string(room["display_name"]))
+    }
+
+    private static func activeNode(_ row: StorageRow, depth: Int64) -> Bool {
+        guard case .some(.int(let storedDepth)) = row["depth"],
+              case .some(.int(let lifecycle)) = row["lifecycle"],
+              storedDepth == depth, lifecycle == 0,
+              nodeValueIsNull(row["tombstoned_hlc"]),
+              nodeValueIsNull(row["tombstoned_at"]) else {
+            return false
+        }
+        return true
+    }
+
+    private static func nodeUUID(_ value: TypedValue?) -> UUID? {
+        switch value {
+        case .uuid(let id): return id
+        case .text(let id): return UUID(uuidString: id)
+        default: return nil
+        }
+    }
+
+    private static func nodeValueIsNull(_ value: TypedValue?) -> Bool {
+        switch value {
+        case .none, .some(.null): return true
+        default: return false
+        }
+    }
 
     /// Insert a tunnel. Conflicting ids surface as duplicateKey.
     ///
@@ -3743,21 +4004,29 @@ public actor DrawerStore {
     /// the node tree. Higher kits call this to obtain display names
     /// after node-tree integrity removed them from the Drawer struct.
     public func resolveNodeNames(
-        parentNodeIds: [String]
+        parentNodeIds: [String],
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> [String: (wing: String, room: String)] {
         guard !parentNodeIds.isEmpty else { return [:] }
         let unique = Array(Set(parentNodeIds))
         // Query with .uuid() values to match the nodes table's id column type.
         // NodeStore stores id as .uuid(UUID); querying with .text() fails in
         // InMemoryStorage because the predicate evaluator does strict type matching.
-        let uuidValues = unique.compactMap { str -> TypedValue? in
+        var nodeValues = unique.compactMap { str -> TypedValue? in
             guard let uuid = UUID(uuidString: str) else { return nil }
             return .uuid(uuid)
         }
-        guard !uuidValues.isEmpty else { return [:] }
+        // Rust SQLite stores UUID nodes as lowercase TEXT while Swift's
+        // `.uuid(UUID)` binding uses UUID.uuidString. The portable v2 read
+        // seam may opt in to the supplied physical spelling as a second,
+        // bounded predicate; legacy callers retain typed UUID lookup only.
+        if preservePhysicalUUIDSpellings {
+            nodeValues += unique.map { .text($0) }
+        }
+        guard !nodeValues.isEmpty else { return [:] }
         let roomRows = try await storage.rowStore.query(
             table: "nodes",
-            where: .in(Column(table: "nodes", name: "id"), uuidValues)
+            where: .in(Column(table: "nodes", name: "id"), nodeValues)
         )
         var roomMap: [String: (displayName: String, parentId: String)] = [:]
         var wingIds = Set<String>()
@@ -3770,10 +4039,13 @@ public actor DrawerStore {
         }
         var wingNames: [String: String] = [:]
         if !wingIds.isEmpty {
-            let wingUuids = wingIds.compactMap { UUID(uuidString: $0) }.map { TypedValue.uuid($0) }
+            var wingValues = wingIds.compactMap { UUID(uuidString: $0) }.map { TypedValue.uuid($0) }
+            if preservePhysicalUUIDSpellings {
+                wingValues += wingIds.map { .text($0) }
+            }
             let wingRows = try await storage.rowStore.query(
                 table: "nodes",
-                where: .in(Column(table: "nodes", name: "id"), wingUuids)
+                where: .in(Column(table: "nodes", name: "id"), wingValues)
             )
             for row in wingRows {
                 wingNames[Self.string(row["id"])] = Self.string(row["display_name"])

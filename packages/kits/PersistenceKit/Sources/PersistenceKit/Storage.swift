@@ -41,6 +41,9 @@ public protocol Storage: Sendable {
     /// runs migrations up to the declared schema version).
     func open(schema: SchemaDeclaration) async throws
 
+    /// Validate and register an existing schema without persistent writes.
+    func openExisting(schema: SchemaDeclaration) async throws
+
     /// Close the backend cleanly. Idempotent.
     func close() async
 
@@ -50,6 +53,11 @@ public protocol Storage: Sendable {
         isolation: IsolationLevel,
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T
+
+    /// Capture immutable, bounded drawer and node rows from one backend snapshot.
+    /// This is a strict storage primitive: callers perform domain decoding,
+    /// authorization, filtering, and ordering after capture.
+    func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot
 
     /// Current schema version applied to the backend.
     /// Returns the global maximum version across all kits when multiple
@@ -93,11 +101,26 @@ public enum SchemaKitRenameOutcome: Sendable, Equatable {
 }
 
 public extension Storage {
+    func openExisting(schema: SchemaDeclaration) async throws {
+        throw StorageError.featureGated(feature: "readOnlySchemaRegistration")
+    }
+
     /// Default isolation is read-committed.
     func transaction<T: Sendable>(
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T {
         try await transaction(isolation: .readCommitted, block)
+    }
+
+    func captureInventorySnapshot() async throws -> InventorySnapshot {
+        try await captureInventorySnapshot(limits: .production)
+    }
+
+    /// Third-party storage conformers must opt in to the strict snapshot
+    /// contract explicitly. Retaining this default keeps the additive protocol
+    /// requirement source-compatible while failing closed at the call site.
+    func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        throw StorageError.featureGated(feature: "inventorySnapshot")
     }
 
     /// Default `datasetStore` implementation throws `featureGated("datasetStore")`.

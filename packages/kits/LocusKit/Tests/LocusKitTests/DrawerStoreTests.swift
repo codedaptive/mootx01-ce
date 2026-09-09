@@ -98,6 +98,28 @@ struct DrawerStoreTests {
         #expect(try await store.getDrawers(ids: []) == [])
     }
 
+    @Test("strict active maintenance page fails instead of skipping a corrupt row")
+    func strictActivePageRejectsCorruptDrawer() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let storage = TestStorage.sqlite(url)
+        let store = try await DrawerStore(storage: storage)
+        let corrupt = sampleDrawer(id: "00000000-0000-4000-8000-000000000001")
+        let later = sampleDrawer(id: "00000000-0000-4000-8000-000000000002")
+        try await store.addDrawer(corrupt)
+        try await store.addDrawer(later)
+        _ = try await storage.rowStore.update(
+            table: "drawers",
+            values: ["lineageID": .text("not-a-uuid")],
+            where: .eq(Column(table: "drawers", name: "id"), .text(corrupt.id)))
+
+        let resilient = try await store.activeDrawersAfter(id: nil, limit: 200)
+        #expect(resilient.map(\.id) == [later.id])
+        await #expect(throws: (any Error).self) {
+            _ = try await store.activeDrawersAfterStrict(id: nil, limit: 200)
+        }
+    }
+
     @Test("getDrawers(ids:) omits unknown ids and de-duplicates repeats")
     func getDrawersMissesAndDupes() async throws {
         let (store, url) = try await makeStore()
