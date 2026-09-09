@@ -1,6 +1,7 @@
 //! core/mod.rs — installer-core for the Rust vertical.
 //!
-//! Exports: clients, daemon_client, depth, mcp_ownership, merge, paths,
+//! Exports: clients, daemon_client, depth, estate_adoption, mcp_ownership,
+//! merge, paths,
 //! permissions, release, sensitivity_crypto, sensitivity_hashes,
 //! unlock_authority, update_advisor, and service — the full
 //! installer-core module set.
@@ -9,6 +10,16 @@ pub mod clients;
 pub mod daemon_client;
 pub mod depth;
 pub mod desktop_ext;
+/// The one call every command makes before it opens the estate catalog: the
+/// Windows base-directory adoption capsule's command-layer entry point.
+/// Its public surface is `estate_open::catalog()`, which wraps both the
+/// adoption step and the catalog open into one call.
+pub mod estate_adoption;
+/// Single-call funnel for catalog opens: runs Windows base-directory adoption
+/// (a no-op on non-Windows and adopted machines) then opens the catalog.
+/// Commands call `crate::core::estate_open::catalog(selecting)` instead of
+/// the two-step `adopt_before_catalog_open` + `EstateCatalog::open*` pattern.
+pub mod estate_open;
 /// The `no-encrypt` opt-out marker and the shared at-rest open posture
 /// (Rust twin of Swift MootInstallerCore's EstateOpenPosture).
 pub mod mcp_ownership;

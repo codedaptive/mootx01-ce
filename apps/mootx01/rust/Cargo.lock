@@ -101,6 +101,7 @@ dependencies = [
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",
+ "moot-product-identity",
  "neuron-kit",
  "observer-sink",
  "persistence-kit",
@@ -1378,6 +1379,7 @@ dependencies = [
  "corpus-kit",
  "genius-locus-kit",
  "locus-kit",
+ "moot-product-identity",
  "persistence-kit",
  "rusqlite",
  "serde",
@@ -1859,6 +1861,9 @@ dependencies = [
 [[package]]
 name = "moot-product-identity"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "mootx01-cli"
@@ -1873,6 +1878,7 @@ dependencies = [
  "genius-locus-kit-migrations",
  "libc",
  "locus-kit",
+ "moot-product-identity",
  "persistence-kit",
  "queuekit",
  "rusqlite",
