@@ -27,6 +27,7 @@ import ArgumentParser
 import Foundation
 import GeniusLocusKit
 import MootInstallerCore
+import MootEstateOpen
 
 struct QueryCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -59,7 +60,7 @@ struct QueryCommand: AsyncParsableCommand {
         // The value itself is passed to serve unchanged; serve resolves it the
         // same way.
         if let db {
-            do { _ = try EstateCatalog.open(selecting: db) } catch {
+            do { _ = try EstateOpen.catalog(selecting: db) } catch {
                 fputs("mootx01 query: \(error)\n", stderr)
                 throw ExitCode.failure
             }

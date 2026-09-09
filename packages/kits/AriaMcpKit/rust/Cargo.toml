@@ -61,8 +61,13 @@ synapsekit        = { path = "../../SynapseKit/rust" }
 # in autonomic_governor.rs (Part 4) and autonomic_governor_tests.rs (Part 1).
 intellectus-lib  = { path = "../../../libs/IntellectusLib/rust" }
 # observer-sink: PersistenceStatsSink backed by StatsStore (SQLite). Wired at
-# startup via ARIA_MCP_STATS_STORE env var; see main.rs telemetry block.
+# startup by runtime.rs when in resident HTTP mode; path computed from the
+# configuration directory (ARIA_MCP_STATS_STORE env override removed per R6).
 observer-sink    = { path = "../../../libs/ObserverSink/rust" }
+# moot-product-identity: settings::load() reads config.json for the
+# daemon.stats_store R6 setting used by stats_store_path in runtime.rs.
+# Per in-repository dependency direction (app/kit → lib); no inversion.
+moot-product-identity = { path = "../../../libs/MootProductIdentity/rust" }
 # lattice-lib: the resident Autonomic Governor drives `lattice::pool_reduce`
 # (novel-token merge-back — the second dormant learning loop) on a low cadence
 # from autonomic_governor.rs. App→lib path dep (downstream→upstream), no

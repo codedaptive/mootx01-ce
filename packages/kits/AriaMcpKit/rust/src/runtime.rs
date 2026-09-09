@@ -4,8 +4,8 @@
 //! Extracted verbatim from the binary's `main.rs` so that BOTH entry points —
 //! the `aria-mcp` dev binary and the product `mootx01 serve` (apps/mootx01/rust)
 //! — run the identical resident-daemon logic from one source of truth. The
-//! caller prepares the transport environment (`MOOTX01_HTTP_PORT`,
-//! `ARIA_MCP_STATS_STORE`, …) and calls `run()`; this
+//! caller prepares the transport environment (`MOOTX01_HTTP_PORT`, …) and calls
+//! `run()`; this
 //! function does not return until the transport stops (stdin closes, or the
 //! HTTP loop exits). On fatal config errors it exits the process, same as
 //! the original main.
@@ -105,17 +105,17 @@ pub fn run(
 
     // Telemetry wiring (durable default for resident mode, opt-in for stdio).
     //
-    // stats_store_path_from_env() resolves: ARIA_MCP_STATS_STORE env override
-    // first; if absent in resident HTTP mode, the moot-mgr default path
-    // (<configuration directory>/moot-mgr/stats.sqlite). stdio mode
-    // returns None when the env var is absent (telemetry off by default there).
+    // stats_store_path() resolves the moot-mgr stats store path from
+    // the configuration directory in resident HTTP mode, and returns None for
+    // stdio mode (telemetry off by default there). The ARIA_MCP_STATS_STORE
+    // env override was removed (R6, 2026-09-08) to align with Swift.
     //
     // is_http_mode = MOOTX01_HTTP_PORT is set (determined here before the
     // transport branch below so telemetry is wired once before the governor
     // thread is spawned).
     let is_http_mode = !std::env::var("MOOTX01_HTTP_PORT").unwrap_or_default().is_empty();
     let mut gov_stats_store: Option<Arc<observer_sink::StatsStore>> = None;
-    let stats_store_path_opt = stats_store_path_from_env(is_http_mode);
+    let stats_store_path_opt = stats_store_path(is_http_mode, None);
     if let Some(ref stats_store_path) = stats_store_path_opt {
         match observer_sink::StatsStore::new(stats_store_path) {
             Ok(store) => {
@@ -470,43 +470,53 @@ pub fn run(
 /// ## Enable path
 ///
 /// Telemetry is opt-in for stdio (short-lived processes). For the resident
-/// HTTP daemon (`MOOTX01_HTTP_PORT` set), a platform default is computed so
-/// the daemon self-reports out-of-the-box without operator configuration.
+/// HTTP daemon (`MOOTX01_HTTP_PORT` set), the path is computed from the
+/// product's configuration directory so the daemon self-reports without
+/// operator configuration. Mirrors Swift
+/// `AriaResident.statsStorePath(useDefault:configurationDirectory:)`.
 ///
-/// Resolution order:
+/// Resolution:
 ///
-/// 1. `ARIA_MCP_STATS_STORE` set and non-empty → use that exact path.
-/// 2. `use_default` is `true` (resident HTTP mode) → fall back to
-///    `<configuration>/moot-mgr/stats.sqlite`, the configuration directory
-///    being the estate catalog's (`EstateCatalog::configuration_directory`):
-///    - Linux:   `${XDG_DATA_HOME:-~/.local/share}/mootx01/moot-mgr/stats.sqlite`
-///    - Windows: `%LOCALAPPDATA%\com.mootx01.ce\moot-mgr\stats.sqlite`
-///    This is the same file the `moot-mgr` manager process owns.
-/// 3. `use_default` is `false` (stdio mode) → return `None` (telemetry off).
+/// - `use_default` is `false` (stdio mode) → return `None` (telemetry off).
+/// - `use_default` is `true` (resident HTTP mode):
+///   1. `daemon.stats_store` key in `<config-dir>/config.json` (R6 setting,
+///      2026-09-09): a changeable value operators can edit without rebuilding.
+///   2. Fallback: `<config-dir>/moot-mgr/stats.sqlite` (the same file
+///      `moot-mgr`'s `resolve_store_path` targets when no override is set).
 ///
-/// Mirrors Swift `AriaResident.statsStorePathFromEnv(env:useDefault:)` (Apple-
-/// only; the Windows branch is Rust-only since Swift has no Windows target).
-pub fn stats_store_path_from_env(use_default: bool) -> Option<String> {
-    let raw = std::env::var("ARIA_MCP_STATS_STORE").unwrap_or_default();
-    if !raw.is_empty() {
-        return Some(raw);
-    }
+/// Note: this function runs on Linux and Windows, not on macOS (Swift owns
+/// the macOS daemon). The absolute path differs per platform:
+///   - Linux:   `${XDG_DATA_HOME:-~/.local/share}/mootx01/…`
+///   - Windows: `%LOCALAPPDATA%\com.mootx01.ce\…`
+///
+/// The `config_dir` parameter is the directory that contains `config.json`.
+/// Pass `None` in production (uses the product default). Pass `Some(dir)` in
+/// tests to inject a scratch directory without touching the real config file.
+/// Mirrors Swift `AriaResident.statsStorePath(useDefault:configurationDirectory:)`.
+pub fn stats_store_path(use_default: bool, config_dir: Option<&std::path::Path>) -> Option<String> {
     if !use_default {
-        // stdio mode: no default — telemetry off unless explicitly configured.
+        // stdio mode: telemetry off by default.
         return None;
     }
-    // Resident HTTP mode: the moot-mgr stats store in the configuration
-    // directory, `<configuration>/moot-mgr/stats.sqlite`. Twin of Swift
-    // `MootPaths.daemonStatsStorePath(dataDir:)` over
-    // `EstateCatalog.configurationDirectory`. The store file and its parent
-    // directories are created by SqliteStorage when StatsStore::new opens the
-    // connection — no pre-creation needed here.
+    let owned;
+    let dir: &std::path::Path = match config_dir {
+        Some(p) => p,
+        None => {
+            owned = moot_product_identity::storage::configuration_directory();
+            &owned
+        }
+    };
+    // Step 1: check `config.json` in the configuration directory for an
+    // operator-set path (R6, 2026-09-09). Reading through the injected
+    // directory makes this testable without touching the real config file.
+    if let Some(p) = moot_product_identity::settings::load(dir).daemon_stats_store {
+        return Some(p);
+    }
+    // Step 2: computed default — the same file `resolve_store_path` targets
+    // in manager_config.rs when no setting is set, so both processes open the
+    // same store out of the box.
     Some(
-        genius_locus_kit::EstateCatalog::configuration_directory()
-            .join("moot-mgr")
-            .join("stats.sqlite")
-            .to_string_lossy()
-            .into_owned(),
+        moot_product_identity::paths::daemon_stats_store_default(dir),
     )
 }
 

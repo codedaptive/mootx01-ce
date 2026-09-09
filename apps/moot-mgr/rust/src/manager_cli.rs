@@ -90,7 +90,6 @@ COMMANDS:\n\
 \u{20}\u{20}help                 Print this message\n\
 \n\
 ENVIRONMENT:\n\
-\u{20}\u{20}MOOT_MGR_STORE                      Override the stats-store path\n\
 \u{20}\u{20}MOOT_MGR_RETENTION_SECONDS          Retention window in seconds (default 604800 = 7d)\n\
 \u{20}\u{20}MOOT_MGR_RETENTION_CADENCE_SECONDS  Resident retention-loop cadence (default 3600 = 1h)\n\
 \u{20}\u{20}MOOT_MGR_HTTP_PORT                  Loopback HTTP read-API port (serve; default 4200)\n\

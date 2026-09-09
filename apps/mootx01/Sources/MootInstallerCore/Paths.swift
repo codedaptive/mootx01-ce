@@ -235,17 +235,34 @@ public enum MootPaths {
             .appendingPathComponent("\(daemonLabel).plist", isDirectory: false)
     }
 
-    /// The moot-mgr stats-store path the resident daemon self-reports to
-    /// (`ARIA_MCP_STATS_STORE`). Mirrors moot-mgr's `ManagerConfig` default —
-    /// `<data-dir>/moot-mgr/stats.sqlite` — so the daemon writes exactly where
-    /// moot-mgr reads.
+    /// The computed default stats-store path for the resident daemon, with no
+    /// settings-file lookup. This is the value `mootx01 install` writes into
+    /// `config.json` when the key is absent, and the fallback used by
+    /// `daemonStatsStorePath` when no setting is configured.
     ///
-    /// - Parameter dataDir: the resolved app-support data dir (`com.mootx01.ce`).
-    public static func daemonStatsStorePath(dataDir: URL) -> String {
+    /// - Parameter dataDir: The resolved app-support data directory (`com.mootx01.ce`).
+    public static func daemonStatsStoreDefault(dataDir: URL) -> String {
         dataDir
             .appendingPathComponent("moot-mgr", isDirectory: true)
             .appendingPathComponent("stats.sqlite", isDirectory: false)
             .path
+    }
+
+    /// The moot-mgr stats-store path the resident daemon uses.
+    ///
+    /// Precedence (highest to lowest):
+    ///   1. `daemon.stats_store` key in `<dataDir>/config.json` (R6 setting,
+    ///      2026-09-09): a changeable setting that `mootx01 install` seeds and
+    ///      operators can edit.
+    ///   2. The computed default: `<dataDir>/moot-mgr/stats.sqlite`, matching
+    ///      `ManagerConfig`'s default so the daemon and moot-mgr open the same file.
+    ///
+    /// - Parameter dataDir: The resolved app-support data directory (`com.mootx01.ce`).
+    public static func daemonStatsStorePath(dataDir: URL) -> String {
+        if let configured = MootProductIdentity.Settings.load(configurationDirectory: dataDir).daemonStatsStore {
+            return configured
+        }
+        return daemonStatsStoreDefault(dataDir: dataDir)
     }
 
     /// The resident daemon's loopback HTTP port — the single source of truth for

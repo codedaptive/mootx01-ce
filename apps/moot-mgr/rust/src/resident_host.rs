@@ -109,7 +109,7 @@ impl ResidentHostConfig {
     /// `ResidentHostConfig.fromEnvironment()`.
     pub fn from_environment() -> Self {
         let env: HashMap<String, String> = std::env::vars().collect();
-        let manager = ManagerConfig::from_environment_map(&env);
+        let manager = ManagerConfig::from_environment_map(&env, None);
         let store_dir = std::path::Path::new(&manager.store_path)
             .parent()
             .map(|p| p.to_path_buf())

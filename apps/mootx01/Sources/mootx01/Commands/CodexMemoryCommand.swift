@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import GeniusLocusKit
 import MootInstallerCore
+import MootEstateOpen
 
 struct CodexHookCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -173,7 +174,7 @@ struct CodexMemoryDoctorCommand: ParsableCommand {
 
         // The active estate's file, from the catalog; an unreadable catalog
         // reports the posture as absent rather than failing the status print.
-        let estate = try? EstateCatalog.open().active.databaseURL
+        let estate = try? EstateOpen.catalog(selecting: nil).active.databaseURL
         let posture = estate.map { EstateOpenPosture.fileState(at: $0) } ?? .absent
         let postureText: String
         switch posture {

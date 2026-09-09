@@ -23,6 +23,7 @@ import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import MootInstallerCore
+import MootEstateOpen
 import AriaResident
 import Darwin
 
@@ -36,8 +37,11 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Estate to serve: a registered name, or <dir>/<name> for a transient estate. Default: the active estate.")
     var db: String?
 
-    @Option(name: .long, help: "Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.")
-    var http: Int?
+    /// Either a decimal port number (exact — fails if busy) or the literal
+    /// string "auto" (hunts upward from the default port, same as Rust).
+    /// Also readable from MOOTX01_HTTP_PORT (numeric only from the environment).
+    @Option(name: .long, help: "Resident HTTP port on 127.0.0.1, or 'auto' to hunt from \(MootPaths.defaultResidentPort) upward (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.")
+    var http: String?
 
     @Flag(name: .long, help: "Serve the estate as a read-only snapshot (also MOOTX01_FROZEN=1): no background workers, no recall traces or reward marks, mutating tools refused. stdio only — refused with --http.")
     var frozen = false
@@ -62,7 +66,7 @@ struct ServeCommand: AsyncParsableCommand {
         // here computes a path.
         let catalog: EstateCatalog
         do {
-            catalog = try db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()
+            catalog = try EstateOpen.catalog(selecting: db)
         } catch {
             Logging.stderr.log("mootx01 serve fatal: \(error)")
             throw ExitCode.failure
@@ -77,7 +81,7 @@ struct ServeCommand: AsyncParsableCommand {
         // Resident HTTP transport when a port is configured (--http flag or
         // MOOTX01_HTTP_PORT); otherwise stdio (the default — existing client
         // configs that run `mootx01` keep working unchanged).
-        let residentPort = Self.resolveResidentPort(flag: http, environment: environment)
+        let residentPort = try Self.resolveResidentPort(flag: http, environment: environment)
         Logging.stderr.log("mootx01 serve starting (estate: \(estateName) [\(estate.kind.rawValue)] at \(estate.directory.path), transport: \(residentPort.map { "HTTP :\($0)" } ?? "stdio"))")
 
         // Frozen posture: `--frozen` wins, else MOOTX01_FROZEN=1. A frozen serve
@@ -99,6 +103,11 @@ struct ServeCommand: AsyncParsableCommand {
         // The resident's PID marker lives with the estate it serves (resident-only,
         // written below). "Is this estate served" is a fact about the estate.
         let pidURL = estate.pidURL
+        // PID writes, the T4 forward probe, and the dreamer apply only when the
+        // estate lives on disk as SQLite. An in-memory estate is ephemeral: the
+        // estate directory never holds a pid file, no dreamer persists its output,
+        // and T4 forwarding is irrelevant — there is no resident to forward to.
+        let onDisk = !inMemory && estate.backend == .sqlite
 
         // T4 — forward, don't collide. If a LIVE resident already serves THIS
         // estate, an stdio `serve` must not open the same estate as a second
@@ -110,7 +119,7 @@ struct ServeCommand: AsyncParsableCommand {
         // through and open it directly (joining the WAL pool; the drain lease
         // (T3) keeps multiple direct stdio writers from double-draining).
         #if os(macOS)
-        if residentPort == nil,
+        if residentPort == nil, onDisk,
            Self.residentServesEstate(pidURL: pidURL) {
             let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
             if await Self.residentReachable(port: port) {
@@ -146,7 +155,7 @@ struct ServeCommand: AsyncParsableCommand {
         // launchd that is a crash loop. A recycled PID fails the identity
         // check and its stale file is removed here so status stops
         // reporting a phantom "running" server.
-        if residentPort != nil,
+        if residentPort != nil, onDisk,
            let existing = try? String(contentsOf: pidURL, encoding: .utf8),
            let existingPID = Int32(existing.trimmingCharacters(in: .whitespacesAndNewlines)),
            existingPID != ProcessInfo.processInfo.processIdentifier {
@@ -160,13 +169,15 @@ struct ServeCommand: AsyncParsableCommand {
         // The PID marker is RESIDENT-only: it is the signal a stdio `serve` reads
         // (T4) to decide it should forward to the live resident for THIS estate
         // instead of opening a second writer. stdio writes nothing — it is either
-        // forwarding or an ephemeral direct opener.
-        if residentPort != nil {
+        // forwarding or an ephemeral direct opener. In-memory estates never write
+        // a PID marker: the estate directory may not exist and there is no
+        // on-disk resident to forward to.
+        if residentPort != nil, onDisk {
             try? String(ProcessInfo.processInfo.processIdentifier).write(
                 to: pidURL, atomically: true, encoding: .utf8)
         }
         defer {
-            if residentPort != nil {
+            if residentPort != nil, onDisk {
                 try? FileManager.default.removeItem(at: pidURL)
             }
         }
@@ -186,8 +197,17 @@ struct ServeCommand: AsyncParsableCommand {
         // its Ed25519 identity lives in the Keychain and it may be encrypted with
         // a Keychain-held key. A TRANSIENT estate (`--db <dir>/<name>`) never
         // touches the Keychain: identity store in memory, no federation, opened
-        // plaintext (or with the harness key file beside it in harness builds).
-        let registered = estate.kind == .registered
+        // plaintext (or with the harness key file beside it in harness builds),
+        // and no charter drawers seeded into it.
+        //
+        // `--in-memory` is served as a transient estate whatever the record
+        // says (R8, 2026-09-08). Nothing survives the process, so there is no
+        // identity for a peer to address later and no charter map to outlive
+        // the run — and a benchmark RAM arm measures the pool it imported and
+        // nothing else. The record is still resolved first, so a `--db` naming
+        // no estate is refused before the backend is chosen. Same rule in the
+        // Rust port and in both ports of `aria-mcp`.
+        let registered = estate.kind == .registered && !inMemory
         let identityKeyStore: (any EstateIdentityKeyStore)? =
             registered ? nil : InMemoryEstateIdentityKeyStore()
 
@@ -363,8 +383,9 @@ struct ServeCommand: AsyncParsableCommand {
             // one-shot stdio `query` subprocess does NOT need it, so skip it in stdio
             // mode — stdio recall runs with degraded (zero) matrix scoring, which is
             // correct one-shot behaviour, and a one-shot must not pay even the load
-            // cost or write a snapshot it will never reuse.
-            if residentPort != nil {
+            // cost or write a snapshot it will never reuse. In-memory estates have
+            // no on-disk matrix snapshot to load or persist.
+            if residentPort != nil, onDisk {
                 Task {
                     do {
                         try await kit.rebuildDerivedAccelerators(for: handle, frozen: posture == .frozen)
@@ -454,14 +475,16 @@ struct ServeCommand: AsyncParsableCommand {
             // Resident daemon: HTTP transport + autonomic governor + telemetry/monitoring
             // gate via the shared AriaResident runner (identical wiring to
             // aria-mcp). The estate is the durable SQLite opened above, so dreaming
-            // persists. Telemetry store from ARIA_MCP_STATS_STORE (set by the
-            // launchd plist at install).
+            // persists. Telemetry store at the canonical path computed by
+            // MootPaths.daemonStatsStorePath — the same location moot-mgr reads
+            // and the launchd plist no longer needs to carry the path in its env
+            // (R6: ARIA_MCP_STATS_STORE moves from env to configuration).
             let config = AriaResident.ResidentConfig(
                 port: port,
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(env: environment),
                 brainTickMs: AriaResident.brainTickMs(env: environment),
                 monitoringPollMs: AriaResident.monitoringPollMs(env: environment),
-                statsStorePath: environment["ARIA_MCP_STATS_STORE"],
+                statsStorePath: MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 vaultPath: AriaResident.vaultPath(env: environment),
                 vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment)
             )
@@ -487,8 +510,9 @@ struct ServeCommand: AsyncParsableCommand {
             // `mountDreamingQueue` force-mounts the queue from queue.sqlite so
             // `dreamingQueuePendingCount` reflects the persisted backlog rather
             // than the in-session state (which is zero at startup). Idempotent.
-            await kit.mountDreamingQueue(for: handle)
-            if let startupPending = await kit.dreamingQueuePendingCount(for: handle),
+            if onDisk { await kit.mountDreamingQueue(for: handle) }
+            if onDisk,
+               let startupPending = await kit.dreamingQueuePendingCount(for: handle),
                startupPending > 0,
                Self.backgroundWorkerPermitted(posture, worker: "startup dreamer") {
                 Logging.stderr.log(
@@ -517,7 +541,7 @@ struct ServeCommand: AsyncParsableCommand {
             // Task — it is in a 6-hour sleep and cannot fire again before then.
             // Frozen: no periodic dreamer at all — the Task is never created, so
             // there is nothing to cancel and nothing that could fire.
-            let periodicDreamer: Task<Void, Never>? = posture == .live ? Task {
+            let periodicDreamer: Task<Void, Never>? = posture == .live && onDisk ? Task {
                 while true {
                     do {
                         try await Task.sleep(for: Self.periodicDreamInterval)
@@ -827,10 +851,26 @@ struct ServeCommand: AsyncParsableCommand {
     /// Resolve the resident HTTP port: the `--http` flag wins, else
     /// `MOOTX01_HTTP_PORT` from the environment (the launchd plist sets it). nil →
     /// stdio. An out-of-range value is rejected (logged) and falls back to stdio.
-    static func resolveResidentPort(flag: Int?, environment: [String: String]) -> UInt16? {
+    static func resolveResidentPort(flag: String?, environment: [String: String]) throws -> UInt16? {
         if let flag {
-            guard flag > 0, let port = UInt16(exactly: flag) else {
-                Logging.stderr.log("mootx01 serve: --http \(flag) is not a valid TCP port (1–65535); using stdio")
+            if flag == "auto" {
+                // Hunt from the default port upward until a free socket is found.
+                // Delegates to ServePortHunt (MootInstallerCore) so the probe and
+                // hunt logic are exercised by unit tests without importing this
+                // executable target. Mirrors Rust serve.rs §3.
+                let base = MootPaths.defaultResidentPort
+                if let port = ServePortHunt.hunt(from: UInt16(base)) {
+                    if port != UInt16(base) {
+                        Logging.stderr.log("mootx01 serve: port \(base) busy; hunted to \(port)")
+                    }
+                    return port
+                }
+                // No free port found: exit 1, matching Rust serve.rs exhaustion.
+                Logging.stderr.log("mootx01: no free port in \(base)–\(Int(base) + Int(ServePortHunt.huntRange))")
+                throw ExitCode.failure
+            }
+            guard let port = UInt16(flag), port > 0 else {
+                Logging.stderr.log("mootx01 serve: --http '\(flag)' is not a valid TCP port (1–65535) or 'auto'; using stdio")
                 return nil
             }
             return port

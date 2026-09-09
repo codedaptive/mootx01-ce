@@ -25,6 +25,7 @@ import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import MootInstallerCore
+import MootEstateOpen
 import PersistenceKit
 import PersistenceKitSQLite
 import SynapseKit
@@ -99,8 +100,8 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// network, no download, no plugin convergence, no encryption offer, no
     /// restartAgents cycle. Each step handles its own daemon quiesce and
     /// restore so the caller need not manage service state, and quiesces only
-    /// when the estate is the resident one (`MootPaths.isResidentEstate`); a
-    /// cloned estate is upgraded with the daemon left running.
+    /// when a live resident is serving this estate; a cloned estate is
+    /// upgraded with the daemon left running.
     ///
     /// Ordering matches `runConvergence`: the schema step first (it decides
     /// whether the estate is one this build upgrades at all; a refusal stops
@@ -164,7 +165,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // estate runs the estate migration steps and nothing else.
         let estate: EstateRecord
         do {
-            estate = try (db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()).active
+            estate = try EstateOpen.catalog(selecting: db).active
         } catch {
             print("mootx01 upgrade: \(error)")
             throw ExitCode.failure

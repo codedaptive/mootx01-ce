@@ -60,11 +60,6 @@ struct UnlockCommand: AsyncParsableCommand {
     @Argument(help: "Tier to unlock: 'private' or 'secret'.")
     var tier: String
 
-    /// Optional named estate. When provided, the command resolves the daemon port
-    /// from that estate's data directory. Default: the active estate.
-    @Option(name: .long, help: "Named estate. Default: active estate.")
-    var db: String?
-
     func run() async throws {
 
         // Map user-facing name to internal SensitivityTier.

@@ -68,6 +68,9 @@ struct LaunchAgentTests {
     }
 
     @Test func daemonPlistCarriesEnvironmentVariables() throws {
+        // ARIA_MCP_STATS_STORE is no longer injected into the plist (R6):
+        // the daemon resolves its stats store path from MootPaths directly.
+        // The env carried here is what InstallCommand now sets.
         let plist = LaunchAgent.makePlist(
             label: MootPaths.daemonLabel,
             programArguments: ["/Users/test/.mootx01/bin/mootx01", "serve"],
@@ -75,21 +78,20 @@ struct LaunchAgentTests {
             stderrPath: "/Users/test/.mootx01/logs/mootx01-daemon.err.log",
             environmentVariables: [
                 "MOOTX01_HTTP_PORT": "4242",
-                "ARIA_MCP_STATS_STORE": "/Users/test/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite",
             ]
         )
         #expect(plist.contains("<string>com.mootx01.daemon</string>"))
         #expect(plist.contains("<key>EnvironmentVariables</key>"))
         #expect(plist.contains("<key>MOOTX01_HTTP_PORT</key>"))
         #expect(plist.contains("<string>4242</string>"))
-        #expect(plist.contains("<key>ARIA_MCP_STATS_STORE</key>"))
-        // Parses as a real plist, and the env round-trips to the right values.
+        #expect(!plist.contains("ARIA_MCP_STATS_STORE"), "stats-store path no longer travels in the plist env (R6)")
+        // Parses as a real plist and the env round-trips to the right values.
         let data = Data(plist.utf8)
         let obj = try PropertyListSerialization.propertyList(from: data, format: nil)
         let dict = try #require(obj as? [String: Any])
         let env = try #require(dict["EnvironmentVariables"] as? [String: String])
         #expect(env["MOOTX01_HTTP_PORT"] == "4242")
-        #expect(env["ARIA_MCP_STATS_STORE"] == "/Users/test/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite")
+        #expect(env["ARIA_MCP_STATS_STORE"] == nil)
     }
 
     @Test func daemonPaths() {

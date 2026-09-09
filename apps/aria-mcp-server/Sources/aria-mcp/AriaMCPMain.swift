@@ -23,8 +23,9 @@ import AriaResident
 //   aria-mcp --db <dir>/<name>     a transient estate at that directory,
 //                                  attached for this process only
 //   aria-mcp --in-memory           the selected estate served from the
-//                                  in-memory backend: same protocol and
-//                                  algorithms, no filesystem, gone at exit
+//                                  in-memory backend as a TRANSIENT estate:
+//                                  same protocol and algorithms, no
+//                                  federation, no charters, gone at exit
 //
 // The record decides the backend. A SQLite record opens `estate.sqlite` in
 // its directory under the posture the file requires (EstateOpenPosture: an
@@ -39,6 +40,14 @@ import AriaResident
 // Keychain and they federate. Transient estates keep their identity in
 // memory, never touch the Keychain, and never federate.
 //
+// `--in-memory` is always transient (R8, 2026-09-08), whatever the record it
+// selected says. Nothing survives the process, so there is no identity for a
+// peer to address later and no charter map to outlive the run — and a
+// benchmark RAM arm measures the pool it imported and nothing else. The
+// catalog is still opened and the record still resolved, so a `--db` naming
+// no estate is refused before the backend is chosen. The same rule holds in
+// the Rust port and in both ports of `mootx01 serve`.
+//
 // The JSON-RPC wire surface (tools, schemas, methods) is the same on every
 // backend. Clients do not know or care which backend is active.
 //
@@ -51,35 +60,56 @@ struct AriaMCPMain {
         await AriaMCPMain.run()
     }
 
-    /// The two arguments the binary takes. Anything else is a usage error:
-    /// this server has no other configuration on its command line.
+    /// The two arguments the binary takes, plus `--help`. Anything else is a
+    /// usage error: this server has no other configuration on its command
+    /// line. Twin of the Rust `aria-mcp` `Arguments`; both ports refuse the
+    /// same shapes and exit with `usageExitCode`.
     struct Arguments: Equatable {
         var db: String?
         var inMemory = false
+        /// `--help` or `-h` was given: print the usage line and exit 0
+        /// without opening a catalog or an estate.
+        var help = false
 
-        static let usage = "usage: aria-mcp [--db <name> | --db <dir>/<name>] [--in-memory]"
+        static let usage = "usage: aria-mcp [--db <name>|<dir>/<name>] [--in-memory]"
+
+        /// The exit code both ports use for a refused command line. A
+        /// supervisor scripting on the code must not have to know which port
+        /// it launched.
+        static let usageExitCode: Int32 = 1
 
         init(_ arguments: [String]) throws {
             var rest = arguments[...]
             while let argument = rest.popFirst() {
                 switch argument {
                 case "--db":
-                    guard db == nil, let value = rest.popFirst(), !value.hasPrefix("--") else {
-                        throw UsageError(argument)
+                    // Three refusals, all so a mistyped line never serves the
+                    // wrong estate: a missing value; a value that is itself a
+                    // flag (`--db --in-memory` would otherwise name an estate
+                    // "--in-memory"); and a repeat (two estates named, neither
+                    // of them unambiguously the one wanted).
+                    guard db == nil else { throw UsageError("--db given twice") }
+                    guard let value = rest.popFirst() else {
+                        throw UsageError("--db requires a value")
+                    }
+                    guard !value.hasPrefix("--") else {
+                        throw UsageError("--db requires an estate name, got the flag '\(value)'")
                     }
                     db = value
                 case "--in-memory":
                     inMemory = true
+                case "--help", "-h":
+                    help = true
                 default:
-                    throw UsageError(argument)
+                    throw UsageError("unexpected argument '\(argument)'")
                 }
             }
         }
 
-        struct UsageError: Error, CustomStringConvertible {
-            let argument: String
-            init(_ argument: String) { self.argument = argument }
-            var description: String { "unexpected argument '\(argument)'. \(Arguments.usage)" }
+        struct UsageError: Error, Equatable, CustomStringConvertible {
+            let reason: String
+            init(_ reason: String) { self.reason = reason }
+            var description: String { "\(reason). \(Arguments.usage)" }
         }
     }
 
@@ -89,7 +119,11 @@ struct AriaMCPMain {
             arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
         } catch {
             fputs("ARIA_MCP fatal: \(error)\n", stderr)
-            exit(1)
+            exit(Arguments.usageExitCode)
+        }
+        if arguments.help {
+            print(Arguments.usage)
+            return
         }
 
         let environment = ProcessInfo.processInfo.environment
@@ -110,7 +144,10 @@ struct AriaMCPMain {
             exit(1)
         }
         let estate = catalog.active
-        let registered = estate.kind == .registered
+        // The estate's posture for THIS open. `--in-memory` forces transient
+        // (see the header): it decides the identity store, federation, and
+        // charter seeding — the same rule as `mootx01 serve` (ServeCommand.swift:196).
+        let registered = AriaMCPMain.isRegisteredOpening(kind: estate.kind, inMemory: arguments.inMemory)
 
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-owner")
@@ -135,7 +172,7 @@ struct AriaMCPMain {
             // the .inMemory backend resolves the in-memory identity store and no
             // db key exists to mint. Accuracy sweeps only; a durable estate never
             // selects it, and no environment value turns it on.
-            Logging.stderr.log("ARIA_MCP starting (estate: \(estate.name) [\(estate.kind.rawValue)], IN-MEMORY backend — exists only for this process)")
+            Logging.stderr.log("ARIA_MCP starting (estate: \(estate.name) [\(estate.kind.rawValue)], IN-MEMORY backend — exists only for this process; served transient: no federation, no charters)")
             storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         } else {
             switch estate.backend {
@@ -280,6 +317,13 @@ struct AriaMCPMain {
             exit(1)
         }
 
+        // Charters seed only into a registered estate, matching `mootx01 serve`
+        // (ServeCommand.swift:336-349). A transient or in-memory estate holds
+        // exactly what was imported into it (2026-08-24 ruling; ARIA_MCP_SPEC §6.6).
+        // Extracted into a static helper so tests can verify the `registered` gate
+        // directly without going through the full `run()` stack.
+        await AriaMCPMain.seedChartersIfRegistered(kit: kit, handle: handle, registered: registered, now: Date())
+
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "0.1.0")
         // Server identity injected so facts/memories filed via this host are
         // stamped "aria-mcp-server" — the standalone reference MCP server.
@@ -299,10 +343,9 @@ struct AriaMCPMain {
                 exit(1)
             }
             // Resident HTTP mode: pass useDefault: true so the daemon wires
-            // PersistenceStatsSink to the moot-mgr default path when
-            // ARIA_MCP_STATS_STORE is not set. Telemetry is durable by default
-            // in resident mode; stdio mode stays opt-in.
-            let statsStorePath = AriaResident.statsStorePathFromEnv(useDefault: true)
+            // PersistenceStatsSink to the moot-mgr default path. Telemetry is
+            // durable by default in resident mode; stdio mode stays opt-in.
+            let statsStorePath = AriaResident.statsStorePath(useDefault: true)
             let config = AriaResident.ResidentConfig(
                 port: portValue,
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(),
@@ -329,13 +372,43 @@ struct AriaMCPMain {
         } else {
             // stdio: ephemeral, per-client. Startup-once telemetry only (no
             // continuous gate — the process does not outlive the client session).
-            // useDefault: false → telemetry off unless ARIA_MCP_STATS_STORE is set.
-            let statsStorePath = AriaResident.statsStorePathFromEnv(useDefault: false)
+            // useDefault: false → stdio mode telemetry off (opt-in only).
+            let statsStorePath = AriaResident.statsStorePath(useDefault: false)
             _ = await AriaResident.installManagerTelemetry(storePath: statsStorePath)
             let server = StdioServer(dispatcher: dispatcher)
             Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, stdio transport)")
             await server.run()
             Logging.stderr.log("ARIA_MCP exiting (stdin closed)")
         }
+    }
+
+    /// Seed default wing charters into the estate when the opening is registered.
+    /// Called by `run()` after the estate is open and semantic recall is wired.
+    /// Extracted so `CharterSeedingTests` can exercise the `registered` gate
+    /// without the full `run()` stack: removing the `guard registered` check
+    /// makes `transientOpeningSeedsNoCharterDrawers` red; disabling the seeding
+    /// call makes `registeredOpeningSeedsSevenCharterDrawers` red.
+    static func seedChartersIfRegistered(kit: GeniusLocusKit, handle: EstateHandle, registered: Bool, now: Date) async {
+        guard registered else { return }
+        do {
+            try await kit.seedDefaultWings(for: handle, now: now)
+        } catch {
+            // Non-fatal: the estate is open and functional; a fresh agent sees
+            // no charter map at worst. Log and continue — identical treatment
+            // to `mootx01 serve`.
+            Logging.stderr.log("ARIA_MCP warning: default wing seeding failed: \(error) — continuing")
+        }
+    }
+
+    /// Whether the estate should be opened with registered posture: federated
+    /// identity, Keychain key store, and charter seeding. Returns `false` when
+    /// `inMemory` is true regardless of the record kind — `--in-memory` always
+    /// forces the transient posture (R8, 2026-09-08).
+    ///
+    /// Extracted from `run()` so that `EstateSelectionTests` can verify the
+    /// condition with records from a scratch catalog. A mutation that drops
+    /// `&& !inMemory` makes `inMemoryAlwaysTransientWhateverTheRecordKind` red.
+    static func isRegisteredOpening(kind: EstateRecordKind, inMemory: Bool) -> Bool {
+        kind == .registered && !inMemory
     }
 }

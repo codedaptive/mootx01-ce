@@ -6,6 +6,7 @@
 
 import EstateEncryption
 import Foundation
+import GeniusLocusKit
 import Testing
 @testable import MootInstallerCore
 
@@ -115,5 +116,56 @@ struct ResidentDaemonQuiesceTests {
         #expect(!ResidentDaemonQuiesce.residentServes(pidURL: pidURL))            // ourselves
         try "not a pid".write(to: pidURL, atomically: true, encoding: .utf8)
         #expect(!ResidentDaemonQuiesce.residentServes(pidURL: pidURL))            // garbage
+    }
+
+    /// A live process whose executable is NOT a mootx01 binary must be rejected
+    /// by the identity gate even though `kill(pid, 0)` succeeds. Proves that
+    /// `ProcessIdentity.isLiveProcess` uses `proc_pidpath` on macOS (or
+    /// `/proc/<pid>/comm` on Linux) and not bare existence alone.
+    ///
+    /// Mutation proof: replacing `name.hasPrefix("mootx01")` with `true` in
+    /// `ProcessIdentity.isLiveProcess` would make this test fail, because the
+    /// sleep(1) child is live and signallable.
+    @Test("a live non-mootx01 process does not pass the resident identity gate")
+    func liveNonMootx01ProcessIsNotServed() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("quiesce-foreign-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pidURL = dir.appendingPathComponent("estate.pid")
+        // Spawn a child process whose executable name does not start with
+        // "mootx01" — sleep(1) lives at /bin/sleep.
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        try child.run()
+        defer {
+            child.terminate()
+            child.waitUntilExit()
+        }
+        // Write the child's PID so the marker-absent and dead-pid checks pass.
+        try String(child.processIdentifier).write(to: pidURL, atomically: true, encoding: .utf8)
+        // The identity gate must reject the non-mootx01 binary even though the
+        // process is live and signallable.
+        let result = ResidentDaemonQuiesce.residentServes(pidURL: pidURL)
+        #expect(!result,
+            "live sleep(1) process must not pass the mootx01 identity gate")
+    }
+
+    /// `EstateRecord.pidURL` returns the PID file inside the estate directory
+    /// (not at the catalog root). StatusCommand uses this to find the correct
+    /// PID file regardless of which estate is active.
+    @Test("estate record's pidURL is estate.pid inside the estate directory, not at the catalog root")
+    func pidURLIsInsideEstateDirectory() {
+        let estateDir = URL(fileURLWithPath: "/tmp/test-estate", isDirectory: true)
+        let record = EstateRecord(
+            name: "default",
+            directory: estateDir,
+            kind: .registered,
+            backend: .sqlite
+        )
+        #expect(record.pidURL == estateDir.appendingPathComponent("estate.pid"))
+        #expect(!record.pidURL.path.contains("mootx01.pid"),
+                "pidURL must not use the legacy catalog-root path")
     }
 }

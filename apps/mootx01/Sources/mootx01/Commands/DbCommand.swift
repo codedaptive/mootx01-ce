@@ -23,6 +23,7 @@ import ArgumentParser
 import Foundation
 import GeniusLocusKit
 import MootInstallerCore
+import MootEstateOpen
 
 struct DbCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -56,7 +57,7 @@ struct DbCreateCommand: AsyncParsableCommand {
     var noEncrypt: Bool = false
 
     func run() async throws {
-        var catalog = try EstateCatalog.open()
+        var catalog = try EstateOpen.catalog(selecting: nil)
         let selector = try EstateCatalog.EstateSelector(value)
         let registered = selector.path == nil
         let directory = selector.directory ?? catalog.directory(forBareName: selector.name)
@@ -140,7 +141,7 @@ struct DbRegisterCommand: AsyncParsableCommand {
     var value: String
 
     func run() async throws {
-        var catalog = try EstateCatalog.open()
+        var catalog = try EstateOpen.catalog(selecting: nil)
         let selector = try EstateCatalog.EstateSelector(value)
         let directory = selector.directory ?? catalog.directory(forBareName: selector.name)
         let record = EstateRecord(name: selector.name, directory: directory)
@@ -165,7 +166,7 @@ struct DbUnregisterCommand: AsyncParsableCommand {
     var name: String
 
     func run() async throws {
-        var catalog = try EstateCatalog.open()
+        var catalog = try EstateOpen.catalog(selecting: nil)
         guard let record = catalog.record(named: name) else {
             throw ValidationError("no estate named '\(name)' is registered. Run `mootx01 db list`.")
         }
@@ -183,7 +184,7 @@ struct DbListCommand: AsyncParsableCommand {
     )
 
     func run() async throws {
-        let catalog = try EstateCatalog.open()
+        let catalog = try EstateOpen.catalog(selecting: nil)
         print("Estates (default location \(catalog.defaultLocation.path)):")
         for (index, record) in catalog.records.enumerated() {
             let marker = index == 0 ? " (active)" : ""
@@ -204,7 +205,7 @@ struct DbOpenCommand: AsyncParsableCommand {
     var name: String
 
     func run() async throws {
-        var catalog = try EstateCatalog.open()
+        var catalog = try EstateOpen.catalog(selecting: nil)
         let selector = try EstateCatalog.EstateSelector(name)
         guard selector.path == nil else {
             throw ValidationError("`db open` takes a registered name; register '\(name)' first with `mootx01 db register`, or attach it for one invocation with `--db \(name)`.")
@@ -232,7 +233,7 @@ struct DbDeleteCommand: AsyncParsableCommand {
     var yes: Bool = false
 
     func run() async throws {
-        var catalog = try EstateCatalog.open()
+        var catalog = try EstateOpen.catalog(selecting: nil)
         guard let record = catalog.record(named: name) else {
             throw ValidationError("no estate named '\(name)' is registered. Run `mootx01 db list`.")
         }

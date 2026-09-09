@@ -105,9 +105,13 @@ public struct ResidentHostConfig: Sendable {
     /// - Parameter environment: The environment map (injectable for tests).
     /// - Returns: A resolved `ResidentHostConfig`.
     public static func fromEnvironment(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
+        _ environment: [String: String] = ProcessInfo.processInfo.environment,
+        configurationDirectory: URL = EstateCatalog.configurationDirectory
     ) -> ResidentHostConfig {
-        let manager = ManagerConfig.fromEnvironment(environment)
+        // Thread the configurationDirectory into ManagerConfig so tests can inject
+        // a scratch dir without touching the developer's real config.json.
+        let manager = ManagerConfig.fromEnvironment(environment,
+            configurationDirectory: configurationDirectory)
         let portExplicit = !(environment[httpPortEnvKey] ?? "").isEmpty
         let port = environment[httpPortEnvKey].flatMap { UInt16($0) } ?? defaultHTTPPort
         let token = environment[controlTokenEnvKey] ?? ""
