@@ -17,9 +17,9 @@
 //!   db open <name>              make a registered estate the active one
 //!   db delete <name>            remove a registered estate's files and record
 //!
-//! Twin of Swift DbCommand. Flag names differ in one place (`--force`/`-f`
-//! here vs Swift's `--yes`/`-y` for the delete confirmation), and an aborted
-//! delete exits non-zero here.
+//! Twin of Swift DbCommand. Both ports use `--yes`/`-y` for the delete
+//! confirmation flag. An aborted delete prints "Aborted." and exits 0,
+//! matching Swift DbCommand behaviour (I2-2).
 
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
@@ -45,7 +45,7 @@ pub fn run(cmd: DbCommand) -> ExitCode {
         DbCommand::Unregister { name } => unregister(&name),
         DbCommand::List => list(),
         DbCommand::Open { name } => open(&name),
-        DbCommand::Delete { name, force } => delete(&name, force, || confirm_on_stdin()),
+        DbCommand::Delete { name, yes } => delete(&name, yes, || confirm_on_stdin()),
     };
     match result {
         Ok(()) => ExitCode::from(exit::OK),
@@ -56,8 +56,13 @@ pub fn run(cmd: DbCommand) -> ExitCode {
     }
 }
 
-fn open_catalog() -> Result<EstateCatalog, String> {
-    EstateCatalog::open().map_err(|e| format!("mootx01 db: {e}"))
+/// The catalog every `db` subcommand works through. `pub(crate)` so the
+/// adoption-ordering tests in `core::estate_open` can drive the real
+/// entry point rather than a copy of it.
+pub(crate) fn open_catalog() -> Result<EstateCatalog, String> {
+    // Routes through the funnel: Windows base-directory adoption first (no-op
+    // on non-Windows and adopted machines), then EstateCatalog::open().
+    crate::core::estate_open::catalog(None)
 }
 
 /// The record a `<value>` names: a bare name lands under the catalog's default
@@ -199,7 +204,7 @@ fn open(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Interactive confirmation for `db delete` without `--force`.
+/// Interactive confirmation for `db delete` without `--yes`.
 fn confirm_on_stdin() -> bool {
     print!("Type 'yes' to confirm: ");
     let _ = io::stdout().flush();
@@ -208,7 +213,7 @@ fn confirm_on_stdin() -> bool {
     line.trim().eq_ignore_ascii_case("yes")
 }
 
-fn delete(name: &str, force: bool, confirm: impl FnOnce() -> bool) -> Result<(), String> {
+fn delete(name: &str, yes: bool, confirm: impl FnOnce() -> bool) -> Result<(), String> {
     let mut catalog = open_catalog()?;
     let Some(record) = catalog.record_named(name).cloned() else {
         return Err(format!("no estate named '{name}' is registered. Run `mootx01 db list`."));
@@ -219,13 +224,16 @@ fn delete(name: &str, force: bool, confirm: impl FnOnce() -> bool) -> Result<(),
     if catalog.active().name == name {
         return Err(format!("'{name}' is the active estate; run `mootx01 db open <other>` first."));
     }
-    if !force {
+    if !yes {
         println!(
             "Delete estate '{name}' at {} and all its data? This is irreversible.",
             record.directory.display()
         );
         if !confirm() {
-            return Err("Aborted.".to_string());
+            // Abort exits 0 (no error): the user made a deliberate choice.
+            // Matches Swift DbCommand behaviour.
+            println!("Aborted.");
+            return Ok(());
         }
     }
 
@@ -246,11 +254,13 @@ fn delete(name: &str, force: bool, confirm: impl FnOnce() -> bool) -> Result<(),
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     /// The catalog's configuration directory is process-global, so the tests
-    /// serialize on this lock and point it at a scratch directory each.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// serialize and point it at a scratch directory each. The lock is the
+    /// crate's one configuration-directory lock, shared with
+    /// `core::estate_adoption::tests`, which redirects the same global.
+    use crate::core::estate_adoption::CONFIGURATION_TEST_LOCK as TEST_LOCK;
 
     struct Scratch {
         dir: PathBuf,
@@ -360,7 +370,8 @@ mod tests {
         assert!(delete("work", true, || true).unwrap_err().contains("is the active estate"));
         open("default").unwrap();
 
-        assert_eq!(delete("work", false, || false).unwrap_err(), "Aborted.");
+        // Abort returns Ok(()) and exits 0 — the user made a deliberate choice.
+        delete("work", false, || false).unwrap();
         assert!(dir.exists(), "an aborted delete touches nothing");
 
         std::fs::write(dir.join("estate.sqlite"), b"ciphertext").unwrap();
