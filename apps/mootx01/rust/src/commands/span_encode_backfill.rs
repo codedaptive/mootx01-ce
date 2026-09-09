@@ -28,13 +28,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use corpus_kit::encoder::spanner;
-use corpus_kit::encoder::{EncoderModelSpec as EncoderSpec, Pooling as EncoderPooling, SpanEncoder};
+use corpus_kit::encoder::{
+    EncoderModelSpec as EncoderSpec, Pooling as EncoderPooling, SpanEncoder,
+};
 use corpus_kit_providers::{model_dir_for, SpanEncoderFactory};
+use genius_locus_kit::span_content_version::{requires_repair, span_content_version};
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::encoder_model_store::{EncoderModelStore, Pooling};
-use persistence_kit::predicate::StoragePredicate;
-use persistence_kit::types::{Column, TypedValue};
 use persistence_kit::Storage;
 use substrate_kernel::int8_vec;
 use synapsekit::{SpanVectorInput, VectorStore};
@@ -48,11 +49,17 @@ pub(crate) enum SpanEncodeReport {
     /// vocab hash, or load); the reason is the one line the caller prints.
     ModelUnavailable(String),
     /// Drawers and span rows written, and how many drawers still owe spans.
-    Encoded { drawers: usize, spans: usize, remaining: usize },
+    Encoded {
+        drawers: usize,
+        spans: usize,
+        remaining: usize,
+    },
 }
 
 /// Drawers per encode call: the default `encoder_batch` outside iOS (§7).
 pub(crate) const BATCH_SIZE: usize = 64;
+const REPAIR_PAGE_SIZE: usize = 200;
+const SPAN_INDEXED_BIT: i64 = 1 << 27;
 
 /// Encode every drawer whose bit 27 is clear under the active model.
 ///
@@ -111,6 +118,62 @@ pub(crate) fn run(
     let vectors = VectorStore::new(Arc::clone(&storage), None);
     let mut drawers_done = 0usize;
     let mut spans_written = 0usize;
+
+    // Repair pre-release upgrade rows that used the drawer SHA content_hash
+    // instead of the canonical FNV content version. Their bit 27 is already
+    // set, so the ordinary debt scan below cannot see them. The bounded scan
+    // leaves valid serving-generation span sets byte-for-byte untouched.
+    let mut repair_cursor: Option<String> = None;
+    loop {
+        let page = store
+            .active_drawers_after(repair_cursor.as_deref(), REPAIR_PAGE_SIZE)
+            .map_err(|e| e.to_string())?;
+        if page.is_empty() {
+            break;
+        }
+        let indexed: Vec<_> = page
+            .iter()
+            .filter(|drawer| {
+                !drawer.content.is_empty() && drawer.operational_bitmap & SPAN_INDEXED_BIT != 0
+            })
+            .collect();
+        if !indexed.is_empty() {
+            let ids: Vec<&str> = indexed.iter().map(|drawer| drawer.id.as_str()).collect();
+            let snapshot = vectors
+                .strict_span_vector_snapshot(&ids, &row.model_id)
+                .map_err(|e| format!("{e:?}"))?;
+            for drawer in indexed {
+                let rows = snapshot
+                    .rows
+                    .get(&drawer.id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let malformed = snapshot
+                    .malformed_rows
+                    .iter()
+                    .any(|bad| bad.item_id == drawer.id);
+                if !requires_repair(&drawer.content, spec.dim, spec.max_spans, rows, malformed) {
+                    continue;
+                }
+                spans_written += encode_drawer(
+                    drawer,
+                    &spec,
+                    encoder.as_ref(),
+                    &vectors,
+                    &row.model_id,
+                    &row.model_version,
+                    now_millis,
+                )?;
+                drawers_done += 1;
+            }
+        }
+        let short_page = page.len() < REPAIR_PAGE_SIZE;
+        repair_cursor = page.last().map(|drawer| drawer.id.clone());
+        if short_page {
+            break;
+        }
+    }
+
     let mut cursor: Option<String> = None;
     loop {
         let batch = store
@@ -120,70 +183,78 @@ pub(crate) fn run(
             break;
         }
         for drawer in &batch {
-            let words = spanner::words(&drawer.content);
-            let bounds = spanner::spans(
-                words.len(),
-                spec.window_words,
-                spec.overlap_divisor,
-                spec.max_spans,
-            );
-            let texts: Vec<String> = bounds
-                .iter()
-                .map(|(start, end)| words[*start..*end].join(" "))
-                .collect();
-            let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-            let floats = encoder.encode_spans(&text_refs).map_err(|e| format!("{e:?}"))?;
-            let content_version = content_version(&storage, &drawer.id)?;
-            let inputs: Vec<SpanVectorInput> = floats
-                .iter()
-                .enumerate()
-                .map(|(index, vector)| {
-                    let (q, scale) = int8_vec::quantize(vector);
-                    SpanVectorInput {
-                        index: index as u32,
-                        int8: q,
-                        scale,
-                        start_word: bounds[index].0,
-                        end_word: bounds[index].1,
-                        content_version: content_version.clone(),
-                    }
-                })
-                .collect();
-            vectors
-                .write_span_vectors(&drawer.id, &row.model_id, &row.model_version, &inputs, now_millis)
-                .map_err(|e| format!("{e:?}"))?;
-            store.set_span_indexed(&drawer.id).map_err(|e| e.to_string())?;
+            spans_written += encode_drawer(
+                drawer,
+                &spec,
+                encoder.as_ref(),
+                &vectors,
+                &row.model_id,
+                &row.model_version,
+                now_millis,
+            )?;
+            store
+                .set_span_indexed(&drawer.id)
+                .map_err(|e| e.to_string())?;
             drawers_done += 1;
-            spans_written += inputs.len();
         }
         cursor = batch.last().map(|d| d.id.clone());
     }
     let remaining = store.count_span_index_debt().map_err(|e| e.to_string())?;
-    Ok(SpanEncodeReport::Encoded { drawers: drawers_done, spans: spans_written, remaining })
+    Ok(SpanEncodeReport::Encoded {
+        drawers: drawers_done,
+        spans: spans_written,
+        remaining,
+    })
 }
 
-/// The drawer's `content_hash` column as lowercase hex, the span rows'
-/// `content_version` (§3). `Drawer` does not carry the hash (the
-/// hash-on-write hook owns the column), so it is read per row here. Empty
-/// when the row predates hash-on-write; a later content write always
-/// produces a hash, so a stale span set is still recognised.
-fn content_version(storage: &Arc<dyn Storage>, drawer_id: &str) -> Result<String, String> {
-    let rows = storage
-        .row_store()
-        .query_projected(
-            "drawers",
-            &["content_hash"],
-            Some(&StoragePredicate::Eq(
-                Column::new("drawers", "id"),
-                TypedValue::Text(drawer_id.to_string()),
-            )),
-            &[],
-            Some(1),
-            None,
+fn encode_drawer(
+    drawer: &locus_kit::drawer::Drawer,
+    spec: &EncoderSpec,
+    encoder: &dyn SpanEncoder,
+    vectors: &VectorStore,
+    model_id: &str,
+    model_version: &str,
+    now_millis: i64,
+) -> Result<usize, String> {
+    let words = spanner::words(&drawer.content);
+    let bounds = spanner::spans(
+        words.len(),
+        spec.window_words,
+        spec.overlap_divisor,
+        spec.max_spans,
+    );
+    let texts: Vec<String> = bounds
+        .iter()
+        .map(|(start, end)| words[*start..*end].join(" "))
+        .collect();
+    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let floats = encoder
+        .encode_spans(&text_refs)
+        .map_err(|e| format!("{e:?}"))?;
+    let content_version = span_content_version(&drawer.content);
+    let inputs: Vec<SpanVectorInput> = floats
+        .iter()
+        .enumerate()
+        .map(|(index, vector)| {
+            let (q, scale) = int8_vec::quantize(vector);
+            SpanVectorInput {
+                index: index as u32,
+                int8: q,
+                scale,
+                start_word: bounds[index].0,
+                end_word: bounds[index].1,
+                content_version: content_version.clone(),
+            }
+        })
+        .collect();
+    vectors
+        .write_span_vectors(
+            drawer.id.as_str(),
+            model_id,
+            model_version,
+            &inputs,
+            now_millis,
         )
-        .map_err(|e| e.to_string())?;
-    Ok(match rows.first().and_then(|r| r.get("content_hash")) {
-        Some(TypedValue::Blob(bytes)) => bytes.iter().map(|b| format!("{b:02x}")).collect(),
-        _ => String::new(),
-    })
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(inputs.len())
 }

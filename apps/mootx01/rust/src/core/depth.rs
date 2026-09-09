@@ -105,8 +105,177 @@ impl ClaudeCliRunning for ProcessClaudeCliRunner {
     }
 }
 
+/// Codex CLI seam. Tests use a fake; production runs without terminal input and
+/// with a deadline. `None` means unavailable, unsuccessful, or malformed output.
+pub trait CodexCliRunning {
+    fn run(&self, args: &[&str]) -> Option<String>;
+}
+
+pub struct ProcessCodexCliRunner;
+impl CodexCliRunning for ProcessCodexCliRunner {
+    fn run(&self, args: &[&str]) -> Option<String> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("codex").args(args)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().ok()?;
+        let stdout = child.stdout.take()?;
+        // Drain concurrently so list output cannot fill the pipe and deadlock.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes);
+            let output = if result.is_ok() && bytes.len() <= 4 * 1024 * 1024 {
+                String::from_utf8(bytes).ok()
+            } else { None };
+            let _ = sender.send(output);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return if status.success() { receiver.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten() } else { None };
+                }
+                Ok(None) if std::time::Instant::now() < deadline =>
+                    std::thread::sleep(std::time::Duration::from_millis(100)),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Registry state comes from Codex, never a leftover materialized directory.
+/// Outer None is a failed/invalid query; inner None means not installed.
+pub fn codex_installed_enabled(cli: &dyn CodexCliRunning) -> Option<Option<bool>> {
+    let output = cli.run(&["plugin", "list", "--json"])?;
+    let root: serde_json::Value = serde_json::from_str(&output).ok()?;
+    let installed = root.get("installed")?.as_array()?;
+    for plugin in installed {
+        if plugin.get("pluginId")?.as_str()? == "mootx01@mootx01" {
+            if !plugin.get("installed")?.as_bool()? { return Some(None); }
+            return Some(Some(plugin.get("enabled")?.as_bool()?));
+        }
+    }
+    Some(None)
+}
+
+fn codex_registered_version(cli: &dyn CodexCliRunning, expected: &str) -> bool {
+    let Some(output) = cli.run(&["plugin", "list", "--json"]) else { return false; };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&output) else { return false; };
+    root.get("installed").and_then(|v| v.as_array()).map(|plugins| plugins.iter().any(|p|
+        p.get("pluginId").and_then(|v| v.as_str()) == Some("mootx01@mootx01")
+        && p.get("installed").and_then(|v| v.as_bool()) == Some(true)
+        && p.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+        && p.get("version").and_then(|v| v.as_str()) == Some(expected)
+    )).unwrap_or(false)
+}
+
+/// Remove only the exact HTTP table written by this installer, after verified
+/// plugin registration. Extra options, child tables, alternate endpoints and
+/// malformed/duplicate tables are preserved for manual inspection.
+fn cleanup_codex_default_direct_entry(home: &Path) -> std::io::Result<()> {
+    let codex_home = if codex_cli_home_matches(home) {
+        std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex"))
+    } else { home.join(".codex") };
+    let path = codex_home.join("config.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut in_table = false;
+    let mut tables = 0;
+    let mut body = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            if line.starts_with("[mcp_servers.mootx01.") { return Ok(()); }
+            in_table = line == "[mcp_servers.mootx01]";
+            if in_table { tables += 1; }
+        } else if in_table && !line.is_empty() && !line.starts_with('#') {
+            body.push(line);
+        }
+    }
+    if tables != 1 || body != ["url = \"http://127.0.0.1:4242\""] { return Ok(()); }
+    backup_existing(&path)?;
+    crate::core::merge::remove_from_toml_config(&path, "mootx01")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    Ok(())
+}
+
+/// Production guard: a fixture/alternate home must never mutate the live Codex
+/// registry. The CLI resolves CODEX_HOME itself for the actual user's install.
+pub fn codex_cli_home_matches(home: &Path) -> bool {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from).as_deref() == Some(home)
+}
+
+/// Install the embedded Codex package and register it through Codex's supported
+/// CLI. Upgrade only refreshes confirmed installed/enabled plugins; disabled
+/// plugins are left untouched because `plugin add` can re-enable them.
+pub fn apply_codex_plugin(
+    home: &Path,
+    vault_off: bool,
+    upgrade_only: bool,
+    cli: &dyn CodexCliRunning,
+) -> std::io::Result<Option<DepthOutcome>> {
+    if upgrade_only {
+        match codex_installed_enabled(cli) {
+            Some(Some(true)) => {},
+            Some(Some(false)) => {
+                println!("  ⓘ Codex mootx01 plugin is disabled; update deferred to preserve that choice.");
+                return Ok(None);
+            }
+            Some(None) => return Ok(None),
+            None => {
+                println!("  ⓘ Could not check installed Codex plugins; plugin update skipped.");
+                return Ok(None);
+            }
+        }
+    }
+    let outcome = apply("codex", InstallDepth::Plugin, home, vault_off, &ProcessClaudeCliRunner)?;
+    let DepthOutcome::Plugin(ref path) = outcome else { return Ok(Some(outcome)); };
+    let dir = Path::new(path);
+    let marketplace_dir = dir.join(".codex-plugin");
+    std::fs::create_dir_all(&marketplace_dir)?;
+    let marketplace = serde_json::json!({
+        "name": "mootx01",
+        "owner": {"name": "Codedaptive"},
+        "plugins": [{"name": "mootx01", "source": "./"}]
+    });
+    std::fs::write(marketplace_dir.join("marketplace.json"),
+        serde_json::to_vec_pretty(&marketplace)?)?;
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join(".codex-plugin/plugin.json"))?)?;
+    let expected_version = manifest.get("version").and_then(|v| v.as_str())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Codex plugin version missing"))?;
+    if cli.run(&["plugin", "marketplace", "add", path]).is_none()
+        || cli.run(&["plugin", "add", "mootx01@mootx01"]).is_none()
+        || !codex_registered_version(cli, expected_version) {
+        println!("  ⓘ Codex plugin files prepared; registration failed. Run `codex plugin marketplace add '{}'` then `codex plugin add mootx01@mootx01`, then restart Codex.", path.replace('\'', "'\\''"));
+        let skill = apply("codex", InstallDepth::Skills, home, vault_off, &ProcessClaudeCliRunner)?;
+        if let DepthOutcome::Skills(path) = skill {
+            return Ok(Some(DepthOutcome::PluginFellBackToSkills(path,
+                "Codex CLI registration failed; wrote skill only".to_string())));
+        }
+    } else {
+        if let Err(e) = cleanup_codex_default_direct_entry(home) {
+            println!("  ⓘ Codex plugin registered, but direct MCP cleanup failed: {e}");
+        }
+        println!("  ✓ Codex mootx01 plugin registered — restart Codex to load it.");
+    }
+    Ok(Some(outcome))
+}
+
 /// The committed, embedded install bundle (compact JSON). Self-contained: the
 /// installed binary carries the skill, the host map, and every package.
+#[cfg(feature = "aria-v2")]
+const INSTALL_BUNDLE_JSON: &str = include_str!("../embedded/install-bundle-v2.json");
+#[cfg(not(feature = "aria-v2"))]
 const INSTALL_BUNDLE_JSON: &str = include_str!("../embedded/install-bundle.json");
 
 /// Requested integration depth.
@@ -197,8 +366,14 @@ struct InstallMapWire {
 
 #[derive(Debug, Deserialize)]
 struct BundleWire {
+    #[serde(rename = "ariaVersion")]
+    aria_version: Option<String>,
+    #[serde(rename = "ariaBundleIdentity")]
+    aria_bundle_identity: Option<String>,
     #[serde(rename = "skillMarkdown")]
     skill_markdown: String,
+    #[serde(rename = "skillMarkdownByHost")]
+    skill_markdown_by_host: Option<BTreeMap<String, String>>,
     #[serde(rename = "installMap")]
     install_map: InstallMapWire,
     /// "<host>/<relpath>" -> file contents.
@@ -207,29 +382,64 @@ struct BundleWire {
 
 /// The decoded embedded bundle: canonical skill, host map, package trees.
 pub struct InstallBundle {
+    pub aria_version: String,
+    pub aria_bundle_identity: String,
     pub skill_markdown: String,
+    skill_markdown_by_host: BTreeMap<String, String>,
     hosts: BTreeMap<String, InstallMapHost>,
     packages: BTreeMap<String, String>,
 }
 
 impl InstallBundle {
+    fn selected_aria_version() -> &'static str {
+        #[cfg(feature = "aria-v2")]
+        {
+            // The Rust vertical reads the public selected-surface authority,
+            // enabled only by the explicit Cargo feature forwarding.
+            aria_mcp::v2::render::V2_SURFACE_VERSION
+        }
+        #[cfg(not(feature = "aria-v2"))]
+        {
+            "v1"
+        }
+    }
+
+    fn from_json(json: &str) -> Result<Self, String> {
+        let wire: BundleWire = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        let aria_version = wire.aria_version.unwrap_or_else(|| "v1".to_string());
+        let selected = Self::selected_aria_version();
+        if aria_version != selected {
+            return Err(format!(
+                "install bundle ARIA release {aria_version} does not match executable release {selected}"
+            ));
+        }
+        let aria_bundle_identity = match wire.aria_bundle_identity {
+            Some(identity) if !identity.is_empty() => identity,
+            _ if aria_version == "v1" => "legacy-v1".to_string(),
+            _ => return Err(format!("install bundle has no identity for ARIA release {aria_version}")),
+        };
+        let mut hosts = BTreeMap::new();
+        for h in wire.install_map.hosts {
+            hosts.insert(h.id.clone(), h);
+        }
+        Ok(InstallBundle {
+            aria_version,
+            aria_bundle_identity,
+            skill_markdown: wire.skill_markdown,
+            skill_markdown_by_host: wire.skill_markdown_by_host.unwrap_or_default(),
+            hosts,
+            packages: wire.packages,
+        })
+    }
+
     /// Decode the embedded bundle. Panics on malformed embedded data — that is
     /// a build defect (the artifact is committed), surfaced loudly.
     pub fn embedded() -> &'static InstallBundle {
         use std::sync::OnceLock;
         static BUNDLE: OnceLock<InstallBundle> = OnceLock::new();
         BUNDLE.get_or_init(|| {
-            let wire: BundleWire = serde_json::from_str(INSTALL_BUNDLE_JSON)
-                .expect("embedded install-bundle.json failed to parse (build defect)");
-            let mut hosts = BTreeMap::new();
-            for h in wire.install_map.hosts {
-                hosts.insert(h.id.clone(), h);
-            }
-            InstallBundle {
-                skill_markdown: wire.skill_markdown,
-                hosts,
-                packages: wire.packages,
-            }
+            Self::from_json(INSTALL_BUNDLE_JSON)
+                .expect("embedded install-bundle.json failed to parse (build defect)")
         })
     }
 
@@ -238,6 +448,15 @@ impl InstallBundle {
     /// Installer client ids and host ids are identical where both exist.
     pub fn host(&self, client_id: &str) -> Option<&InstallMapHost> {
         self.hosts.get(client_id)
+    }
+
+    /// Select a generated host wrapper, retaining the neutral scalar for
+    /// pre-selector or intentionally shared payloads.
+    pub fn skill_markdown_for_host(&self, host_id: &str) -> &str {
+        self.skill_markdown_by_host
+            .get(host_id)
+            .map(String::as_str)
+            .unwrap_or(&self.skill_markdown)
     }
 
     pub fn host_count(&self) -> usize {
@@ -317,13 +536,13 @@ pub fn apply(
 
     match depth {
         InstallDepth::Server => Ok(DepthOutcome::Server),
-        InstallDepth::Skills => write_skill(host, home),
+        InstallDepth::Skills => write_skill(host, bundle, home),
         InstallDepth::Plugin => {
             if host.supports_plugin() {
                 install_plugin(host, home, vault_off, claude_cli)
             } else {
                 // §4.4 ceiling: fall back to skills and report it.
-                match write_skill(host, home)? {
+                match write_skill(host, bundle, home)? {
                     DepthOutcome::Skills(path) => Ok(DepthOutcome::PluginFellBackToSkills(
                         path,
                         host.fallback_reason().to_string(),
@@ -354,14 +573,17 @@ pub fn plugin_install_directory(host: &InstallMapHost, home: &Path) -> PathBuf {
 }
 
 /// Mode 2: write the embedded canonical SKILL.md to the host's skillUserPath.
-fn write_skill(host: &InstallMapHost, home: &Path) -> std::io::Result<DepthOutcome> {
-    let bundle = InstallBundle::embedded();
+fn write_skill(
+    host: &InstallMapHost,
+    bundle: &InstallBundle,
+    home: &Path,
+) -> std::io::Result<DepthOutcome> {
     let dest = expand_tilde(&host.skill_user_path, home);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     backup_existing(&dest)?;
-    std::fs::write(&dest, &bundle.skill_markdown)?;
+    std::fs::write(&dest, bundle.skill_markdown_for_host(&host.id))?;
     Ok(DepthOutcome::Skills(dest.display().to_string()))
 }
 
@@ -388,7 +610,7 @@ fn install_plugin(
     let files = bundle.package_files(&host.id);
     if files.is_empty() {
         // No embedded package — fall back to skills.
-        return match write_skill(host, home)? {
+        return match write_skill(host, bundle, home)? {
             DepthOutcome::Skills(path) => Ok(DepthOutcome::PluginFellBackToSkills(
                 path,
                 "no embedded package for host; wrote skill only".to_string(),
@@ -617,6 +839,127 @@ mod tests {
     use super::*;
     use crate::core::clients;
 
+    struct FakeCodexCli {
+        replies: std::cell::RefCell<std::collections::VecDeque<Option<String>>>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+    impl FakeCodexCli {
+        fn new(replies: Vec<Option<&str>>) -> Self {
+            Self {
+                replies: std::cell::RefCell::new(replies.into_iter().map(|s| s.map(str::to_string)).collect()),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+    impl CodexCliRunning for FakeCodexCli {
+        fn run(&self, args: &[&str]) -> Option<String> {
+            self.calls.borrow_mut().push(args.iter().map(|s| s.to_string()).collect());
+            self.replies.borrow_mut().pop_front().expect("unexpected Codex CLI call")
+        }
+    }
+    fn codex_test_home() -> PathBuf {
+        let home = std::env::temp_dir().join(format!("moot-codex-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+    fn codex_current_registry() -> String {
+        let bundle = InstallBundle::embedded();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &bundle.package_files("codex")[".codex-plugin/plugin.json"]).unwrap();
+        serde_json::json!({"installed":[{"pluginId":"mootx01@mootx01", "installed":true,
+            "enabled":true,"version":manifest["version"]}]}).to_string()
+    }
+    #[test]
+    fn codex_install_registers_local_embedded_plugin() {
+        let home = codex_test_home();
+        let registry = codex_current_registry();
+        let cli = FakeCodexCli::new(vec![Some("{}"), Some("{}"), Some(&registry)]);
+        let result = apply_codex_plugin(&home, false, false, &cli).unwrap();
+        let Some(DepthOutcome::Plugin(path)) = result else { panic!("expected plugin"); };
+        let calls = cli.calls.borrow();
+        assert_eq!(calls[0], vec!["plugin", "marketplace", "add", &path]);
+        assert_eq!(calls[1], vec!["plugin", "add", "mootx01@mootx01"]);
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            Path::new(&path).join(".codex-plugin/marketplace.json")).unwrap()).unwrap();
+        assert_eq!(manifest["plugins"][0]["source"], "./");
+        assert!(Path::new(&path).join(".codex-plugin/plugin.json").is_file());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn codex_upgrade_uses_registry_not_materialized_directory() {
+        for reply in [Some(r#"{"installed":[]}"#),
+            Some(r#"{"installed":[{"pluginId":"mootx01@mootx01","installed":true,"enabled":false}]}"#),
+            Some("malformed"), None] {
+            let home = codex_test_home();
+            let bundle = InstallBundle::embedded();
+            let dir = plugin_install_directory(bundle.host("codex").unwrap(), &home);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("marker"), "untouched").unwrap();
+            let cli = FakeCodexCli::new(vec![reply]);
+            assert!(apply_codex_plugin(&home, false, true, &cli).unwrap().is_none());
+            assert_eq!(std::fs::read_to_string(dir.join("marker")).unwrap(), "untouched");
+            assert_eq!(cli.calls.borrow().len(), 1);
+            assert!(!dir.join(".codex-plugin/plugin.json").exists());
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
+    #[test]
+    fn codex_upgrade_refreshes_installed_plugin_without_loose_directory() {
+        let home = codex_test_home();
+        let registry = codex_current_registry();
+        let cli = FakeCodexCli::new(vec![Some(&registry), Some("{}"), Some("{}"), Some(&registry)]);
+        assert!(matches!(apply_codex_plugin(&home, false, true, &cli).unwrap(), Some(DepthOutcome::Plugin(_))));
+        assert_eq!(cli.calls.borrow().len(), 4);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn codex_cleanup_preserves_foreign_and_removes_only_managed_http() {
+        for (body, removed) in [
+            ("url = \"http://127.0.0.1:4242\"\n", true),
+            ("url = \"http://127.0.0.1:4243\"\n", false),
+            ("url = \"http://127.0.0.1:4242\"\nenabled = false\n", false),
+            ("url = \"http://127.0.0.1:4242\"\n[mcp_servers.mootx01.env]\nA = \"B\"\n", false),
+        ] {
+            let home = codex_test_home();
+            std::fs::create_dir_all(home.join(".codex")).unwrap();
+            let path = home.join(".codex/config.toml");
+            let original = format!("model = \"test\"\n[mcp_servers.mootx01]\n{body}[other]\nx = true\n");
+            std::fs::write(&path, &original).unwrap();
+            cleanup_codex_default_direct_entry(&home).unwrap();
+            let actual = std::fs::read_to_string(path).unwrap();
+            assert_eq!(!actual.contains("[mcp_servers.mootx01]"), removed);
+            if !removed { assert_eq!(actual, original); }
+            assert!(actual.contains("[other]\nx = true"));
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
+    #[test]
+    fn codex_readback_failure_preserves_direct_connection() {
+        let home = codex_test_home();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let path = home.join(".codex/config.toml");
+        let original = "[mcp_servers.mootx01]\nurl = \"http://127.0.0.1:4242\"\n";
+        std::fs::write(&path, original).unwrap();
+        let cli = FakeCodexCli::new(vec![Some("{}"), Some("{}"), Some(r#"{"installed":[]}"#)]);
+        assert!(matches!(apply_codex_plugin(&home, false, false, &cli).unwrap(),
+            Some(DepthOutcome::PluginFellBackToSkills(_, _))));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        assert_eq!(cli.calls.borrow().len(), 3);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_registration_failure_writes_fallback_skill_and_stops_sequence() {
+        let home = codex_test_home();
+        let cli = FakeCodexCli::new(vec![None]);
+        let Some(DepthOutcome::PluginFellBackToSkills(path, _)) =
+            apply_codex_plugin(&home, false, false, &cli).unwrap() else { panic!("expected skill fallback"); };
+        assert!(Path::new(&path).is_file());
+        assert_eq!(cli.calls.borrow().len(), 1);
+        assert!(!codex_cli_home_matches(&home));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn mode_flag_parses() {
         assert_eq!(InstallDepth::from_flag("server"), Some(InstallDepth::Server));
@@ -694,12 +1037,29 @@ mod tests {
     fn embedded_bundle_decodes() {
         let b = InstallBundle::embedded();
         assert!(b.skill_markdown.contains("name: mootx01-memory"));
+        assert_eq!(b.aria_version, InstallBundle::selected_aria_version());
+        assert!(b.aria_bundle_identity.starts_with(&format!("mootx01/{}/", b.aria_version)));
         assert_eq!(b.host_count(), 10); // 10th host: xcode (EE packager sync 0b632002)
         assert!(b.host("claude-code").is_some());
         // MCP-only clients have no matrix row.
         assert!(b.host("claude-desktop").is_none());
         assert!(b.host("continue").is_none());
         assert!(b.host("kiro").is_none());
+    }
+
+    #[cfg(feature = "aria-v2")]
+    #[test]
+    fn v2_embedded_bundle_identity_matches_registry() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors().nth(3).expect("repository root from apps/mootx01/rust");
+        let registry: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            root.join("packages/kits/AriaMcpKit/Registry/aria-v2-selected-release.json")
+        ).expect("read selected ARIA release artifact")).expect("decode selected ARIA release artifact");
+        let catalog_identity = registry["catalogIdentity"].as_str().expect("catalog identity");
+        let bundle = InstallBundle::embedded();
+        assert_eq!(registry["ariaVersion"], "v2");
+        assert_eq!(bundle.aria_version, "v2");
+        assert_eq!(bundle.aria_bundle_identity, format!("mootx01/v2/{catalog_identity}"));
     }
 
     #[test]
@@ -714,9 +1074,49 @@ mod tests {
         }
         // Package SKILL.md is byte-identical to the canonical skill (§0.4).
         assert_eq!(
-            b.package_files("claude-code").get("skills/mootx01-memory/SKILL.md"),
-            Some(&b.skill_markdown)
+            b.package_files("claude-code")
+                .get("skills/mootx01-memory/SKILL.md")
+                .map(String::as_str),
+            Some(b.skill_markdown_for_host("claude-code"))
         );
+    }
+
+    fn staged_bundle_json(version: &str) -> String {
+        format!(r#"{{
+          "schemaVersion": 1,
+          "ariaVersion": "{version}",
+          "ariaBundleIdentity": "mootx01/fixture/selected",
+          "skillMarkdown": "shared teaching",
+          "skillMarkdownByHost": {{"codex": "codex teaching"}},
+          "installMap": {{"hosts": [{{
+            "id": "codex", "displayName": "Codex", "family": "manifestBundle",
+            "mcpMapKey": "mcpServers", "mcpUserFormat": "json",
+            "mcpUserPath": "~/.codex/config.json", "roadmap": "now",
+            "skillUserPath": "~/.codex/skills/mootx01-memory/SKILL.md"
+          }}]}},
+          "packages": {{}}
+        }}"#)
+    }
+
+    #[test]
+    fn staged_bundle_selects_host_payload_and_writes_fixture_home() {
+        let staged = InstallBundle::from_json(&staged_bundle_json(InstallBundle::selected_aria_version())).unwrap();
+        assert_eq!(staged.aria_bundle_identity, "mootx01/fixture/selected");
+        assert_eq!(staged.skill_markdown_for_host("codex"), "codex teaching");
+        assert_eq!(staged.skill_markdown_for_host("unknown"), "shared teaching");
+
+        let home = tmp_home("staged-host-payload");
+        let host = staged.host("codex").unwrap();
+        write_skill(host, &staged, &home).unwrap();
+        let written = std::fs::read_to_string(join_rel(&home, ".codex/skills/mootx01-memory/SKILL.md")).unwrap();
+        assert_eq!(written, "codex teaching");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn staged_bundle_rejects_unselected_release() {
+        let other = if InstallBundle::selected_aria_version() == "v1" { "v2" } else { "v1" };
+        assert!(InstallBundle::from_json(&staged_bundle_json(other)).is_err());
     }
 
     fn tmp_home(tag: &str) -> PathBuf {
@@ -755,7 +1155,7 @@ mod tests {
         let dest = join_rel(&home, ".claude/skills/mootx01-memory/SKILL.md");
         assert_eq!(outcome, DepthOutcome::Skills(dest.display().to_string()));
         let written = std::fs::read_to_string(&dest).unwrap();
-        assert_eq!(written, InstallBundle::embedded().skill_markdown);
+        assert_eq!(written, InstallBundle::embedded().skill_markdown_for_host("claude-code"));
         let _ = std::fs::remove_dir_all(&home);
     }
 

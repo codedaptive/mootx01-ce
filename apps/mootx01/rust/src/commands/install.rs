@@ -308,7 +308,14 @@ pub fn run(
             // untouched — the resident daemon carries the vault posture in
             // its own service-manager environment (`core::service`),
             // independent of this call.
-            match depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner) {
+            let result = if client.id == "codex" && depth == InstallDepth::Plugin
+                && depth::codex_cli_home_matches(&home) {
+                depth::apply_codex_plugin(&home, !vault_on, false, &depth::ProcessCodexCliRunner)
+                    .map(|outcome| outcome.unwrap_or(DepthOutcome::Server))
+            } else {
+                depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner)
+            };
+            match result {
                 Ok(DepthOutcome::Server) => {
                     // Claude Desktop's "plugin" is a Desktop extension, not a
                     // file-drop payload. At plugin depth, install it

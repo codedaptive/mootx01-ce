@@ -7,7 +7,15 @@ adapter covers all six surfaces:
 - `CLAUDE.md` - always-on project instruction block.
 - `.claude/rules/mootx01-memory.md` - modular always-on rule.
 - `.claude/skills/mootx01-memory/SKILL.md` - task-specific skill.
+- `.claude/skills/mootx01-plans/SKILL.md` - file an approved plan to the
+  estate at approval, before it is lost with the session.
 - `.claude/commands/mootx01-start.md` - optional slash command prompt.
+- `.claude/commands/prepare-for-compact.md` - write the handoff and file it,
+  then compact.
+- `.claude/commands/start-clean.md` - cold-start handoff for a session
+  ending rather than compacting.
+- `.claude/commands/recover-from-compact.md` - read the handoff back and
+  re-orient.
 - `.claude/hooks/moot_hooks.py` - hook script (context meter, compaction
   recovery, writeback check).
 - `.claude/hooks/moot_update_check.py` - optional update-availability check
@@ -110,3 +118,26 @@ from `.claude/settings.json`. Self-hosted builds can point
   differs (for example `export MOOTX01_CONTEXT_WINDOW=500000`).
 - The context percentages are estimates derived from the transcript's token
   usage records. Treat them as a fuel gauge, not a lab instrument.
+
+## The compact ritual
+
+A session's context is finite and the work usually is not. The three
+compact commands make the handover explicit rather than hoping a
+summarizer keeps the right details.
+
+    /prepare-for-compact     agent writes its own handoff, files it, then
+                             tells you to run /compact
+    /compact                 Claude Code compacts
+    /recover-from-compact    read it back; usually unnecessary, since the
+                             SessionStart hook injects recovery after a
+                             compact
+
+`/start-clean` replaces the first step when the session is ending rather
+than compacting: it writes a cold-start handoff that assumes nothing
+carries over.
+
+Handoffs are filed to `session/<session_id>/handoff` and open with four
+identity lines - repo, agent, branch, written. More than one agent may work
+from one directory, and a later session needs to tell them apart. A wrong
+handoff does not announce itself: it reads as perfectly coherent context
+for work nobody was doing.
