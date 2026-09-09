@@ -8,7 +8,7 @@
 //!
 //! # Usage
 //!
-//! In `runtime.rs`, when `ARIA_MCP_STATS_STORE` is configured:
+//! In `runtime.rs`, when the stats store path resolves (resident HTTP mode):
 //! ```ignore
 //! let sink: Box<dyn GovernorTopologySink> =
 //!     Box::new(StatsStoreTopologySink::new(Arc::clone(&store)));

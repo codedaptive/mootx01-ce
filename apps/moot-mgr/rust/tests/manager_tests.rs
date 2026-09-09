@@ -423,27 +423,57 @@ fn epoch_to_iso8601_is_stable_utc() {
 // ───────────────────────────── ManagerConfig env ───────────────────────────
 
 #[test]
-fn config_from_env_applies_overrides_and_defaults() {
+fn config_rejects_non_positive_retention() {
+    // Zero/negative retention values fall back to defaults.
+    // No MOOT_MGR_STORE env key — the setting is the variable (W-6 ruling).
     let mut env = std::collections::HashMap::new();
-    env.insert("MOOT_MGR_STORE".to_string(), "/tmp/explicit.sqlite".to_string());
-    env.insert("MOOT_MGR_RETENTION_SECONDS".to_string(), "1800".to_string());
-    // Cadence absent → default 1 hour.
-    let cfg = ManagerConfig::from_environment_map(&env);
-    assert_eq!(cfg.store_path, "/tmp/explicit.sqlite");
-    assert_eq!(cfg.retention_window_secs, 1800);
+    env.insert("MOOT_MGR_RETENTION_SECONDS".to_string(), "0".to_string());
+    env.insert("MOOT_MGR_RETENTION_CADENCE_SECONDS".to_string(), "-5".to_string());
+    // config_dir=None would read the real config file; use a scratch dir instead.
+    let scratch = std::env::temp_dir().join(format!("moot-mgr-cfg-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let cfg = ManagerConfig::from_environment_map(&env, Some(&scratch));
+    assert_eq!(cfg.retention_window_secs, 7 * 24 * 60 * 60);
     assert_eq!(cfg.retention_cadence_secs, 3600);
 }
 
+/// Wiring test (key set): from_environment_map with a scratch config dir that
+/// has `daemon.stats_store` set returns that configured path. Deleting the
+/// settings::load call in resolve_store_path makes this test red.
 #[test]
-fn config_rejects_non_positive_retention() {
-    let mut env = std::collections::HashMap::new();
-    env.insert("MOOT_MGR_STORE".to_string(), "/tmp/x.sqlite".to_string());
-    env.insert("MOOT_MGR_RETENTION_SECONDS".to_string(), "0".to_string());
-    env.insert("MOOT_MGR_RETENTION_CADENCE_SECONDS".to_string(), "-5".to_string());
-    let cfg = ManagerConfig::from_environment_map(&env);
-    // Zero/negative fall back to defaults (no silent instant-roll-off window).
-    assert_eq!(cfg.retention_window_secs, 7 * 24 * 60 * 60);
-    assert_eq!(cfg.retention_cadence_secs, 3600);
+fn wiring_config_dir_key_set_returns_configured_path() {
+    let scratch = std::env::temp_dir()
+        .join(format!("moot-mgr-wiring-set-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let custom = scratch.join("custom-stats.sqlite");
+    let json = format!(r#"{{"daemon":{{"stats_store":"{}"}}}}"#, custom.display());
+    std::fs::write(scratch.join("config.json"), json).unwrap();
+
+    let env = std::collections::HashMap::new();
+    let cfg = ManagerConfig::from_environment_map(&env, Some(&scratch));
+    assert_eq!(
+        cfg.store_path,
+        custom.to_string_lossy().as_ref(),
+        "from_environment_map must return daemon.stats_store from config.json"
+    );
+}
+
+/// Wiring test (key absent): from_environment_map with a scratch config dir
+/// that has no config.json falls back to the computed default under that dir.
+#[test]
+fn wiring_config_dir_key_absent_returns_computed_default() {
+    let scratch = std::env::temp_dir()
+        .join(format!("moot-mgr-wiring-absent-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    // No config.json written — key is absent.
+    let env = std::collections::HashMap::new();
+    let cfg = ManagerConfig::from_environment_map(&env, Some(&scratch));
+    let expected = scratch.join("moot-mgr").join("stats.sqlite");
+    assert_eq!(
+        cfg.store_path,
+        expected.to_string_lossy().as_ref(),
+        "from_environment_map must fall back to <configDir>/moot-mgr/stats.sqlite"
+    );
 }
 
 // ───────────────────────────── CLI parse / dispatch ────────────────────────

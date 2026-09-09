@@ -20,11 +20,11 @@
 //! SCM services are out of scope for v1 (spec §6). macOS is Swift territory
 //! (launchd, LaunchAgent.swift).
 //!
-//! Beside the writers sits one reader, `daemon_registration`: `mootx01
-//! upgrade` asks it which data directory the registered daemon serves, so
-//! the quiesce decision follows the registration rather than the platform
-//! default (the pure parsers `data_dir_from_unit` / `data_dir_from_task_command`
-//! are the testable core).
+//! The service generator functions (`daemon_unit`, `mgr_unit`,
+//! `daemon_task_command`, `mgr_task_command`) return unit or command content
+//! as plain strings, keeping them testable on any platform. The platform
+//! registration wrappers (`register`, `register_task`) shell out to the
+//! service manager and are runtime-guarded.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
