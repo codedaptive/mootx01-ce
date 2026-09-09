@@ -54,6 +54,27 @@ let package = Package(
         ),
     ],
     traits: [
+        // Default trait set: the two layout capsules, and nothing else.
+        //
+        // A capsule off by default is a capsule whose tests do not run: before
+        // this entry a bare `swift test` in this package compiled
+        // GLKMigrationFlatLayoutToCatalogTests and
+        // GLKMigrationAppContainerToCatalogTests to zero tests, so the
+        // package's own quoted pass count carried no capsule assertion at all.
+        //
+        // They are default-on and the format-step capsules are not because
+        // the two layout targets cost a plain build nothing: each depends only
+        // on GeniusLocusKit and MootProductIdentity, both already in every
+        // build of this package. The format-step targets pull CorpusKit,
+        // SynapseKit and PersistenceKitSQLite into their test targets, which
+        // is why they stay behind a floor the consumer selects.
+        //
+        // No consumer's resolution changes: every product manifest that names
+        // this package selects MigrationFloor1_0, which already enables both
+        // layout traits explicitly.
+        .default(enabledTraits: [
+            "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog",
+        ]),
         // DenseFamilies: compiles the dark dense-family lane keys and presets
         // (PPMI, NMF, FDC — contract sheet §13) into RecallShape. Off by
         // default; Random Indexing is the only live family. LSA sits on its

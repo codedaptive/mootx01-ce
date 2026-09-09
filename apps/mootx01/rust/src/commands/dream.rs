@@ -30,8 +30,8 @@
 
 use std::process::ExitCode;
 
-use aria_mcp::estate_registry::SqliteOpening;
-use genius_locus_kit::{EstateBackend, EstateCatalog, EstateOpenPosture};
+use aria_mcp::estate_registry::EstateOpening;
+use genius_locus_kit::{EstateBackend, EstateOpenPosture};
 use queuekit::DrainLease;
 
 use crate::exit;
@@ -52,12 +52,9 @@ pub fn run(db: Option<String>) -> ExitCode {
 
     // The estate is the catalog's: the `--db` value the spawning serve was
     // launched with (a registered name or a transient path), else the active
-    // estate. Nothing here computes a path.
-    let catalog = match db.as_deref() {
-        Some(value) => EstateCatalog::open_selecting(value),
-        None => EstateCatalog::open(),
-    };
-    let record = match catalog {
+    // estate. Routes through the funnel (Windows base-directory adoption +
+    // catalog open) so the adoption always precedes the open.
+    let record = match crate::core::estate_open::catalog(db.as_deref()) {
         Ok(catalog) => catalog.active().clone(),
         Err(e) => {
             eprintln!("mootx01 dream: {e}");
@@ -86,7 +83,7 @@ pub fn run(db: Option<String>) -> ExitCode {
         }
     };
     // The record's kind decides federation; a dreamer never seeds charters.
-    let opening = SqliteOpening { seed_charters: false, ..SqliteOpening::for_record(&record) };
+    let opening = EstateOpening { seed_charters: false, ..EstateOpening::for_record(&record) };
 
     // The dreaming lease file lives beside queue.sqlite (parent directory of the
     // estate SQLite file), keyed by "dreaming". This is fully independent of the
