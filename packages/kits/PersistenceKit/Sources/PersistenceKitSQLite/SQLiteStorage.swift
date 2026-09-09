@@ -78,6 +78,10 @@ public final class SQLiteStorage: Storage, Sendable {
         try await backend.openSchema(schema)
     }
 
+    public func openExisting(schema: SchemaDeclaration) async throws {
+        try await backend.openExistingSchema(schema)
+    }
+
     public func close() async {
         await backend.close()
     }
@@ -113,6 +117,10 @@ public final class SQLiteStorage: Storage, Sendable {
         }
         return result
     }
+
+    public func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        try await backend.captureInventorySnapshot(limits: limits)
+    }
 }
 
 // MARK: - StorageIntrospection
@@ -133,6 +141,10 @@ extension SQLiteStorage: StorageIntrospection {
 actor SQLiteBackend {
     let connection: SQLiteConnection
     private var inTransaction: Bool = false
+    // Snapshot-test observation seam. This advances immediately before a
+    // complete database row is decoded, allowing the oversized-body test to
+    // prove that its rejection came from the length preflight.
+    private(set) var inventorySnapshotFullRowMaterializations: Int = 0
     /// Blob change notifications buffered while a transaction is open.
     ///
     /// putBlob/deleteBlob append here instead of calling notifyBlobChange
@@ -168,6 +180,188 @@ actor SQLiteBackend {
         self.encryptionConfig = encryptionConfig
     }
 
+    /// Waits for any caller-owned transaction to finish, then performs both
+    /// reads synchronously on this actor's sole connection inside one SQLite
+    /// read transaction. No await occurs after BEGIN, so no other backend
+    /// operation can interleave with the two table reads.
+    func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        var waitedNanos: UInt64 = 0
+        let waitLimitNanos: UInt64 = 60_000_000_000
+        while inTransaction {
+            guard waitedNanos < waitLimitNanos else {
+                throw StorageError.transactionConflict(
+                    detail: "inventory snapshot waited 60 s for active transaction")
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+            waitedNanos += 25_000_000
+        }
+
+        try connection.exec("BEGIN")
+        do {
+            var serializedBytes = 0
+            let drawers = try boundedInventoryRows(
+                table: InventorySnapshot.drawersTable,
+                limits: limits,
+                serializedBytes: &serializedBytes
+            )
+            let nodes = try boundedInventoryRows(
+                table: InventorySnapshot.nodesTable,
+                limits: limits,
+                serializedBytes: &serializedBytes
+            )
+            try connection.exec("COMMIT")
+            return InventorySnapshot(drawers: drawers, nodes: nodes)
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func boundedInventoryRows(
+        table: String,
+        limits: InventorySnapshotLimits,
+        serializedBytes: inout Int
+    ) throws -> [StorageRow] {
+        try validateSQLIdentifier(table)
+        guard let schema = tableDeclarations[table]?.table else {
+            throw StorageError.invalidQuery(detail: "inventory snapshot: schema for \(table) not registered")
+        }
+        try preflightInventoryRows(
+            table: table,
+            schema: schema,
+            limits: limits,
+            serializedBytes: serializedBytes
+        )
+        let statement = try connection.prepareCached(
+            "SELECT * FROM \"\(table)\" LIMIT \(limits.maxRowsPerTable + 1)"
+        )
+        defer { statement.finalize() }
+
+        var rows: [StorageRow] = []
+        let columnCount = statement.columnCount()
+        while try statement.step() {
+            guard rows.count < limits.maxRowsPerTable else {
+                throw InventorySnapshotError.rowLimitExceeded(
+                    table: table,
+                    limit: limits.maxRowsPerTable
+                )
+            }
+            inventorySnapshotFullRowMaterializations += 1
+            var values: [String: TypedValue] = [:]
+            for index in 0..<columnCount {
+                let name = statement.columnName(index)
+                values[name] = try readColumn(
+                    stmt: statement,
+                    index: index,
+                    schema: schema,
+                    columnName: name,
+                    table: table
+                )
+            }
+            let decoded = try decryptedForRead(values, table: table, config: encryptionConfig)
+            let row = StorageRow(values: decoded)
+            let rowBytes = InventorySnapshot.serializedByteCount(of: row)
+            guard rowBytes <= limits.maxSerializedBytes - serializedBytes else {
+                throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+            }
+            serializedBytes += rowBytes
+            rows.append(row)
+        }
+        return rows
+    }
+
+    /// Reject exact known canonical totals before `SELECT *`. SQLite stores
+    /// JSON as arbitrary BLOB, so strict UTF-8 validity cannot be decided in
+    /// SQL: that case contributes its raw byte count here, bounding its later
+    /// FFI acquisition, then the decoded row is exact-counted before retain.
+    private func preflightInventoryRows(
+        table: String,
+        schema: TableDeclaration,
+        limits: InventorySnapshotLimits,
+        serializedBytes: Int
+    ) throws {
+        let columns = schema.columns + schema.generatedColumns.map {
+            ColumnDeclaration(name: $0.name, type: $0.type, nullable: true)
+        }
+        guard !columns.isEmpty else { return }
+        let expressions = try columns.map { column -> String in
+            try validateSQLIdentifier(column.name)
+            let keyBytes = column.name.utf8.count + 1
+            let quoted = "\"\(column.name)\""
+            let bytes = "length(CAST(\(quoted) AS BLOB))"
+            let textEncoding = "(3.0 + length(CAST(\(bytes) AS TEXT)) + \(bytes))"
+            let blobEncoding = "(3.0 + length(CAST(\(bytes) AS TEXT)) + 2.0 * \(bytes))"
+            let integerEncoding = "(2.0 + length(CAST(\(quoted) AS TEXT)))"
+            // Mirror `readColumn`'s runtime-type fallback. This makes a wrong
+            // SQLite storage class contribute its raw body (or its exact
+            // canonical encoding) before `SELECT *`, rather than allowing an
+            // arbitrarily large corrupt scalar to reach the FFI read.
+            let runtimeEncoding = "CASE typeof(\(quoted)) WHEN 'integer' THEN \(integerEncoding) WHEN 'real' THEN 18.0 WHEN 'text' THEN \(textEncoding) WHEN 'blob' THEN \(blobEncoding) ELSE 1.0 END"
+            let boundedContribution: String
+            switch column.type {
+            case .text:
+                let plaintext = "(\(bytes) - 28)"
+                let plaintextEncoding = "(3.0 + length(CAST(\(plaintext) AS TEXT)) + \(plaintext))"
+                if encryptionConfig.usesRowCrypto,
+                   rowCryptoProtectedColumns(for: table).contains(column.name),
+                   columns.contains(where: { $0.name == rowCryptoKeyIDColumn }),
+                   let keyID = encryptionConfig.keyIdentifier {
+                    let escapedKeyID = keyID.replacingOccurrences(of: "'", with: "''")
+                    boundedContribution = "CASE WHEN typeof(\(quoted)) = 'blob' AND \"\(rowCryptoKeyIDColumn)\" = '\(escapedKeyID)' AND \(bytes) >= 28 THEN \(plaintextEncoding) ELSE \(runtimeEncoding) END"
+                } else {
+                    boundedContribution = runtimeEncoding
+                }
+            case .blob:
+                boundedContribution = runtimeEncoding
+            case .json:
+                // A valid JSON UTF-8 body is at least this large; invalid
+                // UTF-8 expands to hex and is caught by exact post-read count.
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'blob' THEN \(bytes) ELSE \(runtimeEncoding) END"
+            case .uuid:
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'text' AND \(bytes) = 36 THEN 38.0 ELSE \(runtimeEncoding) END"
+            case .float:
+                boundedContribution = runtimeEncoding
+            case .bool:
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'integer' THEN 3.0 ELSE \(runtimeEncoding) END"
+            case .int, .bitmap:
+                boundedContribution = runtimeEncoding
+            case .hlc:
+                // HLC stores UInt64 bits in SQLite's signed Int64 slot. For a
+                // negative stored integer, the unsigned canonical decimal has
+                // 19 digits through 9_999_999_999_999_999_999 and 20 above.
+                // Counting the stored minus sign would overcount the high-bit
+                // boundary by one and reject an exact canonical fit.
+                let unsignedDigits = "CASE WHEN \(quoted) < -8446744073709551616 THEN 19.0 WHEN \(quoted) < 0 THEN 20.0 ELSE length(CAST(\(quoted) AS TEXT)) END"
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'integer' THEN 2.0 + \(unsignedDigits) ELSE \(runtimeEncoding) END"
+            case .timestamp:
+                // Accepted RFC-3339 text is 20 or 24 bytes while canonical
+                // epoch-millisecond encoding can be as short as `s:0`.
+                // Subtracting at most 21 bytes preserves every exact canonical fit, yet any
+                // corrupt text admitted to the row read is bounded by the
+                // remaining budget plus that fixed parser-width allowance.
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'text' THEN MAX(\(bytes) - 21, 0) ELSE \(runtimeEncoding) END"
+            case .fingerprint:
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'blob' AND \(bytes) = 32 THEN 66.0 ELSE \(runtimeEncoding) END"
+            }
+            return "CASE WHEN \(quoted) IS NULL THEN \(Double(keyBytes + 1)) ELSE \(Double(keyBytes)) + \(boundedContribution) END"
+        }
+        let separators = max(columns.count - 1, 0)
+        let rowBoundedBytes = "(\(expressions.joined(separator: " + ")) + \(Double(separators)))"
+        let remainingBytes = limits.maxSerializedBytes - serializedBytes
+        let statement = try connection.prepareCached(
+            "SELECT COUNT(*), CASE WHEN COALESCE(SUM(\(rowBoundedBytes)), 0.0) > \(Double(remainingBytes)) THEN 1 ELSE 0 END FROM \"\(table)\""
+        )
+        defer { statement.finalize() }
+        guard try statement.step() else { return }
+        let count = statement.columnInt64(0)
+        guard count <= Int64(limits.maxRowsPerTable) else {
+            throw InventorySnapshotError.rowLimitExceeded(table: table, limit: limits.maxRowsPerTable)
+        }
+        guard statement.columnInt64(1) == 0 else {
+            throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+        }
+    }
+
     private func notifyObservers(_ change: TableChange) {
         if let r = observerRegistry {
             Task { await r.notify(change) }
@@ -199,6 +393,33 @@ actor SQLiteBackend {
     }
 
     // MARK: - Schema and migrations
+
+    func openExistingSchema(_ schema: SchemaDeclaration) throws {
+        guard try currentSchemaVersion(kitID: schema.kitID) == schema.version else {
+            throw StorageError.constraintViolation(detail: "frozen schema requires migration: \(schema.kitID)")
+        }
+        for table in schema.tables {
+            let quoted = table.name.replacingOccurrences(of: "\"", with: "\"\"")
+            let statement = try connection.prepare("PRAGMA table_xinfo(\"\(quoted)\")")
+            var columns: [String: String] = [:]
+            while try statement.step() {
+                if let name = statement.columnText(1) { columns[name] = statement.columnText(2)?.uppercased() ?? "" }
+            }
+            statement.finalize()
+            guard !columns.isEmpty, table.columns.allSatisfy({ column in
+                let storedType = columns[column.name]
+                // Shipped migrations (including Synapse vectors v6) declare
+                // JSON extension columns as TEXT; fresh declarations use BLOB.
+                // Both are supported persisted representations. Frozen opening
+                // must admit either without rewriting a current estate.
+                return storedType == SQLiteSchema.nativeType(column.type)
+                    || (column.type == .json && storedType == "TEXT")
+            }) else {
+                throw StorageError.constraintViolation(detail: "frozen schema is incomplete: \(table.name)")
+            }
+        }
+        try registerTableDeclarations(from: schema)
+    }
 
     func openSchema(_ schema: SchemaDeclaration) throws {
         try registerTableDeclarations(from: schema)
