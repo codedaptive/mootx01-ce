@@ -24,6 +24,13 @@ aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
 genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 moot-product-identity = { path = "../../../packages/libs/MootProductIdentity/rust" }
 
+[dev-dependencies]
+# test-seams enables EstateCatalog::set_configuration_directory_override,
+# the test seam used by the estate-selection tests below.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust", features = ["test-seams"] }
+# serde_json needed by tests/estate_selection.rs to parse dispatch_tool results.
+serde_json = "1"
+
 [features]
 # Forward the compile-time ARIA public-surface selection to the server logic.
 # No default features are changed, so this binary remains v1 unless selected.
