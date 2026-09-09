@@ -26,7 +26,7 @@
 //!   Recall=Rows    → answer:"never" session default (rows-only, current default)
 //!   Recall=Answer  → answer:"always" session default
 //!
-//! Parity: Rust twin of Swift `ModeRegistry.swift`.
+//! Parity: Rust twin of Swift mode registry (v1, removed in ARIA v2).
 
 // MARK: - Mode roster
 
@@ -145,7 +145,7 @@ impl MootMode {
 
     /// Status line for the `moot_estate_status` modes section.
     ///
-    /// Format matches Swift `ModeRegistry.swift` `statusLine` exactly for byte-identity:
+    /// Format matches Swift mode registry statusLine exactly for byte-identity:
     ///   with variants:    "Recall [Auto|Rows|Answer]: contract"
     ///   without variants: "ModeName: contract"
     ///

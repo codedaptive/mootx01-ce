@@ -118,6 +118,11 @@ enum AriaV2SelectedCatalog {
                     "minimum": .integer(1),
                     "maximum": .integer(Int64(AriaV2MemorySearchRequest.maximumLimit)),
                 ]),
+                // explain:true renders a discrimination line when the recall confidence signal
+                // is low or medium — surfaces how clearly the top result separates from
+                // the field. Absent means a clear, nominal result; opt-in because the
+                // discrimination line adds tokens the caller may not want.
+                "explain": booleanSchema(),
                 "estate_id": uuidSchema(),
             ], inputSchemaAdditions: ["oneOf": exactlyOneOf("query", "near")],
             dataSchema: memorySearchDataSchema()
@@ -168,19 +173,25 @@ enum AriaV2SelectedCatalog {
             identity: "recall_distilled", name: AriaV2RecallLensOperation.recallDistilled.rawValue,
             effect: .read, description: "Recall compact distilled memory projections.",
             intents: ["Recall compact distilled memory projections."],
-            properties: recallProperties(), required: ["query"], dataSchema: recallDataSchema()
+            // echo_query:true echoes the rewritten query in the result so the
+            // caller can verify the server's interpretation of a vague or
+            // expanded cue.
+            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
+            required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "recall_vague", name: AriaV2RecallLensOperation.recallVague.rawValue,
             effect: .read, description: "Recall memories from a vague cue.",
             intents: ["Recall memories from a vague cue."],
-            properties: recallProperties(), required: ["query"], dataSchema: recallDataSchema()
+            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
+            required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "recall_walk", name: AriaV2RecallLensOperation.recallWalk.rawValue,
             effect: .read, description: "Recall with the bounded escalation ladder.",
             intents: ["Recall with the bounded escalation ladder."],
-            properties: recallProperties(), required: ["query"], dataSchema: recallDataSchema()
+            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
+            required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "lens_keystones", name: AriaV2RecallLensOperation.lensKeystones.rawValue,
@@ -872,7 +883,15 @@ enum AriaV2SelectedCatalog {
             effect: .write,
             description: "Import a local JSON source into the selected estate.",
             intents: ["Import a local JSON source into the selected estate."],
-            properties: ["path": stringSchema(), "estate_id": uuidSchema()],
+            properties: [
+                "path": stringSchema(),
+                // return_id_map:true adds a second text block with a JSON map
+                // {"id_map":{"<record id>":"<drawer id>"}} naming the drawer each
+                // seed record became. Off by default (most callers want the receipt,
+                // not N id pairs).
+                "return_id_map": booleanSchema(),
+                "estate_id": uuidSchema(),
+            ],
             required: ["path"],
             requiredCapabilities: [vaultCapability],
             dataSchema: jsonImportDataSchema()
@@ -985,9 +1004,15 @@ enum AriaV2SelectedCatalog {
             identity: "vault_job",
             name: "moot_vault_job",
             effect: .read,
-            description: "Fetch the status of one vault job.",
+            description: "Fetch the status of one vault job. Returns running, complete, or failed status with progress details.",
             intents: ["Fetch the status of one vault job."],
-            properties: ["job_id": uuidSchema()],
+            // job_id carries a description so the tools/list entry matches the v2 catalog
+            // and Rust port exactly — both ports share the "Job ID returned by..." text.
+            properties: ["job_id": .object([
+                "type": .string("string"),
+                "format": .string("uuid"),
+                "description": .string("Job ID returned by moot_vault_import or moot_vault_export."),
+            ])],
             required: ["job_id"],
             requiredCapabilities: [vaultCapability],
             dataSchema: vaultJobDataSchema()
