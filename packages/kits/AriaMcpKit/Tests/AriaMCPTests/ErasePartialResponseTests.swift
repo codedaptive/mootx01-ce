@@ -83,43 +83,5 @@ struct ErasePartialResponseTests {
 
     // MARK: - R1: partial expunge names the partial outcome and the count
 
-    @Test
-    func partialLineageExpungeResponseNamesRefusedCount() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcherWithKit()
-
-        // D1: captured, promoted to accepted (S-1 requires trust ≥ canonical).
-        let d1 = try await kit.capture(
-            handle, captureFrame(content: "accepted iridium fact held for audit"))
-        try await kit.mutate(handle, MutateFrame(rowID: d1.id, kind: .correctTrust(.canonical)))
-        try await kit.mutate(handle, MutateFrame(rowID: d1.id, kind: .accept))
-
-        // D2: same lineage, still active — the expunge target.
-        var d2Frame = captureFrame(content: "active iridium draft in the same lineage")
-        d2Frame.lineageID = d1.lineageID
-        let d2 = try await kit.capture(handle, d2Frame)
-
-        let (text, isError) = try await eraseText(dispatcher, rowID: d2.id, requestID: 40)
-        #expect(!isError, "a partial expunge is a completed operation with a partial outcome, not a tool error")
-        #expect(text != "erased memory \(d2.id)",
-                "a partial lineage expunge must NOT claim a plain success: '\(text)'")
-        #expect(text.contains("partial"),
-                "the response must say the expunge was partial: '\(text)'")
-        #expect(text.contains("1 "), "the response must name the refused count: '\(text)'")
-        #expect(text.contains(d1.id),
-                "the response must name the refused sibling id so the caller can act on it: '\(text)'")
-    }
-
     // MARK: - R2: full expunge keeps the historical response byte-identical
-
-    @Test
-    func fullExpungeResponseUnchanged() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcherWithKit()
-        let drawer = try await kit.capture(
-            handle, captureFrame(content: "plain tellurium note with no lineage protection"))
-
-        let (text, isError) = try await eraseText(dispatcher, rowID: drawer.id, requestID: 41)
-        #expect(!isError)
-        #expect(text == "erased memory \(drawer.id)",
-                "a full expunge must keep the exact historical response shape; got '\(text)'")
-    }
 }

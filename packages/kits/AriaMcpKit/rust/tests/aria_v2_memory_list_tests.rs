@@ -1,4 +1,3 @@
-#![cfg(feature = "aria-v2")]
 
 #[path = "../src/v2/memory_list.rs"]
 mod memory_list;

@@ -165,62 +165,15 @@ public enum ToolProjection {
     /// `ProcessInfo.processInfo.environment` (which is read-only at runtime).
     /// Production code uses `tools()` (no args).
     public static func tools(environment: [String: String]) -> [ProjectedTool] {
-        if AriaSurface.isV2 {
-            // The v2 catalog contains only operations whose typed handlers are
-            // executable in this build. Do not wrap them with v1's advisory
-            // mode/teachme arguments or leak community/first-party entries.
-            return AriaV2SelectedCatalog.registry(environment: environment).projectedTools
-        }
-
-        var raw: [ProjectedTool] = []
-        // Anthropic memory_20250818 adapter: opt-in via MOOTX01_MEMORY_TOOL=1
-        // (mootx01 enable memory-tool sets this in the daemon env).
+        // The v2 catalog contains only operations whose typed handlers are
+        // executable in this build. The memory_20250818 adapter is appended
+        // when the opt-in flag is present; it is classified per-command in
+        // ToolMutationInventory.frozenReadCommands rather than by tool name.
+        var result = AriaV2SelectedCatalog.registry(environment: environment).projectedTools
         if memoryToolEnabled(environment: environment) {
-            raw.append(contentsOf: memoryAdapterTools())
+            result += memoryAdapterTools()
         }
-        raw.append(contentsOf: coreMemoryTools())
-        raw.append(contentsOf: connectionTools())
-        raw.append(contentsOf: knowledgeGraphTools())
-        raw.append(contentsOf: journalTools())
-        raw.append(contentsOf: estateTools())
-        raw.append(federationTool())
-        raw.append(contentsOf: RecipeTools.tools())
-        raw.append(contentsOf: LensTools.tools())
-        // Vault tools and the filesystem-importing palace/JSON import tools
-        // are gated: omitted from tools/list when MOOTX01_VAULT=0 (installed
-        // with --vault-off). Default (env absent or any value ≠ "0") is
-        // vault-on. `moot_palace_import` and `moot_json_import` are
-        // interface-shaped maintenance tools, but they read from the local
-        // filesystem (arbitrary SQLite / JSON files), so they carry the same
-        // security posture as vault import/export and hide under the same gate.
-        if vaultEnabled(environment: environment) {
-            raw.append(contentsOf: VaultTools.tools())
-        } else {
-            raw.removeAll { $0.name == "moot_palace_import" || $0.name == "moot_json_import" }
-        }
-        // Dataset tools (MX-TAB-7): file, query, stats. Always visible when the
-        // estate supports datasets. Not vault-gated (dataset tables are a core storage
-        // surface, not a VaultKit feature). Added after vault so the existing
-        // tool-count and tier ordering tests stay stable with a simple +3 increment.
-        raw.append(contentsOf: DatasetTools.tools())
-        // Packet tools (FAB5-I2): file, get, list, lineage. Always visible.
-        // Packets are structuredJSON drawers (typed content, not a new noun).
-        raw.append(contentsOf: PacketTools.tools())
-        return raw.map { tool in
-            ProjectedTool(
-                name: tool.name,
-                description: tool.description,
-                // Apply mode arg first, then teachme: both are injected on every tool.
-                // withModeArg adds "mode" to every tool's inputSchema so it is
-                // recognized by acceptedArgKeys and not flagged as an unknown arg.
-                inputSchema: withTeachme(withModeArg(tool.inputSchema)),
-                provenance: tool.provenance,
-                // Carried through explicitly: this re-wrap constructs a NEW
-                // ProjectedTool, so omitting the field here would silently
-                // strip every declared output schema from tools/list.
-                outputSchema: tool.outputSchema
-            )
-        }
+        return result
     }
 
     // MARK: - Anthropic memory_20250818 adapter (M-MEMTOOL-1)
@@ -712,32 +665,6 @@ public enum ToolProjection {
         ]
     }
 
-    // MARK: - Federation tool
-
-    /// The federated-search tool descriptor. Has no `(verb, noun)` pair;
-    /// dispatched by name. Fans across locally-open estates the requester
-    /// is entitled to read.
-    public static func federationTool() -> ProjectedTool {
-        ProjectedTool(
-            name: ToolDispatcher.federatedSearchToolName,
-            description: "Grant-authorized cross-estate federated search: fans across the locally-open estates the requester is entitled to read and returns per-estate contributions, each narrowed to its grant's scope.",
-            inputSchema: objectSchema(
-                properties: [
-                    // requesterEstateID is now OPTIONAL (Item 2 hardening): omit to use the
-                    // default estate. When supplied it must match the default estate exactly;
-                    // supplying a different UUID is refused to prevent cross-estate spoofing.
-                    "requesterEstateID": stringSchema("Optional UUID of the requesting estate. Omit to use the default (authenticated caller) estate. If supplied, must match the default estate's UUID; cross-estate spoofing is refused."),
-                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall across any confirmation state. null is invalid."),
-                    "limit": integerSchema("Max rows per estate to return. Omit for no explicit cap; null is invalid."),
-                    "ordering": stringSchema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc. Omit to use the default; null is invalid."),
-                    "hydrationLevel": stringSchema("Hydration: structured (default), full, bitmapOnly. Omit to use the default; null is invalid."),
-                ],
-                required: []
-            ),
-            provenance: .federation
-        )
-    }
-
     // MARK: - Schema helpers
 
     /// The shared `outputSchema` for the recall family (`moot_memory_search`,
@@ -919,13 +846,9 @@ public enum ToolProjection {
     }
 
     /// Whether a public name is callable in this binary's selected surface.
-    /// V1 retains its one notice-only compatibility route, which has no
-    /// advertised schema; v2 has no hidden routes while its catalog is partial.
+    /// The v2 surface has no hidden routes: a name is dispatchable only if the
+    /// v2 catalog advertises it.
     static func admitsDispatch(name: String, environment: [String: String]) -> Bool {
-        if tools(environment: environment).contains(where: { $0.name == name }) {
-            return true
-        }
-        return !AriaSurface.isV2
-            && ToolMutationInventory.dispatchableUnadvertisedTools.contains(name)
+        tools(environment: environment).contains(where: { $0.name == name })
     }
 }
