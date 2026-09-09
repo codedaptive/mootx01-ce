@@ -126,7 +126,8 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                         "oneOf":[
                             {"required":["memory_id"],"not":{"required":["memory_ids"]}},
                             {"required":["memory_ids"],"not":{"required":["memory_id"]}}
-                        ],"additionalProperties":false})),
+                        ],
+                        "additionalProperties":false})),
                 descriptor("memory_list", "moot_memory_list", V2OperationEffect::Read,
                     "Enumerate a complete authorized structural memory inventory with revision-bound pagination.",
                     &["list memories", "enumerate memory"],
@@ -144,6 +145,7 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                     json!({"type":"object","properties":{
                         "query":{"type":"string"},"near":{"type":"string","format":"uuid"},
                         "limit":{"type":"integer","minimum":1,"maximum":500},
+                        "explain":{"type":"boolean"},
                         "estate_id":{"type":"string","format":"uuid"}},
                         "oneOf":[
                             {"required":["query"],"not":{"required":["near"]}},
@@ -320,7 +322,7 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                     "Compare a local vault with the estate and optionally apply reconciliation.",
                     &["Compare a local vault with the estate and optionally apply reconciliation."], data_mobility_input_schema("moot_vault_reconcile"), &["vault"]),
                 descriptor_with_features("vault_job", "moot_vault_job", V2OperationEffect::Read,
-                    "Fetch the status of one vault job.",
+                    "Fetch the status of one vault job. Returns running, complete, or failed status with progress details.",
                     &["Fetch the status of one vault job."], data_mobility_input_schema("moot_vault_job"), &["vault"]),
                 descriptor("packet_get", "moot_packet_get", V2OperationEffect::Read,
                     "Fetch one authorized work packet by its durable drawer UUID.",
@@ -780,9 +782,11 @@ fn recall_input_schema(name: &str) -> Option<Value> {
         "moot_recall_shaped" => Some(
             json!({"type":"object","properties":{"query":{"type":"string"},"preset":{"type":"string"},"limit":{"type":"integer","minimum":1},"filter":{"type":"string"},"wing":{"type":"string"},"estate_id":{"type":"string","format":"uuid"}},"required":["query"],"additionalProperties":false}),
         ),
-        "moot_recall_distilled" | "moot_recall_vague" | "moot_recall_walk" => Some(
-            json!({"type":"object","properties":basic(),"required":["query"],"additionalProperties":false}),
-        ),
+        "moot_recall_distilled" | "moot_recall_vague" | "moot_recall_walk" => {
+            let mut props = basic();
+            props["echo_query"] = json!({"type":"boolean"});
+            Some(json!({"type":"object","properties":props,"required":["query"],"additionalProperties":false}))
+        }
         _ => None,
     }
 }
@@ -985,7 +989,7 @@ fn data_mobility_input_schema(name: &str) -> Value {
             json!({"palace_path":string(),"mode":{"type":"string","enum":["foreground","background"]},"estate_id":uuid()}),
             json!(["palace_path"]),
         ),
-        "moot_json_import" => (json!({"path":string(),"estate_id":uuid()}), json!(["path"])),
+        "moot_json_import" => (json!({"path":string(),"return_id_map":{"type":"boolean"},"estate_id":uuid()}), json!(["path"])),
         "moot_file_dataset" => return json!({
             "type":"object",
             "properties":{"name":string(),"location":string(),"columns":{"type":"array"},"rows":{"type":"array"},"csv_path":string(),"wing":string(),"sensitivity":{"type":"string","enum":["normal","elevated","restricted","secret"]},"estate_id":uuid()},
@@ -1041,7 +1045,7 @@ fn data_mobility_input_schema(name: &str) -> Value {
             json!({"vaultPath":string(),"apply":{"type":"boolean"},"estate_id":uuid()}),
             json!(["vaultPath"]),
         ),
-        "moot_vault_job" => (json!({"job_id":uuid()}), json!(["job_id"])),
+        "moot_vault_job" => (json!({"job_id":{"type":"string","format":"uuid","description":"Job ID returned by moot_vault_import or moot_vault_export."}}), json!(["job_id"])),
         _ => unreachable!("only selected data-mobility names use this schema"),
     };
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
