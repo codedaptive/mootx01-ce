@@ -101,6 +101,7 @@ dependencies = [
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",
+ "moot-product-identity",
  "neuron-kit",
  "observer-sink",
  "persistence-kit",
@@ -122,6 +123,7 @@ dependencies = [
  "aria-mcp",
  "genius-locus-kit",
  "moot-product-identity",
+ "serde_json",
 ]
 
 [[package]]
@@ -1382,6 +1384,7 @@ dependencies = [
  "corpus-kit",
  "genius-locus-kit",
  "locus-kit",
+ "moot-product-identity",
  "persistence-kit",
  "rusqlite",
  "serde",
@@ -1863,6 +1866,9 @@ dependencies = [
 [[package]]
 name = "moot-product-identity"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "native-tls"

@@ -104,9 +104,12 @@ local machine.
 
 ## Configuration
 
+The stats-store path is read from `daemon.stats_store` in `<config-dir>/config.json`
+(seeded by `mootx01 install`; default `<config-dir>/moot-mgr/stats.sqlite`).
+No environment variable overrides the store path.
+
 | Environment variable | Meaning | Default |
 |---|---|---|
-| `MOOT_MGR_STORE` | Manager statistics SQLite file | Platform app-data directory |
 | `MOOT_MGR_RETENTION_SECONDS` | Retention window | `604800` (7 days) |
 | `MOOT_MGR_RETENTION_CADENCE_SECONDS` | Resident retention cadence | `3600` (1 hour) |
 | `MOOT_MGR_HTTP_PORT` | Dashboard/read API port | `4200` |
@@ -134,7 +137,7 @@ service when genuinely socket-free operation is required.
 | Symptom | Check |
 |---|---|
 | Dashboard does not open | Run `moot-mgr status`; confirm port `4200` or `MOOT_MGR_HTTP_PORT` |
-| No estates appear | Confirm `MOOT_MGR_STORE` and `MOOT_MGR_ESTATES_DIR` resolve to the same product data root |
+| No estates appear | Confirm `daemon.stats_store` in `config.json` and `MOOT_MGR_ESTATES_DIR` resolve to the same product data root |
 | Monitoring is empty | Run `moot-mgr monitoring status`, then enable it if desired |
 | Old samples remain | Run `moot-mgr retention run` and inspect the retention variables |
 | Control request is rejected | Confirm loopback Origin and bearer token; do not weaken the read/control separation |
