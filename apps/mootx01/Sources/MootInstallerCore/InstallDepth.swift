@@ -20,6 +20,26 @@
 // from tools/moot-packager and embedded by EmbeddedArtifacts.
 
 import Foundation
+import AriaMCP
+
+/// The install bundle must describe the same public ARIA release as the
+/// executable that consumes it. V2's spelling comes from AriaMCP's public
+/// envelope authority; it is only available when the product explicitly
+/// forwards the AriaV2 trait into this target.
+private enum SelectedARIARelease {
+    static let version: String = {
+        #if MOOTX01_ARIA_V2
+        AriaV2Envelope.surfaceVersion
+        #else
+        "v1"
+        #endif
+    }()
+}
+
+public enum InstallBundleError: Error, Equatable {
+    case ariaReleaseMismatch(bundle: String, executable: String)
+    case missingAriaBundleIdentity(version: String)
+}
 #if canImport(Darwin)
 import Darwin
 #elseif canImport(Glibc)
@@ -161,6 +181,10 @@ public struct InstallMapHost: Sendable, Equatable, Codable {
 /// The decoded embedded install bundle: the canonical skill, the host map, and
 /// the pre-generated package trees keyed by host-rooted relative path.
 public struct InstallBundle: Sendable {
+    /// The ARIA public-surface release selected when this artifact was made.
+    public let ariaVersion: String
+    /// Stable identity of the selected generated payload.
+    public let ariaBundleIdentity: String
     public let skillMarkdown: String
     public let hosts: [String: InstallMapHost]
     /// Package files keyed by `"<host>/<relpath>"` → file contents.
@@ -169,17 +193,52 @@ public struct InstallBundle: Sendable {
     private struct Wire: Codable {
         struct Map: Codable { let hosts: [InstallMapHost] }
         let schemaVersion: Int
+        let ariaVersion: String?
+        let ariaBundleIdentity: String?
         let skillMarkdown: String
+        let skillMarkdownByHost: [String: String]?
         let installMap: Map
         let packages: [String: String]
     }
+
+    private let skillMarkdownByHost: [String: String]
+
+    /// The ARIA release expected by this executable. Tests use this to stage a
+    /// deliberately incompatible bundle without relying on build flags.
+    static let selectedARIAReleaseVersion = SelectedARIARelease.version
 
     /// Decode the embedded `install-bundle.json`. Throws on malformed embedded
     /// data — that is a build-time defect (the artifact is committed), so a
     /// hard failure is correct.
     public init(json: String) throws {
         let wire = try JSONDecoder().decode(Wire.self, from: Data(json.utf8))
+        let ariaVersion = wire.ariaVersion ?? "v1"
+        guard ariaVersion == Self.selectedARIAReleaseVersion else {
+            throw InstallBundleError.ariaReleaseMismatch(
+                bundle: ariaVersion,
+                executable: Self.selectedARIAReleaseVersion
+            )
+        }
+        guard let identity = wire.ariaBundleIdentity, !identity.isEmpty else {
+            // Pre-selector bundles remain usable for the v1 compatibility
+            // release only. A selected v2 bundle must carry its own identity.
+            guard ariaVersion == "v1" else {
+                throw InstallBundleError.missingAriaBundleIdentity(version: ariaVersion)
+            }
+            self.ariaBundleIdentity = "legacy-v1"
+            self.ariaVersion = ariaVersion
+            self.skillMarkdown = wire.skillMarkdown
+            self.skillMarkdownByHost = wire.skillMarkdownByHost ?? [:]
+            var legacyMap: [String: InstallMapHost] = [:]
+            for h in wire.installMap.hosts { legacyMap[h.id] = h }
+            self.hosts = legacyMap
+            self.packages = wire.packages
+            return
+        }
+        self.ariaVersion = ariaVersion
+        self.ariaBundleIdentity = identity
         self.skillMarkdown = wire.skillMarkdown
+        self.skillMarkdownByHost = wire.skillMarkdownByHost ?? [:]
         var map: [String: InstallMapHost] = [:]
         for h in wire.installMap.hosts { map[h.id] = h }
         self.hosts = map
@@ -189,7 +248,11 @@ public struct InstallBundle: Sendable {
     /// The embedded bundle, parsed once.
     public static let embedded: InstallBundle = {
         do {
+            #if MOOTX01_ARIA_V2
+            return try InstallBundle(json: EmbeddedArtifactsV2.installBundleJSON)
+            #else
             return try InstallBundle(json: EmbeddedArtifacts.installBundleJSON)
+            #endif
         } catch {
             // The artifact is committed and generated; a parse failure here is a
             // build defect, surfaced loudly rather than silently degrading.
@@ -206,6 +269,12 @@ public struct InstallBundle: Sendable {
     /// hermes, opencode), so the mapping is a direct lookup.
     public func host(forClientID id: String) -> InstallMapHost? {
         hosts[id]
+    }
+
+    /// The generated teaching payload for one host. Legacy bundles carry only
+    /// the neutral scalar and intentionally fall back to it.
+    public func skillMarkdown(forHostID id: String) -> String {
+        skillMarkdownByHost[id] ?? skillMarkdown
     }
 
     /// The package files for a host, keyed by host-relative path
@@ -358,13 +427,17 @@ public enum DepthInstaller {
     }
 
     /// Mode 2: write the embedded canonical SKILL.md to the host's skillUserPath.
-    private static func writeSkill(host: InstallMapHost, homeDirectory: URL) throws -> DepthOutcome {
+    static func writeSkill(
+        host: InstallMapHost,
+        bundle: InstallBundle = .embedded,
+        homeDirectory: URL
+    ) throws -> DepthOutcome {
         let dest = expandTilde(host.skillUserPath, homeDirectory: homeDirectory)
         let dir = dest.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // §4.2: back up any existing skill file before overwriting.
         try Installer.backupExisting(at: dest)
-        try InstallBundle.embedded.skillMarkdown
+        try bundle.skillMarkdown(forHostID: host.id)
             .write(to: dest, atomically: true, encoding: .utf8)
         return .skills(path: dest.path)
     }
@@ -436,8 +509,8 @@ public enum DepthInstaller {
         // loads plugins registered via a marketplace in settings. So write a
         // directory-marketplace manifest and register + enable it. Without this
         // the plugin files land but `/plugin` never lists or loads mootx01.
-        // (Other hosts — Gemini, Cursor, Codex — carry their own registration in
-        // their package payloads; this step is Claude Code specific.)
+        // CodexPluginInstaller registers Codex after this materialization step.
+        // This settings-file registration is Claude Code specific.
         if host.id == "claude-code" {
             try registerClaudeCodeMarketplace(
                 pluginDir: dest,
