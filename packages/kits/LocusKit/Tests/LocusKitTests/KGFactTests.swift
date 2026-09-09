@@ -95,6 +95,16 @@ struct KGFactTests {
         #expect(decoded.foreignRecordID == "t_fleet_works_with_skippy_0001")
     }
 
+    @Test
+    func test_legacyCodablePayload_defaultsExtractionFields() throws {
+        let data = Data(#"{"id":"legacy","subject":"Jack","predicate":"birthday","object":"June 20th","sourceDrawerID":"drawer","addedBy":"","foreignSourceKey":"","foreignRecordID":"","adjectiveBitmap":0,"operationalBitmap":0,"provenanceBitmap":0,"filedAt":0}"#.utf8)
+        let decoded = try JSONDecoder().decode(KGFact.self, from: data)
+        #expect(decoded.evidenceQuote.isEmpty)
+        #expect(decoded.evidenceStart == -1)
+        #expect(decoded.evidenceEnd == -1)
+        #expect(decoded.searchProjection.isEmpty)
+    }
+
     // MARK: - KGExtractorClass — bits 0–3, contiguous
 
     @Test
