@@ -110,17 +110,20 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         // A fresh in-memory estate per branch keeps each branch's rows
         // fully isolated. The estateID is a new UUID; the owner
         // identifier encodes the branchID for traceability in logs.
-        // Identity keys: Estate.open resolves the key store from the
-        // backend, so this `.inMemory` estate mints its Ed25519 identity
-        // into an in-memory store — a branch is ephemeral and must never
-        // leave a permanent com.mootx01.estate.identity item in the login
-        // keychain (one per derive/discard cycle, unbounded growth).
+        // The branch estate opens non-federating: no Ed25519 identity is
+        // minted, no key store is contacted in either direction, and
+        // `issueGrant` throws `invalidManifest` for the estate's lifetime.
+        // A branch is ephemeral scratch that never issues a federation
+        // grant, so the identity step would only spend a keypair per
+        // derive/discard cycle; `federate: false` is stated rather than
+        // inherited from the parameter's default so the posture is visible
+        // here (the 2026-09-08 catalog landing flipped that default).
         let branchID = self.branchID
         let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let storage = InMemoryStorage(configuration: config)
         let credentials = OwnerCredentials(ownerIdentifier: "branch-\(branchID.uuidString)")
         _ = try await LocusKit.Estate.create(storage: storage, owner: credentials)
-        let estate = try await LocusKit.Estate.open(storage: storage, owner: credentials)
+        let estate = try await LocusKit.Estate.open(storage: storage, owner: credentials, federate: false)
         self.branchEstate = estate
 
         // Copy each parent row into the branch estate. The branch-estate
@@ -232,7 +235,9 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         let credentials = OwnerCredentials(
             ownerIdentifier: "branch-\(branchID.uuidString)-released")
         _ = try await LocusKit.Estate.create(storage: storage, owner: credentials)
-        let empty = try await LocusKit.Estate.open(storage: storage, owner: credentials)
+        // Non-federating, like the branch estate it replaces: a released
+        // shell never issues a grant.
+        let empty = try await LocusKit.Estate.open(storage: storage, owner: credentials, federate: false)
         self.branchEstate = empty
         self.snapshotIDs = []
         // Also drop the reference to the parent estate. A branch-of-branch's
@@ -247,7 +252,7 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
             ownerIdentifier: "branch-\(branchID.uuidString)-parent-released")
         _ = try await LocusKit.Estate.create(storage: parentStorage, owner: parentCredentials)
         self.parentEstate = try await LocusKit.Estate.open(
-            storage: parentStorage, owner: parentCredentials)
+            storage: parentStorage, owner: parentCredentials, federate: false)
     }
 
     /// Compare the current branch state to the parent.
