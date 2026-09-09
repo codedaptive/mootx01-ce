@@ -70,19 +70,25 @@ public struct ProjectedTool: Sendable, Equatable {
     /// is then omitted from the wire entry entirely, so tools that never
     /// declared a schema are byte-identical to before this field existed.
     public let outputSchema: JSONValue?
+    /// Optional MCP execution hints. V1 projections leave this absent so their
+    /// wire representation remains unchanged; the selected v2 registry derives
+    /// it from the operation's stable identity and declared effect.
+    public let annotations: JSONValue?
 
     public init(
         name: String,
         description: String,
         inputSchema: JSONValue,
         provenance: ToolProvenance,
-        outputSchema: JSONValue? = nil
+        outputSchema: JSONValue? = nil,
+        annotations: JSONValue? = nil
     ) {
         self.name = name
         self.description = description
         self.inputSchema = inputSchema
         self.provenance = provenance
         self.outputSchema = outputSchema
+        self.annotations = annotations
     }
 }
 
@@ -159,6 +165,13 @@ public enum ToolProjection {
     /// `ProcessInfo.processInfo.environment` (which is read-only at runtime).
     /// Production code uses `tools()` (no args).
     public static func tools(environment: [String: String]) -> [ProjectedTool] {
+        if AriaSurface.isV2 {
+            // The v2 catalog contains only operations whose typed handlers are
+            // executable in this build. Do not wrap them with v1's advisory
+            // mode/teachme arguments or leak community/first-party entries.
+            return AriaV2SelectedCatalog.registry(environment: environment).projectedTools
+        }
+
         var raw: [ProjectedTool] = []
         // Anthropic memory_20250818 adapter: opt-in via MOOTX01_MEMORY_TOOL=1
         // (mootx01 enable memory-tool sets this in the daemon env).
@@ -903,5 +916,16 @@ public enum ToolProjection {
             return []
         }
         return Set(properties.keys)
+    }
+
+    /// Whether a public name is callable in this binary's selected surface.
+    /// V1 retains its one notice-only compatibility route, which has no
+    /// advertised schema; v2 has no hidden routes while its catalog is partial.
+    static func admitsDispatch(name: String, environment: [String: String]) -> Bool {
+        if tools(environment: environment).contains(where: { $0.name == name }) {
+            return true
+        }
+        return !AriaSurface.isV2
+            && ToolMutationInventory.dispatchableUnadvertisedTools.contains(name)
     }
 }

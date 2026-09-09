@@ -266,6 +266,427 @@ enum DatasetTools {
         ]
     }
 
+    // MARK: - Typed v2 lowers
+
+    /// Typed production snapshots for the v2 data-mobility lower. These call
+    /// the same store and estate seams as the v1 tools, but never construct or
+    /// interpret a rendered `ToolResult`.
+    enum DirectFailure: Error, Sendable { case datasetUnavailable }
+
+    static func directFileDataset(
+        arguments: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async throws -> JSONValue {
+        let name = try requireString(arguments, "name")
+        let location = try requireString(arguments, "location")
+        let wing = arguments["wing"]?.stringValue
+        let sensitivity = try decodeSensitivity(arguments["sensitivity"])
+        let columnSpecs = try parseColumnSpecs(arguments["columns"])
+        let hasCSV = arguments["csv_path"] != nil
+        let hasRows = arguments["rows"] != nil
+        guard !(hasCSV && hasRows) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_file_dataset: supply either rows or csv_path, not both")
+        }
+        for column in columnSpecs {
+            try validateDatasetColumnIdentifier(column.name)
+        }
+
+        let schema: DatasetSchema
+        let rows: [[String: TypedValue]]
+        let source: String
+        if let csv = arguments["csv_path"]?.stringValue {
+            let resolved = try resolveCSVPath(csv)
+            let parsed = try parseCSV(at: resolved, columnHints: columnSpecs)
+            schema = parsed.schema
+            rows = parsed.rows
+            source = "csv:\(URL(fileURLWithPath: resolved).lastPathComponent)"
+        } else if let inline = arguments["rows"] {
+            guard !columnSpecs.isEmpty else {
+                throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_file_dataset: columns is required when using inline rows")
+            }
+            let parsed = try parseInlineRows(inline, columnSpecs: columnSpecs)
+            schema = parsed.schema
+            rows = parsed.rows
+            source = "inline_rows:\(name)"
+        } else {
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_file_dataset: either rows or csv_path is required")
+        }
+
+        let datasetID = UUID()
+        let store = try await kit.datasetStore(for: handle)
+        try await store.createDataset(id: datasetID, schema: schema, indexes: [])
+        do {
+            if !rows.isEmpty { try await store.appendRows(id: datasetID, rows: rows) }
+        } catch {
+            try? await store.dropDataset(id: datasetID)
+            throw error
+        }
+
+        let estate: LocusKit.Estate
+        do {
+            estate = try await kit.estate(for: handle)
+        } catch {
+            try? await store.dropDataset(id: datasetID)
+            throw error
+        }
+        let columnSummaries = schema.columns.map {
+            DatasetColumnSummary(name: $0.name, dataType: $0.type.rawValue.uppercased())
+        }
+        let drawer: Drawer
+        do {
+            drawer = try await estate.captureDatasetHandle(
+                datasetId: datasetID,
+                columns: columnSummaries,
+                rowCount: rows.count,
+                sourceDescription: source,
+                wing: wing,
+                room: location,
+                addedBy: "aria-v2",
+                sensitivity: sensitivity,
+                latticeAnchor: LatticeAnchor.udc("000"))
+        } catch {
+            try? await store.dropDataset(id: datasetID)
+            throw error
+        }
+
+        var signatures = "computed"
+        do {
+            let sampled = try await store.queryRows(
+                id: datasetID, predicate: nil, orderBy: [],
+                limit: datasetSignatureSampleSize, offset: nil, columns: nil)
+            var statistics: [String: ColumnStats] = [:]
+            for column in schema.columns {
+                statistics[column.name] = try await store.columnStats(id: datasetID, column: column.name)
+            }
+            _ = try await kit.computeDatasetSignatures(
+                handle: handle, drawerId: drawer.id, columns: columnSummaries,
+                columnStats: statistics, sampledRows: sampled, now: now)
+        } catch {
+            signatures = "pending (\(error.localizedDescription))"
+        }
+        var data: [String: JSONValue] = [
+            "dataset_id": .string(datasetID.uuidString.lowercased()),
+            "handle_memory_id": .string(drawer.id),
+            "name": .string(name),
+            "location": .string(location),
+            "columns": .integer(Int64(schema.columns.count)),
+            "rows": .integer(Int64(rows.count)),
+            "source": .string(source),
+            "sensitivity": .string(String(describing: sensitivity)),
+            "signatures": .string(signatures),
+        ]
+        if let wing { data["wing"] = .string(wing) }
+        return .object(data)
+    }
+
+    static func directDatasetQuery(
+        arguments: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let datasetID = try directDatasetID(arguments, tool: "moot_dataset_query")
+        let estate = try await kit.estate(for: handle)
+        let drawer: Drawer
+        do {
+            drawer = try await estate.resolveActiveDatasetHandle(datasetId: datasetID)
+        } catch {
+            throw DirectFailure.datasetUnavailable
+        }
+        guard let content = try? DatasetHandleContent.decode(from: drawer.content),
+              content.datasetId == datasetID else {
+            throw DirectFailure.datasetUnavailable
+        }
+        let schema = try directDatasetSchema(content)
+        let tableName = datasetTableName(datasetID)
+        let predicate = try strictDirectPredicate(
+            arguments["where"], tableName: tableName, schema: schema)
+        let order = try strictDirectOrderBy(
+            arguments["order_by"], tableName: tableName, schema: schema)
+        let limit = Int(arguments["limit"]?.integerValue ?? 100)
+        guard (1...1_000).contains(limit) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_dataset_query: limit must be between 1 and 1000")
+        }
+        let columns = try strictDirectColumns(arguments["columns"], schema: schema)
+        let store = try await kit.datasetStore(for: handle)
+        let rows = try await store.queryRows(
+            id: datasetID, predicate: predicate, orderBy: order, limit: limit, offset: nil, columns: columns)
+        var data: [String: JSONValue] = [
+            "dataset_id": .string(datasetID.uuidString.lowercased()),
+            "handle_memory_id": .string(drawer.id),
+            "state": .string(String(describing: drawer.state)),
+            "sensitivity": .string(String(describing: drawer.adjectiveSensitivity)),
+            "rows_returned": .integer(Int64(rows.count)),
+            "limit": .integer(Int64(limit)),
+            "rows": .array(rows.map { row in .object(row.values.mapValues(Self.directJSONValue)) }),
+        ]
+        data["columns"] = .array(content.columns.map { .string($0.name) })
+        data["handle_row_count"] = .integer(Int64(content.rowCount))
+        return .object(data)
+    }
+
+    static func directDatasetStats(
+        arguments: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let datasetID = try directDatasetID(arguments, tool: "moot_dataset_stats")
+        let estate = try await kit.estate(for: handle)
+        let drawer: Drawer
+        do {
+            drawer = try await estate.resolveActiveDatasetHandle(datasetId: datasetID)
+        } catch {
+            throw DirectFailure.datasetUnavailable
+        }
+        let requested = arguments["column"]?.stringValue
+        if let requested { try validateDatasetColumnIdentifier(requested) }
+        let columns: [String]
+        if let requested {
+            columns = [requested]
+        } else {
+            columns = (try? DatasetHandleContent.decode(from: drawer.content))?.columns.map(\.name) ?? []
+        }
+        let store = try await kit.datasetStore(for: handle)
+        var stats: [String: JSONValue] = [:]
+        for column in columns {
+            let value = try await store.columnStats(id: datasetID, column: column)
+            stats[column] = .object([
+                "count": .integer(value.count),
+                "distinct_count": .integer(value.distinctCount),
+                "null_count": .integer(value.nullCount),
+                "min": directJSONValue(value.min),
+                "max": directJSONValue(value.max),
+            ])
+        }
+        return .object([
+            "dataset_id": .string(datasetID.uuidString.lowercased()),
+            "handle_memory_id": .string(drawer.id),
+            "stats": .object(stats),
+        ])
+    }
+
+    private static func directDatasetID(_ arguments: [String: JSONValue], tool: String) throws -> UUID {
+        let value = try requireString(arguments, "id")
+        guard let id = UUID(uuidString: value) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "\(tool): id must be a valid UUID")
+        }
+        return id
+    }
+
+    private enum DirectDatasetColumnKind {
+        case text
+        case integer
+        case float
+        case bool
+    }
+
+    /// Interpret the schema captured with the authorized dataset handle. The
+    /// selected v2 query path validates every referenced column and comparison
+    /// type against this schema before constructing a storage predicate. The
+    /// legacy v1 parser remains unchanged below.
+    private static func directDatasetSchema(
+        _ content: DatasetHandleContent
+    ) throws -> [String: DirectDatasetColumnKind] {
+        var schema: [String: DirectDatasetColumnKind] = [:]
+        for column in content.columns {
+            try validateDatasetColumnIdentifier(column.name)
+            guard schema[column.name] == nil else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "moot_dataset_query: dataset schema contains duplicate column '\(column.name)'")
+            }
+            switch column.dataType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+            case "BOOL", "BOOLEAN": schema[column.name] = .bool
+            case "INT", "INTEGER": schema[column.name] = .integer
+            case "FLOAT", "REAL", "DOUBLE": schema[column.name] = .float
+            default: schema[column.name] = .text
+            }
+        }
+        guard !schema.isEmpty else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "moot_dataset_query: dataset schema is unavailable")
+        }
+        return schema
+    }
+
+    private static func strictDirectPredicate(
+        _ value: JSONValue?,
+        tableName: String,
+        schema: [String: DirectDatasetColumnKind]
+    ) throws -> StoragePredicate? {
+        guard let value else { return nil }
+        var nodes = 0
+        return try strictDirectPredicate(
+            value, tableName: tableName, schema: schema, depth: 1, nodes: &nodes)
+    }
+
+    private static func strictDirectPredicate(
+        _ value: JSONValue,
+        tableName: String,
+        schema: [String: DirectDatasetColumnKind],
+        depth: Int,
+        nodes: inout Int
+    ) throws -> StoragePredicate {
+        guard depth <= 8 else { throw datasetQueryInvalid("predicate exceeds maximum depth") }
+        nodes += 1
+        guard nodes <= 128 else { throw datasetQueryInvalid("predicate exceeds maximum node count") }
+        guard let object = value.objectValue else {
+            throw datasetQueryInvalid("predicate values must be objects")
+        }
+
+        if object.count == 1, let children = object["and"]?.arrayValue {
+            guard !children.isEmpty else { throw datasetQueryInvalid("predicate compound must not be empty") }
+            return .and(try children.map {
+                try strictDirectPredicate(
+                    $0, tableName: tableName, schema: schema, depth: depth + 1, nodes: &nodes)
+            })
+        }
+        if object.count == 1, let children = object["or"]?.arrayValue {
+            guard !children.isEmpty else { throw datasetQueryInvalid("predicate compound must not be empty") }
+            return .or(try children.map {
+                try strictDirectPredicate(
+                    $0, tableName: tableName, schema: schema, depth: depth + 1, nodes: &nodes)
+            })
+        }
+
+        guard let columnName = object["col"]?.stringValue else {
+            throw datasetQueryInvalid("comparison requires a column")
+        }
+        do { try validateDatasetColumnIdentifier(columnName) } catch {
+            throw datasetQueryInvalid("invalid predicate column")
+        }
+        guard let columnKind = schema[columnName] else {
+            throw datasetQueryInvalid("unknown predicate column")
+        }
+        guard let operation = object["op"]?.stringValue else {
+            throw datasetQueryInvalid("comparison requires an operator")
+        }
+        let column = Column(table: tableName, name: columnName)
+        if operation == "is_null" || operation == "is_not_null" {
+            guard object.count == 2, object["val"] == nil else {
+                throw datasetQueryInvalid("null predicate must contain only col and op")
+            }
+            return operation == "is_null" ? .isNull(column) : .isNotNull(column)
+        }
+
+        guard ["eq", "neq", "lt", "lte", "gt", "gte"].contains(operation),
+              object.count == 3, let raw = object["val"] else {
+            throw datasetQueryInvalid("comparison must contain only col, op, and val")
+        }
+        let typed = try strictDirectPredicateValue(raw, kind: columnKind, operation: operation)
+        switch operation {
+        case "eq": return .eq(column, typed)
+        case "neq": return .neq(column, typed)
+        case "lt": return .lt(column, typed)
+        case "lte": return .lte(column, typed)
+        case "gt": return .gt(column, typed)
+        case "gte": return .gte(column, typed)
+        default: preconditionFailure("operation was validated above")
+        }
+    }
+
+    private static func strictDirectPredicateValue(
+        _ value: JSONValue,
+        kind: DirectDatasetColumnKind,
+        operation: String
+    ) throws -> TypedValue {
+        switch (kind, value) {
+        case (.bool, .bool(let value)) where operation == "eq" || operation == "neq":
+            return .bool(value)
+        case (.integer, .integer(let value)):
+            return .int(value)
+        case (.float, .integer(let value)):
+            return .float(Double(value))
+        case (.float, .double(let value)):
+            return .float(value)
+        case (.text, .string(let value)):
+            return .text(value)
+        case (.bool, _):
+            throw datasetQueryInvalid("boolean columns permit only boolean eq or neq predicates")
+        case (.integer, _):
+            throw datasetQueryInvalid("integer columns require an integer comparison value")
+        case (.float, _):
+            throw datasetQueryInvalid("numeric columns require a numeric comparison value")
+        case (.text, _):
+            throw datasetQueryInvalid("text columns require a string comparison value")
+        }
+    }
+
+    private static func strictDirectOrderBy(
+        _ value: JSONValue?,
+        tableName: String,
+        schema: [String: DirectDatasetColumnKind]
+    ) throws -> [OrderClause] {
+        guard let value else { return [] }
+        guard let values = value.arrayValue else {
+            throw datasetQueryInvalid("order_by must be an array")
+        }
+        return try values.map { value in
+            guard let object = value.objectValue,
+                  Set(object.keys).isSubset(of: ["col", "dir"]),
+                  let columnName = object["col"]?.stringValue else {
+                throw datasetQueryInvalid("order_by entries require col and optional dir")
+            }
+            do { try validateDatasetColumnIdentifier(columnName) } catch {
+                throw datasetQueryInvalid("invalid order_by column")
+            }
+            guard schema[columnName] != nil else {
+                throw datasetQueryInvalid("unknown order_by column")
+            }
+            let direction: OrderDirection
+            switch object["dir"] {
+            case nil, .some(.string("asc")): direction = .ascending
+            case .some(.string("desc")): direction = .descending
+            default: throw datasetQueryInvalid("order_by dir must be asc or desc")
+            }
+            return OrderClause(column: Column(table: tableName, name: columnName), direction: direction)
+        }
+    }
+
+    private static func strictDirectColumns(
+        _ value: JSONValue?,
+        schema: [String: DirectDatasetColumnKind]
+    ) throws -> [String]? {
+        guard let value else { return nil }
+        guard let values = value.arrayValue else {
+            throw datasetQueryInvalid("projection columns must be an array")
+        }
+        if values.isEmpty { return nil }
+        return try values.map { value in
+            guard let columnName = value.stringValue, !columnName.isEmpty else {
+                throw datasetQueryInvalid("projection columns must be non-empty strings")
+            }
+            do { try validateDatasetColumnIdentifier(columnName) } catch {
+                throw datasetQueryInvalid("invalid projection column")
+            }
+            guard schema[columnName] != nil else {
+                throw datasetQueryInvalid("unknown projection column")
+            }
+            return columnName
+        }
+    }
+
+    private static func datasetQueryInvalid(_ reason: String) -> JSONRPCError {
+        JSONRPCError(
+            code: JSONRPCErrorCode.invalidParams,
+            message: "moot_dataset_query: \(reason)")
+    }
+
+    private static func directJSONValue(_ value: TypedValue) -> JSONValue {
+        switch value {
+        case .null: return .null
+        case .bool(let value): return .bool(value)
+        case .int(let value), .bitmap(let value): return .integer(value)
+        case .float(let value): return .double(value)
+        case .text(let value): return .string(value)
+        case .uuid(let value): return .string(value.uuidString.lowercased())
+        case .timestamp(let value): return .string(ISO8601DateFormatter().string(from: value))
+        default: return .string(typedValueToString(value))
+        }
+    }
+
     // MARK: - moot_file_dataset
 
     private static func runFileDataset(

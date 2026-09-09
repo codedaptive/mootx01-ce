@@ -147,6 +147,39 @@ fn http_tools_list_round_trips() {
     assert!(!tools.is_empty());
 }
 
+#[cfg(feature = "aria-v2")]
+#[test]
+fn v2_http_tools_list_and_monitoring_status_round_trip() {
+    let (list_status, list_body) = round_trip(
+        "POST",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+    );
+    assert_eq!(list_status, 200);
+    let listed: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    let listed_names: std::collections::BTreeSet<String> = listed["result"]["tools"]
+        .as_array().expect("tools/list array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
+        .collect();
+    let selected_names: std::collections::BTreeSet<String> = aria_mcp::v2::catalog::selected_tools()
+        .as_array().expect("selected catalog array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("selected tool name").to_owned())
+        .collect();
+    assert_eq!(listed_names, selected_names);
+    assert!(listed_names.contains("moot_monitoring_status"));
+
+    let (call_status, call_body) = round_trip(
+        "POST",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_monitoring_status","arguments":{}}}"#,
+    );
+    assert_eq!(call_status, 200);
+    let called: serde_json::Value = serde_json::from_slice(&call_body).unwrap();
+    assert_eq!(called["result"]["structuredContent"]["surface_version"], "v2");
+    assert_eq!(called["result"]["structuredContent"]["tool"], "moot_monitoring_status");
+    assert_eq!(called["result"]["structuredContent"]["meta"]["effect"], "read");
+}
+
 #[test]
 fn http_non_post_non_get_returns_405() {
     // PUT (and other non-GET, non-POST methods) must be rejected with 405.

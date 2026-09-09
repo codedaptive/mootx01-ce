@@ -99,6 +99,62 @@ pub fn is_lens_tool(name: &str) -> bool {
     LENS_TOOLS.contains(&name)
 }
 
+/// Direct typed cores for the three graph lenses.  The legacy renderer keeps
+/// owning its text presentation, while a v2 caller can consume the actual
+/// lower-kit results without interpreting that presentation.
+pub fn execute_keystones_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    wing: &str,
+    top_k: usize,
+    timestamp_seconds: f64,
+) -> Result<Vec<neuron_kit::Keystone>, cognition_kit::RecipeRunError> {
+    run_keystones(coordinator, handle, wing, top_k, timestamp_seconds)
+}
+
+pub fn execute_constellation_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    wing: &str,
+    timestamp_seconds: f64,
+) -> Result<neuron_kit::Constellation, cognition_kit::RecipeRunError> {
+    run_constellation(coordinator, handle, wing, timestamp_seconds)
+}
+
+pub fn execute_free_association_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    wing: &str,
+    seed_drawer_id: &str,
+    walk_length: usize,
+    result_limit: usize,
+) -> Result<Vec<cognition_kit::Association>, cognition_kit::RecipeRunError> {
+    run_free_association(
+        coordinator, handle, wing, seed_drawer_id, walk_length, result_limit,
+    )
+}
+
+/// Typed lower cores for the two estate-scoped analytic lenses.  Their v1
+/// arms retain only source-compatible formatting and citations.
+pub fn execute_bias_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    reference: &[(String, f64)],
+    now_millis: i64,
+) -> Result<cognition_kit::BiasReport, cognition_kit::RecipeRunError> {
+    run_bias(coordinator, handle, reference, now_millis)
+}
+
+pub fn execute_cohesion_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    frame: locus_kit::filter::RecallFrame,
+    threshold: f32,
+    now_millis: i64,
+) -> Result<cognition_kit::ContradictionOutput, cognition_kit::RecipeRunError> {
+    run_contradiction(coordinator, handle, frame, threshold, now_millis)
+}
+
 /// How many extent drawer ids a formal-concept row lists before truncating to
 /// "+N more". Twenty matches the default recall frame limit, so an untruncated
 /// extent is the common case; the cap exists so one giant concept cannot flood
@@ -131,7 +187,7 @@ pub fn dispatch(
             // which threads `Date.timeIntervalSince1970`). Scale ms→s for this
             // telemetry-only float — do NOT change `wall_now()`, which the i64
             // ms-timestamp lenses depend on.
-            let ranked = run_keystones(&coord, &estate.handle, wing, top_k, now as f64 / 1000.0)
+            let ranked = execute_keystones_typed(&coord, &estate.handle, wing, top_k, now as f64 / 1000.0)
                 .map_err(lens_error)?;
             // isKeystone post-filter: when keystoneOnly is true, restrict the
             // returned candidate set to drawers that carry the isKeystone bit
@@ -190,7 +246,7 @@ pub fn dispatch(
             // ms→s: `now` is `wall_now()` epoch milliseconds; the constellation
             // VizGraph `ts` is epoch seconds (mirrors the Swift recipe's
             // `Date.timeIntervalSince1970`). See the keystones arm above.
-            let out = run_constellation(&coord, &estate.handle, wing, now as f64 / 1000.0)
+            let out = execute_constellation_typed(&coord, &estate.handle, wing, now as f64 / 1000.0)
                 .map_err(lens_error)?;
             Ok(list(
                 "constellation",
@@ -212,7 +268,7 @@ pub fn dispatch(
             let k = crate::dispatch::clamp_limit(
                 Some(opt_integer(args, "k", 10)?), "k", 10, crate::dispatch::LIMIT_HARD_CEILING
             )?;
-            let out = run_free_association(&coord, &estate.handle, wing, seed, walk_length, k)
+            let out = execute_free_association_typed(&coord, &estate.handle, wing, seed, walk_length, k)
                 .map_err(lens_error)?;
             // free_association is a forward walk; a seed with no outgoing tunnels
             // (or one not present in the wing) yields no associations. Return a
@@ -282,7 +338,7 @@ pub fn dispatch(
 
         "moot_lens_bias" => {
             let reference = decode_reference(args)?;
-            let report = run_bias(&coord, &estate.handle, &reference, now).map_err(lens_error)?;
+            let report = execute_bias_typed(&coord, &estate.handle, &reference, now).map_err(lens_error)?;
             let mut lines = vec!["bias".to_owned()];
             lines.push("for:".to_owned());
             lines.extend(
@@ -498,7 +554,7 @@ pub fn dispatch(
             // confusion with the genuine semantic contradiction detector below.
             let frame = recall_frame(args)?;
             let threshold = opt_float(args, "threshold", 1.5)? as f32;
-            let out = run_contradiction(&coord, &estate.handle, frame, threshold, now)
+            let out = execute_cohesion_typed(&coord, &estate.handle, frame, threshold, now)
                 .map_err(lens_error)?;
             // Dense-row citations: each outlier ID is a followable drawer address
             // (progressive-recall rule). Twin of Swift cohesion dense-row path.
