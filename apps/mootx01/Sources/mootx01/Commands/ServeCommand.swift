@@ -211,13 +211,61 @@ struct ServeCommand: AsyncParsableCommand {
         let identityKeyStore: (any EstateIdentityKeyStore)? =
             registered ? nil : InMemoryEstateIdentityKeyStore()
 
-        // At-rest posture. A new registered estate is created encrypted; an
-        // already-encrypted one loads its existing key; a plaintext one keeps
-        // opening as plaintext. serve runs under launchd with NO TTY, so this
-        // must never prompt and never migrate — migration is `mootx01 upgrade`.
-        let encryption: EstateEncryptionConfig
-        do {
-            let resolved = try EstateOpenPosture.resolve(for: estate)
+        // MOOTX01_RESIDENCY controls both the residency hint and the resident-index
+        // admission budget. See `parseResidencyConfig` for the full grammar.
+        // Default: ram-resident with a 25% ceiling on physical RAM.
+        let (residencyHint, residentIndexBudget) = Self.parseResidencyConfig(
+            rawValue: environment["MOOTX01_RESIDENCY"] ?? ""
+        )
+
+        // Backend selection and at-rest posture. The in-memory branch is entered
+        // before the posture block so that --in-memory never contacts the Keychain.
+        // The record was already resolved above, so a bad --db is refused before
+        // this branch is reached. The on-disk path resolves the at-rest posture
+        // before opening SQLite; the in-memory path skips it entirely.
+        //
+        // encryption is the resolved on-disk posture, nil for an in-memory serve.
+        // EstateManifestRefresh.afterPrepare below runs only when it is non-nil,
+        // so an in-memory serve writes nothing into the estate directory. The
+        // Rust port never refreshes the manifest from serve either.
+        let encryption: EstateEncryptionConfig?
+        let storage: any Storage
+        if inMemory {
+            // C1 (benchmark reset, RAM accuracy shape): --in-memory serves the
+            // estate from PersistenceKit's InMemory backend — same protocol, same
+            // algorithms, no filesystem in the measurement path. The estate lives
+            // and dies with this process (accuracy sweeps only; timing always
+            // measures the real disk path). No Keychain contact: the .inMemory
+            // backend resolves the in-memory identity key store, and no db key
+            // exists to mint. Intended for the benchmark harness; a durable estate
+            // never selects it, and no environment value turns it on.
+            // No on-disk posture: nothing is loaded and nothing is written back.
+            encryption = nil
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .inMemory,
+                residencyHint: residencyHint,
+                residentIndexBudget: residentIndexBudget
+            )
+            storage = InMemoryStorage(configuration: configuration)
+            Logging.stderr.log(
+                "mootx01 serve: IN-MEMORY backend (--in-memory) — "
+                + "estate exists only for this process; accuracy-measurement posture "
+                + "(transient: identity in memory, no federation, no charters, no Keychain writes).")
+        } else {
+            // At-rest posture. A new registered estate is created encrypted; an
+            // already-encrypted one loads its existing key; a plaintext one keeps
+            // opening as plaintext. serve runs under launchd with NO TTY, so this
+            // must never prompt and never migrate — migration is `mootx01 upgrade`.
+            let resolved: (encryption: EstateEncryptionConfig, posture: EstateOpenPosture.Posture)
+            do {
+                resolved = try EstateOpenPosture.resolve(for: estate)
+            } catch {
+                // Fail closed. Never fall back to a plaintext open of an encrypted
+                // estate: that would silently downgrade at-rest protection.
+                Logging.stderr.log("mootx01 serve fatal: estate encryption posture unavailable: \(error)")
+                throw ExitCode.failure
+            }
             encryption = resolved.encryption
             if !registered {
                 Logging.stderr.log("mootx01 serve: transient estate — identity in memory, no federation, no Keychain writes")
@@ -228,47 +276,10 @@ struct ServeCommand: AsyncParsableCommand {
                 Logging.stderr.log(
                     "mootx01 serve: creating estate UNENCRYPTED — its manifest \(estate.manifestURL.path) declares plaintext. Run `mootx01 upgrade` to encrypt.")
             }
-        } catch {
-            // Fail closed. Never fall back to a plaintext open of an encrypted
-            // estate: that would silently downgrade at-rest protection.
-            Logging.stderr.log("mootx01 serve fatal: estate encryption posture unavailable: \(error)")
-            throw ExitCode.failure
-        }
-
-        // C1 (benchmark reset, RAM accuracy shape): --in-memory serves the
-        // estate from PersistenceKit's InMemory backend — same protocol, same
-        // algorithms, no filesystem in the measurement path. The estate lives
-        // and dies with this process (accuracy sweeps only; timing always
-        // measures the real disk path). No Keychain contact: the .inMemory
-        // backend resolves the in-memory identity key store, and no db key
-        // exists to mint. Intended for the benchmark harness; a durable estate
-        // never selects it, and no environment value turns it on.
-        let inMemoryBackend = inMemory
-
-        // MOOTX01_RESIDENCY controls both the residency hint and the resident-index
-        // admission budget. See `parseResidencyConfig` for the full grammar.
-        // Default: ram-resident with a 25% ceiling on physical RAM.
-        let (residencyHint, residentIndexBudget) = Self.parseResidencyConfig(
-            rawValue: environment["MOOTX01_RESIDENCY"] ?? ""
-        )
-
-        let storage: any Storage
-        if inMemoryBackend {
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .inMemory,
-                residencyHint: residencyHint,
-                residentIndexBudget: residentIndexBudget
-            )
-            storage = InMemoryStorage(configuration: configuration)
-            Logging.stderr.log(
-                "mootx01 serve: IN-MEMORY backend (--in-memory) — "
-                + "estate exists only for this process; accuracy-measurement posture.")
-        } else {
             let configuration = EstateConfiguration(
                 estateID: UUID(),
                 backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption,
+                encryptionConfig: resolved.encryption,
                 residencyHint: residencyHint,
                 residentIndexBudget: residentIndexBudget
             )
@@ -317,8 +328,10 @@ struct ServeCommand: AsyncParsableCommand {
             let preparation = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
             // The manifest must say what is on disk: after a migration, or for an
-            // estate that predates manifests, rewrite estate.json.
-            if try EstateManifestRefresh.afterPrepare(
+            // estate that predates manifests, rewrite estate.json. Only an on-disk
+            // serve has a posture to record; an in-memory serve (encryption nil)
+            // writes nothing into the estate directory.
+            if let encryption, try EstateManifestRefresh.afterPrepare(
                 preparation, estate: estate, encryption: encryption, now: Date()) {
                 Logging.stderr.log("mootx01 serve: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
             }
