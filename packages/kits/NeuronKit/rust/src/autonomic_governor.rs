@@ -112,8 +112,8 @@
 //!   2. the inputs dirty token — an unchanged estate skips the math, encode,
 //!      and write, so `generatedTs` means "when the content last changed".
 //!
-//! `stats_store` is wired at construction from `main.rs` when
-//! `ARIA_MCP_STATS_STORE` is set. Tests pass `None` (no store needed).
+//! `stats_store` is wired at construction from `runtime.rs` in resident HTTP
+//! mode. Tests pass `None` (no store needed).
 //!
 //! # Pool reducer (novel-token merge-back) + live tagger swap
 //!
@@ -506,7 +506,7 @@ pub struct AutonomicGovernor {
     stop_flag: Arc<AtomicBool>,
     /// Host-injected topology snapshot sink. None = no write (telemetry
     /// disabled). The AriaMcpKit host provides an implementation backed by
-    /// `observer_sink::StatsStore` when `ARIA_MCP_STATS_STORE` is configured.
+    /// `observer_sink::StatsStore` in resident HTTP mode.
     /// The cadence gate fires regardless of whether the sink is present —
     /// topology_snapshot_fired reflects cadence only, not sink presence.
     topology_sink: Option<Box<dyn GovernorTopologySink>>,
@@ -646,7 +646,7 @@ impl AutonomicGovernor {
     /// `StatsStoreTopologySink` wrapping `Arc<observer_sink::StatsStore>`.
     /// NeuronKit never imports observer-sink directly; the sink is the injection
     /// seam that keeps NeuronKit free of host-layer telemetry. Called from
-    /// `runtime.rs` when `ARIA_MCP_STATS_STORE` is configured.
+    /// `runtime.rs` in resident HTTP mode.
     pub fn new_with_topology_sink(
         coord: Arc<Mutex<EstateCoordinator>>,
         handle: EstateHandle,

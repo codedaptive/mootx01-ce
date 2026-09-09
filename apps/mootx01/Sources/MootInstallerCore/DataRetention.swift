@@ -170,7 +170,7 @@ public enum DataRetention {
     }
 
     /// True when an estate's database file exists at `databaseURL` (the
-    /// catalog record's `databaseURL`). Mirrors `default_estate_exists` (Rust).
+    /// catalog record's `databaseURL`). Mirrors `estate_exists` (Rust).
     public static func estateExists(databaseURL: URL) -> Bool {
         FileManager.default.fileExists(atPath: databaseURL.path)
     }
