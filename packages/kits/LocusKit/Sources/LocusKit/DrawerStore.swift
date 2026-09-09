@@ -4242,6 +4242,18 @@ public actor DrawerStore {
             "addedBy": .text(f.addedBy),
             "foreignSourceKey": .text(f.foreignSourceKey),
             "foreignRecordID": .text(f.foreignRecordID),
+            "evidenceQuote": .text(f.evidenceQuote),
+            "evidenceStart": .int(Int64(f.evidenceStart)),
+            "evidenceEnd": .int(Int64(f.evidenceEnd)),
+            "evidenceStartUTF8Byte": .int(Int64(f.evidenceStartUTF8Byte)),
+            "evidenceEndUTF8Byte": .int(Int64(f.evidenceEndUTF8Byte)),
+            "sourceDigest": .text(f.sourceDigest),
+            "extractorProviderID": .text(f.extractorProviderID),
+            "extractorModelID": .text(f.extractorModelID),
+            "extractorModelVersion": .text(f.extractorModelVersion),
+            "extractionSchemaVersion": .text(f.extractionSchemaVersion),
+            "searchProjection": .text(f.searchProjection),
+            "searchProjectionVersion": .text(f.searchProjectionVersion),
             "adjectiveBitmap": .bitmap(f.adjectiveBitmap),
             "operationalBitmap": .bitmap(f.operationalBitmap),
             "provenanceBitmap": .bitmap(f.provenanceBitmap),
@@ -4543,6 +4555,18 @@ public actor DrawerStore {
             addedBy: string(row["addedBy"]),
             foreignSourceKey: string(row["foreignSourceKey"]),
             foreignRecordID: string(row["foreignRecordID"]),
+            evidenceQuote: string(row["evidenceQuote"]),
+            evidenceStart: Int(int64(row["evidenceStart"])),
+            evidenceEnd: Int(int64(row["evidenceEnd"])),
+            evidenceStartUTF8Byte: Int(int64(row["evidenceStartUTF8Byte"])),
+            evidenceEndUTF8Byte: Int(int64(row["evidenceEndUTF8Byte"])),
+            sourceDigest: string(row["sourceDigest"]),
+            extractorProviderID: string(row["extractorProviderID"]),
+            extractorModelID: string(row["extractorModelID"]),
+            extractorModelVersion: string(row["extractorModelVersion"]),
+            extractionSchemaVersion: string(row["extractionSchemaVersion"]),
+            searchProjection: string(row["searchProjection"]),
+            searchProjectionVersion: string(row["searchProjectionVersion"]),
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
@@ -5482,6 +5506,87 @@ public actor DrawerStore {
             .neq(Column(table: "drawers", name: "content"), .text("")),
             .bitmaskNone(Column(table: "drawers", name: "operationalBitmap"),
                          mask: DrawerFeatureFlags.spanIndexed.rawValue),
+        ])
+    }
+
+    /// Mark distilled fact extraction settled for the current content and
+    /// active recipe. Zero accepted facts is still settled work.
+    @discardableResult
+    public func setFactsExtracted(drawerId: String) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+                orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"])
+            guard let row = rows.first else { return 0 }
+            let current = Self.int64(row["operationalBitmap"])
+            let updated = current | DrawerFeatureFlags.factsExtracted.rawValue
+            guard current != updated else { return 0 }
+            return try await txn.rowStore.update(
+                table: "drawers", values: ["operationalBitmap": .bitmap(updated)],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+        }
+    }
+
+    /// Compare-and-set form used by the extraction duty. The bit is written
+    /// only while the row is live and its content still exactly matches the
+    /// snapshot sent to inference, closing the final rewrite race.
+    @discardableResult
+    public func setFactsExtracted(
+        drawerId: String, ifContentMatches expectedContent: String
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        let id = Column(table: "drawers", name: "id")
+        let content = Column(table: "drawers", name: "content")
+        let tombstone = Column(table: "drawers", name: "tombstonedAt")
+        let op = Column(table: "drawers", name: "operationalBitmap")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let predicate: StoragePredicate = .and([
+                .eq(id, .text(drawerId)), .eq(content, .text(expectedContent)),
+                .isNull(tombstone),
+            ])
+            let rows = try await txn.rowStore.query(
+                table: "drawers", where: predicate, orderBy: [], limit: 1,
+                offset: nil, columns: ["operationalBitmap"])
+            guard let row = rows.first else { return 0 }
+            let current = Self.int64(row["operationalBitmap"])
+            let updated = current | DrawerFeatureFlags.factsExtracted.rawValue
+            guard current != updated else { return 1 }
+            return try await txn.rowStore.update(
+                table: "drawers", values: ["operationalBitmap": .bitmap(updated)],
+                where: .and([predicate, .bitmaskNone(
+                    op, mask: DrawerFeatureFlags.factsExtracted.rawValue)]))
+        }
+    }
+
+    /// Active, non-empty drawers whose fact-extraction settlement bit is clear.
+    public func factExtractionDebtBatch(
+        limit: Int, afterDrawerID: String? = nil
+    ) async throws -> [Drawer] {
+        var clauses = [Self.factExtractionDebtPredicate]
+        if let afterDrawerID {
+            clauses.append(.gt(Column(table: "drawers", name: "id"), .text(afterDrawerID)))
+        }
+        let rows = try await storage.rowStore.query(
+            table: "drawers", where: .and(clauses),
+            orderBy: [OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending)],
+            limit: limit, offset: nil, columns: nil)
+        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "factExtractionDebtBatch")
+    }
+
+    public func countFactExtractionDebt() async throws -> Int {
+        try await storage.rowStore.query(
+            table: "drawers", where: Self.factExtractionDebtPredicate,
+            orderBy: [], limit: nil, offset: nil, columns: ["id"]).count
+    }
+
+    private static var factExtractionDebtPredicate: StoragePredicate {
+        .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .neq(Column(table: "drawers", name: "content"), .text("")),
+            .bitmaskNone(Column(table: "drawers", name: "operationalBitmap"),
+                         mask: DrawerFeatureFlags.factsExtracted.rawValue),
         ])
     }
 
