@@ -16,6 +16,54 @@ import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
 import SubstrateLib
 
+/// Optional machine-extraction fields threaded through the composed KGFact
+/// capture door. Manual and imported callers use `.empty`.
+public struct KGFactExtractionMetadata: Sendable, Equatable, Hashable, Codable {
+    public let evidenceQuote: String
+    public let evidenceStart: Int
+    public let evidenceEnd: Int
+    public let evidenceStartUTF8Byte: Int
+    public let evidenceEndUTF8Byte: Int
+    public let sourceDigest: String
+    public let extractorProviderID: String
+    public let extractorModelID: String
+    public let extractorModelVersion: String
+    public let extractionSchemaVersion: String
+    public let searchProjection: String
+    public let searchProjectionVersion: String
+    public let operationalBitmap: Int64
+
+    public init(
+        evidenceQuote: String, evidenceStart: Int, evidenceEnd: Int,
+        evidenceStartUTF8Byte: Int, evidenceEndUTF8Byte: Int,
+        sourceDigest: String, extractorProviderID: String, extractorModelID: String,
+        extractorModelVersion: String, extractionSchemaVersion: String,
+        searchProjection: String, searchProjectionVersion: String,
+        operationalBitmap: Int64
+    ) {
+        self.evidenceQuote = evidenceQuote
+        self.evidenceStart = evidenceStart
+        self.evidenceEnd = evidenceEnd
+        self.evidenceStartUTF8Byte = evidenceStartUTF8Byte
+        self.evidenceEndUTF8Byte = evidenceEndUTF8Byte
+        self.sourceDigest = sourceDigest
+        self.extractorProviderID = extractorProviderID
+        self.extractorModelID = extractorModelID
+        self.extractorModelVersion = extractorModelVersion
+        self.extractionSchemaVersion = extractionSchemaVersion
+        self.searchProjection = searchProjection
+        self.searchProjectionVersion = searchProjectionVersion
+        self.operationalBitmap = operationalBitmap
+    }
+
+    public static let empty = KGFactExtractionMetadata(
+        evidenceQuote: "", evidenceStart: -1, evidenceEnd: -1,
+        evidenceStartUTF8Byte: -1, evidenceEndUTF8Byte: -1, sourceDigest: "",
+        extractorProviderID: "", extractorModelID: "", extractorModelVersion: "",
+        extractionSchemaVersion: "", searchProjection: "", searchProjectionVersion: "",
+        operationalBitmap: 0)
+}
+
 /// A knowledge-graph fact extracted from drawer content per spec
 /// `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` § 4.1.
 ///
@@ -112,6 +160,34 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
     /// local drawer.
     public let foreignRecordID: String
 
+    /// Verbatim evidence from the source drawer. Empty for manual, imported,
+    /// or legacy facts that predate source-grounded extraction.
+    public let evidenceQuote: String
+
+    /// Half-open evidence range in Unicode code points. `-1/-1` means the
+    /// fact has no machine-resolved source range.
+    public let evidenceStart: Int
+    public let evidenceEnd: Int
+
+    /// UTF-8 byte form of the same half-open evidence range. Kept alongside
+    /// code-point offsets so Swift and Rust never infer each other's index unit.
+    public let evidenceStartUTF8Byte: Int
+    public let evidenceEndUTF8Byte: Int
+
+    /// SHA-256 of the exact source content used for extraction.
+    public let sourceDigest: String
+
+    /// Provider/model/schema provenance for rebuild and audit.
+    public let extractorProviderID: String
+    public let extractorModelID: String
+    public let extractorModelVersion: String
+    public let extractionSchemaVersion: String
+
+    /// Rebuildable lexical/vector input for fact-first recall. This is a
+    /// retrieval projection, never an assertion shown to a caller.
+    public let searchProjection: String
+    public let searchProjectionVersion: String
+
     /// Adjective bitmap encoding state, trust, sensitivity, and
     /// exportability per spec § 5.5. Shares the encoding with
     /// `Drawer.adjectiveBitmap` — accessors live in
@@ -150,6 +226,18 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
         addedBy: String = "",
         foreignSourceKey: String = "",
         foreignRecordID: String = "",
+        evidenceQuote: String = "",
+        evidenceStart: Int = -1,
+        evidenceEnd: Int = -1,
+        evidenceStartUTF8Byte: Int = -1,
+        evidenceEndUTF8Byte: Int = -1,
+        sourceDigest: String = "",
+        extractorProviderID: String = "",
+        extractorModelID: String = "",
+        extractorModelVersion: String = "",
+        extractionSchemaVersion: String = "",
+        searchProjection: String = "",
+        searchProjectionVersion: String = "",
         adjectiveBitmap: Int64 = 0,
         operationalBitmap: Int64 = 0,
         provenanceBitmap: Int64 = 0,
@@ -163,10 +251,93 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
         self.addedBy = addedBy
         self.foreignSourceKey = foreignSourceKey
         self.foreignRecordID = foreignRecordID
+        self.evidenceQuote = evidenceQuote
+        self.evidenceStart = evidenceStart
+        self.evidenceEnd = evidenceEnd
+        self.evidenceStartUTF8Byte = evidenceStartUTF8Byte
+        self.evidenceEndUTF8Byte = evidenceEndUTF8Byte
+        self.sourceDigest = sourceDigest
+        self.extractorProviderID = extractorProviderID
+        self.extractorModelID = extractorModelID
+        self.extractorModelVersion = extractorModelVersion
+        self.extractionSchemaVersion = extractionSchemaVersion
+        self.searchProjection = searchProjection
+        self.searchProjectionVersion = searchProjectionVersion
         self.adjectiveBitmap = adjectiveBitmap
         self.operationalBitmap = operationalBitmap
         self.provenanceBitmap = provenanceBitmap
         self.filedAt = filedAt
+    }
+}
+
+// MARK: - Codable compatibility
+
+public extension KGFact {
+    private enum CodingKeys: String, CodingKey {
+        case id, subject, predicate, object, sourceDrawerID, addedBy
+        case foreignSourceKey, foreignRecordID
+        case evidenceQuote, evidenceStart, evidenceEnd
+        case evidenceStartUTF8Byte, evidenceEndUTF8Byte, sourceDigest
+        case extractorProviderID, extractorModelID, extractorModelVersion
+        case extractionSchemaVersion, searchProjection, searchProjectionVersion
+        case adjectiveBitmap, operationalBitmap, provenanceBitmap, filedAt
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try values.decode(String.self, forKey: .id),
+            subject: try values.decode(String.self, forKey: .subject),
+            predicate: try values.decode(String.self, forKey: .predicate),
+            object: try values.decode(String.self, forKey: .object),
+            sourceDrawerID: try values.decode(String.self, forKey: .sourceDrawerID),
+            addedBy: try values.decodeIfPresent(String.self, forKey: .addedBy) ?? "",
+            foreignSourceKey: try values.decodeIfPresent(String.self, forKey: .foreignSourceKey) ?? "",
+            foreignRecordID: try values.decodeIfPresent(String.self, forKey: .foreignRecordID) ?? "",
+            evidenceQuote: try values.decodeIfPresent(String.self, forKey: .evidenceQuote) ?? "",
+            evidenceStart: try values.decodeIfPresent(Int.self, forKey: .evidenceStart) ?? -1,
+            evidenceEnd: try values.decodeIfPresent(Int.self, forKey: .evidenceEnd) ?? -1,
+            evidenceStartUTF8Byte: try values.decodeIfPresent(Int.self, forKey: .evidenceStartUTF8Byte) ?? -1,
+            evidenceEndUTF8Byte: try values.decodeIfPresent(Int.self, forKey: .evidenceEndUTF8Byte) ?? -1,
+            sourceDigest: try values.decodeIfPresent(String.self, forKey: .sourceDigest) ?? "",
+            extractorProviderID: try values.decodeIfPresent(String.self, forKey: .extractorProviderID) ?? "",
+            extractorModelID: try values.decodeIfPresent(String.self, forKey: .extractorModelID) ?? "",
+            extractorModelVersion: try values.decodeIfPresent(String.self, forKey: .extractorModelVersion) ?? "",
+            extractionSchemaVersion: try values.decodeIfPresent(String.self, forKey: .extractionSchemaVersion) ?? "",
+            searchProjection: try values.decodeIfPresent(String.self, forKey: .searchProjection) ?? "",
+            searchProjectionVersion: try values.decodeIfPresent(String.self, forKey: .searchProjectionVersion) ?? "",
+            adjectiveBitmap: try values.decodeIfPresent(Int64.self, forKey: .adjectiveBitmap) ?? 0,
+            operationalBitmap: try values.decodeIfPresent(Int64.self, forKey: .operationalBitmap) ?? 0,
+            provenanceBitmap: try values.decodeIfPresent(Int64.self, forKey: .provenanceBitmap) ?? 0,
+            filedAt: try values.decode(Date.self, forKey: .filedAt))
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(subject, forKey: .subject)
+        try values.encode(predicate, forKey: .predicate)
+        try values.encode(object, forKey: .object)
+        try values.encode(sourceDrawerID, forKey: .sourceDrawerID)
+        try values.encode(addedBy, forKey: .addedBy)
+        try values.encode(foreignSourceKey, forKey: .foreignSourceKey)
+        try values.encode(foreignRecordID, forKey: .foreignRecordID)
+        try values.encode(evidenceQuote, forKey: .evidenceQuote)
+        try values.encode(evidenceStart, forKey: .evidenceStart)
+        try values.encode(evidenceEnd, forKey: .evidenceEnd)
+        try values.encode(evidenceStartUTF8Byte, forKey: .evidenceStartUTF8Byte)
+        try values.encode(evidenceEndUTF8Byte, forKey: .evidenceEndUTF8Byte)
+        try values.encode(sourceDigest, forKey: .sourceDigest)
+        try values.encode(extractorProviderID, forKey: .extractorProviderID)
+        try values.encode(extractorModelID, forKey: .extractorModelID)
+        try values.encode(extractorModelVersion, forKey: .extractorModelVersion)
+        try values.encode(extractionSchemaVersion, forKey: .extractionSchemaVersion)
+        try values.encode(searchProjection, forKey: .searchProjection)
+        try values.encode(searchProjectionVersion, forKey: .searchProjectionVersion)
+        try values.encode(adjectiveBitmap, forKey: .adjectiveBitmap)
+        try values.encode(operationalBitmap, forKey: .operationalBitmap)
+        try values.encode(provenanceBitmap, forKey: .provenanceBitmap)
+        try values.encode(filedAt, forKey: .filedAt)
     }
 }
 

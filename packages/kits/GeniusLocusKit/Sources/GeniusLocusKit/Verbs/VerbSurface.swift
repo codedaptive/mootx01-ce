@@ -491,6 +491,7 @@ public extension GeniusLocusKit {
         addedBy: String = "",
         foreignSourceKey: String = "",
         foreignRecordID: String = "",
+        extraction: KGFactExtractionMetadata = .empty,
         now: Date
     ) async throws -> KGFact {
         let store = try await ensureKGStore(for: handle)
@@ -524,7 +525,20 @@ public extension GeniusLocusKit {
             addedBy: addedBy,
             foreignSourceKey: foreignSourceKey,
             foreignRecordID: foreignRecordID,
+            evidenceQuote: extraction.evidenceQuote,
+            evidenceStart: extraction.evidenceStart,
+            evidenceEnd: extraction.evidenceEnd,
+            evidenceStartUTF8Byte: extraction.evidenceStartUTF8Byte,
+            evidenceEndUTF8Byte: extraction.evidenceEndUTF8Byte,
+            sourceDigest: extraction.sourceDigest,
+            extractorProviderID: extraction.extractorProviderID,
+            extractorModelID: extraction.extractorModelID,
+            extractorModelVersion: extraction.extractorModelVersion,
+            extractionSchemaVersion: extraction.extractionSchemaVersion,
+            searchProjection: extraction.searchProjection,
+            searchProjectionVersion: extraction.searchProjectionVersion,
             adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: extraction.operationalBitmap,
             provenanceBitmap: provenanceBitmap,
             filedAt: now
         )

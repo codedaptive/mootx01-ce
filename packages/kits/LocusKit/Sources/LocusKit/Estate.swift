@@ -522,6 +522,33 @@ public actor Estate {
         try await store.countSpanIndexDebt()
     }
 
+    /// Mark one drawer settled for the active distilled-fact recipe.
+    @discardableResult
+    public func setFactsExtracted(drawerId: String) async throws -> Int {
+        try await store.setFactsExtracted(drawerId: drawerId)
+    }
+
+    /// Compare-and-set settlement used after inference and fact filing.
+    @discardableResult
+    public func setFactsExtracted(
+        drawerId: String, ifContentMatches expectedContent: String
+    ) async throws -> Int {
+        try await store.setFactsExtracted(
+            drawerId: drawerId, ifContentMatches: expectedContent)
+    }
+
+    /// Bounded deterministic fact-extraction debt batch.
+    public func factExtractionDebtBatch(
+        limit: Int, afterDrawerID: String? = nil
+    ) async throws -> [Drawer] {
+        try await store.factExtractionDebtBatch(limit: limit, afterDrawerID: afterDrawerID)
+    }
+
+    /// Estate-wide count of drawers awaiting distilled fact extraction.
+    public func countFactExtractionDebt() async throws -> Int {
+        try await store.countFactExtractionDebt()
+    }
+
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
     /// over `DrawerStore.setSubjectRepresentation` — the seam the filing
     /// surface, backfill, and the (future) subject rider write through.
