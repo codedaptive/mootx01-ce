@@ -140,80 +140,11 @@ struct DoorDispatchTests {
     /// When no DoorManifest has been provisioned on the estate, door="guess"
     /// reads the absent key and falls back to .matrixAware — byte-identical to
     /// today's behaviour. Must succeed (not error).
-    @Test func guessDoorWithNoConfigFallsBackToMatrixAware() async throws {
-        let (dispatcher, _, _) = try await makeDispatcher()
-        try await fileMemory(content: "door-guess-no-config-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("door-guess-no-config-test"),
-                "door": .string("guess"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "door=guess with no provisioned config must succeed (fallback to matrixAware)")
-    }
 
     /// When a DoorManifest with scoring=rrf is provisioned, door="guess"
     /// reads it and routes through rrf — the A1 per-corpus static config tier.
-    @Test func guessDoorWithProvisionedConfigUsesManifestScoring() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        try await kit.provisionDoorConfig(DoorManifest(scoring: .rrf), for: handle)
-        try await fileMemory(content: "door-guess-provisioned-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("door-guess-provisioned-test"),
-                "door": .string("guess"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "door=guess with DoorManifest(scoring:.rrf) must succeed")
-    }
 
     // MARK: - C. Known door values (explicit scoring rawValues) succeed
-
-    @Test func doorRrfSucceeds() async throws {
-        let (dispatcher, _, _) = try await makeDispatcher()
-        try await fileMemory(content: "door-rrf-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("door-rrf-test"),
-                "door": .string("rrf"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "door=rrf must succeed")
-    }
-
-    @Test func doorMatrixAwareSucceeds() async throws {
-        let (dispatcher, _, _) = try await makeDispatcher()
-        try await fileMemory(content: "door-matrixAware-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("door-matrixAware-test"),
-                "door": .string("matrixAware"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "door=matrixAware must succeed")
-    }
-
-    @Test func doorRawSucceeds() async throws {
-        let (dispatcher, _, _) = try await makeDispatcher()
-        try await fileMemory(content: "door-raw-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("door-raw-test"),
-                "door": .string("raw"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "door=raw must succeed")
-    }
 
     // MARK: - D. door overrides scoring when both present — discriminating assertion
     //
@@ -227,61 +158,12 @@ struct DoorDispatchTests {
     // This discriminating assertion proves which path ran — not just that the
     // call succeeded.
 
-    @Test func doorOverridesScoringWhenBothPresent() async throws {
-        let (dispatcher, _, _) = try await makeDispatcher()
-        try await fileMemory(content: "door-overrides-scoring-test", location: "test", dispatcher: dispatcher)
-        // door=rrf wins; scoring=matrixAware is superseded. The rrf path on
-        // unionBest records "unionBest.rrf" in degraded_stages, proving the
-        // door arg was applied (not the scoring arg).
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("door-overrides-scoring-test"),
-                "door": .string("rrf"),
-                "scoring": .string("matrixAware"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "door=rrf + scoring=matrixAware must succeed (door takes precedence)")
-        // Discriminating assertion: degraded retrieval in the response text proves
-        // door=rrf won over scoring=matrixAware. If scoring won instead, the
-        // matrixAware full-pipeline path runs cleanly with no degradation signal.
-        // COMPOSER-02B §11 control lines: "retrieval: degraded — ..." replaces the
-        // old "degraded_stages:[...]" format.
-        let text = result.objectValue?["content"]?
-            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        #expect(text.contains("retrieval: degraded"),
-                "door=rrf must win over scoring=matrixAware: response must show degraded retrieval; got: \(text.prefix(200))")
-    }
-
     // MARK: - E. Schema exposes door
 
     /// The moot_memory_search inputSchema must expose the `door` property so
     /// MCP clients can discover it. This is a schema-presence gate, not a
     /// routing test.
-    @Test func schemaExposesDoorProperty() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_memory_search" }),
-              case let .object(schema) = tool.inputSchema,
-              case let .object(props)? = schema["properties"]
-        else {
-            Issue.record("Could not read moot_memory_search inputSchema")
-            return
-        }
-        #expect(props["door"] != nil, "moot_memory_search schema must expose 'door' property")
-    }
 
     /// The `door` property description must contain the word "guess" (the A1
     /// door family name) so calling AIs can discover the front-door behaviour.
-    @Test func doorPropertyDescriptionMentionsGuess() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_memory_search" }),
-              case let .object(schema) = tool.inputSchema,
-              case let .object(props)? = schema["properties"],
-              case let .object(doorProp)? = props["door"],
-              case let .string(desc)? = doorProp["description"]
-        else {
-            Issue.record("Could not read moot_memory_search door property description")
-            return
-        }
-        #expect(desc.contains("guess"), "door description must mention 'guess'; got: \(desc.prefix(200))")
-    }
 }

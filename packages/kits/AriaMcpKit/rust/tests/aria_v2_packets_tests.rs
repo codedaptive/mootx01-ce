@@ -1,6 +1,5 @@
 //! Selected-surface integration for the typed v2 packet operations.
 
-#![cfg(feature = "aria-v2")]
 
 use aria_mcp::{
     dispatcher::Dispatcher,

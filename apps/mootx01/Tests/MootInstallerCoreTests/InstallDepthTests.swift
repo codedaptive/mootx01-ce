@@ -48,7 +48,6 @@ struct InstallDepthTests {
         #expect(b.host(forClientID: "kiro") == nil)
     }
 
-    #if MOOTX01_ARIA_V2
     @Test("selected v2 embedded bundle identity agrees with the ARIA Registry")
     func v2EmbeddedBundleIdentityMatchesRegistry() throws {
         let root = URL(fileURLWithPath: #filePath)
@@ -67,7 +66,6 @@ struct InstallDepthTests {
         #expect(bundle.ariaVersion == "v2")
         #expect(bundle.ariaBundleIdentity == "mootx01/v2/\(catalogIdentity)")
     }
-    #endif
 
     @Test("manifest-bundle hosts support plugin; module/ide hosts ceil at skills")
     func pluginCeiling() {

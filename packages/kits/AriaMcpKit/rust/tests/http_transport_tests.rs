@@ -147,7 +147,6 @@ fn http_tools_list_round_trips() {
     assert!(!tools.is_empty());
 }
 
-#[cfg(feature = "aria-v2")]
 #[test]
 fn v2_http_tools_list_and_monitoring_status_round_trip() {
     let (list_status, list_body) = round_trip(

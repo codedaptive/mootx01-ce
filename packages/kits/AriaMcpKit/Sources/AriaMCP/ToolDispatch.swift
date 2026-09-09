@@ -541,222 +541,40 @@ public struct ToolDispatcher: Sendable {
     /// JSON-RPC error: the call did reach the substrate, the substrate
     /// said no, the client should see why.
     ///
-    /// Dispatch order: teachme pre-check → mode arg decode → federation →
-    /// recipe → lens → vault → dataset → interface → methodNotFound →
-    /// unknown-arg hint → per-call coaching hint → periodic coaching block.
+    /// Dispatch: admit via v2 catalog → decode typed request → dispatchV2.
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
         let decodedArguments = arguments.objectValue
         let args = decodedArguments ?? [:]
 
-        // V2 admits names from its selected catalog before any legacy early
-        // return, clock sample, teaching lookup, frozen-name inventory, or
-        // session mutation.  V1 intentionally keeps its legacy unknown-name
-        // teachme behavior and notice-only compatibility route.
-        if AriaSurface.isV2 {
-            guard decodedArguments != nil else {
-                let message = "tools/call arguments must be an object for the active ARIA v2 surface"
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: message,
-                    data: .object([
-                        "code": .string("invalid_argument"),
-                        "path": .string("arguments"),
-                        "message": .string(message),
-                        "correction": .string("Call moot_monitoring_status with an empty arguments object."),
-                    ])
-                )
-            }
-            guard ToolProjection.admitsDispatch(name: name, environment: environment) else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.methodNotFound,
-                    message: "Unknown tool: \(name)"
-                )
-            }
-            let request = try AriaSurfaceDecoder.decode(name: name, arguments: args)
-            return await dispatchV2(request)
+        // V2 admits names from its selected catalog before any frozen policy,
+        // teachme interception, mode parsing, or session mutation.
+        guard decodedArguments != nil else {
+            let message = "tools/call arguments must be an object for the active ARIA v2 surface"
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: message,
+                data: .object([
+                    "code": .string("invalid_argument"),
+                    "path": .string("arguments"),
+                    "message": .string(message),
+                    "correction": .string("Call moot_monitoring_status with an empty arguments object."),
+                ])
+            )
         }
-
-        // moot_drain_status is a pure-read polling call used by waitForEncodeDrain.
-        // It does not participate in temporal scoring and must NOT advance the bench
-        // clock counter — otherwise the counter offset when the actual memory-query
-        // runners execute depends on how many drain polls occurred, which is
-        // wall-clock-dependent (how fast the encode queue drains) and therefore
-        // non-deterministic across replay runs.  Early-return before the clock
-        // sample so the seam is never touched for this tool.
-        if name == "moot_drain_status" {
-            return try await runDrainStatus(args)
+        guard ToolProjection.admitsDispatch(name: name, environment: environment) else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.methodNotFound,
+                message: "Unknown tool: \(name)"
+            )
         }
-
-        // Bench clock: sample once per tool-call dispatch and thread through every
-        // runner. In pinned mode (MOOT_BENCH_EPOCH_NOW set) this returns a
-        // deterministic base+N-seconds value; in wall-clock mode it returns Date().
-        // Runners MUST NOT call Date() directly — use the `now` parameter they receive.
-        // Background/daemon paths (dreaming, governor, HLC self-advance) are excluded
-        // from this seam; they remain on wall clock by design.
-        let now = benchClock.now()
-        do {
-            // teachme: true — return the usage guide without touching the estate.
-            // Intercepted before any runner fires so no side effects occur.
-            if try optionalBool(args["teachme"], argument: "teachme") == true {
-                return Self.textResult(TeachmeGuides.guide(for: name))
-            }
-
-            // Frozen posture: refuse every writing, mutating, or deleting tool
-            // before any runner fires and before the session state records
-            // the call, so the refusal leaves no side effect at all. Returned
-            // as an isError tool result (not a JSON-RPC error) for the same
-            // reason substrate refusals are: the client keeps the call id and
-            // the model sees the reason. Two checks: the name inventory, then
-            // the command-classified tools (`memory`), whose `command`
-            // argument decides per call — a read command proceeds; a
-            // mutating, unknown, or missing command is refused here so the
-            // adapter itself never learns about posture.
-            if posture == .frozen {
-                if ToolMutationInventory.frozenRefusedTools.contains(name) {
-                    return Self.errorResult(EstatePosture.refusalMessage(tool: name))
-                }
-                if let readCommands = ToolMutationInventory.frozenReadCommands[name] {
-                    let command = args["command"]?.stringValue
-                    if !readCommands.contains(command ?? "") {
-                        return Self.errorResult(EstatePosture.refusalMessage(tool: name, command: command))
-                    }
-                }
-            }
-
-            // Decode the optional `mode` argument (modes are fail-open by spec).
-            //
-            // ## Fail-open vs. fail-closed contrast
-            //
-            // The `mode` argument is ADVISORY and accepts any string without
-            // invalidParams — unknown mode names and unknown variants are accepted
-            // but ignored, with a hint appended (fail-open). This is the OPPOSITE
-            // of the `answer` argument, which throws invalidParams on unknown values
-            // (fail-closed). The reason: an AI re-declaring a mode it discovered
-            // (via the echo tag) must never lose the call when the server has an
-            // older mode registry. Advisory modes must survive version skew gracefully.
-            let modeDeclaration: ModeDeclaration? = try {
-                guard let raw = try optionalString(args["mode"], argument: "mode") else { return nil }
-                return ModeDeclaration.parse(raw)
-            }()
-
-            // Apply estate-provisioned modes preferences on the first call.
-            // Guards itself: applyPreferences is a no-op if configuredFromEstate
-            // is already set (bitmap bit 1). Reading the manifest is a RAM-resident
-            // dictionary hit so the overhead is negligible, but we skip it after
-            // the first call for clarity.
-            if await !modeSessionState.configuredFromEstate {
-                if let config = try? await kit.provisionedModesConfig(for: handle) {
-                    await modeSessionState.applyPreferences(
-                        stickyEnabled: config.stickyEnabled,
-                        coachingCalls: config.coachingCalls)
-                }
-            }
-
-            // Record the call in the session state (updates sticky, counters, bigrams).
-            await modeSessionState.recordCall(toolName: name, mode: modeDeclaration)
-
-            // Route to the appropriate runner and capture the result so
-            // the coaching engine can inspect it before it is returned.
-            var runnerResult: JSONValue
-            if name == Self.federatedSearchToolName {
-                // Federation tool above the interface tier — matched by name.
-                runnerResult = try await runFederatedSearch(args)
-            } else if RecipeTools.isRecipeTool(name) {
-                // CognitionKit behaviour-recipe tools dispatched by name.
-                runnerResult = try await RecipeTools.dispatch(
-                    name: name, args: args, kit: kit, defaultHandle: handle,
-                    resolveHandle: resolveHandle)
-            } else if LensTools.isLensTool(name) {
-                // Reasoning-lens tools dispatched by name.
-                // resolveHandle: restricted to default estate (direct routing gate, Item 3).
-                // resolvePeer: unrestricted — lens overlap/divergence need cross-estate access.
-                runnerResult = try await LensTools.dispatch(
-                    name: name, args: args, kit: kit, defaultHandle: handle,
-                    resolveHandle: resolveHandle,
-                    resolvePeer: resolveAnyRegistered,
-                    now: now)
-            } else if VaultTools.isVaultTool(name) {
-                // VaultKit control-surface tools dispatched by name.
-                runnerResult = try await VaultTools.dispatch(
-                    name: name, args: args, kit: kit, defaultHandle: handle,
-                    resolveHandle: resolveHandle, jobRegistry: jobRegistry,
-                    environment: environment)
-            } else if DatasetTools.isDatasetTool(name) {
-                // User-defined tabular dataset tools (MX-TAB-7): file, query, stats.
-                // Dispatched between vault and the five-tier interface; each tool
-                // targets an estate and resolves the handle via the standard gate.
-                runnerResult = try await DatasetTools.dispatch(
-                    name: name, args: args, kit: kit,
-                    resolveHandle: resolveHandle,
-                    serverIdentity: serverIdentity,
-                    now: now)
-            } else if PacketTools.isPacketTool(name) {
-                // Agentic work-packet tools (FAB5-I2): file, get, list, lineage.
-                // Packets are structuredJSON drawers; PacketTools wraps WorkPacketKit.
-                // The grant ledger rides along so the by-id readers (get, lineage)
-                // apply the same sensitivity ceiling moot_memory_get does.
-                runnerResult = try await PacketTools.dispatch(
-                    name: name, args: args, kit: kit,
-                    resolveHandle: resolveHandle,
-                    sensitivityUnlockLedger: sensitivityUnlockLedger,
-                    now: now)
-            } else if InterfaceTools.isInterfaceTool(name) {
-                // Five-tier AI-client interface tools dispatched by name.
-                runnerResult = try await InterfaceTools.dispatch(
-                    name: name, args: args, dispatcher: self, now: now)
-            } else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.methodNotFound,
-                    message: "Unknown tool: \(name)"
-                )
-            }
-            // Append a hint for any argument keys the tool schema does not declare.
-            // Non-error results only. Also mirrors the hint to stderr so daemon logs
-            // capture the ignored arg without the LLM client having to relay it.
-            runnerResult = appendUnknownArgsHint(name: name, args: args, to: runnerResult)
-            // Append a mode-unknown hint when the declared mode or variant is not
-            // in the registry. Fail-open: the call succeeded; this is advisory only.
-            if let decl = modeDeclaration, let hint = decl.unknownHint {
-                runnerResult = Self.appendingHint(hint, to: runnerResult)
-            }
-            // Append a per-call coaching hint (CoachingEngine triggers) when applicable.
-            runnerResult = applyHint(name: name, args: args, to: runnerResult)
-            // Append the periodic coaching block when the session counter hits the
-            // configured cadence (default every 25 moot calls, 0 = off).
-            // The block rides on the first text block after all other hints so the
-            // caller sees the tool result first and the coaching after.
-            if await modeSessionState.shouldCoach() {
-                let snap = await modeSessionState.snapshot
-                let block = PeriodicCoach.renderBlock(for: snap)
-                runnerResult = Self.appendingHint(block, to: runnerResult)
-            }
-            return runnerResult
-        } catch let error as JSONRPCError {
-            throw error
-        } catch let error as VerbError {
-            // VerbError covers the substrate's own refusals. Emit as a
-            // tool-call result with isError set so the client can act on
-            // them without losing the call ID.
-            return Self.errorResult(describe(error))
-        } catch let error as GeniusLocusKitError {
-            return Self.errorResult(describe(error))
-        } catch {
-            // Anything else is unexpected (a CocoaError from the filesystem, a
-            // VaultKitError from an adapter, …) — but the call DID reach its
-            // runner, so it is an execution failure, not a protocol fault. MCP
-            // clients render a thrown JSON-RPC error as a bare "failed to call
-            // tool" and discard the message; returning isError:true instead
-            // puts the description in front of the model so it can react.
-            // Mirror to stderr — the daemon log otherwise records nothing for
-            // a failed tool call, which makes field failures undiagnosable.
-            fputs("aria-mcp: tool \(name) failed: \(error)\n", stderr)
-            return Self.errorResult("unexpected error in \(name): \(error)")
-        }
+        let request = try AriaSurfaceDecoder.decode(name: name, arguments: args)
+        return await dispatchV2(request)
     }
+}
 
-    /// Shared v2 policy/context handoff.  Effect identity, not a legacy name,
-    /// determines the frozen-posture decision.  The only Mission01 operation
-    /// is an inspection, so frozen posture allows it to reach its typed read.
+// MARK: - V2 dispatch
+
+private extension ToolDispatcher {
     private func dispatchV2(_ request: AriaSurfaceRequest) async -> JSONValue {
         switch request.operation.effect {
         case .inspection:
@@ -1021,352 +839,64 @@ public struct ToolDispatcher: Sendable {
             preconditionFailure("unselected data-mobility request reached the v2 dispatcher")
         }
     }
+}
 
-    // MARK: - Hint injection
+// MARK: - Result helpers
 
-    /// Append `\nhint: <hint>` to the FIRST content block's text, carrying
-    /// every subsequent block through unchanged — the single append seam for
-    /// both hint appenders below.
+extension ToolDispatcher {
+    /// MCP `tools/call` success result with a single text content block.
+    public static func textResult(_ text: String) -> JSONValue {
+        textResultBlocks([text])
+    }
+
+    /// MCP `tools/call` success result carrying several text blocks, in order.
     ///
-    /// Block preservation is the point: multi-block results (`moot_json_import`
-    /// with `return_id_map` returns receipt + `{"id_map":…}` as separate
-    /// blocks) must keep their trailing machine-readable blocks intact. The
-    /// hint goes on the prose block only — a hint line inside a JSON block
-    /// would break the caller's parse, which is why the map is a separate
-    /// block in the first place. Mirrors Rust `dispatch.rs` `inject_hint` /
-    /// `inject_unknown_args_hint`, which mutate `content[0]["text"]` in place.
+    /// Used where a machine-readable payload travels alongside the prose
+    /// receipt (`moot_json_import` with `return_id_map`): the reader parses one
+    /// block whole rather than scraping structure out of a sentence.
     ///
-    /// Returns the result unchanged when it has no first text block to append
-    /// to. All other keys of the result object (`isError`, any future fields)
-    /// are carried through verbatim.
-    private static func appendingHint(_ hint: String, to result: JSONValue) -> JSONValue {
-        guard var obj = result.objectValue,
-              var content = obj["content"]?.arrayValue,
-              var first = content.first?.objectValue,
-              let text = first["text"]?.stringValue else {
-            return result
-        }
-        first["text"] = .string(text + "\nhint: " + hint)
-        content[0] = .object(first)
-        obj["content"] = .array(content)
-        return .object(obj)
+    /// Deliberately NOT an overload of `textResult(_:)`. Overloading on
+    /// `String` vs `[String]` forces the type-checker to weigh both candidates
+    /// at every call site, and the long `+`-chained receipt strings in this
+    /// file exceed its time budget when it has to.
+    public static func textResultBlocks(_ blocks: [String]) -> JSONValue {
+        .object([
+            "content": .array(blocks.map { block in
+                .object([
+                    "type": .string("text"),
+                    "text": .string(block),
+                ])
+            }),
+            "isError": .bool(false),
+        ])
     }
 
-    /// Append a hint line when the caller sent argument keys not declared in the
-    /// tool's inputSchema. Returns the result unchanged on error results or when
-    /// all keys are recognized. Also logs unrecognized keys to stderr for the
-    /// daemon log — callers (LLM clients) may not relay warnings.
-    ///
-    /// Accepted keys are extracted from `ToolProjection.acceptedArgKeys(for:)`,
-    /// which reads the live tool schema (post-`withEstateID`/`withTeachme`
-    /// wrappers), so `estateID` and `teachme` are always recognized.
-    /// Returns nil from `acceptedArgKeys` for unknown tool names — no check runs.
-    ///
-    /// Hint format: `hint: unrecognized argument(s) ignored: <sorted, comma-joined>`,
-    /// appended to the first block only; trailing blocks survive (see
-    /// `appendingHint(_:to:)`).
-    private func appendUnknownArgsHint(name: String, args: [String: JSONValue], to result: JSONValue) -> JSONValue {
-        guard let accepted = ToolProjection.acceptedArgKeys(for: name) else {
-            return result
-        }
-        let unknown = Set(args.keys).subtracting(accepted)
-        guard !unknown.isEmpty else { return result }
-        let sorted = unknown.sorted().joined(separator: ", ")
-        fputs("aria-mcp: \(name): unrecognized argument(s) ignored: \(sorted)\n", stderr)
-        // Append hint to non-error results only — error results carry their own
-        // message and must not be silently augmented.
-        guard let obj = result.objectValue,
-              obj["isError"]?.boolValue == false else {
-            return result
-        }
-        return Self.appendingHint("unrecognized argument(s) ignored: \(sorted)", to: result)
+    /// MCP `tools/call` failure result. Substrate refusals come back
+    /// here rather than as JSON-RPC errors so the client retains the
+    /// call ID and can render the message in a tool-output panel.
+    public static func errorResult(_ text: String) -> JSONValue {
+        .object([
+            "content": .array([
+                .object([
+                    "type": .string("text"),
+                    "text": .string(text),
+                ])
+            ]),
+            "isError": .bool(true),
+        ])
     }
+}
 
-    /// Append a coaching hint to a successful tool result when `CoachingEngine`
-    /// detects a suboptimal call pattern. Returns the result unchanged when
-    /// `isError == true` or when no trigger fires. The hint lands on the first
-    /// block; trailing blocks survive (see `appendingHint(_:to:)`).
-    private func applyHint(name: String, args: [String: JSONValue], to result: JSONValue) -> JSONValue {
-        guard let obj = result.objectValue,
-              obj["isError"]?.boolValue == false,
-              let text = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue else {
-            return result
-        }
-        guard let hint = CoachingEngine.hint(name: name, args: args, resultText: text) else {
-            return result
-        }
-        return Self.appendingHint(hint, to: result)
-    }
 
-    // MARK: - Federation tool
+// MARK: - Decode helpers
 
-    /// Tool name for the grant-authorized cross-estate federated search.
-    /// Renamed from `crossEstateRecallToolName` (MCP-INT-01) to use the
-    /// AI-client-oriented vocabulary.
-    public static let federatedSearchToolName = "moot_federated_search"
-
-    /// Run `moot_federated_search`: a grant-authorized federated read that
-    /// fans across the locally-open estates the caller is entitled to
-    /// read, narrows each contribution to its grant's scope, and returns
-    /// the per-estate contributions.
-    ///
-    /// Authorization is NOT performed here. The per-estate grant gate
-    /// lives entirely in GLK's `federatedRecall` — this is the I-13
-    /// boundary in practice: ARIA mediates *which* locally-open estates
-    /// to attempt; GLK enforces *whether* each read is granted.
-    /// A per-estate `.crossEstateReadRefused` is the expected "not granted"
-    /// signal and is skipped. If no estate authorizes the caller, the
-    /// call is refused cleanly with an `errorResult`.
-    private func runFederatedSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let requester = try resolveRequester(args)
-        let filterChain = try decodeFilterChain(args["filter"])
-        // Absent `hydrationLevel` defaults to .full so content blobs are present
-        // in the assembled response text — federated search renders drawer content
-        // as a preview and the caller cannot evaluate relevance on empty strings.
-        // When present, the value is passed through `decodeHydration` which throws
-        // `invalidParams` on unknown strings. This is fail-CLOSED: on a federated
-        // and privacy-sensitive surface, unknown garbage must never silently grant
-        // maximum content exposure. Mirrors the same validation discipline as the
-        // Rust `run_federated_search` parser: absent→Full, valid→honored,
-        // invalid→error. Both verticals must be identical.
-        let hydration: HydrationLevel
-        if args["hydrationLevel"] == nil {
-            // Absent: default to .full (content preview requires the content blob).
-            hydration = .full
-        } else {
-            // Present: decode strictly — unknown value → invalidParams (fail-closed).
-            hydration = try decodeHydration(args["hydrationLevel"])
-        }
-        let ordering = try decodeOrdering(args["ordering"])
-        // Route through clampLimit so negative and over-ceiling values are
-        // rejected/clamped at the MCP boundary on the federated surface.
-        // Parity: Rust run_federated_search uses clamp_limit with the same ceiling.
-        let limit = try Self.clampLimit(
-            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
-        let frame = RecallFrame(
-            filterChain: filterChain,
-            hydrationLevel: hydration,
-            limit: limit,
-            ordering: ordering
-        )
-        // Visit candidate sources sorted by UUID so the assembled text is
-        // deterministic across runs, independent of map iteration order.
-        let candidates = estates.values
-            .filter { $0.estateUUID != requester.estateUUID }
-            .sorted { $0.estateUUID.uuidString < $1.estateUUID.uuidString }
-        var sections: [String] = []
-        for source in candidates {
-            let result: FederatedRecallResult
-            do {
-                result = try await kit.federatedRecall(frame, from: source, requestedBy: requester)
-            } catch let error as GeniusLocusKitError {
-                if case .crossEstateReadRefused = error { continue }
-                throw error
-            }
-            let sourceEstate = try await kit.estate(for: source)
-            let scoped = try await Self.narrow(
-                result.drawers, to: result.grant.scope, estate: sourceEstate)
-            sections.append(try await Self.renderContribution(
-                source: source, grant: result.grant, drawers: scoped,
-                estate: sourceEstate
-            ))
-        }
-        guard !sections.isEmpty else {
-            return Self.errorResult(
-                "federated_search refused: no open estate holds an active grant naming the requester."
-            )
-        }
-        return Self.textResult(sections.joined(separator: "\n\n"))
-    }
-
-    // MARK: - Federation helpers
-
-    /// Resolve the requester estate for a federated search.
-    ///
-    /// `requesterEstateID` is now OPTIONAL (Item 2 hardening). When omitted the
-    /// requester is always the default estate. When supplied it must match the
-    /// default estate exactly — supplying a different estate UUID is refused.
-    ///
-    /// This closes the anti-spoof gap: a caller cannot represent themselves as
-    /// a different estate to bypass cross-estate grant scope checks. The
-    /// requester identity is always bound to the authenticated caller, which is
-    /// the server's own default open estate.
-    private func resolveRequester(_ args: [String: JSONValue]) throws -> EstateHandle {
-        guard let supplied = args["requesterEstateID"] else {
-            // Omitted: bind to the default estate (the authenticated caller).
-            return handle
-        }
-        guard let raw = supplied.stringValue else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "requesterEstateID must be a string when supplied; omit it to use the default caller estate"
-            )
-        }
-        guard let uuid = UUID(uuidString: raw) else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "Malformed requesterEstateID (not a UUID): \(raw)"
-            )
-        }
-        guard uuid == handle.estateUUID else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "requesterEstateID does not match the authenticated caller estate; omit requesterEstateID to use the default estate"
-            )
-        }
-        return handle
-    }
-
-    /// Narrow a source estate's recalled drawers to the rows inside the
-    /// authorizing grant's scope (DECISION §10 answer assembly).
-    ///
-    /// PRIMARY enforcement is in GLK: `CrossEstateFederation.federatedRecall`
-    /// already filtered drawers by `grant.contentLevel` before this is called.
-    /// This narrowing is defense-in-depth secondary at the ARIA surface.
-    ///
-    /// Grants specify human-readable wing/room names, so name-based filtering
-    /// requires resolving parentNodeIds to display names via the node tree.
-    private static func narrow(
-        _ drawers: [Drawer],
-        to scope: GrantScope,
-        estate: LocusKit.Estate
-    ) async throws -> [Drawer] {
-        switch scope {
-        case .wholeEstate:
-            return drawers
-        case .wing(let name):
-            let nodeNames = try await estate.resolveNodeNames(
-                parentNodeIds: drawers.map(\.parentNodeId))
-            return drawers.filter { (nodeNames[$0.parentNodeId]?.wing ?? "") == name }
-        case .room(let name):
-            let nodeNames = try await estate.resolveNodeNames(
-                parentNodeIds: drawers.map(\.parentNodeId))
-            return drawers.filter { (nodeNames[$0.parentNodeId]?.room ?? "") == name }
-        case .latticeSubtree(let code):
-            // A drawer is inside the subtree when its UDC code equals `code`
-            // or descends from it on a dot boundary. The `+ "."` guard prevents
-            // a bare-prefix false match (e.g. "00" vs "001").
-            return drawers.filter { $0.udcCode == code || $0.udcCode.hasPrefix(code + ".") }
-        case .singleRow(let id):
-            return drawers.filter { $0.id == id.uuidString }
-        }
-    }
-
-    /// Format one estate's authorized contribution for the federated response.
-    /// Resolves drawer room names from the node tree for display preview.
-    /// Renders as S2 rows (unranked, no score) via the shared ResultComposer,
-    /// so the disclosure is assertions the source chose to write (subjects,
-    /// first sentences) rather than content previews.
-    private static func renderContribution(
-        source: EstateHandle, grant: Grant, drawers: [Drawer],
-        estate: LocusKit.Estate
-    ) async throws -> String {
-        let header = "estate \(source.estateName) [\(source.estateUUID)] — grant \(grant.id), \(drawers.count) row(s)"
-        // Build S2 rows (unranked, no score) for each drawer.
-        let candidateRows: [CandidateRowData] = drawers.prefix(50).map { drawer in
-            Self.federatedCandidateRow(
-                id: drawer.id, sensitivity: drawer.sensitivity,
-                subject: drawer.subject, content: drawer.content,
-                eventTime: ResultComposer.iso8601(drawer.eventTime))
-        }
-        let rows = candidateRows.map(ResultComposer.renderS2Row)
-        return ([header] + rows).joined(separator: "\n")
-    }
-
-    /// Maps one federated drawer to its S2 candidate row, applying
-    /// provenance redaction to BOTH content-derived columns. A subject-only
-    /// gate leaked a body-derived bestSpan preview for restricted and
-    /// secret rows while the subject claimed the row was redacted (codex
-    /// finding 2026-08-26); the Rust twin already nils best_span for
-    /// these sensitivities — this is its exact mirror. Internal (not
-    /// private) so the redaction mapping is pinned by a direct test.
-    internal static func federatedCandidateRow(
-        id: String, sensitivity: Sensitivity,
-        subject: String?, content: String, eventTime: String
-    ) -> CandidateRowData {
-        let rowSubject: String?
-        let rowBestSpan: String?
-        switch sensitivity {
-        case .restricted:
-            rowSubject = ResultComposer.restrictedMarker
-            rowBestSpan = nil
-        case .secret:
-            rowSubject = ResultComposer.secretMarker
-            rowBestSpan = nil
-        case .normal, .elevated:
-            rowSubject = subject
-            rowBestSpan = content.isEmpty ? nil : content
-        }
-        return CandidateRowData(
-            id: id,
-            subject: rowSubject,
-            bestSpan: rowBestSpan,
-            eventTime: eventTime)
-    }
-
-    // MARK: - Argument decoders
-
-    func requireString(_ args: [String: JSONValue], _ key: String) throws -> String {
-        guard let value = args[key]?.stringValue else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "Missing required string argument: \(key)"
-            )
-        }
-        return value
-    }
-
-    private func optionalString(_ value: JSONValue?, argument: String) throws -> String? {
-        guard let value else { return nil }
-        guard let name = value.stringValue else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "\(argument) must be a string; omit it to use the default"
-            )
-        }
-        return name
-    }
-
-    private func optionalBool(_ value: JSONValue?, argument: String) throws -> Bool? {
-        guard let value else { return nil }
-        guard let flag = value.boolValue else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "\(argument) must be a boolean; omit it to use the default"
-            )
-        }
-        return flag
-    }
-
-    private func optionalInt(_ value: JSONValue?, argument: String) throws -> Int? {
-        guard let value else { return nil }
-        guard let raw = value.integerValue else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "\(argument) must be an integer; omit it to use the default"
-            )
-        }
-        return Int(raw)
-    }
-
+extension ToolDispatcher {
     /// Hard ceiling for all caller-supplied `limit`/`count`/`k` arguments at the
     /// MCP tool boundary. Every tool that accepts a numeric quantity must clamp
     /// through `clampLimit` before passing the value into the substrate.
     /// Parity: mirrors `LIMIT_HARD_CEILING` in Rust `dispatch.rs`.
     static let limitHardCeiling = 500
 
-    /// Clamp a caller-supplied `limit`/`count`/`k` to the safe MCP boundary range
-    /// `[1, ceiling]`. This is the single clamping funnel for all such arguments
-    /// across the ARIA_MCP tool surface (interface tools, recipe tools, lens tools).
-    ///
-    /// - `nil` (absent arg)  → returns `defaultValue`.
-    /// - raw ≤ 0             → throws `invalidParams`; negative/zero values crash
-    ///                         downstream range and iterator operations.
-    /// - raw > `ceiling`     → silently clamped to `ceiling`; prevents DoS via
-    ///                         unbounded substrate scans.
-    /// - Otherwise           → returned as-is.
-    ///
-    /// Parity: mirrors `clamp_limit` in Rust `dispatch.rs`.
     static func clampLimit(
         _ raw: Int?,
         argument: String,
@@ -1578,50 +1108,55 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    // MARK: - Result helpers
 
-    /// MCP `tools/call` success result with a single text content block.
-    public static func textResult(_ text: String) -> JSONValue {
-        textResultBlocks([text])
+    // MARK: - Argument decoders
+
+    func requireString(_ args: [String: JSONValue], _ key: String) throws -> String {
+        guard let value = args[key]?.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Missing required string argument: \(key)"
+            )
+        }
+        return value
     }
 
-    /// MCP `tools/call` success result carrying several text blocks, in order.
-    ///
-    /// Used where a machine-readable payload travels alongside the prose
-    /// receipt (`moot_json_import` with `return_id_map`): the reader parses one
-    /// block whole rather than scraping structure out of a sentence.
-    ///
-    /// Deliberately NOT an overload of `textResult(_:)`. Overloading on
-    /// `String` vs `[String]` forces the type-checker to weigh both candidates
-    /// at every call site, and the long `+`-chained receipt strings in this
-    /// file exceed its time budget when it has to.
-    public static func textResultBlocks(_ blocks: [String]) -> JSONValue {
-        .object([
-            "content": .array(blocks.map { block in
-                .object([
-                    "type": .string("text"),
-                    "text": .string(block),
-                ])
-            }),
-            "isError": .bool(false),
-        ])
+    private func optionalString(_ value: JSONValue?, argument: String) throws -> String? {
+        guard let value else { return nil }
+        guard let name = value.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a string; omit it to use the default"
+            )
+        }
+        return name
     }
 
-    /// MCP `tools/call` failure result. Substrate refusals come back
-    /// here rather than as JSON-RPC errors so the client retains the
-    /// call ID and can render the message in a tool-output panel.
-    public static func errorResult(_ text: String) -> JSONValue {
-        .object([
-            "content": .array([
-                .object([
-                    "type": .string("text"),
-                    "text": .string(text),
-                ])
-            ]),
-            "isError": .bool(true),
-        ])
+    private func optionalBool(_ value: JSONValue?, argument: String) throws -> Bool? {
+        guard let value else { return nil }
+        guard let flag = value.boolValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a boolean; omit it to use the default"
+            )
+        }
+        return flag
     }
 
+    private func optionalInt(_ value: JSONValue?, argument: String) throws -> Int? {
+        guard let value else { return nil }
+        guard let raw = value.integerValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be an integer; omit it to use the default"
+            )
+        }
+        return Int(raw)
+    }
+
+}
+
+extension ToolDispatcher {
     // MARK: - Structured recall results (MXE-SS)
 
     /// One structured recall row — the typed twin of a rendered row, per the
@@ -1869,6 +1404,7 @@ public struct ToolDispatcher: Sendable {
         return String(reason[colonRange.upperBound...])
     }
 }
+
 
 // MARK: - Server-owned defaults
 

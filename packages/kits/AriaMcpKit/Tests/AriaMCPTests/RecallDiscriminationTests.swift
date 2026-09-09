@@ -159,46 +159,4 @@ struct RecallDiscriminationTests {
 
     /// An estate with near-identical memories produces a moot_memory_search
     /// result that always contains the discrimination line.
-    @Test(.timeLimit(.minutes(1)))
-    func memorySearchResultAlwaysContainsDiscriminationLine() async throws {
-        let kit = GeniusLocusKit()
-        let storage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: UUID(), backend: .inMemory))
-        let owner = OwnerCredentials(ownerIdentifier: "recall-disc-test")
-        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-
-        // File several near-identical memories so recall scores cluster.
-        for i in 1...5 {
-            let frame = CaptureFrame(
-                content: "apple fruit tree garden nature",
-                channel: .typed,
-                room: "garden",
-                latticeAnchor: .udc("635"),
-                addedBy: "test",
-                embeddingModelID: "test-model-v1")
-            _ = try await kit.capture(handle, frame)
-            // Silence unused variable warning.
-            _ = i
-        }
-
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        let args: JSONValue = .object(["query": .string("apple fruit garden")])
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search", arguments: args)
-
-        let obj = try #require(result.objectValue)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-
-        // Discrimination signal must always be present in the result.
-        #expect(text.contains("discrimination:"))
-        // The signal must be one of the known levels.
-        let hasKnownLevel = text.contains("discrimination: low")
-            || text.contains("discrimination: medium")
-            || text.contains("discrimination: high")
-            || text.contains("discrimination: n/a")
-            || text.contains("discrimination: not_found")
-        #expect(hasKnownLevel)
-    }
 }

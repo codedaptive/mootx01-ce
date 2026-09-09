@@ -3,7 +3,6 @@
 //! The selected-surface owner exposes `aria_mcp::v2` and enables this test with
 //! `aria-v2`; this file must not wire the module or advertise the operations.
 
-#![cfg(feature = "aria-v2")]
 
 use std::sync::Mutex;
 

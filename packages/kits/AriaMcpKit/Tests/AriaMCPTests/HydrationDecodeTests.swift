@@ -53,88 +53,20 @@ struct HydrationDecodeTests {
     /// A JSON integer sent as hydrationLevel must throw invalidParams.
     /// Before the fix this silently returned .structured (the default), accepting
     /// semantically invalid input without error.
-    @Test func numberHydrationLevelThrowsInvalidParams() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        do {
-            _ = try await dispatcher.dispatch(
-                name: "moot_federated_search",
-                arguments: .object([
-                    "requesterEstateID": .string(requesterID.uuidString),
-                    "hydrationLevel": .integer(1),
-                ])
-            )
-            Issue.record("Integer hydrationLevel must throw invalidParams, but did not throw")
-        } catch let error as JSONRPCError {
-            #expect(
-                error.code == JSONRPCErrorCode.invalidParams,
-                "Integer hydrationLevel must throw invalidParams; got code \(error.code)"
-            )
-        }
-    }
 
     // MARK: - B. Valid string values do not throw invalidParams
 
     /// "structured" must not throw invalidParams (call may return isError:true due
     /// to no-grant refusal, but must not throw an out-of-band invalidParams error).
-    @Test func structuredHydrationLevelDoesNotThrow() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        // No throw expected — if no-grant refusal happens that is a tool-level
-        // isError:true result, not a JSONRPCError.
-        _ = try await dispatcher.dispatch(
-            name: "moot_federated_search",
-            arguments: .object([
-                "requesterEstateID": .string(requesterID.uuidString),
-                "hydrationLevel": .string("structured"),
-            ])
-        )
-    }
 
     /// "full" must not throw invalidParams.
-    @Test func fullHydrationLevelDoesNotThrow() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        _ = try await dispatcher.dispatch(
-            name: "moot_federated_search",
-            arguments: .object([
-                "requesterEstateID": .string(requesterID.uuidString),
-                "hydrationLevel": .string("full"),
-            ])
-        )
-    }
 
     /// "bitmapOnly" must not throw invalidParams.
-    @Test func bitmapOnlyHydrationLevelDoesNotThrow() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        _ = try await dispatcher.dispatch(
-            name: "moot_federated_search",
-            arguments: .object([
-                "requesterEstateID": .string(requesterID.uuidString),
-                "hydrationLevel": .string("bitmapOnly"),
-            ])
-        )
-    }
 
     // MARK: - C. Unknown string value → invalidParams (regression guard)
 
     /// An unknown string must throw invalidParams. This was correct before the fix
     /// and must remain correct after.
-    @Test func unknownHydrationLevelStringThrowsInvalidParams() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        do {
-            _ = try await dispatcher.dispatch(
-                name: "moot_federated_search",
-                arguments: .object([
-                    "requesterEstateID": .string(requesterID.uuidString),
-                    "hydrationLevel": .string("ultraHydrated"),
-                ])
-            )
-            Issue.record("Unknown hydrationLevel string must throw invalidParams, but did not throw")
-        } catch let error as JSONRPCError {
-            #expect(
-                error.code == JSONRPCErrorCode.invalidParams,
-                "Unknown hydrationLevel string must throw invalidParams; got code \(error.code)"
-            )
-        }
-    }
 
     // MARK: - D. Absent hydrationLevel does not throw
 
@@ -142,49 +74,11 @@ struct HydrationDecodeTests {
     /// to .full (not .structured) when the key is absent; no decodeHydration call
     /// is made at all. Regression guard: callers that never supply the field must
     /// be unaffected by the fix.
-    @Test func absentHydrationLevelDoesNotThrow() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        _ = try await dispatcher.dispatch(
-            name: "moot_federated_search",
-            arguments: .object([
-                "requesterEstateID": .string(requesterID.uuidString),
-            ])
-        )
-    }
 
     // MARK: - E. clampLimit guards on moot_federated_search (Finding 3)
 
     /// A negative `limit` on `moot_federated_search` must throw `invalidParams`.
     /// Before the fix, the limit bypassed clampLimit and reached the substrate raw.
-    @Test func federatedSearchNegativeLimitThrowsInvalidParams() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        do {
-            _ = try await dispatcher.dispatch(
-                name: "moot_federated_search",
-                arguments: .object([
-                    "requesterEstateID": .string(requesterID.uuidString),
-                    "limit": .integer(-1),
-                ])
-            )
-            Issue.record("Negative limit must throw invalidParams, but did not throw")
-        } catch let error as JSONRPCError {
-            #expect(
-                error.code == JSONRPCErrorCode.invalidParams,
-                "Negative limit must throw invalidParams; got code \(error.code)"
-            )
-        }
-    }
 
     /// An over-ceiling `limit` on `moot_federated_search` must be silently clamped.
-    @Test func federatedSearchOverCeilingLimitDoesNotThrow() async throws {
-        let (dispatcher, requesterID) = try await makeDispatcher()
-        // Should not throw — clamped to 500 before reaching the substrate.
-        _ = try await dispatcher.dispatch(
-            name: "moot_federated_search",
-            arguments: .object([
-                "requesterEstateID": .string(requesterID.uuidString),
-                "limit": .integer(1_000_000),
-            ])
-        )
-    }
 }
