@@ -394,6 +394,53 @@ fn http_get_admin_estates_returns_200_with_hosted_key() {
     assert!(!v["hosted"].as_array().unwrap().is_empty());
 }
 
+/// Each hosted estate reports ITS OWN backend, not the default's.
+///
+/// Swift's `HTTPServer.adminEstatesSnapshot` calls
+/// `kit.storageBackend(for: handle)` inside its per-handle loop; the Rust
+/// twin read `registry.backend` once, so a SQLite default with a registered
+/// in-memory extra reported both as "SQLite" and an operator troubleshooting
+/// the extra read the wrong backend. A registry with two backends is the only
+/// shape that tells the two readings apart.
+#[test]
+fn http_get_admin_estates_labels_each_estate_with_its_own_backend() {
+    let path = std::env::temp_dir()
+        .join(format!(
+            "aria-admin-backends-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ))
+        .to_string_lossy()
+        .into_owned();
+    let mut registry = aria_mcp::estate_registry::EstateRegistry::new_sqlite(&path, "admin-backends-owner")
+        .expect("scratch SQLite estate must open");
+    let extra = registry.register_inmemory("admin-backends-extra");
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "0.1.0", "test", "", None);
+
+    let (status, body) = round_trip_get_with("/api/admin/estates", dispatcher);
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let hosted = v["hosted"].as_array().expect("hosted array");
+
+    let backends: Vec<&str> = hosted
+        .iter()
+        .filter_map(|e| e["backend"].as_str())
+        .collect();
+    assert!(backends.contains(&"SQLite"), "the default must report SQLite, got {backends:?}");
+    assert!(
+        backends.contains(&"InMemory"),
+        "the registered in-memory extra must report InMemory, got {backends:?}"
+    );
+
+    let extra_row = hosted
+        .iter()
+        .find(|e| e["estateUUID"].as_str() == Some(&extra.to_string()))
+        .expect("the extra must be listed");
+    assert_eq!(extra_row["backend"].as_str(), Some("InMemory"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - Hardening tests (P4 backpressure + counters)
 // ─────────────────────────────────────────────────────────────────────────────

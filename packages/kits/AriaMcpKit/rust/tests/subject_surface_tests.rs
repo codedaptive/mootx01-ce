@@ -112,6 +112,36 @@ fn file_memory_oversize_subject_returns_contract_error() {
     );
 }
 
+/// The 120 of the subject contract is 120 Unicode SCALARS, the unit this port
+/// has always counted and the unit both moot-bridge ports now cut on. A
+/// non-ASCII case is what tells the rules apart: 70 clusters of "e" + U+0301
+/// is 70 grapheme clusters — under the limit by that count — and 140 scalars,
+/// over it. Twin of the Swift `subjectLengthCountsScalarsNotGraphemes`.
+#[test]
+fn subject_length_counts_scalars_not_graphemes() {
+    let registry = EstateRegistry::new_inmemory();
+    let clusters = 70;
+    let combining = "e\u{0301}".repeat(clusters);
+    assert_eq!(combining.chars().count(), clusters * 2, "140 Unicode scalars");
+    let result = dispatch_tool(
+        "moot_file_memory",
+        &args!["content" => "some content",
+               "subject" => combining.as_str(),
+               "location" => "subject-tests"],
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect("a 140-scalar subject must return Ok(isError), not Err");
+    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
+    let text = content_text(&result);
+    // The reported length is the scalar count, so the model is told how much
+    // to cut in the unit the contract measures.
+    assert!(
+        text.contains(&format!("(got {})", clusters * 2)),
+        "the refusal must report the scalar count, got: {text}"
+    );
+}
+
 #[test]
 fn set_subject_oversize_returns_contract_error() {
     // setSubject contract violation also surfaces as isError:true (ARIA-MSG-1).

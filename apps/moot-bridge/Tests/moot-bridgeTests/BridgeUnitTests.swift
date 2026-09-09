@@ -32,7 +32,7 @@ struct BridgeConfigTests {
             "verbMap": {
               "write": "moot_file_memory",
               "query": "moot_memory_search",
-              "constantArgs": { "location": "scratch/notes" },
+              "constantArgs": { "wing": "scratch", "location": "notes" },
               "resultFormat": { "kind": "mootText" }
             }
           },
@@ -46,6 +46,8 @@ struct BridgeConfigTests {
         #expect(config.backendA.verbMap.write == "mempalace_add_drawer")
         #expect(config.backendA.verbMap.constantArgs["wing"] == "scratch")
         #expect(config.backendB.verbMap.write == "moot_file_memory")
+        #expect(config.backendB.verbMap.constantArgs["wing"] == "scratch")
+        #expect(config.backendB.verbMap.constantArgs["location"] == "notes")
     }
 
     /// A `primary` that names no configured backend fails fast at load.
@@ -112,7 +114,7 @@ struct TranslateTests {
     private let mootx01 = VerbMap(
         write: "moot_file_memory", query: "moot_memory_search",
         contentArg: "content", queryArg: "query",
-        constantArgs: ["location": "scratch/notes"],
+        constantArgs: ["wing": "scratch", "location": "notes"],
         resultFormat: .mootText,
         subjectArg: "subject")
 
@@ -121,7 +123,7 @@ struct TranslateTests {
     }
 
     /// A MemPalace write translates into a mootx01 write: secondary tool name,
-    /// secondary constantArgs (location), content carried over, fresh disjoint id.
+    /// secondary constantArgs (wing + location), content carried over, fresh disjoint id.
     @Test func writeTranslatesToSecondaryTool() throws {
         let clientCall = parse("""
         {"jsonrpc":"2.0","id":42,"method":"tools/call",
@@ -139,22 +141,54 @@ struct TranslateTests {
         let argObj = try #require(out["params"]?["arguments"]?.objectValue)
         // Content carried over under the secondary's contentArg.
         #expect(argObj["content"] == .string("hello bridge"))
-        // Secondary's constant write-context present.
-        #expect(argObj["location"] == .string("scratch/notes"))
+        // Secondary's constant write-context present: both wing and location.
+        #expect(argObj["wing"] == .string("scratch"))
+        #expect(argObj["location"] == .string("notes"))
         // mootx01 requires a subject; the bridge derives it from the content.
         #expect(argObj["subject"] == .string("hello bridge"))
-        // The primary-only constantArgs (wing/room) are NOT leaked to mootx01.
-        #expect(argObj["wing"] == nil)
+        // The primary-only constantArg room is NOT leaked to mootx01.
         #expect(argObj["room"] == nil)
     }
 
     /// The derived subject is the first non-empty line, trimmed, cut to the
-    /// 120 characters mootx01 accepts; empty content still yields a subject.
+    /// 120 scalars mootx01 accepts; empty content still yields a subject.
     @Test func derivedSubjectShape() {
         #expect(BridgeServer.derivedSubject(from: "\n  first line  \nsecond") == "first line")
         let long = String(repeating: "x", count: 300)
-        #expect(BridgeServer.derivedSubject(from: long).count == BridgeServer.derivedSubjectLimit)
+        #expect(BridgeServer.derivedSubject(from: long).unicodeScalars.count
+                == BridgeServer.derivedSubjectLimit)
         #expect(BridgeServer.derivedSubject(from: "   \n") == "memory")
+    }
+
+    /// The cut counts Unicode SCALARS, the unit the server's 120-character
+    /// contract counts in both ports. "é" as e + U+0301 is one Character and
+    /// two scalars: an ASCII-only test cannot tell the two rules apart, and
+    /// the grapheme rule emitted subjects the Rust server refused.
+    @Test func derivedSubjectCutsOnScalarsNotGraphemes() {
+        let combining = String(repeating: "e\u{0301}", count: 300)
+        let derived = BridgeServer.derivedSubject(from: combining)
+        #expect(derived.unicodeScalars.count == BridgeServer.derivedSubjectLimit)
+        // 120 scalars of a two-scalar cluster is 60 clusters — fewer Characters
+        // than the limit, which is exactly why the two rules disagree.
+        #expect(derived.count == BridgeServer.derivedSubjectLimit / 2)
+        // Whatever the bridge emits must satisfy the server's own check.
+        #expect(derived.unicodeScalars.count <= 120)
+    }
+
+    /// A subject the client already gave under the secondary's key is carried
+    /// through unchanged rather than re-derived. Twin of the Rust
+    /// `write_carries_a_given_subject_through`.
+    @Test func writeCarriesAGivenSubjectThrough() throws {
+        let clientCall = parse("""
+        {"jsonrpc":"2.0","id":1,"method":"tools/call",
+         "params":{"name":"mempalace_add_drawer",
+                   "arguments":{"wing":"scratch","room":"notes","content":"body text","subject":"given"}}}
+        """)
+        let data = try #require(BridgeServer.translateCall(
+            clientParsed: clientCall, callType: .write,
+            primaryVerbMap: mempalace, secondaryVerbMap: mootx01, freshID: 2))
+        let out = try JSONDecoder().decode(JSONValue.self, from: data)
+        #expect(out["params"]?["arguments"]?["subject"] == .string("given"))
     }
 
     /// A mirrored write the secondary refused is a failure, never a completed
@@ -172,7 +206,7 @@ struct TranslateTests {
         let clientCall = parse("""
         {"jsonrpc":"2.0","id":1,"method":"tools/call",
          "params":{"name":"moot_file_memory",
-                   "arguments":{"content":"reverse content","location":"scratch/notes"}}}
+                   "arguments":{"content":"reverse content","wing":"scratch","location":"notes"}}}
         """)
         let data = try #require(BridgeServer.translateCall(
             clientParsed: clientCall, callType: .write,
