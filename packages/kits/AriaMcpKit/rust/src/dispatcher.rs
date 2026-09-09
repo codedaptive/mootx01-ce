@@ -35,7 +35,6 @@ use crate::periodic_coach;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::estate_posture::EstatePosture;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
-use crate::tool_list::build_tool_list;
 use crate::vault_tools::VaultJobLedger;
 
 /// The complete set of MCP protocol versions this server implements, most
@@ -76,6 +75,9 @@ pub struct Dispatcher {
     server_name: String,
     server_version: String,
     tools: serde_json::Value,
+    /// The compile-time selected public surface. Its decoder admits v2 calls
+    /// before legacy policy, teachme, and session processing.
+    surface: crate::surface::SelectedSurface,
     /// Session-scoped ledger of drawer ids surfaced by `moot_memory_search`.
     /// Consulted by dereference verbs to trigger reward-trace marking (B-10a).
     pub(crate) ledger: SurfacedRecallLedger,
@@ -165,12 +167,17 @@ impl Dispatcher {
         version_skew: &str,
         monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
     ) -> Self {
-        let tools = build_tool_list();
+        let surface = crate::surface::SelectedSurface::selected(
+            crate::tool_list::vault_enabled(),
+            crate::tool_list::memory_enabled(),
+        );
+        let tools = surface.catalog().clone();
         Dispatcher {
             registry,
             server_name: name.to_owned(),
             server_version: version.to_owned(),
             tools,
+            surface,
             ledger: SurfacedRecallLedger::new(),
             vault_ledger: VaultJobLedger::new(),
             sensitivity_ledger: SensitivityGrantLedger::new(),
@@ -333,7 +340,67 @@ impl Dispatcher {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| JsonValue::Object(Default::default()));
-        let mut args_map = arguments.as_object().cloned().unwrap_or_default();
+        let mut args_map = match arguments.as_object() {
+            Some(args) => args.clone(),
+            None if cfg!(feature = "aria-v2") => {
+                let message =
+                    "tools/call arguments must be an object for the active ARIA v2 surface";
+                return Err(JSONRPCError {
+                    code: JSONRPCErrorCode::INVALID_PARAMS,
+                    message: message.to_owned(),
+                    data: Some(serde_json::json!({
+                        "code": "invalid_argument",
+                        "path": "arguments",
+                        "message": message,
+                        "correction": "Call moot_monitoring_status with an empty arguments object."
+                    })),
+                });
+            }
+            None => Default::default(),
+        };
+
+        // Selected-surface admission belongs before frozen policy, teachme
+        // interception, mode parsing, and legacy dispatch. A v2-only name
+        // therefore cannot reach any v1 runner, even with teachme:true.
+        #[cfg(feature = "aria-v2")]
+        if let Some(request) = self.surface.decode(name, &args_map)? {
+            // Stable typed effect drives posture before the request clock or
+            // any session/estate state changes.
+            if request.effect() == crate::surface::SurfaceEffect::Mutation
+                && self.posture.is_frozen()
+            {
+                return Ok(crate::v2::render::refusal(
+                    name,
+                    &crate::v2::render::V2OperationalRefusal {
+                        code: "estate_frozen".to_owned(),
+                        message: EstatePosture::refusal_message(name),
+                        retryable: false,
+                        recovery: None,
+                    },
+                    &crate::v2::render::V2ResultMeta::incomplete(
+                        &self.build_serial,
+                        self.surface.capability_digest(),
+                        crate::v2::operation::V2OperationEffect::Write,
+                    ),
+                ));
+            }
+            let now_millis = crate::dispatch::bench_clock_now();
+            return crate::surface::execute(
+                &self.surface,
+                self.posture,
+                request,
+                &self.registry,
+                &self.sensitivity_ledger,
+                &self.ledger,
+                &self.vault_ledger,
+                self.monitoring_control.as_deref(),
+                &self.build_serial,
+                now_millis,
+            );
+        }
+
+        #[cfg(not(feature = "aria-v2"))]
+        let _ = self.surface.decode(name, &args_map)?;
 
         // Frozen posture: refuse every writing, mutating, or deleting tool
         // before any runner fires and before the session state records the
@@ -500,5 +567,22 @@ mod frozen_command_tests {
         let ping = call(&frozen, "moot_estate_ping", serde_json::json!({}));
         assert_ne!(ping["result"]["isError"], serde_json::json!(true), "moot_estate_ping is a read; got {ping}");
         assert_eq!(frozen.mode_session_state.snapshot().total_calls, 1);
+    }
+
+    #[cfg(feature = "aria-v2")]
+    #[test]
+    fn v2_rejects_inactive_teachme_before_the_session_records_it() {
+        let dispatcher = frozen_dispatcher();
+        let response = call(
+            &dispatcher,
+            "moot_file_memory",
+            serde_json::json!({"teachme": true, "mode": "Recall=exact"}),
+        );
+        assert_eq!(response["error"]["code"], serde_json::json!(-32601));
+        assert_eq!(
+            dispatcher.mode_session_state.snapshot().total_calls,
+            0,
+            "inactive v1 names must reject before v2 session handling",
+        );
     }
 }

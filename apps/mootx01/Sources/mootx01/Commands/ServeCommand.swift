@@ -176,6 +176,9 @@ struct ServeCommand: AsyncParsableCommand {
         // An in-memory estate is ALWAYS first-run: nothing persists between
         // processes, so create-then-open every time.
         let isFirstRun = !FileManager.default.fileExists(atPath: estateURL.path) || inMemory
+        if isFirstRun && posture == .frozen {
+            throw EstateError.substrateUnavailable("frozen serve requires an existing estate")
+        }
 
         // Estate key-material lifetime (estate-key-lifetime fix, 2026-07-29).
         // The catalog decided what kind of estate this is, and the kind decides
@@ -279,13 +282,18 @@ struct ServeCommand: AsyncParsableCommand {
             // a transient estate's Ed25519 key never touches the Keychain and it
             // never federates.
             handle = try await kit.open(storage: storage, owner: owner,
-                                        identityKeyStore: identityKeyStore, federate: registered)
+                                        identityKeyStore: identityKeyStore, federate: registered, frozen: posture == .frozen)
             // A fresh estate is born with the span encoder as its default recall
             // stage; existing estates get the key from `mootx01 upgrade`, never
             // from a serve open (an operator who cleared it stays lexical-only).
             if isFirstRun {
                 try await kit.provisionDefaultEncoderIfAbsent(for: handle)
             }
+            if posture == .frozen {
+                guard try await EstateFormatStore(storage: storage).readIfPresent() == .current else {
+                    throw EstateError.substrateUnavailable("frozen estate requires migration before serving")
+                }
+            } else {
             let preparation = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
             // The manifest must say what is on disk: after a migration, or for an
@@ -294,12 +302,13 @@ struct ServeCommand: AsyncParsableCommand {
                 preparation, estate: estate, encryption: encryption, now: Date()) {
                 Logging.stderr.log("mootx01 serve: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
             }
+            }
             // `open` admits a BARE estate — it does not register a Corpus or
             // VectorStore, so dense vector recall and distillation are dark. Wire
             // the GLK semantic layer (Corpus + VectorStore + encode queue) here so
             // a served estate is fully live. Idempotent on reopen; does not
             // re-stamp the manifest (which is why we wire rather than `provision`).
-            try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage, frozen: posture == .frozen)
             // Seed the seven default wings if they are not already present.
             // `seedDefaultWings` is idempotent: it reads existing charter drawers
             // and skips wings that are already seeded, so calling it on every open
@@ -326,7 +335,7 @@ struct ServeCommand: AsyncParsableCommand {
             }
             // Charters seed only into a registered estate. A transient estate
             // holds exactly what was imported into it (2026-08-24 ruling).
-            if registered {
+            if registered && posture != .frozen {
             do {
                 try await kit.seedDefaultWings(for: handle, now: Date())
             } catch {
@@ -358,7 +367,7 @@ struct ServeCommand: AsyncParsableCommand {
             if residentPort != nil {
                 Task {
                     do {
-                        try await kit.rebuildDerivedAccelerators(for: handle)
+                        try await kit.rebuildDerivedAccelerators(for: handle, frozen: posture == .frozen)
                         Logging.stderr.log("derived accelerators rebuilt (background)")
                     } catch {
                         Logging.stderr.log("warning: derived accelerator rebuild failed: \(error)")
