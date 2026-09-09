@@ -19,9 +19,9 @@
 
 import Foundation
 import PersistenceKit
+import PersistenceKitSQLite
 import QueueKit
 import SubstrateTypes
-import PersistenceKitSQLite
 import Testing
 
 @testable import CorpusKit
