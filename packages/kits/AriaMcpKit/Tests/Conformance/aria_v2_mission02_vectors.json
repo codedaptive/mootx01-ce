@@ -195,6 +195,9 @@
               "minimum": 1,
               "maximum": 500
             },
+            "explain": {
+              "type": "boolean"
+            },
             "estate_id": {
               "type": "string",
               "format": "uuid"
@@ -2733,6 +2736,9 @@
             "path": {
               "type": "string"
             },
+            "return_id_map": {
+              "type": "boolean"
+            },
             "estate_id": {
               "type": "string",
               "format": "uuid"
@@ -3824,6 +3830,9 @@
             "estate_id": {
               "type": "string",
               "format": "uuid"
+            },
+            "echo_query": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -3916,6 +3925,9 @@
             "estate_id": {
               "type": "string",
               "format": "uuid"
+            },
+            "echo_query": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -4084,6 +4096,9 @@
             "estate_id": {
               "type": "string",
               "format": "uuid"
+            },
+            "echo_query": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -7835,7 +7850,7 @@
       {
         "id": "vault_job",
         "name": "moot_vault_job",
-        "description": "Fetch the status of one vault job.",
+        "description": "Fetch the status of one vault job. Returns running, complete, or failed status with progress details.",
         "help": {
           "intent": "Fetch the status of one vault job.",
           "example": {
@@ -7860,7 +7875,8 @@
           "properties": {
             "job_id": {
               "type": "string",
-              "format": "uuid"
+              "format": "uuid",
+              "description": "Job ID returned by moot_vault_import or moot_vault_export."
             }
           },
           "required": [

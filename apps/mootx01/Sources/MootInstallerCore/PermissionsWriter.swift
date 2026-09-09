@@ -127,7 +127,17 @@ public enum PermissionsWriter {
         "moot_recall_walk", "moot_recall_temporal",
         "moot_fact_search", "moot_fact_timeline",
         "moot_connection_search", "moot_connection_map",
-        "moot_estate_map", "moot_read_journal", "moot_federated_search",
+        "moot_estate_map", "moot_read_journal",
+        // Grant-authorized federated read (v2 name: moot_federated_recall replaces moot_federated_search).
+        "moot_federated_recall",
+        // Surface help: capability discovery, always a pure read.
+        "moot_help",
+        // Transcript recall: reads session transcript, no estate writes.
+        "moot_memory_recall_transcript",
+        // Monitoring inspection: reads daemon telemetry state without changing it.
+        "moot_monitoring_status",
+        // Migration candidate evaluation (read-only, does not commit).
+        "moot_migration_run",
         // Dataset reads (MX-TAB-7): query rows / column stats are read-only.
         "moot_dataset_query", "moot_dataset_stats",
         "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
