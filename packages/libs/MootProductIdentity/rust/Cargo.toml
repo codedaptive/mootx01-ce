@@ -12,8 +12,8 @@ name = "moot_product_identity"
 path = "src/lib.rs"
 
 [dependencies]
-
-[dev-dependencies]
-# The shared fixture beside the Swift library is JSON; the parity test reads
-# it with serde_json. Dev-only: the shipped crate is constants and path math.
-serde_json = "1"
+# serde_json parses `<config dir>/config.json` in ProductSettings::load, the
+# production settings path shared by the daemon and moot-mgr, and the fixture
+# parity test reads it too. The port's Swift twin uses Foundation's
+# JSONSerialization; serde_json is the Rust port's JSON parser everywhere.
+serde_json = { version = "1" }

@@ -44,6 +44,7 @@ import PersistenceKit
 import PersistenceKitSQLite
 import QueueKit
 import MootInstallerCore
+import MootEstateOpen
 import Darwin
 
 struct DreamCommand: AsyncParsableCommand {
@@ -65,7 +66,7 @@ struct DreamCommand: AsyncParsableCommand {
         // a registered name, or a transient estate by its directory.
         let estate: EstateRecord
         do {
-            estate = try (db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()).active
+            estate = try EstateOpen.catalog(selecting: db).active
         } catch {
             Logging.stderr.log("mootx01 dream fatal: \(error)")
             throw ExitCode.failure

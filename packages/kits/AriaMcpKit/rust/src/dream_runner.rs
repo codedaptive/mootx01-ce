@@ -159,7 +159,7 @@ pub struct DreamRunResult {
 pub fn run_one_dreaming_cycle(
     estate_path: &str,
     owner: &str,
-    opening: crate::estate_registry::SqliteOpening,
+    opening: crate::estate_registry::EstateOpening,
     now_epoch_secs: f64,
 ) -> Result<DreamRunResult, String> {
     // Nothing to do if the estate file does not exist.

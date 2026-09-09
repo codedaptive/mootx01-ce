@@ -20,7 +20,17 @@ struct StatusCommand: AsyncParsableCommand {
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let env = ProcessInfo.processInfo.environment
-        let dataDir = EstateCatalog.configurationDirectory
+
+        // Catalog load to resolve the active record's PID file path.
+        // `EstateCatalog.load()` is read-only and fast; a catalog that does
+        // not exist yet (first install) returns `.failure`, and `pidURL`
+        // remains nil — the PID observation is skipped, which is correct
+        // (no serve has ever run on this machine).
+        let activeRecord = try? EstateCatalog.load().active
+        // The PID file is `estate.pid` inside the estate's own directory,
+        // not `mootx01.pid` at the catalog root. The path is owned by the
+        // estate record to stay in sync with serve and upgrade.
+        let pidURL: URL? = activeRecord?.pidURL
 
         print("mootx01 status")
         print("─────────────────────────────────")
@@ -36,7 +46,6 @@ struct StatusCommand: AsyncParsableCommand {
         //     unverified — could be any process)?
         //   - provider report: the descriptor/authenticated readiness surface
         //     remains authoritative; a registration or open port alone is not.
-        let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
         let rawPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
         let residentPort = (1...65535).contains(rawPort) ? rawPort : MootPaths.defaultResidentPort
         #if os(macOS)
@@ -69,7 +78,8 @@ struct StatusCommand: AsyncParsableCommand {
         // A PID file whose process is verifiably a live mootx01 binary is an
         // OBSERVATION worth surfacing (identity-verified, still not
         // readiness); a stale one is removed.
-        if let pidString = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+        if let pidURL,
+           let pidString = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            let pid = Int32(pidString) {
             if processIsRunning(pid: pid) {
                 print("Foreground serve process: PID \(pid) (identity-verified mootx01; not proof of resident readiness)")

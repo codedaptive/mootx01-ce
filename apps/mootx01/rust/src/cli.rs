@@ -122,10 +122,11 @@ pub enum Command {
     Dream { db: Option<String> },
     /// §4.8 upgrade [--from <path>] [--db <name>|<dir>/<name>] [--check] [--yes] [--no-restart] [--backfill-only]
     Upgrade { from: Option<String>, db: Option<String>, check: bool, yes: bool, no_restart: bool, converge_only: bool, backfill_only: bool },
-    /// out-of-band sensitivity grants unlock <private|secret> [--db <name>]
+    /// out-of-band sensitivity grants unlock <private|secret>
     /// Authenticate and issue an in-RAM sensitivity-tier grant to the daemon.
     /// "private" maps to the restricted tier; "secret" to the secret tier.
-    Unlock { tier: String, db: Option<String> },
+    /// Always operates on the active estate's daemon; --db has no spec entry.
+    Unlock { tier: String },
     /// out-of-band sensitivity grants lock — revoke all sensitivity grants (no auth required).
     Lock,
     /// enable <feature> [--yes] [--ingest-all]
@@ -181,7 +182,7 @@ pub enum DbCommand {
     Unregister { name: String },
     List,
     Open { name: String },
-    Delete { name: String, force: bool },
+    Delete { name: String, yes: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,14 +604,14 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
         }
         "delete" => {
             let name = take_value(it, "db delete <name>")?;
-            let mut force = false;
+            let mut yes = false;
             while let Some(a) = it.next() {
                 match a.as_str() {
-                    "--force" | "-f" => force = true,
+                    "--yes" | "-y" => yes = true,
                     other => return Err(unexpected(other, "db delete")),
                 }
             }
-            Ok(Command::Db(DbCommand::Delete { name, force }))
+            Ok(Command::Db(DbCommand::Delete { name, yes }))
         }
         "--help" | "-h" => Ok(Command::HelpFor("db")),
         other => Err(UsageError(format!(
@@ -861,15 +862,13 @@ fn parse_unlock(it: &mut Args) -> Result<Command, UsageError> {
             s
         }
     };
-    let mut db = None;
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--db" => db = Some(take_value(it, "--db")?),
             "--help" | "-h" => return Ok(Command::HelpFor("unlock")),
             other => return Err(unexpected(other, "unlock")),
         }
     }
-    Ok(Command::Unlock { tier, db })
+    Ok(Command::Unlock { tier })
 }
 
 fn parse_enable(it: &mut Args) -> Result<Command, UsageError> {
@@ -1044,7 +1043,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 unregister <name>                   Forget a registered estate. Its files are not touched.\n\
             \x20 list                                List the registered estates, active first.\n\
             \x20 open <name>                         Make a registered estate the active one (used by serve, drain, dream, query and status).\n\
-            \x20 delete <name> [-f]                  Delete a registered estate: its files and its record. Cannot delete the active estate or 'default' (use uninstall --purge).".into(),
+            \x20 delete <name> [-y]                  Delete a registered estate: its files and its record. Cannot delete the active estate or 'default' (use uninstall --purge).".into(),
         "status" => "Show server state, active estate, and wired clients.\n\
             \n\
             USAGE: mootx01 status".into(),
@@ -1130,16 +1129,16 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --daemon-url <url>      Resident daemon base URL. Default: read daemon.port file, else http://127.0.0.1:4242.".into(),
         "drain" => "Finish draining an estate's encode queue, then exit. The detached background finisher an stdio serve spawns when it exits with encode work still pending (T5); rarely run by hand.\n\
             \n\
-            USAGE: mootx01 drain [--db <name>]\n\
+            USAGE: mootx01 drain [--db <name>|<dir>/<name>]\n\
             \n\
             OPTIONS:\n\
-            \x20 --db <name>             Named estate to drain. Default: active estate.".into(),
+            \x20 --db <name>|<dir>/<name>  Named estate or transient path to drain. Default: active estate.".into(),
         "dream" => "Run one REM-ALPHA dreaming cycle, then exit. The detached background finisher an stdio serve spawns on startup or exit when the dreaming queue has pending items; rarely run by hand.\n\
             \n\
-            USAGE: mootx01 dream [--db <name>]\n\
+            USAGE: mootx01 dream [--db <name>|<dir>/<name>]\n\
             \n\
             OPTIONS:\n\
-            \x20 --db <name>             Named estate to process dreaming jobs for. Default: active estate.".into(),
+            \x20 --db <name>|<dir>/<name>  Named estate or transient path to process dreaming jobs for. Default: active estate.".into(),
         "upgrade" => "Upgrade mootx01 to the latest release or a local build.\n\
             \n\
             USAGE: mootx01 upgrade [--from <path>] [--db <name>|<dir>/<name>] [--check] [--yes] [--no-restart] [--backfill-only]\n\
@@ -1153,14 +1152,11 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --backfill-only         Run only the estate migration steps (schema 10 → 19, manifest refresh, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
         "unlock" => "Authenticate and issue a sensitivity-tier grant to the resident daemon.\n\
             \n\
-            USAGE: mootx01 unlock <private|secret> [--db <name>]\n\
+            USAGE: mootx01 unlock <private|secret>\n\
             \n\
             ARGUMENTS:\n\
             \x20 private                 Grant access to restricted-tier rows until local midnight.\n\
             \x20 secret                  Grant access to secret-tier rows for 30 minutes.\n\
-            \n\
-            OPTIONS:\n\
-            \x20 --db <name>             Named estate (uses that estate's daemon port). Default: active estate.\n\
             \n\
             Authentication (Linux/Windows): verifies the tier-specific PBKDF2 password stored in\n\
             <dataDir>/sensitivity_hashes.json. Use `mootx01 lock` to revoke immediately.".into(),
@@ -1486,8 +1482,10 @@ mod tests {
         assert_eq!(p(&["db", "list"]).unwrap(), Command::Db(DbCommand::List));
         assert_eq!(p(&["db", "open", "work"]).unwrap(),
                    Command::Db(DbCommand::Open { name: "work".into() }));
-        assert_eq!(p(&["db", "delete", "work", "-f"]).unwrap(),
-                   Command::Db(DbCommand::Delete { name: "work".into(), force: true }));
+        assert_eq!(p(&["db", "delete", "work", "-y"]).unwrap(),
+                   Command::Db(DbCommand::Delete { name: "work".into(), yes: true }));
+        // --force/-f is gone (I2-2); it must now be rejected.
+        assert!(p(&["db", "delete", "work", "-f"]).is_err());
     }
 
     #[test]
@@ -1586,7 +1584,7 @@ mod tests {
     fn unlock_private_parses() {
         assert_eq!(
             p(&["unlock", "private"]).unwrap(),
-            Command::Unlock { tier: "private".into(), db: None }
+            Command::Unlock { tier: "private".into() }
         );
     }
 
@@ -1594,16 +1592,14 @@ mod tests {
     fn unlock_secret_parses() {
         assert_eq!(
             p(&["unlock", "secret"]).unwrap(),
-            Command::Unlock { tier: "secret".into(), db: None }
+            Command::Unlock { tier: "secret".into() }
         );
     }
 
     #[test]
-    fn unlock_with_db_parses() {
-        assert_eq!(
-            p(&["unlock", "private", "--db", "work"]).unwrap(),
-            Command::Unlock { tier: "private".into(), db: Some("work".into()) }
-        );
+    fn unlock_db_flag_rejected() {
+        // --db has no spec entry for unlock (R5); the parser must reject it.
+        assert!(p(&["unlock", "private", "--db", "work"]).is_err());
     }
 
     #[test]
@@ -1611,7 +1607,7 @@ mod tests {
         // "restricted" is the internal name; the CLI also accepts it.
         assert_eq!(
             p(&["unlock", "restricted"]).unwrap(),
-            Command::Unlock { tier: "restricted".into(), db: None }
+            Command::Unlock { tier: "restricted".into() }
         );
     }
 

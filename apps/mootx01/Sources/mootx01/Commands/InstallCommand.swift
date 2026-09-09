@@ -9,6 +9,8 @@ import Foundation
 import GeniusLocusKit
 import GeniusLocusKitMigrations
 import MootInstallerCore
+import MootEstateOpen
+import MootProductIdentity
 
 struct InstallCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -90,7 +92,7 @@ struct InstallCommand: AsyncParsableCommand {
         //
         // The catalog names the default estate and its files; install inspects
         // the same database file every opener will open.
-        let active = try EstateCatalog.open().active
+        let active = try EstateOpen.catalog(selecting: nil).active
         if noEncrypt {
             switch EstateOpenPosture.fileState(at: active.databaseURL) {
             case .absent:
@@ -147,6 +149,26 @@ struct InstallCommand: AsyncParsableCommand {
                         "could not clear a stale --no-encrypt choice in the estate manifest: \(error). Pass --no-encrypt if plaintext was intended.")
                 }
             }
+        }
+
+        // Seed the product settings file (`config.json`) with the computed
+        // default stats-store path when the key is absent. Idempotent: a
+        // second run leaves an existing value untouched (R6, 2026-09-09).
+        // `upgrade` never calls this, so the setting is install-time only
+        // unless the operator edits the file. Placed after handleExistingDatabase
+        // so a cancelled reinstall does not overwrite a previously-set operator
+        // path (W-5).
+        let configDir = MootProductIdentity.Storage.configurationDirectory
+        let defaultStatsStorePath = MootPaths.daemonStatsStoreDefault(dataDir: configDir)
+        let seeded = MootProductIdentity.Settings.seedDefaultsIfAbsent(
+            defaultStatsStorePath: defaultStatsStorePath,
+            configurationDirectory: configDir
+        )
+        if !seeded {
+            // Non-fatal: the daemon and moot-mgr fall back to the same computed
+            // default when no setting is present. Warn so the operator can
+            // investigate permission issues (twin of Rust: "could not seed config.json").
+            fputs("mootx01: warning: could not seed config.json\n", stderr)
         }
 
         // Resolve the SOURCE binary (the running executable). We never
@@ -574,10 +596,11 @@ struct InstallCommand: AsyncParsableCommand {
             // travels in the environment: the estate manifest is the one record
             // of the at-rest posture, and a hand-run `mootx01 serve` reads the
             // same catalog and manifest as the launchd daemon.
+            // ARIA_MCP_STATS_STORE is no longer injected here (R6): the daemon
+            // resolves its stats store path from MootPaths.daemonStatsStorePath
+            // directly, the same path moot-mgr reads. No env carry needed.
             let daemonEnv = [
                 "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
-                "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(
-                    dataDir: EstateCatalog.configurationDirectory),
                 "MOOTX01_VAULT": vaultValue,
                 "MOOTX01_SUBJECT_RIDER": subjectRiderValue,
             ]
@@ -714,7 +737,7 @@ struct InstallCommand: AsyncParsableCommand {
     private func handleExistingDatabase(homeDirectory home: URL) throws {
         var catalog: EstateCatalog
         do {
-            catalog = try EstateCatalog.open()
+            catalog = try EstateOpen.catalog(selecting: nil)
         } catch {
             print("  ✗ \(error)")
             throw ExitCode.failure

@@ -12,10 +12,9 @@
 //   - The production sink is `PersistenceStatsSink`, wired by
 //     `AriaResident.installManagerTelemetry` at startup. In resident
 //     HTTP mode the daemon resolves the store path via
-//     `AriaResident.statsStorePathFromEnv`: if `ARIA_MCP_STATS_STORE`
-//     is set and non-empty that path is used; otherwise the daemon
-//     defaults to the moot-mgr store at
-//     `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite`.
+//     `AriaResident.statsStorePath`: the daemon defaults to the moot-mgr
+//     store at `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite`.
+//     (ARIA_MCP_STATS_STORE env override removed per R6, 2026-09-08.)
 //     This file only provides the protocol and the no-op default.
 
 // MARK: - StatsSink

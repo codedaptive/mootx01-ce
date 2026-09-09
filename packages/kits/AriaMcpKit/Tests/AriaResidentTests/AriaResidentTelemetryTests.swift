@@ -1,17 +1,13 @@
 // AriaResidentTelemetryTests.swift
 //
 // Tests for the resident-daemon telemetry wiring:
-//   1. statsStorePathFromEnv — env override, useDefault=true default path, useDefault=false nil.
+//   1. statsStorePath — wiring tests proving the configurationDirectory seam
+//      routes through Settings.load (two tests: key-set and key-absent).
+//      Existing tests use a scratch directory so no real config.json is read.
+//      (ARIA_MCP_STATS_STORE env override removed per R6, 2026-09-08.)
 //   2. installManagerTelemetry with a real path: wires the sink so a reported sample
 //      lands in the stats store (enabled sink persists samples).
-//   3. installManagerTelemetry with nil/empty path: returns nil. The tests assert
-//      only the nil return value; they do not inspect the installed sink or prove
-//      no-op behavior of the enabled gate.
-//
-// Both-ports parity note:
-//   The Rust port's stats_store_path_from_env() is exercised by the Rust
-//   runtime tests in packages/kits/AriaMcpKit/rust/tests/runtime_tests.rs (same three
-//   scenarios: explicit env, default, absent).
+//   3. installManagerTelemetry with nil/empty path: returns nil.
 
 import Testing
 import Foundation
@@ -29,48 +25,69 @@ private func makeTempStoreURL() -> URL {
     return tmp.appendingPathComponent("stats.sqlite")
 }
 
-// MARK: - statsStorePathFromEnv
+// MARK: - statsStorePath helpers
 
-@Suite("AriaResident.statsStorePathFromEnv")
-struct StatsStorePathFromEnvTests {
+private func makeScratchDir(label: String = "") throws -> URL {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("com.mootx01.statstest-\(label)\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
 
-    @Test("env var override takes precedence in both modes")
-    func envVarOverrideTakesPrecedence() {
-        let explicit = "/tmp/my-stats.sqlite"
-        let env = ["ARIA_MCP_STATS_STORE": explicit]
+private func writeConfig(_ json: String, to dir: URL) throws {
+    let url = dir.appendingPathComponent("config.json")
+    try json.data(using: .utf8)!.write(to: url)
+}
 
-        // Override is returned regardless of useDefault.
-        #expect(AriaResident.statsStorePathFromEnv(env: env, useDefault: false) == explicit)
-        #expect(AriaResident.statsStorePathFromEnv(env: env, useDefault: true) == explicit)
+// MARK: - statsStorePath
+
+@Suite("AriaResident.statsStorePath")
+struct StatsStorePathTests {
+
+    @Test("useDefault=false returns nil (stdio opt-in)")
+    func noDefaultReturnsNil() throws {
+        let scratch = try makeScratchDir(label: "nil-")
+        let result = AriaResident.statsStorePath(useDefault: false, configurationDirectory: scratch)
+        #expect(result == nil, "stdio mode must return nil")
     }
 
-    @Test("useDefault=false with no env var returns nil (stdio opt-in)")
-    func noEnvAndNoDefaultReturnsNil() {
-        let result = AriaResident.statsStorePathFromEnv(env: [:], useDefault: false)
-        #expect(result == nil, "stdio mode must return nil when env var absent")
-    }
-
-    @Test("useDefault=true with no env var returns the moot-mgr platform default path")
-    func useDefaultReturnsDefaultPath() {
-        let result = AriaResident.statsStorePathFromEnv(env: [:], useDefault: true)
-        // Must be non-nil and contain the canonical moot-mgr path segments.
+    @Test("useDefault=true with no config key returns the computed default")
+    func useDefaultReturnsDefaultPath() throws {
+        // Use a scratch dir with no config.json so we exercise the fallback path
+        // without reading the developer's real configuration file.
+        let scratch = try makeScratchDir(label: "default-")
+        let result = AriaResident.statsStorePath(useDefault: true, configurationDirectory: scratch)
         #expect(result != nil,
                 "resident default path must be non-nil when useDefault=true")
         #expect(result?.hasSuffix("moot-mgr/stats.sqlite") == true,
                 "resident default path must end with moot-mgr/stats.sqlite, got: \(result ?? "nil")")
-        // Must contain the com.mootx01.ce bundle-ID segment.
-        #expect(result?.contains("com.mootx01.ce") == true,
-                "resident default path must contain com.mootx01.ce, got: \(result ?? "nil")")
     }
 
-    @Test("empty env var string is treated as absent (falls through to default or nil)")
-    func emptyEnvVarIsTreatedAsAbsent() {
-        let env = ["ARIA_MCP_STATS_STORE": ""]
-        // stdio: nil; resident: default path.
-        #expect(AriaResident.statsStorePathFromEnv(env: env, useDefault: false) == nil)
-        let defaultResult = AriaResident.statsStorePathFromEnv(env: env, useDefault: true)
-        #expect(defaultResult != nil, "empty env var with useDefault=true must return the default path")
-        #expect(defaultResult?.hasSuffix("moot-mgr/stats.sqlite") == true)
+    // MARK: Wiring tests — configurationDirectory seam proves the reader honours the setting
+
+    /// Wiring test (key set): statsStorePath with a scratch config dir that has
+    /// `daemon.stats_store` set returns that configured path. Deleting the
+    /// Settings.load call in statsStorePath makes this test red.
+    @Test("wiring: key set in scratch config dir → statsStorePath returns it")
+    func wiring_keySet_returnsConfiguredPath() throws {
+        let scratch = try makeScratchDir(label: "wiring-set-")
+        let customPath = scratch.appendingPathComponent("custom-stats.sqlite").path
+        try writeConfig(#"{"daemon":{"stats_store":"\#(customPath)"}}"#, to: scratch)
+        let result = AriaResident.statsStorePath(useDefault: true, configurationDirectory: scratch)
+        #expect(result == customPath,
+                "statsStorePath must return daemon.stats_store from config.json; got \(result ?? "nil")")
+    }
+
+    /// Wiring test (key absent): statsStorePath with a scratch config dir that has
+    /// no key falls back to the computed default under that dir.
+    @Test("wiring: key absent in scratch config dir → statsStorePath returns computed default")
+    func wiring_keyAbsent_returnsComputedDefault() throws {
+        let scratch = try makeScratchDir(label: "wiring-absent-")
+        // No config.json written — key is absent.
+        let result = AriaResident.statsStorePath(useDefault: true, configurationDirectory: scratch)
+        let expected = scratch.appendingPathComponent("moot-mgr/stats.sqlite").path
+        #expect(result == expected,
+                "statsStorePath must fall back to <configDir>/moot-mgr/stats.sqlite; got \(result ?? "nil")")
     }
 }
 

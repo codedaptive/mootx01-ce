@@ -26,7 +26,7 @@
 //! recall-trace reward window is bounded by this constant.
 
 use aria_mcp::dream_runner::run_one_dreaming_cycle;
-use aria_mcp::estate_registry::{EstateRegistry, SqliteOpening};
+use aria_mcp::estate_registry::{EstateRegistry, EstateOpening};
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
     RecallOrigin,
@@ -141,7 +141,7 @@ fn dream_runner_nonempty_queue_cycle_ran() {
     drop(registry);
 
     // Run one REM-ALPHA cycle against the on-disk estate.
-    let result = run_one_dreaming_cycle(&path, "dream-test-owner", SqliteOpening::REGISTERED, NOW)
+    let result = run_one_dreaming_cycle(&path, "dream-test-owner", EstateOpening::REGISTERED, NOW)
         .expect("run_one_dreaming_cycle must not error on a seeded estate");
 
     assert!(
@@ -168,7 +168,7 @@ fn dream_runner_empty_queue_no_cycle() {
         .expect("new_sqlite must succeed on a fresh path");
     drop(_registry); // release before calling run_one_dreaming_cycle
 
-    let result = run_one_dreaming_cycle(&path, "dream-test-owner", SqliteOpening::REGISTERED, NOW)
+    let result = run_one_dreaming_cycle(&path, "dream-test-owner", EstateOpening::REGISTERED, NOW)
         .expect("run_one_dreaming_cycle must not error on an empty estate");
 
     assert!(
@@ -197,7 +197,7 @@ fn dream_runner_nonexistent_path_noop() {
         "pre-condition: path must not exist for this test to be meaningful"
     );
 
-    let result = run_one_dreaming_cycle(&absent, "dream-test-owner", SqliteOpening::REGISTERED, NOW)
+    let result = run_one_dreaming_cycle(&absent, "dream-test-owner", EstateOpening::REGISTERED, NOW)
         .expect("run_one_dreaming_cycle must not error for a nonexistent path");
 
     assert!(

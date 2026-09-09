@@ -21,6 +21,7 @@ import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
 import MootInstallerCore
+import MootEstateOpen
 import Darwin
 
 struct DrainCommand: AsyncParsableCommand {
@@ -46,7 +47,7 @@ struct DrainCommand: AsyncParsableCommand {
         // a registered name, or a transient estate by its directory.
         let estate: EstateRecord
         do {
-            estate = try (db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()).active
+            estate = try EstateOpen.catalog(selecting: db).active
         } catch {
             Logging.stderr.log("mootx01 drain fatal: \(error)")
             throw ExitCode.failure

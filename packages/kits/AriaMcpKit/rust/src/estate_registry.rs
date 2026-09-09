@@ -10,8 +10,10 @@
 //! Three backend shapes are available, all wiring semantic recall (BM25 +
 //! vector lanes via Corpus + VectorStore) after `coord.open`:
 //!
-//! - **In-memory** (`new_inmemory`, `register_inmemory`): ephemeral, discarded
-//!   on process exit. Used by default when neither env var is set.
+//! - **In-memory** (`new_inmemory`, `new_inmemory_with`, `register_inmemory`):
+//!   ephemeral, discarded on process exit. Reached from the product only by
+//!   `--in-memory`, which serves it as a transient estate (R8, 2026-09-08):
+//!   no federation identity and no charter seeding.
 //!   **Semantic recall lanes are wired** via a separate `InMemoryStorage`
 //!   handle used exclusively by the Corpus + VectorStore. The LocusKit tables
 //!   (drawers, tunnels, kg_facts) and the CorpusKit/SynapseKit tables (chunks,
@@ -35,8 +37,10 @@
 //!   are idempotent; construction does not open a TCP connection.
 //!
 //! Persistence is server-internal — no wire change; the JSON-RPC surface is
-//! identical for all three backends. See `server::ServerConfig::for_estate` for
-//! how environment variables select between them at startup.
+//! identical for all three backends. The host resolves its estate from the
+//! estate catalog and passes it in as a `server::RuntimeEstate`; nothing here
+//! reads an estate path, a connection string or a backend from the
+//! environment. See `server::ServerConfig::for_estate`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,6 +108,13 @@ pub struct OpenEstate {
     /// write proposals/diary entries directly without routing through the
     /// coordinator's MCP verb layer.
     pub store: Arc<dyn DrawerStore>,
+    /// The backend THIS estate was opened on. Per entry, not per registry: a
+    /// registry whose default is SQLite can carry a PostgreSQL or in-memory
+    /// extra (`register_postgres`, `register_inmemory`), and
+    /// `/api/admin/estates` must report each one for what it is. Twin of the
+    /// Swift admin snapshot reading `kit.storageBackend(for: handle)` inside
+    /// its per-handle loop.
+    pub backend: EstateStorageBackend,
 }
 
 /// The estate registry the dispatcher uses to resolve `estateID` arguments.
@@ -153,20 +164,25 @@ pub struct EstateRegistry {
     pub server_identity: String,
 }
 
-/// How a SQLite estate is opened: the choices the estate's catalog record
-/// decides. Twin of the Swift `ServeCommand` decisions taken from
-/// `EstateRecord.kind`: a registered estate federates and seeds its charters;
-/// a transient one does neither; a maintenance open (`mootx01 upgrade`)
-/// converges what exists and creates nothing.
+/// How an estate is opened: the choices the estate's catalog record decides.
+/// Twin of the Swift `ServeCommand` decisions taken from `EstateRecord.kind`:
+/// a registered estate federates and seeds its charters; a transient one does
+/// neither; a maintenance open (`mootx01 upgrade`) converges what exists and
+/// creates nothing.
+///
+/// Every backend constructor takes one — SQLite, in-memory and PostgreSQL —
+/// so federation and charter seeding are decided by the record, never by the
+/// backend. The `Sqlite` in the name records where the type entered the
+/// codebase, not the set of backends it governs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SqliteOpening {
+pub struct EstateOpening {
     /// Whether this open establishes the estate's Ed25519 federation identity.
     pub federate: bool,
     /// Whether the seven default wings and their charter hints are seeded.
     pub seed_charters: bool,
 }
 
-impl SqliteOpening {
+impl EstateOpening {
     /// A registered estate served by this machine: federates, seeds charters.
     pub const REGISTERED: Self = Self { federate: true, seed_charters: true };
     /// A transient estate (`--db <dir>/<name>`): holds exactly what was
@@ -185,10 +201,29 @@ impl SqliteOpening {
 }
 
 impl EstateRegistry {
-    /// Construct a registry with one new in-memory default estate.
+    /// Construct a registry with one new in-memory default estate: charters
+    /// seeded, no federation.
     ///
-    /// The `--in-memory` backend and the test default. **Semantic recall lanes
-    /// (BM25 + vector) are wired** — a `Corpus` and
+    /// The test and development default, and the two halves have different
+    /// reasons. Charters are seeded because a test estate should look like a
+    /// served one, with the seven default wings in place. Federation is off
+    /// because it mints the estate's Ed25519 identity into a manifest that
+    /// dies with the process, leaving no identity for a peer to address
+    /// later; every caller of this constructor took that posture before the
+    /// opening argument existed, and none of them issues a grant.
+    ///
+    /// The product's `--in-memory` never arrives here. It calls
+    /// `new_inmemory_with(EstateOpening::TRANSIENT)`, so a RAM benchmark arm
+    /// measures a candidate pool with no charter drawers in it (R8,
+    /// 2026-09-08).
+    pub fn new_inmemory() -> Self {
+        Self::new_inmemory_with(EstateOpening { federate: false, seed_charters: true })
+    }
+
+    /// Construct a registry with one new in-memory default estate under the
+    /// opening the caller's catalog record decides.
+    ///
+    /// **Semantic recall lanes (BM25 + vector) are wired** — a `Corpus` and
     /// a `VectorStore` are registered on a second `InMemoryStorage` handle so BM25
     /// and vector recall are live from the first capture, matching the production
     /// wiring of the Swift `AriaMCPMain.swift` in-memory branch.
@@ -199,7 +234,7 @@ impl EstateRegistry {
     /// handles are `Arc<dyn Storage>` over separate `InMemoryStorage` allocations;
     /// they are disjoint table namespaces and do not interfere with each other.
     /// This is the in-memory equivalent of the SQLite two-handle pattern.
-    pub fn new_inmemory() -> Self {
+    pub fn new_inmemory_with(opening: EstateOpening) -> Self {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         let estate_id = Uuid::new_v4();
         // InMemoryDrawerStore::new allocates its own InMemoryStorage internally;
@@ -209,7 +244,8 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open(Arc::clone(&store), OwnerCredentials::new(DEFAULT_OWNER), 0, 100)
+            .open_with_federation(
+                Arc::clone(&store), OwnerCredentials::new(DEFAULT_OWNER), 0, 100, opening.federate)
             .expect("default estate open must succeed");
         // A fresh in-memory estate is born with the span encoder as its default
         // recall stage; written before wiring so this open activates it.
@@ -223,16 +259,23 @@ impl EstateRegistry {
         // fail in a correct build; the InMemory backend never returns I/O errors.
         wire_inmemory_semantic_recall(&handle, &coord)
             .expect("in-memory semantic recall wiring must succeed");
-        // Idempotently seed the seven default wings. Non-fatal: seeding
-        // failure logs and continues — the estate is open and functional.
-        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
-        seed_wings_non_fatal(&coord, &handle, "in-memory");
+        if opening.seed_charters {
+            // Idempotently seed the seven default wings. Non-fatal: seeding
+            // failure logs and continues — the estate is open and functional.
+            // Mirrors Swift ServeCommand's seedDefaultWings call, which runs for
+            // a registered estate only: a transient estate — and `--in-memory`
+            // always serves one (R8, 2026-09-08) — holds exactly what was
+            // imported into it, so a RAM benchmark arm measures a pool with no
+            // charter drawers in it.
+            seed_wings_non_fatal(&coord, &handle, "in-memory");
+        }
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::InMemory,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
@@ -274,6 +317,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::InMemory,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
@@ -319,13 +363,13 @@ impl EstateRegistry {
     /// if the semantic-recall wiring (Corpus/VectorStore construction) fails.
     /// The caller should print this to stderr and exit with a nonzero code.
     pub fn new_sqlite(path: &str, owner: &str) -> Result<Self, String> {
-        Self::open_sqlite(path, owner, SqliteOpening::REGISTERED)
+        Self::open_sqlite(path, owner, EstateOpening::REGISTERED)
     }
 
     /// Open a SQLite estate with the opening its catalog record decides
-    /// (`SqliteOpening::for_record`): federation and charter seeding for a
+    /// (`EstateOpening::for_record`): federation and charter seeding for a
     /// registered estate, neither for a transient one.
-    pub fn new_sqlite_with(path: &str, owner: &str, opening: SqliteOpening) -> Result<Self, String> {
+    pub fn new_sqlite_with(path: &str, owner: &str, opening: EstateOpening) -> Result<Self, String> {
         Self::open_sqlite(path, owner, opening)
     }
 
@@ -346,7 +390,7 @@ impl EstateRegistry {
     ///
     /// Same error conditions as `new_sqlite`.
     pub fn new_sqlite_for_maintenance(path: &str, owner: &str) -> Result<Self, String> {
-        Self::open_sqlite(path, owner, SqliteOpening::MAINTENANCE)
+        Self::open_sqlite(path, owner, EstateOpening::MAINTENANCE)
     }
 
     /// Shared SQLite open path behind `new_sqlite` and `new_sqlite_for_maintenance`.
@@ -354,7 +398,7 @@ impl EstateRegistry {
     /// (geometry normalization, store open, estate-id read-back, coordinator
     /// admission, semantic-recall wiring) is one implementation so the ports
     /// cannot drift between the serve and upgrade opens.
-    fn open_sqlite(path: &str, owner: &str, opening: SqliteOpening) -> Result<Self, String> {
+    fn open_sqlite(path: &str, owner: &str, opening: EstateOpening) -> Result<Self, String> {
         // First run = no estate file before this open. Read before anything
         // below can create the file; it gates the create-time defaults.
         let first_run = !std::path::Path::new(path).exists();
@@ -474,6 +518,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Sqlite,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
@@ -511,6 +556,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::InMemory,
         };
         self.extras.insert(estate_id, estate);
         estate_id
@@ -565,6 +611,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Sqlite,
         };
         self.extras.insert(estate_id, estate);
         Ok(estate_id)
@@ -596,6 +643,20 @@ impl EstateRegistry {
     /// etc.) or if semantic-recall wiring fails. The pool itself is lazy; actual
     /// connection errors surface on first use, not here.
     pub fn new_postgres(conn_str: &str, owner: &str) -> Result<Self, String> {
+        // Charters seeded, no federation — the posture every caller of this
+        // constructor took before the opening argument existed. A host that
+        // knows its catalog record calls `new_postgres_with` instead.
+        Self::new_postgres_with(conn_str, owner, EstateOpening { federate: false, seed_charters: true })
+    }
+
+    /// Open a PostgreSQL estate with the opening its catalog record decides
+    /// (`EstateOpening::for_record`): charter seeding for a registered estate,
+    /// none for a transient one. Twin of `new_sqlite_with`.
+    pub fn new_postgres_with(
+        conn_str: &str,
+        owner: &str,
+        opening: EstateOpening,
+    ) -> Result<Self, String> {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         let store: Arc<dyn DrawerStore> = Arc::new(
             PostgresDrawerStore::from_connection_string(conn_str, INIT_NOW, None).map_err(|e| {
@@ -616,7 +677,8 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
+            .open_with_federation(
+                Arc::clone(&store), OwnerCredentials::new(owner), 0, 100, opening.federate)
             .expect("default postgres estate open must succeed");
         // This entry point creates on every open (there is no first-run signal
         // for a connection string), so the create-time default belongs here:
@@ -631,16 +693,20 @@ impl EstateRegistry {
         // Uses a separate PostgresStorage handle on the same connection string.
         wire_postgres_semantic_recall(conn_str, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for postgres: {e}"))?;
-        // Idempotently seed the seven default wings. Non-fatal: seeding
-        // failure logs and continues — the estate is open and functional.
-        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
-        seed_wings_non_fatal(&coord, &handle, "postgres");
+        if opening.seed_charters {
+            // Idempotently seed the seven default wings. Non-fatal: seeding
+            // failure logs and continues — the estate is open and functional.
+            // Same gate as the SQLite and in-memory constructors: the record's
+            // kind decides charters, never the backend.
+            seed_wings_non_fatal(&coord, &handle, "postgres");
+        }
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Postgresql,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
@@ -689,6 +755,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Postgresql,
         };
         self.extras.insert(estate_id, estate);
         Ok(estate_id)
