@@ -17,9 +17,11 @@ fn frozen_selected_memory_search_preserves_traces_and_live_search_records_usage(
         let store = registry.default.store.clone();
         let dispatcher = Dispatcher::new(registry, "test", "test", "test", "", None)
             .with_posture(EstatePosture::Live);
+        // impatient:true ensures corpus ingestion is synchronous (WriteMode::Impatient)
+        // so the BM25 index is ready before the search runs in the same call sequence.
         let filed = call(&dispatcher, "moot_file_memory", serde_json::json!({
             "subject":"orchard", "content":"Orchard radio calibration uses channel 17.",
-            "location":"Lab"
+            "location":"Lab", "impatient": true
         }));
         assert_eq!(filed["result"]["isError"], false, "{filed}");
         let before = store.count_recall_traces().unwrap();
