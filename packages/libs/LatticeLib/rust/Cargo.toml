@@ -18,8 +18,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-segmentation = "1"
 substrate-kernel = { path = "../../SubstrateKernel/rust" }
-# moot-product-identity: the configuration directory the novel-token pool
-# lives under, the same resolution every product process uses.
+# moot-product-identity: the novel-token pool's two folder names and its two
+# base directories — `LATTICE_FOLDER` under the Apple container, and the
+# configuration directory on Linux and Windows — resolved the same way every
+# product process resolves them.
 moot-product-identity = { path = "../../MootProductIdentity/rust" }
 
 [dev-dependencies]
