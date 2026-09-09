@@ -38,6 +38,7 @@ pub fn run(
     no_encrypt: bool,
 ) -> ExitCode {
     let home = home_dir();
+
     let registry = clients::supported();
 
     let selected = match resolve_targets(&registry, target, yes, &home) {
@@ -47,16 +48,26 @@ pub fn run(
             return ExitCode::from(exit::FAILURE);
         }
     };
-    if selected.is_empty() {
-        println!("Nothing selected.");
-        return ExitCode::from(exit::OK);
-    }
-
     // Existing-database disposition (reinstall contract): resolved BEFORE any
     // wiring so a 'replace' that cannot proceed (daemon running, trash
     // failure) aborts the install with nothing half-done.
     if let Err(code) = handle_existing_database(db_arg, yes) {
         return code;
+    }
+
+    // Seed the product settings file (`config.json`) with the computed default
+    // stats-store path when the key is absent. Idempotent: a second run leaves
+    // an existing value untouched (R6, 2026-09-09). `upgrade` never calls this.
+    // Placed after the DB abort gate AND before the nothing-selected return so
+    // an install that selects no client still seeds the setting (W-5, matching
+    // Swift's placement at InstallCommand.swift:161 vs the guard at :185).
+    seed_config_defaults();
+
+    // Nothing-selected check comes AFTER seeding so the setting is always
+    // written on first install regardless of whether any client is wired.
+    if selected.is_empty() {
+        println!("Nothing selected.");
+        return ExitCode::from(exit::OK);
     }
 
     // At-rest encryption posture for the DEFAULT estate (twin of Swift
@@ -75,7 +86,7 @@ pub fn run(
     // the same database file every opener will open.
     {
         use aria_mcp::estate_migration::{detect_estate_file_state, EstateFileState};
-        let active = match EstateCatalog::open() {
+        let active = match crate::core::estate_open::catalog(None) {
             Ok(catalog) => catalog.active().clone(),
             Err(e) => {
                 eprintln!("mootx01: {e}");
@@ -982,12 +993,15 @@ fn trash_mgr_store(configuration: &Path) -> Result<(), String> {
 /// failure); Ok(()) to continue installing.
 ///
 /// The existing estate is the catalog's default record. Opening the catalog
-/// creates it on a first install, which is what install is for. (The Rust
-/// port never kept a flat estate in the configuration directory, so there is
-/// no flat-layout adoption step here; the Swift one is macOS-only.)
+/// creates it on a first install, which is what install is for. The estate
+/// this reasons about is already at the catalog's base directory: any legacy
+/// Windows base is adopted by `core::estate_open::catalog` before the catalog
+/// opens. (No layout adoption belongs here: the Rust port never kept a flat
+/// estate in its base directory, so the Swift flat-layout capsule has no twin
+/// — ruling R3.)
 fn handle_existing_database(flag: Option<ExistingDbArg>, yes: bool) -> Result<(), ExitCode> {
     use std::io::IsTerminal;
-    let mut catalog = EstateCatalog::open().map_err(|e| {
+    let mut catalog = crate::core::estate_open::catalog(None).map_err(|e| {
         eprintln!("  ✗ {e}");
         ExitCode::from(exit::FAILURE)
     })?;
@@ -1081,6 +1095,33 @@ fn reject_if_daemon_alive(action: &str) -> Result<(), ExitCode> {
         return Err(ExitCode::from(exit::FAILURE));
     }
     Ok(())
+}
+
+/// Seed `<config-dir>/config.json` with the computed default stats-store path
+/// when the key is absent. Delegates to `seed_config_defaults_at` with the
+/// live configuration directory so there is one implementation path for both
+/// production and tests (W-1).
+fn seed_config_defaults() {
+    seed_config_defaults_at(&moot_product_identity::storage::configuration_directory());
+}
+
+/// Seed `<config_dir>/config.json` with the computed default stats-store path
+/// when the key is absent. Accepts the directory explicitly so tests can
+/// redirect seeding to a scratch path without touching the developer's real
+/// configuration file.
+///
+/// Non-fatal: a write failure logs a warning but does not abort the install;
+/// both the daemon and moot-mgr fall back to the computed default when the
+/// setting is absent.
+fn seed_config_defaults_at(config_dir: &std::path::Path) {
+    // Use the canonical path helper — the subdirectory + filename are spelled
+    // exactly once across all callers (W-1).
+    let default_path = moot_product_identity::paths::daemon_stats_store_default(config_dir);
+    if let Err(e) =
+        moot_product_identity::settings::seed_defaults_if_absent(config_dir, &default_path)
+    {
+        eprintln!("mootx01: warning: could not seed config.json: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -1789,5 +1830,176 @@ mod tests {
         assert!(after_count > before_count, "post-repair capture must append audit state");
         drop(conn);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// W-5: an install that selects no client (nothing-selected path) must still
+    /// seed config.json with the default stats-store path. The seeder runs AFTER
+    /// the DB abort gate AND BEFORE the nothing-selected return in `run()`.
+    ///
+    /// This test drives `run()` itself under the process-global
+    /// CONFIGURATION_TEST_LOCK so both the EstateCatalog and
+    /// `configuration_directory()` (via XDG_DATA_HOME) land in a scratch
+    /// directory, isolating the test from the developer's real config.json.
+    #[test]
+    fn nothing_selected_install_seeds_stats_store_key() {
+        use crate::core::estate_adoption::CONFIGURATION_TEST_LOCK;
+        use moot_product_identity::{settings, storage::UNIX_DATA_FOLDER};
+
+        // Lock the process-global configuration directory seam shared by all
+        // tests that redirect EstateCatalog and configuration_directory().
+        let _guard = CONFIGURATION_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // scratch_base is the XDG_DATA_HOME root; config_dir is what
+        // configuration_directory() resolves to under that root.
+        let scratch_base = std::env::temp_dir()
+            .join(format!("mootx01-w5-{}", std::process::id()));
+        let config_dir = scratch_base.join(UNIX_DATA_FOLDER);
+        let _ = std::fs::remove_dir_all(&scratch_base);
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        // Redirect EstateCatalog (used by handle_existing_database) and
+        // configuration_directory() (used by seed_config_defaults) to the same
+        // scratch directory.
+        EstateCatalog::set_configuration_directory_override(Some(config_dir.clone()));
+        let old_xdg = std::env::var("XDG_DATA_HOME").ok();
+        std::env::set_var("XDG_DATA_HOME", &scratch_base);
+
+        struct Restore {
+            old_xdg: Option<String>,
+            scratch_base: std::path::PathBuf,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                EstateCatalog::set_configuration_directory_override(None);
+                match &self.old_xdg {
+                    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+                let _ = std::fs::remove_dir_all(&self.scratch_base);
+            }
+        }
+        let _restore = Restore { old_xdg, scratch_base: scratch_base.clone() };
+
+        // Precondition: config.json does not exist yet.
+        let config_file = config_dir.join("config.json");
+        assert!(!config_file.exists(), "scratch dir must start clean");
+
+        // Drive run() with an empty target list so selected is empty. All
+        // interactive-write flags are disabled so only the seeder writes anything.
+        let code = run(
+            Some(vec![]),   // target: empty selection → nothing-selected path
+            Location::Global,
+            true,           // yes
+            false,          // grant_permissions
+            true,           // no_permissions
+            true,           // no_mgr
+            true,           // no_daemon
+            false,          // vault_on
+            None,           // depth_arg
+            None,           // db_arg
+            true,           // no_encrypt
+        );
+
+        // run() must return OK — the nothing-selected path is not an error.
+        // We check the side-effect rather than comparing ExitCode directly
+        // (ExitCode does not implement PartialEq in stable Rust).
+        assert!(
+            config_file.exists(),
+            "run() must seed config.json before the nothing-selected return (W-5); exit was non-zero if this is absent"
+        );
+
+        // The seeded value must be present and under scratch.
+        let loaded = settings::load(&config_dir);
+        assert!(
+            loaded.daemon_stats_store.is_some(),
+            "seed must write daemon.stats_store to config.json (W-5)"
+        );
+        let store_path = loaded.daemon_stats_store.unwrap();
+        assert!(
+            store_path.starts_with(config_dir.to_string_lossy().as_ref()),
+            "seeded path must be under the scratch config directory, not the real one; got: {store_path}"
+        );
+
+        // Idempotent: a second run() call must leave the existing value untouched.
+        let _ = run(Some(vec![]), Location::Global, true, false, true, true, true, false, None, None, true);
+        let loaded2 = settings::load(&config_dir);
+        assert_eq!(
+            loaded2.daemon_stats_store.as_deref(),
+            Some(store_path.as_str()),
+            "seeder must not overwrite an existing value on repeated calls"
+        );
+
+        // Suppress unused-variable warning for code; it captures the W-5
+        // ordering contract via the config_file.exists() assertion above.
+        let _ = code;
+    }
+
+    /// W-5 ordering: config.json must NOT be seeded when handle_existing_database
+    /// aborts before seeding. If seed_config_defaults() were moved above the DB
+    /// abort gate, this test would catch the violation (config.json would exist
+    /// despite the abort).
+    #[test]
+    fn seed_not_written_when_db_gate_aborts() {
+        use crate::core::estate_adoption::CONFIGURATION_TEST_LOCK;
+        use moot_product_identity::storage::UNIX_DATA_FOLDER;
+
+        let _guard = CONFIGURATION_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let scratch_base = std::env::temp_dir()
+            .join(format!("mootx01-w5-ord-{}", std::process::id()));
+        let config_dir = scratch_base.join(UNIX_DATA_FOLDER);
+        let _ = std::fs::remove_dir_all(&scratch_base);
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        EstateCatalog::set_configuration_directory_override(Some(config_dir.clone()));
+        let old_xdg = std::env::var("XDG_DATA_HOME").ok();
+        std::env::set_var("XDG_DATA_HOME", &scratch_base);
+
+        struct Restore {
+            old_xdg: Option<String>,
+            scratch_base: std::path::PathBuf,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                EstateCatalog::set_configuration_directory_override(None);
+                match &self.old_xdg {
+                    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+                let _ = std::fs::remove_dir_all(&self.scratch_base);
+            }
+        }
+        let _restore = Restore { old_xdg, scratch_base: scratch_base.clone() };
+
+        // Write a malformed catalog so EstateCatalog::open() fails inside
+        // handle_existing_database, causing it to return Err before seeding.
+        std::fs::write(config_dir.join("estatecatalog.json"), b"NOT_VALID_JSON").unwrap();
+
+        let config_file = config_dir.join("config.json");
+        assert!(!config_file.exists(), "no config.json before run()");
+
+        // run() should abort (handle_existing_database fails on the bad catalog).
+        let _ = run(
+            Some(vec![]),
+            Location::Global,
+            true,
+            false,
+            true,
+            true,
+            true,
+            false,
+            None,
+            None,
+            true,
+        );
+
+        // Ordering assertion: seeding must NOT have happened because the DB gate
+        // aborted before the seeder call site. If seed_config_defaults() were
+        // moved above handle_existing_database, config.json would exist here and
+        // this assertion would fail.
+        assert!(
+            !config_file.exists(),
+            "config.json must NOT be seeded when handle_existing_database aborts (W-5 ordering)"
+        );
     }
 }

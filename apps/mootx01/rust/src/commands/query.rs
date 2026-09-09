@@ -13,8 +13,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command as Proc, ExitCode, Stdio};
 
-use genius_locus_kit::EstateCatalog;
-
 use crate::core::daemon_client;
 use crate::exit;
 
@@ -23,11 +21,11 @@ pub fn run(verb: String, db: Option<String>, json: bool, args: Vec<String>) -> E
     // process with the catalog's message instead of inside the serve child.
     // The value itself is passed to serve unchanged; serve resolves it the
     // same way (a registered name, or `<dir>/<name>` for a transient estate).
-    if let Some(value) = db.as_deref() {
-        if let Err(e) = EstateCatalog::open_selecting(value) {
-            eprintln!("mootx01 query: {e}");
-            return ExitCode::from(exit::FAILURE);
-        }
+    // Routes through the funnel (Windows base-directory adoption + catalog
+    // open) so the adoption always precedes the open.
+    if let Err(e) = crate::core::estate_open::catalog(db.as_deref()) {
+        eprintln!("mootx01 query: {e}");
+        return ExitCode::from(exit::FAILURE);
     }
 
     let tool = format!("moot_{verb}");

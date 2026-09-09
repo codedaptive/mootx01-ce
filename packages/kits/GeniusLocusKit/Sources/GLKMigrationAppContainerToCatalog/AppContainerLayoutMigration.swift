@@ -39,11 +39,23 @@
 // skipping every sidecar no longer at the source, and finishes with the
 // database.
 //
-// Compiled only under the `MigrationAppContainerToCatalog` trait, which every
-// migration floor from 1.0 through 1.7 enables. Retirement: raise the
-// product's floor above 1.7, delete this target, its trait, its test target,
-// the umbrella entry in `GLKMigrationCatalog`, and the one call in the app's
-// GatewayRuntime. Nothing else in the product knows the old layout existed.
+// Compiled under the `MigrationAppContainerToCatalog` trait, which the
+// package enables by default and which every migration floor from 1.0
+// through 1.7 also enables. The trait is default-on because this target's
+// only dependencies are GeniusLocusKit and MootProductIdentity, both already
+// in every plain build, so a bare `swift test` runs its tests at no cost in
+// build graph.
+//
+// Retirement: raise the product's floor above 1.7, then delete
+//   - this target, its trait, its default-trait entry and its test target
+//     (`packages/kits/GeniusLocusKit/Package.swift`),
+//   - the umbrella entry in `GeniusLocusKitMigrations/GLKMigrationCatalog`,
+//   - `apps/Mootx01-App/Sources/MootGateway/LegacyAppEstateStep.swift`, the
+//     whole file, which is the product's only caller of this enum, and
+//   - its one call site, `LegacyAppEstateStep.migrate(into:)` in
+//     `MootBridge.attach(record:)`.
+// `GatewayRuntime` is not a caller. Nothing else in the product knows the old
+// layout existed.
 
 import Foundation
 import MootProductIdentity

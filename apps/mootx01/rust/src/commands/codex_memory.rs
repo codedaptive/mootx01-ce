@@ -132,6 +132,16 @@ fn home_dir() -> PathBuf {
 pub fn run_doctor() -> ExitCode {
     use aria_mcp::estate_migration as migration;
 
+    // Adopt a pre-catalog Windows base directory before the catalog open
+    // below. A refusal is reported and the report continues: doctor's job is
+    // to describe the machine, and a machine holding two bases is exactly what
+    // an operator runs it to find out. Every posture line below is read from
+    // the catalog's base, so the refusal line is what tells the reader which
+    // base that is.
+    if let Err(message) = crate::core::estate_adoption::adopt_before_catalog_open() {
+        println!("{message}");
+    }
+
     let home = home_dir();
     let codex_home = resolve_codex_home(&home);
     let config_path = codex_home.join("config.toml");
@@ -189,7 +199,8 @@ pub fn run_doctor() -> ExitCode {
 
     // The active estate's file, from the catalog; an unreadable catalog
     // reports the posture as absent rather than failing the status print.
-    let estate_path = genius_locus_kit::EstateCatalog::open()
+    // Routes through the funnel (adoption already ran above; idempotent).
+    let estate_path = crate::core::estate_open::catalog(None)
         .ok()
         .map(|catalog| catalog.active().database_path());
     let posture = estate_path

@@ -263,3 +263,51 @@ struct NovelPoolSubmitterTests {
         #expect(back.entries[2].tag == "OTHER")
     }
 }
+
+// ─── Pool directory pin (cross-port) ─────────────────────────────────────────
+
+/// The pool directory rules, pinned as literals in both ports.
+///
+/// The Rust twin is `packages/libs/LatticeLib/rust/tests/pool_directory_pin_test.rs`,
+/// which asserts the same two strings. The pair exists because the Rust port
+/// once silently stopped resolving the Apple container: the merged
+/// `WordClassTable.json` a Mac had accumulated was abandoned, FDC
+/// classification fell back to the bundled table, and nothing failed. Only a
+/// literal pin catches that; a test that recomputes the rule agrees with
+/// whatever the rule became.
+@Suite("Novel pool directory rules")
+struct NovelPoolDirectoryPinTests {
+
+    @Test("Apple: <Application Support>/com.mootx01.lattice/pool")
+    func applePoolDirectoryIsTheLatticeSibling() {
+        let support = URL(fileURLWithPath: "/probe/Library/Application Support", isDirectory: true)
+        #expect(
+            NovelPoolSubmitter.applePoolDirectory(applicationSupport: support).path
+                == "/probe/Library/Application Support/com.mootx01.lattice/pool")
+    }
+
+    @Test("Base-directory platforms: <configuration>/lattice/pool")
+    func configuredPoolDirectoryLivesInsideTheInstallFolder() {
+        let configuration = URL(fileURLWithPath: "/probe/.local/share/mootx01", isDirectory: true)
+        #expect(
+            NovelPoolSubmitter.configuredPoolDirectory(configurationDirectory: configuration).path
+                == "/probe/.local/share/mootx01/lattice/pool")
+    }
+
+    @Test("The non-Apple base directory is the identity's unix data folder")
+    func unixConfigurationDirectoryUsesTheIdentityFolder() {
+        let dataHome = URL(fileURLWithPath: "/probe/.local/share", isDirectory: true)
+        #expect(
+            NovelPoolSubmitter.unixConfigurationDirectory(dataHome: dataHome).path
+                == "/probe/.local/share/mootx01")
+    }
+
+    @Test("The merged table sits beside the pool, not inside it")
+    func tableArtifactIsThePoolSiblingUnderTheLatticeFolder() {
+        let support = URL(fileURLWithPath: "/probe/Library/Application Support", isDirectory: true)
+        let pool = NovelPoolSubmitter.applePoolDirectory(applicationSupport: support)
+        #expect(
+            pool.deletingLastPathComponent().appendingPathComponent("WordClassTable.json").path
+                == "/probe/Library/Application Support/com.mootx01.lattice/WordClassTable.json")
+    }
+}
