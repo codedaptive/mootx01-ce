@@ -76,10 +76,11 @@ pub struct KGFactIdentityBackfillReport {
 ///   - "aria-mcp"        — the Rust standalone server's banner before
 ///                         PAR-MCP-2 corrected it to "mootx01"; estates
 ///                         written by that build carry it.
-///   - "Gateway"         — the App's `MootBridge.attachSQLite` default
-///                         `serverName`, forwarded verbatim as the host
-///                         identity for disk estates served through the
-///                         App gateway.
+///   - "Gateway"         — the App's `MootBridge` default `serverName`
+///                         (`attachInMemory(serverName:)` and the
+///                         catalog-record attach pass the same value),
+///                         forwarded verbatim as the host identity for
+///                         estates served through the App gateway.
 pub const KNOWN_HOST_IDENTITIES: [&str; 4] =
     ["mootx01", "aria-mcp-server", "aria-mcp", "Gateway"];
 
