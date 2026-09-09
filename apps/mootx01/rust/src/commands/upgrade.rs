@@ -21,6 +21,9 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use libc;
+
 use genius_locus_kit::{EstateCatalog, EstateManifestEncryption, EstateRecord, EstateRecordKind};
 use genius_locus_kit_migrations as manifest_refresh;
 
@@ -45,12 +48,9 @@ pub fn run(
     // a registered estate or attaches a transient one; absent, the active
     // estate. Install-wide work (binary, plugin, encryption offer) belongs to
     // the machine's own estates only, so a transient estate runs the estate
-    // migration steps and nothing else.
-    let catalog = match db.as_deref() {
-        Some(value) => EstateCatalog::open_selecting(value),
-        None => EstateCatalog::open(),
-    };
-    let record = match catalog {
+    // migration steps and nothing else. Routes through the funnel (Windows
+    // base-directory adoption + catalog open).
+    let record = match crate::core::estate_open::catalog(db.as_deref()) {
         Ok(catalog) => catalog.active().clone(),
         Err(e) => {
             println!("mootx01 upgrade: {e}");
@@ -1742,10 +1742,11 @@ impl DaemonControl for NoDaemon {
     }
 }
 
-/// Quiesce the resident daemon around `work` when the estate's own PID
-/// marker names a live mootx01 process: that is the one fact that says a
-/// resident serves THIS estate. No marker, or a dead one, and the daemon is
-/// left running because it is serving some other estate or nothing.
+/// Quiesce the resident daemon around `work` when `estate_pid_file` records
+/// a live, identity-verified mootx01 process other than this one. That is
+/// the one fact that says a resident serves THIS estate: no marker, a dead
+/// one, or a recycled PID holding a different executable means the daemon is
+/// left running.
 ///
 /// Returns `work`'s result, or `None` when the daemon was running and would
 /// not stop — the step is skipped, nothing is half-done, and the next
@@ -1791,13 +1792,96 @@ pub(crate) fn with_resident_serving<T>(
     Some(out)
 }
 
-/// True when `estate_pid_file` records a mootx01 process other than this one
-/// and a daemon answers on the recorded port. Twin of the check `serve` makes
-/// before forwarding (T4): the marker says which estate, the loopback probe
-/// says it is alive — portable where kill(pid, 0) is not.
+/// True when `estate_pid_file` records a live, identity-verified mootx01
+/// process other than this one. Three checks per platform:
+///
+/// 1. The file exists, parses as a positive PID, and is not this process.
+/// 2. The process is alive:
+///    - Linux/macOS: `kill(pid, 0)` returns 0 (signallable) or EPERM
+///      (live but owned by another user — the identity gate will reject it).
+///    - Windows: `kill(pid, 0)` via the CRT (post-v1: `OpenProcess` with
+///      `PROCESS_QUERY_LIMITED_INFORMATION`).
+/// 3. The executable image starts with "mootx01":
+///    - Linux: `/proc/<pid>/comm` (kernel 15-char truncated executable name).
+///    - macOS: `proc_pidpath(2)` (full executable path; last path component
+///      checked against the prefix).
+///    - Windows: `QueryFullProcessImageName` (post-v1; currently accepts
+///      existence alone when the process is signallable).
+///    - Unknown platforms: always return false.
+///
+/// Twin of Swift `ResidentDaemonQuiesce.residentServes(pidURL:)` +
+/// `ProcessIdentity.isLiveProcess`.
 pub(crate) fn resident_serves(estate_pid_file: &std::path::Path) -> bool {
-    super::serve::resident_pid_recorded(estate_pid_file)
-        && crate::core::daemon_client::alive(crate::core::daemon_client::resolved_port())
+    let Ok(text) = std::fs::read_to_string(estate_pid_file) else { return false };
+    let Ok(pid) = text.trim().parse::<i32>() else { return false };
+    if pid <= 0 || pid as u32 == std::process::id() { return false }
+    is_live_mootx01(pid)
+}
+
+/// Identity-verified liveness check. See `resident_serves` for the contract.
+fn is_live_mootx01(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // Existence gate: 0 = live; EPERM = live but owned by another user
+        // (resident runs as the invoking user, so EPERM means a recycled PID
+        // the identity gate will reject).
+        let result = unsafe { libc::kill(pid, 0) };
+        let exists = result == 0 || {
+            let e = std::io::Error::last_os_error().raw_os_error();
+            e == Some(libc::EPERM)
+        };
+        if !exists { return false }
+        // Identity gate: /proc/<pid>/comm is the kernel's 15-char truncated
+        // executable name. Missing = process exited between kill and read;
+        // not starting with "mootx01" = recycled PID serving something else.
+        match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+            Ok(comm) => comm.trim_end().starts_with("mootx01"),
+            Err(_) => false,
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows CRT kill(pid, 0) returns 0 when the process exists and the
+        // caller has PROCESS_QUERY_INFORMATION access; returns -1 otherwise.
+        // Full QueryFullProcessImageName identity check is post-v1.
+        let alive = unsafe { libc::kill(pid, 0) };
+        alive == 0
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Existence gate: kill(pid, 0) returns 0 when the process exists and
+        // the caller has access; EPERM means the process exists but is owned
+        // by a different user (a recycled PID that the identity gate rejects).
+        let result = unsafe { libc::kill(pid, 0) };
+        let exists = result == 0 || {
+            let e = std::io::Error::last_os_error().raw_os_error();
+            e == Some(libc::EPERM)
+        };
+        if !exists { return false }
+        // Identity gate: proc_pidpath gives the full executable path.
+        // A return length of 0 means the process exited between kill and here.
+        // A path whose last component does not start with "mootx01" means a
+        // recycled PID running something else.
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let len = unsafe {
+            libc::proc_pidpath(
+                pid,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len() as u32,
+            )
+        };
+        if len <= 0 { return false }
+        let path_str = std::str::from_utf8(&buf[..len as usize]).unwrap_or("");
+        let binary_name = path_str.rsplit('/').next().unwrap_or("");
+        binary_name.starts_with("mootx01")
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        // Unknown platform: never claim the lock holder is live without an
+        // identity source — a spurious skip is safer than a spurious quiesce.
+        let _ = pid;
+        false
+    }
 }
 
 fn place_and_report(src: &std::path::Path, home: &std::path::Path, no_restart: bool) -> ExitCode {
@@ -2683,21 +2767,54 @@ mod tests {
         assert_eq!(daemon.calls(), vec!["is_running", "stop"]);
     }
 
-    /// No PID marker, or a marker naming THIS process, means no resident
-    /// serves the estate: the step runs with the daemon untouched. The live
-    /// case needs a daemon answering on loopback and is covered by the serve
-    /// T4 forwarding tests.
+    /// `resident_serves` rejects absent, non-numeric, dead, and self-PID
+    /// markers without contacting the network. The alive-and-named case
+    /// requires a live mootx01 process and is covered by the serve T4 tests.
     #[test]
     fn estate_without_a_live_pid_marker_is_not_served() {
         let (_tmp, pid_file) = scratch_estate();
         assert!(!super::resident_serves(&pid_file), "no marker");
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
         assert!(!super::resident_serves(&pid_file), "our own pid is not a resident");
+        std::fs::write(&pid_file, "999999999").unwrap();
+        assert!(!super::resident_serves(&pid_file), "dead pid is not a resident");
+        std::fs::write(&pid_file, "not-a-pid").unwrap();
+        assert!(!super::resident_serves(&pid_file), "garbage is not a resident");
 
         let daemon = RecordingDaemon::new(true, true);
         let out = super::with_resident_daemon_quiesced(&pid_file, "schema upgrade", &daemon, || 1);
         assert_eq!(out, Some(1));
         assert!(daemon.calls().is_empty());
+    }
+
+    /// macOS identity gate: a live process whose executable is NOT a mootx01
+    /// binary must be rejected even when `kill(pid, 0)` succeeds.
+    ///
+    /// Mutation proof: replacing `binary_name.starts_with("mootx01")` with
+    /// `true` in the `#[cfg(target_os = "macos")]` arm of `is_live_mootx01`
+    /// makes this test fail (resident_serves returns true for the sleep child),
+    /// proving the identity check is load-bearing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_non_mootx01_process_is_not_served_macos() {
+        let (_tmp, pid_file) = scratch_estate();
+        // Spawn a child that is definitively not mootx01 — sleep(1) from
+        // /bin/sleep. The macOS identity gate calls proc_pidpath and checks
+        // the last path component against "mootx01".
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep(1) for identity-gate test");
+        let pid = child.id() as i32;
+        std::fs::write(&pid_file, pid.to_string()).unwrap();
+        // Call resident_serves while the child is live so the existence gate
+        // passes and only the identity gate can reject it.
+        let result = super::resident_serves(&pid_file);
+        // Clean up the child regardless of the assertion outcome.
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!result,
+            "live sleep(1) must not pass the mootx01 identity gate (proc_pidpath check)");
     }
 
     #[test]

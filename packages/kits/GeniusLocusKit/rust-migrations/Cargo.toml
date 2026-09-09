@@ -49,6 +49,11 @@ corpus-kit = { path = "../../CorpusKit/rust" }
 locus-kit = { path = "../../LocusKit/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
 synapsekit = { path = "../../SynapseKit/rust" }
+# moot-product-identity: the Windows base-directory adoption capsule resolves
+# the process home through `storage::process_home()` rather than spelling the
+# `USERPROFILE` rule a second time. Layering: the identity library is a pure
+# string/path library below every kit; no inversion.
+moot-product-identity = { path = "../../../libs/MootProductIdentity/rust" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # rusqlite: required by geometry_normalization.rs (production code) for the
@@ -98,3 +103,10 @@ required-features = ["migration-v1-4-to-v1-5"]
 # nonzero reserve, regardless of migration floor. No required-features gate.
 [[test]]
 name = "geometry_normalization"
+
+# The Windows base-directory adoption capsule is base-directory work, not
+# schema work: the old base can hold an estate of any format. No
+# required-features gate, and the tests fabricate the old base in a scratch
+# directory so they run on every host.
+[[test]]
+name = "windows_base_directory_adoption_tests"

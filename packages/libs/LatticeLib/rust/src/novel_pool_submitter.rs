@@ -8,8 +8,21 @@
 // resident Autonomic Governor (NeuronKit). The durable landing zone is
 // a local directory configured via:
 //   1. LATTICE_POOL_DIR environment variable (takes priority).
-//   2. XDG_DATA_HOME/mootx01/lattice/pool/ or
-//      ~/.local/share/mootx01/lattice/pool/ (non-Apple default).
+//   2. Apple: <Application Support>/com.mootx01.lattice/pool/, byte-identical
+//      to what Swift `NovelPoolSubmitter.resolvePoolDirectory()` resolves.
+//   3. Linux and Windows: <configuration>/lattice/pool/, inside the install's
+//      own base directory.
+//
+// PARITY, exactly: the two ports agree on Apple and only on Apple. Swift has
+// no Linux or Windows target, so on those platforms there is nothing to agree
+// with and the pool follows the install's base directory rather than an Apple
+// container convention that means nothing there. Agreeing on Apple is what
+// matters: a developer running both ports on one Mac must reduce into ONE
+// writable WordClassTable.json, or learned word-class rows diverge while the
+// bundled artifacts and input bytes match. `apple_pool_directory` and
+// `configured_pool_directory` are the two rules, pinned by
+// `pool_directory_pin_test.rs` against the Swift twins in
+// `NovelPoolSubmitterTests.swift`.
 //
 // Terminal state: token drained → JSON file written to pool directory →
 // pool-reducer (`pool_reducer::reduce`) consumes files and merges novel
@@ -32,18 +45,52 @@ use crate::novel_token_cache::{PoolSubmission, Submitter};
 
 // ─── Default pool directory ───────────────────────────────────────────────────
 
+/// The folder that holds the pool and the merged table inside an install's
+/// own base directory, on the platforms that resolve it that way (Linux and
+/// Windows). Distinct from the Apple sibling folder, whose name is the
+/// product identity's `LATTICE_FOLDER` (`com.mootx01.lattice`): that one sits
+/// BESIDE the install's folder under Application Support because on Apple the
+/// pool is machine-wide, shared across installs.
+pub const CONFIGURATION_LATTICE_FOLDER: &str = "lattice";
+
+/// The pool folder inside whichever lattice folder applies.
+pub const POOL_FOLDER: &str = "pool";
+
+/// The Apple rule: `<Application Support>/com.mootx01.lattice/pool`. Twin of
+/// Swift `NovelPoolSubmitter.applePoolDirectory(applicationSupport:)`, and the
+/// one place this port reads the product identity's `LATTICE_FOLDER`.
+pub fn apple_pool_directory(application_support: &Path) -> PathBuf {
+    application_support
+        .join(moot_product_identity::storage::LATTICE_FOLDER)
+        .join(POOL_FOLDER)
+}
+
+/// The Linux and Windows rule: `<configuration>/lattice/pool`. Twin of Swift
+/// `NovelPoolSubmitter.configuredPoolDirectory(configurationDirectory:)`.
+pub fn configured_pool_directory(configuration_directory: &Path) -> PathBuf {
+    configuration_directory
+        .join(CONFIGURATION_LATTICE_FOLDER)
+        .join(POOL_FOLDER)
+}
+
 /// Resolves the pool directory from environment or the product default:
 ///   1. `LATTICE_POOL_DIR` env var, if set and non-empty.
-///   2. `<configuration>/lattice/pool/`, where the configuration directory is
-///      the product identity's (`moot_product_identity::storage::
-///      configuration_directory`): `${XDG_DATA_HOME:-~/.local/share}/mootx01`
-///      on Unix, `%LOCALAPPDATA%\com.mootx01.ce` on Windows. Keeping the pool
-///      in the one folder the install owns is part of the FDC classification
-///      contract: learned word-class rows must not scatter across per-process
-///      guesses at a data directory.
+///   2. macOS: `<home>/Library/Application Support/com.mootx01.lattice/pool`,
+///      the same directory Swift resolves. A Mac runs both ports, so both must
+///      reduce into one writable `WordClassTable.json`; the pool is a
+///      machine-wide resource there, beside the install's folder rather than
+///      inside it.
+///   3. Linux and Windows: `<configuration>/lattice/pool`, where the
+///      configuration directory is the product identity's
+///      (`${XDG_DATA_HOME:-~/.local/share}/mootx01`, or
+///      `%LOCALAPPDATA%\com.mootx01.ce`). Swift has no target on either
+///      platform, so there is no second port to agree with, and the pool
+///      belongs in the one folder the install owns.
 ///
-/// Mirrors Swift `NovelPoolSubmitter.resolvePoolDirectory()`, which resolves
-/// the Apple container the same way through `MootProductIdentity.Storage`.
+/// A relative result is the NO-TRUSTED-LOCATION sentinel: the home lookup
+/// failed. Both consumers fail closed on it (`default_submitter` returns the
+/// no-op submitter, `word_class_table::load_writable_table` falls back to the
+/// bundled table). Never write to, or load from, a relative result.
 pub fn default_pool_dir() -> PathBuf {
     // Priority 1: explicit env var.
     if let Ok(dir) = env::var("LATTICE_POOL_DIR") {
@@ -51,9 +98,18 @@ pub fn default_pool_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
-    moot_product_identity::storage::configuration_directory()
-        .join("lattice")
-        .join("pool")
+    #[cfg(target_os = "macos")]
+    {
+        apple_pool_directory(
+            &moot_product_identity::storage::process_home()
+                .join("Library")
+                .join("Application Support"),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        configured_pool_directory(&moot_product_identity::storage::configuration_directory())
+    }
 }
 
 /// Resolves the writable WordClassTable artifact the reducer merges into.
@@ -219,13 +275,19 @@ mod tests {
             dir.is_absolute(),
             "default pool dir must be absolute, got {dir:?}"
         );
+        // One expected tail per platform rule. macOS resolves the Apple
+        // container so both ports reduce into one WordClassTable.json on a
+        // Mac; Linux and Windows resolve the install's own base directory.
+        let expected_tail = if cfg!(target_os = "macos") {
+            "com.mootx01.lattice/pool"
+        } else if cfg!(target_os = "windows") {
+            "com.mootx01.ce/lattice/pool"
+        } else {
+            "mootx01/lattice/pool"
+        };
         assert!(
-            dir.ends_with(if cfg!(target_os = "windows") {
-                "com.mootx01.ce/lattice/pool"
-            } else {
-                "mootx01/lattice/pool"
-            }),
-            "default pool dir must end with the configuration directory's lattice pool path, got {dir:?}"
+            dir.ends_with(expected_tail),
+            "default pool dir must end with {expected_tail}, got {dir:?}"
         );
     }
 
