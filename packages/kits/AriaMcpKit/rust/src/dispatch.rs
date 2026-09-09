@@ -62,77 +62,6 @@ pub fn dispatch_tool(
     dispatch_tool_with_vault_ledger(name, args, registry, ledger, &VaultJobLedger::new(), "", "")
 }
 
-/// dispatch with an explicit, PERSISTENT sensitivity-unlock
-/// grant ledger. This is the entry point `Dispatcher::tools_call` uses in
-/// production — it is the one owned by the `Dispatcher` for the process
-/// lifetime, so a live grant persists across calls within the same
-/// `mootx01 serve` process (and is gone on restart, by construction, same
-/// as Swift's `ToolDispatcher`).
-///
-/// Every OTHER public entry point in this file (`dispatch_tool`,
-/// `dispatch_tool_with_vault_flag`, `dispatch_tool_with_vault_ledger`) is
-/// left with its EXACT existing signature — each internally passes a
-/// fresh, throwaway, always-locked `SensitivityGrantLedger::new()` to the
-/// inner implementation. This keeps every existing call site (the ~180+
-/// tests across `dispatch_tests.rs` that call those functions directly)
-/// compiling unchanged; none of them exercise sensitivity-unlock gating,
-/// so a throwaway ledger (equivalent to "no grant ever issued") preserves
-/// their existing behavior exactly.
-#[allow(clippy::too_many_arguments)] // production entry point threading every session-scoped ledger + advisory string; grouping would obscure which caller owns which state
-pub fn dispatch_tool_with_ledgers(
-    name: &str,
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-    ledger: &SurfacedRecallLedger,
-    vault_ledger: &VaultJobLedger,
-    sensitivity_ledger: &SensitivityGrantLedger,
-    // Frozen or live: the runners that write on the read path (memory
-    // search origin, reward marks) and `moot_estate_status` read it.
-    posture: EstatePosture,
-    build_serial: &str,
-    version_skew: &str,
-    // Upstream-release advisory provider — evaluated by ping/status only.
-    // None when the host wired none (stdio one-shots, tests, aria-mcp dev).
-    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
-    // monitoring seam, threaded to interface_tools::dispatch.
-    // None when no stats store is wired (stdio, test harnesses, provision-less contexts).
-    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
-) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_tool_with_vault_ledger_and_flag(
-        name, args, registry, ledger, vault_ledger, sensitivity_ledger, posture,
-        crate::tool_list::vault_enabled(), crate::tool_list::memory_enabled(),
-        build_serial, version_skew,
-        update_advisory, monitoring_control,
-    )
-}
-
-/// Dispatch with an explicit memory-enabled flag alongside the vault flag.
-/// The `Dispatcher` calls this so it can pass the value resolved once in
-/// `Dispatcher::new` rather than re-reading the process environment on every
-/// call. Production code goes through `dispatch_tool_with_ledgers`; this
-/// entry point is for `Dispatcher::handle_tool_call` only.
-pub(crate) fn dispatch_tool_with_ledgers_and_memory_flag(
-    name: &str,
-    args: &BTreeMap<String, JsonValue>,
-    registry: &EstateRegistry,
-    ledger: &SurfacedRecallLedger,
-    vault_ledger: &VaultJobLedger,
-    sensitivity_ledger: &SensitivityGrantLedger,
-    posture: EstatePosture,
-    memory_on: bool,
-    build_serial: &str,
-    version_skew: &str,
-    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
-    monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
-) -> Result<serde_json::Value, JSONRPCError> {
-    dispatch_tool_with_vault_ledger_and_flag(
-        name, args, registry, ledger, vault_ledger, sensitivity_ledger, posture,
-        crate::tool_list::vault_enabled(), memory_on,
-        build_serial, version_skew,
-        update_advisory, monitoring_control,
-    )
-}
-
 /// Dispatch with an explicit vault-on flag. Used by tests that need to verify
 /// vault-gating behaviour without mutating the process environment
 /// (std::env::set_var is not thread-safe under the parallel Rust test runner).
@@ -145,8 +74,8 @@ pub fn dispatch_tool_with_vault_flag(
     ledger: &SurfacedRecallLedger,
     vault_on: bool,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    // Throwaway sensitivity ledger — see `dispatch_tool_with_ledgers`'s doc
-    // comment for why every non-production entry point does this.
+    // Throwaway sensitivity ledger — non-production entry points pass a fresh,
+    // always-locked SensitivityGrantLedger so no unlock grant persists.
     // Monitoring control: None — test/non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, &VaultJobLedger::new(), &SensitivityGrantLedger::new(),
@@ -169,8 +98,8 @@ pub fn dispatch_tool_with_vault_ledger(
     build_serial: &str,
     version_skew: &str,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    // Throwaway sensitivity ledger — see `dispatch_tool_with_ledgers`'s doc
-    // comment for why every non-production entry point does this.
+    // Throwaway sensitivity ledger — non-production entry points pass a fresh,
+    // always-locked SensitivityGrantLedger so no unlock grant persists.
     // Monitoring control: None — non-production entry points have no stats store.
     dispatch_tool_with_vault_ledger_and_flag(
         name, args, registry, ledger, vault_ledger, &SensitivityGrantLedger::new(),
@@ -572,6 +501,23 @@ fn inject_hint(
 /// wrappers). Returns `None` for unknown tool names — no check runs.
 ///
 /// Mirrors Swift `ToolDispatcher.appendUnknownArgsHint`.
+/// Arg names that the legacy v1 dispatch path (`interface_tools`) still reads
+/// under their original names. These are accepted by the tool's handler but
+/// not listed in the v2 catalog schema (which uses the renamed v2 names).
+/// Exempting them here prevents the hint from firing on callers that use the
+/// v1 names while the v2 catalog reflects only the new names.
+fn v1_interface_arg_exemptions(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        // v1: "id"/"ids" → v2 catalog: "memory_id"/"memory_ids"
+        "moot_memory_get" => &["id", "ids"],
+        // v1: "id"+"confirmed" → v2 catalog: "memory_id"+"confirmation"
+        "moot_erase_memory" => &["id", "confirmed"],
+        // v1: "kind"+"proposed" → v2 catalog: "relationship" (proposed not advertised)
+        "moot_link_memories" => &["kind", "proposed"],
+        _ => &[],
+    }
+}
+
 fn inject_unknown_args_hint(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
@@ -580,9 +526,10 @@ fn inject_unknown_args_hint(
     let Some(accepted) = crate::tool_list::accepted_arg_keys(name) else {
         return result;
     };
+    let exempted = v1_interface_arg_exemptions(name);
     let unknown: Vec<String> = {
         let mut v: Vec<String> = args.keys()
-            .filter(|k| !accepted.contains(*k))
+            .filter(|k| !accepted.contains(*k) && !exempted.contains(&k.as_str()))
             .cloned()
             .collect();
         v.sort();

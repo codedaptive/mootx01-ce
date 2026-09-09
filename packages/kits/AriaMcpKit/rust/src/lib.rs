@@ -13,15 +13,10 @@
 //!   └─► framing::read_frames
 //!         └─► jsonrpc::JSONRPCRequest::decode
 //!               └─► dispatcher::Dispatcher::handle
-//!                     ├─► tool_list (projected AI-client surface)
-//!                     └─► tool_call  ──► dispatch::dispatch_tool
-//!                                         ├─► teachme pre-check (intercepts before any runner)
-//!                                         ├─► interface_tools (Tier 1–5 + maintenance/admin)
-//!                                         ├─► vault_tools (moot_vault_export, moot_vault_import, …)
-//!                                         ├─► dataset_tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats; MX-TAB-7b)
-//!                                         ├─► recipe_tools (moot_list_lenses, moot_synthesize, …)
-//!                                         ├─► lens_tools (moot_lens_keystones … moot_lens_concepts)
-//!                                         └─► hint injection (CoachingEngine, non-error results only)
+//!                     ├─► surface::SelectedSurface::decode (v2 admission + frozen gate)
+//!                     └─► surface::execute  ──► v2::{core_memory, estate_diagnostics, …}
+//!                                                 ├─► (84 ARIA v2 tools)
+//!                                                 └─► dispatch::dispatch_tool (v1 test helpers only)
 //! stdout (newline-delimited JSON responses)
 //! ```
 //!
@@ -44,14 +39,11 @@
 pub mod build_serial;
 pub mod coaching_engine;
 // mode_registry: the five-mode roster, RecallVariant enum, and ModeDeclaration parser.
-// Modes are advisory and fail-open (mirrors Swift ModeRegistry.swift).
+// Modes are advisory and fail-open (mirrors Swift mode registry (v1, removed in ARIA v2)).
 pub mod mode_registry;
 // mode_session_state: per-session sticky mode state and call counters.
 // Uses Mutex for interior mutability (mirrors Swift ModeSessionState.swift actor).
 pub mod mode_session_state;
-// periodic_coach: deterministic coaching block renderer.
-// Golden-pin tested against Tests/Conformance/modes_coaching_fixture.json.
-pub mod periodic_coach;
 pub mod dataset_tools;
 // dense_row module deleted in COMPOSER-02B: all render sites migrated to result_composer.
 pub mod dispatch;

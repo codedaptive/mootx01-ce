@@ -26,7 +26,8 @@ use aria_mcp::{
     estate_registry::EstateRegistry,
     jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue},
     surfaced_recall_ledger::SurfacedRecallLedger,
-    tool_list::{build_tool_list, build_tool_list_with_flags, build_tool_list_with_vault_flag, vault_enabled},
+    tool_list::{build_tool_list, vault_enabled},
+    v2::catalog::{selected_tools_for_registry, selected_registry_with_vault},
 };
 
 // ---------------------------------------------------------------------------
@@ -258,11 +259,11 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 76 tools exact
+// 1. tools/list surface assertions — 84 tools exact (v2 catalog)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_76() {
+fn tools_list_count_is_84() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -295,12 +296,11 @@ fn tools_list_count_is_76() {
     //   77  total (memory adapter excluded — opt-in, off by default; D10 added
     //       moot_recall_walk escalation-ladder recall recipe; 2026-08-26 added
     //       moot_rebuild_status, the derived-state rebuild condition surface)
-    // Use build_tool_list_with_flags with memory_on=false for deterministic count:
-    // the 3 memory-tool tests in this file hold memory_env_lock() while setting
-    // MOOTX01_MEMORY_TOOL=1, which would race this test and flip the count to 79.
-    let tools = build_tool_list_with_flags(vault_enabled(), false);
-    let arr = tools.as_array().expect("build_tool_list must return an array");
-    assert_eq!(arr.len(), 76, "expected 76 tools; got {}", arr.len());
+    // v2 catalog: 84 tools with vault-on (the default), 77 without vault.
+    // Use selected_tools_for_registry with vault_enabled() for deterministic count.
+    let tools = selected_tools_for_registry(&selected_registry_with_vault(vault_enabled()));
+    let arr = tools.as_array().expect("selected_tools must return an array");
+    assert_eq!(arr.len(), 84, "expected 84 v2 tools; got {}", arr.len());
 }
 
 #[test]
@@ -320,112 +320,69 @@ fn tools_list_name_set_matches_expected_names() {
     // moot_recall_walk (D10): escalation-ladder recall — cheap session_hybrid
     // first, precise hamming+text only when Stage 1 is not confident.
     let expected: std::collections::HashSet<&str> = [
-        // Tier 1 — Core memory (9)
-        "moot_file_memory",
-        "moot_memory_search",
-        "moot_memory_list",
-        "moot_memory_get",
-        "moot_update_memory",
-        "moot_withdraw_memory",
-        "moot_erase_memory",
-        "moot_confirm_memory",
-        "moot_move_memory",
-        // Tier 2 — Connections (4)
-        "moot_link_memories",
+        // Core memory writes (7)
+        "moot_file_memory", "moot_update_memory", "moot_withdraw_memory",
+        "moot_erase_memory", "moot_confirm_memory", "moot_move_memory", "moot_link_memories",
+        // Core memory reads (3)
+        "moot_memory_search", "moot_memory_list", "moot_memory_get",
+        // Connection writes (1)
         "moot_review_tunnel",
-        "moot_connection_search",
-        "moot_connection_map",
-        // Tier 3 — Knowledge graph (4)
-        "moot_file_fact",
-        "moot_fact_search",
-        "moot_retire_fact",
-        "moot_fact_timeline",
-        // Tier 4 — Journal (2)
+        // Connection reads (2)
+        "moot_connection_search", "moot_connection_map",
+        // Knowledge graph writes (2)
+        "moot_file_fact", "moot_retire_fact",
+        // Knowledge graph reads (2)
+        "moot_fact_search", "moot_fact_timeline",
+        // Journal writes (1)
         "moot_write_journal",
+        // Journal reads (1)
         "moot_read_journal",
-        // Tier 5 — Estate (3)
-        "moot_estate_status",
-        "moot_estate_map",
-        "moot_estate_ping",
-        // Monitoring control (1) — out-of-band sensitivity grants
-        "moot_monitoring_status",
-        // Federation (1)
-        "moot_federated_search",
-        // Recipe (14) — list_lenses + list_recipes + synthesize + run_migration
-        //               + confirm_migration + recall_precise + recall_connected
-        //               + recall_shaped + recall_vague + dream
-        //               + recall_temporal + recall_distilled
-        //               + hunt_contradictions
-        //               + recall_walk (D10: escalation-ladder recall)
-        //               (moot_consolidate no longer dispatches — SPEC §3 Phase 2;
-        //                moot_distill and moot_redistill retired ENC-W6B;
-        //                moot_recollect is a notice-only stub, not listed)
-        "moot_list_lenses",
-        "moot_list_recipes",
-        "moot_synthesize",
-        "moot_run_migration",
-        "moot_confirm_migration",
-        "moot_recall_precise",
-        "moot_recall_temporal",
-        "moot_recall_connected",
-        "moot_recall_shaped",
-        "moot_recall_vague",
-        "moot_dream",
-        "moot_recall_distilled",
-        "moot_hunt_contradictions",
-        "moot_recall_walk",
-        "moot_reindex",
-        "moot_drain_status",
-        "moot_rebuild_status",
-        "moot_reclassify_fdc",
-        "moot_timing_report",
-        "moot_palace_import",
-        "moot_json_import",
-        // Lens tools (23) — names from lens_tools.rs LENS_TOOLS constant
-        "moot_lens_keystones",
-        "moot_lens_constellation",
-        "moot_lens_free_association",
-        "moot_lens_theme_weather",
-        "moot_lens_latent_themes",
-        "moot_lens_bias",
-        "moot_lens_drift",
-        "moot_lens_node_motion",
-        "moot_lens_cohesion",
-        "moot_lens_contradiction",
-        "moot_lens_trust_synthesis",
-        "moot_lens_partial_cue",
-        "moot_lens_anticipate",
-        "moot_lens_successors",
-        "moot_lens_overlap",
-        "moot_lens_divergence",
-        "moot_lens_associations",
-        "moot_lens_concepts",
-        "moot_lens_apriori",
-        "moot_lens_moment",
-        "moot_lens_rhythm",
-        "moot_lens_precedence",
-        "moot_lens_complexity",
-        // Vault tools (5) — moot_vault_job added for parity (Bob's ruling 2026-06-12)
-        "moot_vault_export",
-        "moot_vault_import",
-        "moot_vault_status",
-        "moot_vault_reconcile",
-        "moot_vault_job",
-        // Dataset tools (3) — MX-TAB-7 (moot_file_dataset / query / stats)
-        "moot_file_dataset",
-        "moot_dataset_query",
-        "moot_dataset_stats",
+        // Contradiction writes (2)
+        "moot_hunt_contradictions", "moot_propose_contradictions",
+        // Work packet reads (3)
+        "moot_packet_get", "moot_packet_lineage", "moot_packet_list",
+        // Work packet writes (1)
+        "moot_file_packet",
+        // Transcript recall (1)
+        "moot_memory_recall_transcript",
+        // Help (1)
+        "moot_help",
+        // Estate reads (3)
+        "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+        // Monitoring (2)
+        "moot_monitoring_status", "moot_monitoring_set",
+        // Recipe tools (8)
+        "moot_list_lenses", "moot_list_recipes", "moot_synthesize", "moot_dream",
+        "moot_migration_run", "moot_migration_confirm",
+        "moot_federated_recall",
+        "moot_recall_precise", "moot_recall_temporal", "moot_recall_connected",
+        "moot_recall_shaped", "moot_recall_distilled", "moot_recall_vague", "moot_recall_walk",
+        // Maintenance tools (6) — reindex, drain, rebuild, reclassify, timing, palace, json
+        "moot_reindex", "moot_drain_status", "moot_rebuild_status",
+        "moot_reclassify_fdc", "moot_timing_report",
+        "moot_palace_import", "moot_json_import",
+        // Lens tools (23)
+        "moot_lens_keystones", "moot_lens_constellation", "moot_lens_free_association",
+        "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
+        "moot_lens_drift", "moot_lens_node_motion", "moot_lens_cohesion",
+        "moot_lens_contradiction", "moot_lens_trust_synthesis", "moot_lens_partial_cue",
+        "moot_lens_anticipate", "moot_lens_successors", "moot_lens_overlap",
+        "moot_lens_divergence", "moot_lens_associations", "moot_lens_concepts",
+        "moot_lens_apriori", "moot_lens_moment", "moot_lens_rhythm",
+        "moot_lens_precedence", "moot_lens_complexity",
+        // Vault tools (5)
+        "moot_vault_export", "moot_vault_import", "moot_vault_status",
+        "moot_vault_reconcile", "moot_vault_job",
+        // Dataset tools (3)
+        "moot_file_dataset", "moot_dataset_query", "moot_dataset_stats",
     ]
     .iter()
     .copied()
     .collect();
 
-    // Use build_tool_list_with_flags with memory_on=false: this test gates the
-    // baseline 75-name set; the `memory` tool's opt-in appearance is tested in
-    // memory_adapter_tests.rs. Deterministic flag prevents racing the env-var
-    // mutations in the three memory_env_lock()-gated tests below.
-    let tools = build_tool_list_with_flags(vault_enabled(), false);
-    let arr = tools.as_array().expect("build_tool_list must return an array");
+    // v2 catalog with vault-on (84 tools).
+    let tools = selected_tools_for_registry(&selected_registry_with_vault(vault_enabled()));
+    let arr = tools.as_array().expect("selected_tools must return an array");
     let actual: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
 
@@ -1587,25 +1544,6 @@ fn memory_search_unknown_ordering_returns_invalid_params() {
         JSONRPCErrorCode::INVALID_PARAMS,
         "unknown ordering must be INVALID_PARAMS; got code {}",
         err.code
-    );
-}
-
-#[test]
-fn memory_search_schema_advertises_by_relevance_desc() {
-    // The tool list schema for moot_memory_search must document "byRelevanceDesc"
-    // so clients can discover the spelling. This is the client-facing contract.
-    let tools = build_tool_list();
-    let arr = tools.as_array().expect("build_tool_list must return array");
-    let search = arr
-        .iter()
-        .find(|t| t["name"].as_str() == Some("moot_memory_search"))
-        .expect("moot_memory_search must be in tool list");
-    let ordering_desc = search["inputSchema"]["properties"]["ordering"]["description"]
-        .as_str()
-        .unwrap_or("");
-    assert!(
-        ordering_desc.contains("byRelevanceDesc"),
-        "moot_memory_search ordering description must advertise byRelevanceDesc; got: {ordering_desc}"
     );
 }
 
@@ -6167,37 +6105,36 @@ fn vault_enabled_default_is_true() {
     }
 }
 
-/// With vault_on=true (the default), all five vault tools appear in the list.
+/// With vault_on=true (the default), all vault-gated tools appear in the v2 catalog.
 #[test]
-fn build_tool_list_with_vault_on_includes_vault_tools() {
-    let tools = build_tool_list_with_vault_flag(true);
+fn v2_catalog_with_vault_on_includes_vault_tools() {
+    let tools = selected_tools_for_registry(&selected_registry_with_vault(true));
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 76, "vault-on must produce 76 tools (incl. moot_recall_connected, moot_timing_report, moot_recall_temporal, moot_recall_walk, moot_rebuild_status)");
+    assert_eq!(arr.len(), 84, "vault-on must produce 84 v2 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
                    "moot_vault_reconcile", "moot_vault_job"] {
-        assert!(names.contains(name), "vault-on: expected {name} in tools/list");
+        assert!(names.contains(name), "vault-on: expected {name} in v2 catalog");
     }
 }
 
-/// With vault_on=false (MOOTX01_VAULT=0), all five vault tools and the
-/// filesystem-importing palace import tool are absent from tools/list.
+/// With vault_on=false (MOOTX01_VAULT=0), vault-gated tools are absent from the v2 catalog.
 #[test]
-fn build_tool_list_with_vault_off_excludes_vault_tools() {
-    let tools = build_tool_list_with_vault_flag(false);
+fn v2_catalog_with_vault_off_excludes_vault_tools() {
+    let tools = selected_tools_for_registry(&selected_registry_with_vault(false));
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 69, "vault-off must produce 69 tools (76 - 5 vault - 2 gated import lanes)");
+    assert_eq!(arr.len(), 77, "vault-off must produce 77 v2 tools (84 - 7 vault-gated)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
                    "moot_vault_reconcile", "moot_vault_job", "moot_palace_import",
                    "moot_json_import"] {
-        assert!(!names.contains(name), "vault-off: {name} must NOT appear in tools/list");
+        assert!(!names.contains(name), "vault-off: {name} must NOT appear in v2 catalog");
     }
     // A sample of non-vault tools must still be present.
     assert!(names.contains("moot_file_memory"), "vault-off: core tools must still be present");
-    assert!(names.contains("moot_federated_search"), "vault-off: federation tool must still be present");
+    assert!(names.contains("moot_federated_recall"), "vault-off: federation recall must still be present");
     assert!(names.contains("moot_lens_keystones"), "vault-off: lens tools must still be present");
 }
 
@@ -9111,7 +9048,7 @@ fn recall_distilled_runs_without_any_ack() {
 /// description carries no ceremony vocabulary.
 #[test]
 fn recall_distilled_schema_has_no_ack_param() {
-    let tools = build_tool_list_with_flags(vault_enabled(), false);
+    let tools = selected_tools_for_registry(&selected_registry_with_vault(vault_enabled()));
     let arr = tools.as_array().expect("tool list must be array");
     let tool = arr.iter()
         .find(|t| t["name"].as_str() == Some("moot_recall_distilled"))

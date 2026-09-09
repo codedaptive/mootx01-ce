@@ -145,8 +145,7 @@ enum DatasetTools {
     /// The three dataset tools added to the tool list.
     ///
     /// Schemas are wrapped with withEstateID() so the estate-addressing contract
-    /// matches all other interface tools. withTeachme() is applied globally by
-    /// ToolProjection.tools(environment:).
+    /// matches all other interface tools.
     static func tools() -> [ProjectedTool] {
         [
             ProjectedTool(

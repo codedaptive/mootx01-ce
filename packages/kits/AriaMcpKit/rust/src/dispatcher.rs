@@ -4,8 +4,8 @@
 //! `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`,
 //! and `prompts/list`. All other method names return a `methodNotFound` error.
 //!
-//! `tools/call` delegates to `crate::dispatch::dispatch_tool` which holds
-//! the full tool dispatch table (federation, interface/maintenance, vault, recipe, lens tools).
+//! `tools/call` decodes and dispatches through the v2 surface (`crate::surface::SelectedSurface`)
+//! which covers all 84 ARIA v2 tools. Unknown tool names are rejected with METHOD_NOT_FOUND.
 //!
 //! # Session ledger
 //!
@@ -29,9 +29,7 @@
 
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JSONRPCRequest, JSONRPCResponse, JsonValue};
-use crate::mode_registry::ModeDeclaration;
 use crate::mode_session_state::ModeSessionState;
-use crate::periodic_coach;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::estate_posture::EstatePosture;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
@@ -397,123 +395,14 @@ impl Dispatcher {
             );
         }
 
-
-        // Frozen posture: refuse every writing, mutating, or deleting tool
-        // before any runner fires and before the session state records the
-        // call, so the refusal leaves no side effect at all. `teachme:true`
-        // is answered first, as in the live path — a guide touches nothing.
-        // Returned as an isError tool result (not a JSON-RPC error) for the
-        // same reason substrate refusals are: the client keeps the call id
-        // and the model sees the reason. Two checks: the name inventory, then
-        // the command-classified tools (`memory`), whose `command` argument
-        // decides per call — a read command proceeds; a mutating, unknown, or
-        // missing command is refused here so the adapter itself never learns
-        // about posture. Mirrors Swift ToolDispatcher.dispatch.
-        let teachme = args_map.get("teachme").and_then(|v| v.as_bool()) == Some(true);
-        if self.posture.is_frozen() && !teachme {
-            if crate::tool_mutation_inventory::is_frozen_refused(name) {
-                return Ok(crate::dispatch::error_result(&EstatePosture::refusal_message(name)));
-            }
-            if let Some(read_commands) = crate::tool_mutation_inventory::frozen_read_commands(name) {
-                let command = args_map.get("command").and_then(|v| v.as_str());
-                if !command.is_some_and(|c| read_commands.contains(&c)) {
-                    return Ok(crate::dispatch::error_result(
-                        &EstatePosture::refusal_message_for_command(name, command),
-                    ));
-                }
-            }
-        }
-
-        // Decode the optional `mode` argument (modes are fail-open by spec).
-        //
-        // ## Fail-open vs. fail-closed contrast
-        //
-        // The `mode` argument is ADVISORY: unknown mode names and unknown variants
-        // are accepted with a hint appended (fail-open). This is the OPPOSITE of the
-        // `answer` argument, which throws invalidParams on unknown values (fail-closed).
-        // The reason: an AI re-declaring a mode it discovered must never lose the call
-        // when the server has an older mode registry. Advisory modes survive version skew.
-        let mode_declaration: Option<ModeDeclaration> = args_map
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .map(ModeDeclaration::parse);
-
-        // Apply estate-provisioned modes preferences on the first call.
-        // Guards itself: apply_preferences is a no-op if configured_from_estate
-        // is already set (bitmap bit 1). Reading the manifest is a RAM-resident
-        // dictionary hit so the overhead is negligible.
-        if !self.mode_session_state.is_configured_from_estate() {
-            if let Ok(config) = self.registry.coord
-                .lock()
-                .expect("coordinator lock")
-                .provisioned_modes_config(&self.registry.default.handle)
-            {
-                self.mode_session_state.apply_preferences(
-                    config.sticky_enabled,
-                    config.coaching_calls,
-                );
-            }
-        }
-
-        // Record the call in session state (updates sticky, counters, bigrams).
-        self.mode_session_state.record_call(name, mode_declaration.as_ref());
-
-        // Recall variant: if sticky Recall=<variant> is set and `answer` is absent,
-        // inject the variant's answer mode into args_map so interface_tools sees it.
-        // Per-call `answer` arg always takes precedence (most specific wins).
-        if name == "moot_memory_search" && !args_map.contains_key("answer") {
-            if let Some(answer_raw) = self.mode_session_state.sticky_recall_answer_mode() {
-                args_map.insert(
-                    "answer".to_owned(),
-                    JsonValue::String(answer_raw.to_owned()),
-                );
-            }
-        }
-
-        let mut result = crate::dispatch::dispatch_tool_with_ledgers_and_memory_flag(
-            name, &args_map, &self.registry, &self.ledger, &self.vault_ledger, &self.sensitivity_ledger,
-            self.posture, self.memory_tool_enabled, &self.build_serial, &self.version_skew,
-            // Upstream-release advisory provider — evaluated by ping/status
-            // only; None when the host wired none.
-            self.update_advisory.as_ref(),
-            // thread the monitoring-control seam so the
-            // interface-tools layer can reach it without importing observer_sink.
-            self.monitoring_control.as_deref(),
-        )?;
-
-        // Append unknown-mode hint when the mode arg contained something unrecognized.
-        if let Some(ref decl) = mode_declaration {
-            if let Some(hint) = decl.unknown_hint() {
-                result = append_hint_to_result(result, &hint);
-            }
-        }
-
-        // Append periodic coaching block when the cadence fires.
-        if self.mode_session_state.should_coach() {
-            let snap = self.mode_session_state.snapshot();
-            let block = periodic_coach::render_block(&snap);
-            result = append_hint_to_result(result, &block);
-        }
-
-        Ok(result)
+        // No tool matched the v2 catalog — surface.decode() already returns
+        // METHOD_NOT_FOUND for unknown names; this branch is a safety net for
+        // any gap between accepted_arg_keys and the match arms in decode().
+        Err(JSONRPCError::new(
+            JSONRPCErrorCode::METHOD_NOT_FOUND,
+            format!("Unknown tool for active ARIA v2 surface: {name}"),
+        ))
     }
-}
-
-/// Append a hint/coaching line to the first text block of a tool result.
-///
-/// The result is expected to have `content[0].text` (the standard text_result shape).
-/// If the shape doesn't match, the result is returned unchanged rather than erroring.
-///
-/// Mirrors Swift `ToolDispatcher.appendingHint(_:to:)`.
-fn append_hint_to_result(mut result: serde_json::Value, text: &str) -> serde_json::Value {
-    if let Some(content) = result.get_mut("content") {
-        if let Some(first) = content.as_array_mut().and_then(|arr| arr.first_mut()) {
-            if let Some(existing) = first.get_mut("text").and_then(|t| t.as_str()).map(|t| t.to_string()) {
-                first["text"] = serde_json::Value::String(format!("{}\nhint: {}", existing, text));
-            }
-        }
-    }
-    result
 }
 
 #[cfg(test)]

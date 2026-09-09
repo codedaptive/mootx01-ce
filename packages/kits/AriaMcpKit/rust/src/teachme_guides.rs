@@ -1,11 +1,11 @@
-//! TeachmeGuides — per-tool usage guides returned when `teachme:true`.
+//! teachme guides — per-tool usage guides returned when `teachme:true`.
 //!
-//! Mirrors Swift `TeachmeGuides.swift`. When any tool is called with
+//! Mirrors Swift `teachme guides.swift`. When any tool is called with
 //! `teachme:true` in its arguments, `dispatch.rs` intercepts the call before
 //! any runner fires and returns the guide for that tool name.
 //!
 //! Each guide covers: what the tool does, required and optional arguments,
-//! a usage example, and common mistakes. Content mirrors Swift TeachmeGuides.swift
+//! a usage example, and common mistakes. Content mirrors Swift teachme guides.swift
 //! at ≥80% fidelity (structure preserved; some details abbreviated).
 
 /// Return the teachme guide for `tool_name` as an owned `String`.
@@ -28,7 +28,7 @@ pub fn guide(tool_name: &str) -> String {
 /// sticky-state behavior. Derived from `MootMode::all_cases()` so the tool
 /// roster and contracts in the guide are always current.
 ///
-/// Byte-identical to Swift `TeachmeGuides.modesTeachmeGuide` — both ports read
+/// Byte-identical to Swift `teachme guides.modesTeachmeGuide` — both ports read
 /// the shared `Tests/Conformance/modes_teachme_guide_fixture.json` fixture to
 /// verify parity.
 pub fn modes_teachme_guide() -> String {
@@ -92,7 +92,7 @@ pub fn modes_teachme_guide() -> String {
 /// from `modes_teachme_guide()`.
 ///
 /// Parity: the embedded modes block is byte-identical to Swift's
-/// `TeachmeGuides.modesTeachmeGuide` (computed property).
+/// `teachme guides.modesTeachmeGuide` (computed property).
 pub fn estate_status_guide() -> String {
     let modes_section = modes_teachme_guide();
     format!(
