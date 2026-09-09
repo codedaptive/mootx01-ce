@@ -1,0 +1,63 @@
+{
+  "format": "moot_memory_list_revision_v1",
+  "canonicalization": {
+    "algorithm": "SHA-256",
+    "encoding": "UTF-8 canonical JSON",
+    "object_key_order": "UTF-8 lexicographic",
+    "uuid_encoding": "lowercase hyphenated UUID",
+    "row_order": "uuid_bytes_ascending"
+  },
+  "revision_material": {
+    "authorization": {
+      "authorization_generation": "authorization-generation-7",
+      "caller_binding": "caller-binding-a",
+      "context_id": "context-42",
+      "policy_version": "policy-v3"
+    },
+    "estate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "revision_version": "moot_memory_list_revision_v1",
+    "rows": [
+      {
+        "ancestry_ids": [
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222"
+        ],
+        "ancestry_names": ["Agentic Memory", "inbox"],
+        "eligibility": "current",
+        "memory_id": "10000000-0000-4000-8000-000000000000",
+        "projection": {
+          "context": null,
+          "provenance": "agent",
+          "subject": null,
+          "weight": 7
+        },
+        "visibility": "bulk_exportable"
+      },
+      {
+        "ancestry_ids": [
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222"
+        ],
+        "ancestry_names": ["Agentic Memory", "inbox"],
+        "eligibility": "current",
+        "memory_id": "f0000000-0000-4000-8000-000000000000",
+        "projection": {
+          "context": "planning",
+          "provenance": null,
+          "subject": null,
+          "weight": 8
+        },
+        "visibility": "bulk_exportable"
+      }
+    ],
+    "scope": {
+      "filter": "missing_subject",
+      "order": "uuid_bytes_ascending",
+      "room": null,
+      "wing": "Agentic Memory"
+    },
+    "total": 2
+  },
+  "canonical_json": "{\"authorization\":{\"authorization_generation\":\"authorization-generation-7\",\"caller_binding\":\"caller-binding-a\",\"context_id\":\"context-42\",\"policy_version\":\"policy-v3\"},\"estate_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"revision_version\":\"moot_memory_list_revision_v1\",\"rows\":[{\"ancestry_ids\":[\"11111111-1111-4111-8111-111111111111\",\"22222222-2222-4222-8222-222222222222\"],\"ancestry_names\":[\"Agentic Memory\",\"inbox\"],\"eligibility\":\"current\",\"memory_id\":\"10000000-0000-4000-8000-000000000000\",\"projection\":{\"context\":null,\"provenance\":\"agent\",\"subject\":null,\"weight\":7},\"visibility\":\"bulk_exportable\"},{\"ancestry_ids\":[\"11111111-1111-4111-8111-111111111111\",\"22222222-2222-4222-8222-222222222222\"],\"ancestry_names\":[\"Agentic Memory\",\"inbox\"],\"eligibility\":\"current\",\"memory_id\":\"f0000000-0000-4000-8000-000000000000\",\"projection\":{\"context\":\"planning\",\"provenance\":null,\"subject\":null,\"weight\":8},\"visibility\":\"bulk_exportable\"}],\"scope\":{\"filter\":\"missing_subject\",\"order\":\"uuid_bytes_ascending\",\"room\":null,\"wing\":\"Agentic Memory\"},\"total\":2}",
+  "expected_sha256": "46b2b11c24245523020b1bc877064da06f33cfc296fd9f6cf203c913a7107bf2"
+}

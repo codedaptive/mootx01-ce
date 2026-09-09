@@ -58,7 +58,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::dispatch::{describe_glk_error, error_result, optional_integer, optional_string, require_string, text_result, wall_now};
-use crate::estate_registry::EstateRegistry;
+use crate::estate_registry::{EstateRegistry, OpenEstate};
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
 use genius_locus_kit::dataset_signatures::{compute_dataset_signatures, DATASET_SIGNATURE_SAMPLE_SIZE};
@@ -125,6 +125,406 @@ pub fn dispatch(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown dataset tool: {name}"),
         )),
+    }
+}
+
+/// Typed request and receipt records for the v2 lower seam. They deliberately
+/// carry decoded values rather than legacy tool arguments or rendered text.
+pub struct DatasetFileInput<'a> {
+    pub name: &'a str,
+    pub location: &'a str,
+    pub columns: Option<&'a [JsonValue]>,
+    pub rows: Option<&'a [JsonValue]>,
+    pub csv_path: Option<&'a str>,
+    pub wing: Option<&'a str>,
+    pub sensitivity_raw: i64,
+    pub now_millis: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetFiledSnapshot {
+    pub dataset_id: Uuid,
+    pub handle_memory_id: String,
+    pub name: String,
+    pub location: String,
+    pub wing: Option<String>,
+    pub columns: usize,
+    pub rows: usize,
+    pub source: String,
+    pub sensitivity: String,
+    pub signatures: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetQuerySnapshot {
+    pub dataset_id: Uuid,
+    pub handle_memory_id: String,
+    pub state: String,
+    pub sensitivity: String,
+    pub rows_returned: usize,
+    pub limit: usize,
+    pub rows: Vec<BTreeMap<String, JsonValue>>,
+    pub columns: Option<Vec<String>>,
+    pub handle_row_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetColumnStatsSnapshot {
+    pub count: i64,
+    pub distinct_count: i64,
+    pub null_count: i64,
+    pub min: JsonValue,
+    pub max: JsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetStatsSnapshot {
+    pub dataset_id: Uuid,
+    pub handle_memory_id: String,
+    pub stats: BTreeMap<String, DatasetColumnStatsSnapshot>,
+}
+
+/// Create a dataset from already-decoded v2 input, preserving the production
+/// table/handle transaction and signature behavior without v1 argument parsing.
+pub fn file_dataset_snapshot(
+    open: &OpenEstate,
+    input: DatasetFileInput<'_>,
+) -> Result<DatasetFiledSnapshot, String> {
+    let columns_value = input.columns.map(|values| JsonValue::Array(values.to_vec()));
+    let column_specs = parse_column_specs(columns_value.as_ref()).map_err(|error| format!("{error:?}"))?;
+    if input.csv_path.is_some() && input.rows.is_some() {
+        return Err("moot_file_dataset: supply either rows or csv_path, not both".to_owned());
+    }
+    for spec in &column_specs {
+        validate_dataset_column_identifier(&spec.name).map_err(|error| format!(
+            "moot_file_dataset: invalid column identifier \"{}\": {error}", spec.name
+        ))?;
+    }
+
+    let (parse_result, source_description) = match (input.csv_path, input.rows) {
+        (Some(path), None) => {
+            let resolved = resolve_csv_path(path)?;
+            let parsed = parse_csv(&resolved, &column_specs)?;
+            let basename = std::path::Path::new(&resolved).file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(resolved);
+            (parsed, format!("csv:{basename}"))
+        }
+        (None, Some(rows)) => {
+            if column_specs.is_empty() {
+                return Err("moot_file_dataset: columns is required when using inline rows".to_owned());
+            }
+            let rows_value = JsonValue::Array(rows.to_vec());
+            (parse_inline_rows(&rows_value, &column_specs)?, format!("inline_rows:{}", input.name))
+        }
+        (None, None) => return Err("moot_file_dataset: either rows or csv_path is required".to_owned()),
+        (Some(_), Some(_)) => unreachable!("checked above"),
+    };
+    let schema = parse_result.schema;
+    let typed_rows = parse_result.rows;
+    let dataset_id = Uuid::new_v4();
+    let storage = open.store.storage().ok_or_else(|| {
+        "moot_file_dataset: estate storage does not support datasets (no storage layer)".to_owned()
+    })?;
+    let dataset_store = storage.dataset_store().map_err(|error| format!(
+        "moot_file_dataset: estate storage does not support datasets: {error}"
+    ))?;
+    dataset_store.create_dataset(dataset_id, &schema, &[]).map_err(|error| format!(
+        "moot_file_dataset: failed to create dataset table: {error}"
+    ))?;
+    if !typed_rows.is_empty() {
+        if let Err(error) = dataset_store.append_rows(dataset_id, &typed_rows) {
+            let _ = dataset_store.drop_dataset(dataset_id);
+            return Err(format!("moot_file_dataset: failed to append rows (table dropped): {error}"));
+        }
+    }
+    let column_summaries: Vec<DatasetColumnSummary> = schema.columns.iter().map(|column| {
+        DatasetColumnSummary { name: column.name.clone(), data_type: column_type_label(column.column_type) }
+    }).collect();
+    let coord = open.coord.lock().map_err(|_| "moot_file_dataset: estate coordinator lock poisoned".to_owned())?;
+    let estate = coord.estate_for(&open.handle).map_err(|error| format!(
+        "moot_file_dataset: estate not accessible: {}", describe_glk_error(&error)
+    ))?;
+    let drawer = match estate.capture_dataset_handle(
+        dataset_id,
+        column_summaries.clone(),
+        i64::try_from(typed_rows.len()).map_err(|_| "moot_file_dataset: row count overflow".to_owned())?,
+        &source_description,
+        input.wing,
+        input.location,
+        DATASET_ADDED_BY,
+        input.sensitivity_raw,
+        "000",
+        input.now_millis,
+    ) {
+        Ok(drawer) => drawer,
+        Err(error) => {
+            let _ = dataset_store.drop_dataset(dataset_id);
+            return Err(format!("moot_file_dataset: handle creation failed (table dropped): {error}"));
+        }
+    };
+    let mut signatures = "computed".to_owned();
+    let signature_result: Result<(), String> = (|| {
+        let sampled_rows = dataset_store.query_rows(
+            dataset_id, None, &[], Some(DATASET_SIGNATURE_SAMPLE_SIZE), None, None,
+        ).map_err(|error| error.to_string())?;
+        let mut stats = HashMap::new();
+        for column in &schema.columns {
+            stats.insert(column.name.clone(), dataset_store.column_stats(dataset_id, &column.name)
+                .map_err(|error| error.to_string())?);
+        }
+        compute_dataset_signatures(estate, &drawer.id, &column_summaries, &stats, &sampled_rows)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    if let Err(error) = signature_result {
+        signatures = format!("pending ({error})");
+    }
+    Ok(DatasetFiledSnapshot {
+        dataset_id,
+        handle_memory_id: drawer.id,
+        name: input.name.to_owned(),
+        location: input.location.to_owned(),
+        wing: input.wing.map(ToOwned::to_owned),
+        columns: schema.columns.len(),
+        rows: typed_rows.len(),
+        source: source_description,
+        sensitivity: format!("{:?}", locus_kit::adjectives::AdjectiveSensitivity::from_raw(input.sensitivity_raw)).to_lowercase(),
+        signatures,
+    })
+}
+
+/// Query one active dataset through the strict v2 predicate grammar. Every
+/// handle, schema, storage, or query failure is one opaque lower failure so
+/// selected-surface callers cannot use this path as an existence oracle.
+pub fn dataset_query_snapshot(
+    open: &OpenEstate,
+    dataset_id: Uuid,
+    where_clause: Option<&BTreeMap<String, JsonValue>>,
+    order_by: Option<&[JsonValue]>,
+    limit: Option<usize>,
+    columns: Option<&[JsonValue]>,
+) -> Result<DatasetQuerySnapshot, String> {
+    let (handle_drawer, handle_content) = active_dataset_handle(open, dataset_id)?;
+    let table_name = dataset_table_name(dataset_id);
+    let schema = dataset_column_types(&handle_content)?;
+    let mut nodes = 0usize;
+    let predicate = where_clause.map(|value| {
+        strict_v2_predicate(value, &table_name, &schema, 1, &mut nodes)
+    }).transpose()?;
+    let order_by = strict_v2_order_by(order_by, &table_name, &schema)?;
+    let limit = limit.unwrap_or(100);
+    if !(1..=1000).contains(&limit) {
+        return Err("moot_dataset_query: limit must be within 1...1000".to_owned());
+    }
+    let projected_columns = strict_v2_columns(columns, &schema)?;
+    let storage = open.store.storage().ok_or_else(|| "dataset storage unavailable".to_owned())?;
+    let dataset_store = storage.dataset_store().map_err(|_| "dataset storage unavailable".to_owned())?;
+    let rows = dataset_store.query_rows(
+        dataset_id, predicate.as_ref(), &order_by, Some(limit), None, projected_columns.as_deref(),
+    ).map_err(|_| "dataset query unavailable".to_owned())?;
+    let rows = rows.into_iter().map(|row| row.values.into_iter().map(|(column, value)| {
+        (column, typed_value_to_json(&value))
+    }).collect()).collect::<Vec<BTreeMap<_, _>>>();
+    let state = format!("{:?}", handle_drawer.state()).to_lowercase();
+    let sensitivity = format!("{:?}", handle_drawer.adjective_sensitivity()).to_lowercase();
+    Ok(DatasetQuerySnapshot {
+        dataset_id,
+        handle_memory_id: handle_drawer.id,
+        state,
+        sensitivity,
+        rows_returned: rows.len(),
+        limit,
+        rows,
+        columns: Some(handle_content.columns.into_iter().map(|column| column.name).collect()),
+        handle_row_count: Some(handle_content.row_count),
+    })
+}
+
+/// Return per-column aggregates for an active dataset through the same typed
+/// selected-estate seam as the v2 query operation.
+pub fn dataset_stats_snapshot(
+    open: &OpenEstate,
+    dataset_id: Uuid,
+    requested_column: Option<&str>,
+) -> Result<DatasetStatsSnapshot, String> {
+    let (handle_drawer, handle_content) = active_dataset_handle(open, dataset_id)?;
+    let schema = dataset_column_types(&handle_content)?;
+    let columns = match requested_column {
+        Some(column) => {
+            validate_dataset_column_identifier(column).map_err(|_| "invalid dataset column".to_owned())?;
+            if !schema.contains_key(column) { return Err("unknown dataset column".to_owned()); }
+            vec![column.to_owned()]
+        }
+        None => schema.keys().cloned().collect(),
+    };
+    let storage = open.store.storage().ok_or_else(|| "dataset storage unavailable".to_owned())?;
+    let dataset_store = storage.dataset_store().map_err(|_| "dataset storage unavailable".to_owned())?;
+    let mut stats = BTreeMap::new();
+    for column in columns {
+        let value = dataset_store.column_stats(dataset_id, &column)
+            .map_err(|_| "dataset stats unavailable".to_owned())?;
+        stats.insert(column, DatasetColumnStatsSnapshot {
+            count: value.count,
+            distinct_count: value.distinct_count,
+            null_count: value.null_count,
+            min: typed_value_to_json(&value.min),
+            max: typed_value_to_json(&value.max),
+        });
+    }
+    Ok(DatasetStatsSnapshot { dataset_id, handle_memory_id: handle_drawer.id, stats })
+}
+
+fn active_dataset_handle(
+    open: &OpenEstate,
+    dataset_id: Uuid,
+) -> Result<(locus_kit::drawer::Drawer, DatasetHandleContent), String> {
+    let coord = open.coord.lock().map_err(|_| "dataset coordinator unavailable".to_owned())?;
+    let estate = coord.estate_for(&open.handle).map_err(|_| "dataset estate unavailable".to_owned())?;
+    let drawer = estate.resolve_active_dataset_handle(dataset_id)
+        .map_err(|_| "dataset handle unavailable".to_owned())?;
+    let content = DatasetHandleContent::decode(&drawer.content)
+        .map_err(|_| "dataset handle unavailable".to_owned())?;
+    (content.dataset_id == dataset_id).then_some((drawer, content))
+        .ok_or_else(|| "dataset handle unavailable".to_owned())
+}
+
+fn dataset_column_types(content: &DatasetHandleContent) -> Result<BTreeMap<String, String>, String> {
+    let columns: BTreeMap<String, String> = content.columns.iter().map(|column| {
+        (column.name.clone(), column.data_type.clone())
+    }).collect();
+    (!columns.is_empty()).then_some(columns).ok_or_else(|| "dataset schema unavailable".to_owned())
+}
+
+fn strict_v2_predicate(
+    value: &BTreeMap<String, JsonValue>,
+    table_name: &str,
+    schema: &BTreeMap<String, String>,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<StoragePredicate, String> {
+    if depth > 8 { return Err("dataset predicate exceeds maximum depth".to_owned()); }
+    *nodes += 1;
+    if *nodes > 128 { return Err("dataset predicate exceeds maximum node count".to_owned()); }
+    if value.len() == 1 {
+        if let Some(JsonValue::Array(children)) = value.get("and") {
+            if children.is_empty() { return Err("dataset predicate compound must not be empty".to_owned()); }
+            return Ok(StoragePredicate::And(children.iter().map(|child| match child {
+                JsonValue::Object(child) => strict_v2_predicate(child, table_name, schema, depth + 1, nodes),
+                _ => Err("dataset predicate compound values must be objects".to_owned()),
+            }).collect::<Result<Vec<_>, _>>()?));
+        }
+        if let Some(JsonValue::Array(children)) = value.get("or") {
+            if children.is_empty() { return Err("dataset predicate compound must not be empty".to_owned()); }
+            return Ok(StoragePredicate::Or(children.iter().map(|child| match child {
+                JsonValue::Object(child) => strict_v2_predicate(child, table_name, schema, depth + 1, nodes),
+                _ => Err("dataset predicate compound values must be objects".to_owned()),
+            }).collect::<Result<Vec<_>, _>>()?));
+        }
+    }
+    let column = value.get("col").and_then(JsonValue::as_str)
+        .ok_or_else(|| "dataset predicate comparison requires a column".to_owned())?;
+    let operation = value.get("op").and_then(JsonValue::as_str)
+        .ok_or_else(|| "dataset predicate comparison requires an operator".to_owned())?;
+    validate_dataset_column_identifier(column).map_err(|_| "invalid dataset predicate column".to_owned())?;
+    let data_type = schema.get(column).ok_or_else(|| "unknown dataset predicate column".to_owned())?;
+    let storage_column = Column::new(table_name, column);
+    match operation {
+        "is_null" | "is_not_null" => {
+            if value.len() != 2 || value.contains_key("val") { return Err("dataset null predicate must contain only col and op".to_owned()); }
+            Ok(if operation == "is_null" { StoragePredicate::IsNull(storage_column) } else { StoragePredicate::IsNotNull(storage_column) })
+        }
+        "eq" | "neq" | "lt" | "lte" | "gt" | "gte" => {
+            if value.len() != 3 { return Err("dataset comparison predicate must contain only col, op, and val".to_owned()); }
+            let raw = value.get("val").ok_or_else(|| "dataset comparison predicate requires val".to_owned())?;
+            let typed = strict_v2_predicate_value(raw, data_type, operation)?;
+            Ok(match operation {
+                "eq" => StoragePredicate::Eq(storage_column, typed),
+                "neq" => StoragePredicate::Neq(storage_column, typed),
+                "lt" => StoragePredicate::Lt(storage_column, typed),
+                "lte" => StoragePredicate::Lte(storage_column, typed),
+                "gt" => StoragePredicate::Gt(storage_column, typed),
+                "gte" => StoragePredicate::Gte(storage_column, typed),
+                _ => unreachable!(),
+            })
+        }
+        _ => Err("unknown dataset predicate operator".to_owned()),
+    }
+}
+
+fn strict_v2_predicate_value(
+    value: &JsonValue,
+    data_type: &str,
+    operation: &str,
+) -> Result<TypedValue, String> {
+    if matches!(value, JsonValue::Null | JsonValue::Array(_) | JsonValue::Object(_)) {
+        return Err("dataset comparison values must be non-null scalars".to_owned());
+    }
+    match data_type {
+        "BOOL" => {
+            if !matches!(operation, "eq" | "neq") || !matches!(value, JsonValue::Bool(_)) {
+                return Err("boolean columns permit only boolean eq or neq predicates".to_owned());
+            }
+        }
+        "INT" => if !matches!(value, JsonValue::Integer(_)) {
+            return Err("integer columns require an integer comparison value".to_owned());
+        },
+        "FLOAT" => if !matches!(value, JsonValue::Integer(_) | JsonValue::Double(_)) {
+            return Err("numeric columns require a numeric comparison value".to_owned());
+        },
+        _ => if !matches!(value, JsonValue::String(_)) {
+            return Err("text columns require a string comparison value".to_owned());
+        },
+    }
+    Ok(json_value_to_typed(value, None))
+}
+
+fn strict_v2_order_by(
+    value: Option<&[JsonValue]>,
+    table_name: &str,
+    schema: &BTreeMap<String, String>,
+) -> Result<Vec<OrderClause>, String> {
+    value.unwrap_or_default().iter().map(|value| {
+        let object = match value { JsonValue::Object(object) => object, _ => return Err("dataset order_by entries must be objects".to_owned()) };
+        if object.keys().any(|key| key != "col" && key != "dir") { return Err("dataset order_by contains an unknown field".to_owned()); }
+        let column = object.get("col").and_then(JsonValue::as_str)
+            .ok_or_else(|| "dataset order_by requires col".to_owned())?;
+        validate_dataset_column_identifier(column).map_err(|_| "invalid dataset order_by column".to_owned())?;
+        if !schema.contains_key(column) { return Err("unknown dataset order_by column".to_owned()); }
+        let direction = match object.get("dir") {
+            None => OrderDirection::Ascending,
+            Some(JsonValue::String(direction)) if direction == "asc" => OrderDirection::Ascending,
+            Some(JsonValue::String(direction)) if direction == "desc" => OrderDirection::Descending,
+            _ => return Err("dataset order_by dir must be asc or desc".to_owned()),
+        };
+        Ok(OrderClause::new(Column::new(table_name, column), direction))
+    }).collect()
+}
+
+fn strict_v2_columns(
+    value: Option<&[JsonValue]>,
+    schema: &BTreeMap<String, String>,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(values) = value else { return Ok(None); };
+    if values.is_empty() { return Ok(None); }
+    let columns: Vec<String> = values.iter().map(|value| {
+        let column = value.as_str().ok_or_else(|| "dataset projection columns must be strings".to_owned())?;
+        validate_dataset_column_identifier(column).map_err(|_| "invalid dataset projection column".to_owned())?;
+        schema.contains_key(column).then_some(column.to_owned())
+            .ok_or_else(|| "unknown dataset projection column".to_owned())
+    }).collect::<Result<_, _>>()?;
+    Ok(Some(columns))
+}
+
+fn typed_value_to_json(value: &TypedValue) -> JsonValue {
+    match value {
+        TypedValue::Null => JsonValue::Null,
+        TypedValue::Bool(value) => JsonValue::Bool(*value),
+        TypedValue::Int(value) | TypedValue::Bitmap(value) | TypedValue::Timestamp(value) => JsonValue::Integer(*value),
+        TypedValue::Float(value) => JsonValue::Double(*value),
+        TypedValue::Text(value) => JsonValue::String(value.clone()),
+        TypedValue::Uuid(value) => JsonValue::String(value.hyphenated().to_string()),
+        TypedValue::Blob(_) | TypedValue::Json(_) | TypedValue::Hlc(_) | TypedValue::Fingerprint(_) | TypedValue::Array(_) => JsonValue::String(typed_value_to_string(value)),
     }
 }
 
