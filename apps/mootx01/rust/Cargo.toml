@@ -121,9 +121,6 @@ adornment-lib = { path = "../../../packages/libs/AdornmentLib/rust" }
 unicode-normalization = "0.1"
 
 [features]
-# Forward the compile-time ARIA public-surface selection to the embedded MCP
-# server. V1 remains the default through the unchanged `default` list.
-aria-v2 = ["aria-mcp/aria-v2"]
 # The span-encoder runtime (candle, all-MiniLM-L6-v2) ships in the product
 # binary by default: `mootx01 serve` activates it for estates provisioned with
 # embedding_provider = "encoder" and a bundled model directory. Build with

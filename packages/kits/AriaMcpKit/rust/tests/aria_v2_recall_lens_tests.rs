@@ -1,4 +1,3 @@
-#![cfg(feature = "aria-v2")]
 
 use std::{collections::BTreeMap, sync::{Arc, Mutex}};
 

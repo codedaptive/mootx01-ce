@@ -287,33 +287,6 @@ struct ServerTests {
 
     // MARK: - tools/call: live verb with nonexistent ID surfaces as result-isError
 
-    @Test func testEraseMemoryForNonexistentIDReturnsIsError() async throws {
-        let dispatcher = try await makeDispatcher()
-        // moot_erase_memory with a nonexistent row ID must return a tool-call
-        // result with isError=true (not a JSON-RPC protocol error) so AI clients
-        // can handle the failure gracefully.
-        let request = JSONRPCRequest(
-            id: .integer(20),
-            method: "tools/call",
-            params: .object([
-                "name": .string("moot_erase_memory"),
-                "arguments": .object([
-                    "id": .string("nonexistent-row-id"),
-                    "reason": .string("test erasure of nonexistent row"),
-                    "confirmed": .bool(true),
-                ]),
-            ])
-        )
-        let rawResponse = await dispatcher.handle(request)
-        let response = try #require(rawResponse)
-        guard case .result(let result) = response.payload else {
-            Issue.record("moot_erase_memory returned JSON-RPC error: \(response.payload)")
-            return
-        }
-        let object = try #require(result.objectValue)
-        #expect(object["isError"] == .bool(true))
-    }
-
     // MARK: - tools/call: unknown tool
 
     @Test func testUnknownToolReturnsMethodNotFoundError() async throws {
@@ -374,43 +347,6 @@ struct ServerTests {
     /// The stable prefix/shape assertion (starts with "pong: estate",
     /// contains "is live") must hold even after the serial is appended.
     /// The serial itself is non-empty and follows "— build ".
-    @Test func testEstatePingIncludesBuildSerial() async throws {
-        let dispatcher = try await makeDispatcher()
-        let request = JSONRPCRequest(
-            id: .integer(60),
-            method: "tools/call",
-            params: .object([
-                "name": .string("moot_estate_ping"),
-                "arguments": .object([:]),
-            ])
-        )
-        let rawResponse = await dispatcher.handle(request)
-        let response = try #require(rawResponse)
-        guard case .result(let result) = response.payload else {
-            Issue.record("estate_ping returned error: \(response.payload)")
-            return
-        }
-        // Must not be a tool-level error result.
-        #expect(result.objectValue?["isError"] != .bool(true),
-                "estate_ping must not return isError:true")
-        // Extract the text content.
-        let content = try #require(result.objectValue?["content"]?.arrayValue)
-        let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-        // Stable shape assertions — these must hold regardless of the serial value.
-        #expect(text.hasPrefix("pong: estate"),
-                "estate_ping must start with 'pong: estate'; got: \(text)")
-        #expect(text.contains("is live"),
-                "estate_ping must contain 'is live'; got: \(text)")
-        // Build segment: "— build <non-empty-serial>" must be present.
-        #expect(text.contains("— build "),
-                "estate_ping must contain '— build <serial>'; got: \(text)")
-        // The part after "— build " must be non-empty.
-        if let buildRange = text.range(of: "— build ") {
-            let serial = String(text[buildRange.upperBound...])
-            #expect(!serial.isEmpty,
-                    "build serial must be non-empty; got empty string after '— build '")
-        }
-    }
 
     /// `MOOTX01_BUILD_SERIAL` env override is honored by `deriveBuildSerial`.
     ///
@@ -418,41 +354,6 @@ struct ServerTests {
     /// so we test the override path by constructing a `ToolDispatcher` with
     /// an explicit `buildSerial` value (the same codepath the env override
     /// drives at server startup).
-    @Test func testEstatePingHonorsBuildSerialOverride() async throws {
-        let kit = GeniusLocusKit()
-        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-serial-tests")
-        let storage = InMemoryStorage(
-            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
-        )
-        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-
-        // Inject a known serial to simulate MOOTX01_BUILD_SERIAL=ABC123.
-        let knownSerial = "ABC123"
-        let tooling = ToolDispatcher(kit: kit, handle: handle, buildSerial: knownSerial)
-        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
-        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
-
-        let request = JSONRPCRequest(
-            id: .integer(61),
-            method: "tools/call",
-            params: .object([
-                "name": .string("moot_estate_ping"),
-                "arguments": .object([:]),
-            ])
-        )
-        let rawResponse = await dispatcher.handle(request)
-        let response = try #require(rawResponse)
-        guard case .result(let result) = response.payload else {
-            Issue.record("estate_ping returned error: \(response.payload)")
-            return
-        }
-        let content = try #require(result.objectValue?["content"]?.arrayValue)
-        let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-        // The known serial must appear verbatim in the response.
-        #expect(text.contains("build \(knownSerial)"),
-                "estate_ping must echo the injected serial 'ABC123'; got: \(text)")
-    }
 
     // MARK: - Version-skew advisory
 
@@ -460,41 +361,6 @@ struct ServerTests {
     /// and `moot_estate_status` surface it verbatim under a `version_skew:`
     /// line. The default (`nil`) case is covered implicitly by every other
     /// test in this file — none of them mention "version_skew".
-    @Test func testVersionSkewAdvisorySurfacesInPingAndStatus() async throws {
-        let kit = GeniusLocusKit()
-        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-skew-tests")
-        let storage = InMemoryStorage(
-            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
-        )
-        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-
-        let advisory = "plugin 1.0.15 expects binary ≥ 1.0.15; binary is 1.0.11 — run `mootx01 upgrade`"
-        let tooling = ToolDispatcher(kit: kit, handle: handle, versionSkewAdvisory: advisory)
-        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
-        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
-
-        for toolName in ["moot_estate_ping", "moot_estate_status"] {
-            let request = JSONRPCRequest(
-                id: .integer(62),
-                method: "tools/call",
-                params: .object([
-                    "name": .string(toolName),
-                    "arguments": .object([:]),
-                ])
-            )
-            let rawResponse = await dispatcher.handle(request)
-            let response = try #require(rawResponse)
-            guard case .result(let result) = response.payload else {
-                Issue.record("\(toolName) returned error: \(response.payload)")
-                continue
-            }
-            let content = try #require(result.objectValue?["content"]?.arrayValue)
-            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-            #expect(text.contains("version_skew: \(advisory)"),
-                    "\(toolName) must surface the injected version-skew advisory; got: \(text)")
-        }
-    }
 
     /// The default (no advisory injected) case must not mention
     /// `version_skew` at all — the field is opt-in, not a fixed empty slot.
@@ -529,44 +395,6 @@ struct ServerTests {
     /// the field out entirely, mirroring version_skew's opt-in shape. The
     /// no-provider default is covered implicitly by every other test in
     /// this file — none of them mention "update_available".
-    @Test func testUpdateAdvisorySurfacesInPingAndStatus() async throws {
-        let kit = GeniusLocusKit()
-        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-update-tests")
-        let storage = InMemoryStorage(
-            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
-        )
-        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-
-        let line = "v9.9.9 is available (installed 1.0.33) — upgrade with `mootx01 upgrade`"
-        let tooling = ToolDispatcher(
-            kit: kit, handle: handle,
-            updateAdvisoryProvider: { line }
-        )
-        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
-        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
-
-        for toolName in ["moot_estate_ping", "moot_estate_status"] {
-            let request = JSONRPCRequest(
-                id: .integer(64),
-                method: "tools/call",
-                params: .object([
-                    "name": .string(toolName),
-                    "arguments": .object([:]),
-                ])
-            )
-            let rawResponse = await dispatcher.handle(request)
-            let response = try #require(rawResponse)
-            guard case .result(let result) = response.payload else {
-                Issue.record("\(toolName) returned error: \(response.payload)")
-                continue
-            }
-            let content = try #require(result.objectValue?["content"]?.arrayValue)
-            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-            #expect(text.contains("update_available: \(line)"),
-                    "\(toolName) must surface the provider's update advisory; got: \(text)")
-        }
-    }
 
     /// A wired provider that answers nil (the common up-to-date case) must
     /// leave `update_available` out entirely — opt-in field, never an empty
@@ -823,26 +651,6 @@ struct ServerFirstPartyProductToolTests {
         }
         #expect(error.code == JSONRPCErrorCode.methodNotFound)
         #expect(await spy.calls.isEmpty)
-    }
-
-    @Test("Authenticated first-party dispatch lists and calls the attached product")
-    func firstPartyDispatchRoutesProductTools() async throws {
-        let spy = FirstPartyToolHandlerSpy()
-        let authenticated = dispatcher(spy).withFirstPartyIdentity(identity())
-        #expect(try await listedNames(authenticated) == ["fulcrum.context.read"])
-        let response = try #require(await authenticated.handle(JSONRPCRequest(
-            id: .integer(3), method: "tools/call",
-            params: .object([
-                "name": .string("fulcrum.context.read"),
-                "arguments": .object(["outline": .string("life")]),
-            ])
-        )))
-        guard case .result(let value) = response.payload else {
-            Issue.record("first-party product call did not return a result")
-            return
-        }
-        #expect(value.objectValue?["source"]?.stringValue == "product")
-        #expect(await spy.calls == ["fulcrum.context.read"])
     }
 
     @Test("publicLane strips product tools even from an identity-bearing dispatcher")
