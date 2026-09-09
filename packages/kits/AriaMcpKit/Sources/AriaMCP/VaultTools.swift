@@ -700,7 +700,7 @@ enum VaultTools {
         }
         let missingSorted = selected.subtracting(candidatePaths).sorted()
 
-        if let report {
+        if report != nil {
             // Re-stamp: the import above made the estate agree with the disk
             // content hashed at reconcile start, so each imported path's stamp
             // becomes a true certification (schema v2). Without this, a
