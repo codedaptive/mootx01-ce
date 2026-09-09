@@ -110,7 +110,7 @@ struct VerbMap: Codable, Sendable, Equatable {
     /// `moot_file_memory` requires one (`location`); MemPalace's
     /// `mempalace_add_drawer` requires two (`wing` + `room`). A map (not a single
     /// key) covers both without a per-server special case. Default:
-    /// `{ "location": "bridge/mirror" }` — the mootx01 write case. Set to `{}` for
+    /// `{ "wing": "bridge", "location": "mirror" }` — the mootx01 write case. Set to `{}` for
     /// a write tool that needs only content.
     let constantArgs: [String: String]
     /// How this server encodes the result of `query` (and how a write response
@@ -128,7 +128,7 @@ struct VerbMap: Codable, Sendable, Equatable {
          query: String,
          contentArg: String = "content",
          queryArg: String = "query",
-         constantArgs: [String: String] = ["location": "bridge/mirror"],
+         constantArgs: [String: String] = ["wing": "bridge", "location": "mirror"],
          resultFormat: ResultFormat = .mootText,
          subjectArg: String? = nil) {
         self.write = write
@@ -161,7 +161,7 @@ struct VerbMap: Codable, Sendable, Equatable {
         self.contentArg = try c.decodeIfPresent(String.self, forKey: .contentArg) ?? "content"
         self.queryArg = try c.decodeIfPresent(String.self, forKey: .queryArg) ?? "query"
         self.constantArgs = try c.decodeIfPresent([String: String].self, forKey: .constantArgs)
-            ?? ["location": "bridge/mirror"]
+            ?? ["wing": "bridge", "location": "mirror"]
         self.resultFormat = try c.decodeIfPresent(ResultFormat.self, forKey: .resultFormat)
             ?? .mootText
         self.subjectArg = try c.decodeIfPresent(String.self, forKey: .subjectArg)

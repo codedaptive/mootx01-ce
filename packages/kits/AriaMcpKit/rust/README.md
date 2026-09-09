@@ -128,11 +128,24 @@ environment. The host resolves the estate through the estate catalog
 | `--db <name>` | The registered estate of that name | Federates; charters seeded; created encrypted unless its manifest declares plaintext |
 | `--db <dir>/<name>` | A transient estate at `<dir>/<name>/` | Plaintext, identity in memory, no charters; never written to the catalog |
 | (neither) | The catalog's active estate | |
-| `--in-memory` | In-memory | Ephemeral; discarded on exit |
+| `--in-memory` | Record resolved for validation; estate starts empty | Served transient: no federation, no charters; discarded on exit |
 
 A record whose catalog entry names a PostgreSQL backend opens at the record's
-connection string. The `aria-mcp` dev binary takes the same flags as
-`mootx01 serve`.
+connection string. The record's kind decides federation and charter seeding on
+SQLite and PostgreSQL backends; `--in-memory` overrides this — the estate starts
+**empty** (zero drawers), whatever the record says. A transient PostgreSQL estate
+holds exactly what was imported into it.
+
+`--in-memory` opens the catalog and resolves the record before the backend is
+chosen, so a `--db` that names no estate is refused rather than ignored. The
+same rule holds in the Swift port and in both ports of `mootx01 serve`.
+
+The `aria-mcp` dev binary takes `--db`, `--in-memory` and `--help`, and nothing
+else: `--frozen` and `--http`, which `mootx01 serve` accepts, are usage errors
+here. The frozen posture reaches this binary only through `MOOTX01_FROZEN`
+(`estate_posture.rs`), and the HTTP transport only through `MOOTX01_HTTP_PORT`.
+A refused command line prints the reason and the usage line to stderr and exits
+**1**, the same code the Swift port uses.
 
 **PostgreSQL:** the Rust server opens a pooled PostgreSQL estate via
 `locus_kit::PostgresDrawerStore` backed by persistence-kit's `PostgresStorage`.

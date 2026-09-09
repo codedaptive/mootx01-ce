@@ -99,7 +99,8 @@ fn default_query_arg() -> String {
 }
 fn default_constant_args() -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
-    m.insert("location".to_string(), "bridge/mirror".to_string());
+    m.insert("wing".to_string(), "bridge".to_string());
+    m.insert("location".to_string(), "mirror".to_string());
     m
 }
 
