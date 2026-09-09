@@ -23,6 +23,17 @@ pub enum RerankAction {
     Apply,
 }
 
+/// Execution contract for an apply request.  The default preserves the
+/// best-effort stage used by ordinary recall; transcript recall asks for the
+/// fail-closed source/span contract explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankRequirement {
+    #[default]
+    BestEffort,
+    StrictTranscript,
+}
+
 /// Whether the recall request asks for cross-encoder reranking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RerankDirective {
@@ -37,6 +48,14 @@ pub struct RerankDirective {
     /// report, never interpreted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Whether a missing or degraded lower seam is an ordinary degradation or
+    /// an operational unavailability for this request.
+    #[serde(default, skip_serializing_if = "is_best_effort")]
+    pub requirement: RerankRequirement,
+}
+
+fn is_best_effort(value: &RerankRequirement) -> bool {
+    *value == RerankRequirement::BestEffort
 }
 
 impl RerankDirective {
@@ -46,6 +65,7 @@ impl RerankDirective {
             action: RerankAction::Apply,
             profile_id: CrossEncoderProfile::minilm_l6().model_id,
             reason: reason.map(str::to_string),
+            requirement: RerankRequirement::BestEffort,
         }
     }
 
@@ -55,6 +75,23 @@ impl RerankDirective {
             action: RerankAction::Bypass,
             profile_id: CrossEncoderProfile::minilm_l6().model_id,
             reason: reason.map(str::to_string),
+            requirement: RerankRequirement::BestEffort,
         }
+    }
+
+    /// The transcript operation's fixed recipe.  It is intentionally a
+    /// distinct typed request: generic applies retain their degradation and
+    /// fallback behaviour.
+    pub fn strict_transcript(reason: Option<&str>) -> Self {
+        Self {
+            action: RerankAction::Apply,
+            profile_id: CrossEncoderProfile::minilm_l6().model_id,
+            reason: reason.map(str::to_string),
+            requirement: RerankRequirement::StrictTranscript,
+        }
+    }
+
+    pub fn is_strict_transcript(&self) -> bool {
+        self.requirement == RerankRequirement::StrictTranscript
     }
 }

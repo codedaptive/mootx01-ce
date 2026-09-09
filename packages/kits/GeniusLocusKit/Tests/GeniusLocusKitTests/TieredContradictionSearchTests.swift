@@ -36,7 +36,7 @@ struct TieredContradictionSearchTests {
             pairKey: TieredContradictionCore.pairKey(a, b),
             drawerA: ordered.a, drawerB: ordered.b,
             cueKind: tier == .lexicalValue ? "value_divergence" : "negation_asymmetry",
-            ruleID: nil, score: score,
+            ruleID: nil, ruleVersion: nil, score: score,
             sourceSnippet: "s", targetSnippet: "t",
             resultID: nil, coordinateDigest: nil, sensitivityCeilingRaw: nil)
     }
@@ -48,7 +48,7 @@ struct TieredContradictionSearchTests {
             tier: .typedProven,
             pairKey: TieredContradictionCore.pairKey(a, b),
             drawerA: ordered.a, drawerB: ordered.b,
-            cueKind: nil, ruleID: "employment.employer.v1", score: nil,
+            cueKind: nil, ruleID: "employment.employer.v1", ruleVersion: 1, score: nil,
             sourceSnippet: nil, targetSnippet: nil,
             resultID: resultID, coordinateDigest: "digest-\(resultID)",
             sensitivityCeilingRaw: AdjectiveSensitivity.normal.rawValue)
