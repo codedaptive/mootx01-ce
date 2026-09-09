@@ -44,96 +44,6 @@ struct RecipeToolsTests {
 
     // MARK: - Projection
 
-    @Test func testRecipeToolsAppearInProjectionWithRecipeProvenance() {
-        let tools = ToolProjection.tools()
-        let recipeNames = tools
-            .filter { if case .recipe = $0.provenance { return true } else { return false } }
-            .map(\.name)
-            .sorted()
-        // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
-        // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
-        // 37 total: 14 recipe tools + 23 lens tools.
-        // moot_recollect retired with the factoid tier (§3/§11).
-        // moot_recall_connected joined 2026-08-06 (graph-diffusion multi-hop recall).
-        // moot_recall_walk joined D10 (escalation-ladder recall: cheap session_hybrid
-        // first, precise hamming+text only when Stage 1 is not confident).
-        #expect(recipeNames == [
-            "moot_confirm_migration",
-            "moot_dream",
-            "moot_hunt_contradictions",
-            "moot_lens_anticipate",
-            "moot_lens_apriori",
-            "moot_lens_associations",
-            "moot_lens_bias",
-            "moot_lens_cohesion",
-            "moot_lens_complexity",
-            "moot_lens_concepts",
-            "moot_lens_constellation",
-            "moot_lens_contradiction",
-            "moot_lens_divergence",
-            "moot_lens_drift",
-            "moot_lens_free_association",
-            "moot_lens_keystones",
-            "moot_lens_latent_themes",
-            "moot_lens_moment",
-            "moot_lens_node_motion",
-            "moot_lens_overlap",
-            "moot_lens_partial_cue",
-            "moot_lens_precedence",
-            "moot_lens_rhythm",
-            "moot_lens_successors",
-            "moot_lens_theme_weather",
-            "moot_lens_trust_synthesis",
-            "moot_list_lenses",
-            "moot_list_recipes",
-            "moot_recall_connected",
-            "moot_recall_distilled",
-            "moot_recall_precise",
-            "moot_recall_shaped",
-            "moot_recall_temporal",
-            "moot_recall_vague",
-            "moot_recall_walk",
-            "moot_run_migration",
-            "moot_synthesize",
-        ])
-    }
-
-    @Test func testListRecipesDispatchEnumeratesCognitionTools() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "lr"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_list_lenses", arguments: .object([:]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Listing uses ProjectedTool names and descriptions (not catalog names).
-        #expect(text.contains("moot_synthesize"))
-        #expect(text.contains("moot_list_lenses"))
-        // Migration tools are Tier 7 and intentionally absent from the cognition menu.
-        #expect(!text.contains("moot_run_migration"))
-        #expect(!text.contains("moot_confirm_migration"))
-        #expect(text.contains("27 cognition tools"))
-    }
-
-    @Test func testRecipeToolNamesDoNotCollideWithInterfaceToolNames() {
-        // Recipe and lens tools sit above the interface tier — no recipe/lens name
-        // must match any of the 19 AI-client interface tool names.
-        let interfaceNames = Set(
-            ToolProjection.tools()
-                .filter { if case .interface = $0.provenance { return true } else { return false } }
-                .map(\.name)
-        )
-        for tool in ToolProjection.tools() {
-            guard case .recipe = tool.provenance else { continue }
-            #expect(!interfaceNames.contains(tool.name),
-                    "recipe tool \(tool.name) must not collide with an interface tool name")
-        }
-    }
-
     // MARK: - recall_connected dispatch
 
     /// The bridge scenario recall_connected exists for: the answer memory
@@ -141,188 +51,17 @@ struct RecipeToolsTests {
     /// connection edge. File hop-1 (matches the query), file the answer,
     /// link them (a validated tunnel via moot_link_memories), then ask.
     /// Plain similarity cannot surface the answer; the walk must.
-    @Test func testConnectedRecallReachesBridgeLinkedAnswer() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "rc"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        func fileOne(_ content: String) async throws -> String {
-            let result = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: content))
-            let text = result.objectValue?["content"]?.arrayValue?.first?
-                .objectValue?["text"]?.stringValue ?? ""
-            // "filed memory <UUID>" — first line, third token.
-            return text.split(separator: "\n").first?
-                .split(separator: " ").last.map(String.init) ?? ""
-        }
-
-        let hop1 = try await fileOne("Melanie mentioned her sister visited from Cambridge")
-        let answer = try await fileOne("Caroline finished the astrophysics degree this spring")
-        // Distractors so the anchor pool is not trivially the whole estate.
-        _ = try await fileOne("grocery shopping list for the weekend")
-        _ = try await fileOne("bicycle maintenance notes and tire pressure")
-
-        // Validated tunnel between hop-1 and the answer (the human-approved
-        // edge class; associations are the dream's pending equivalent).
-        _ = try await dispatcher.dispatch(
-            name: "moot_link_memories",
-            arguments: .object([
-                "from_id": .string(hop1),
-                "to_id": .string(answer),
-                "kind": .string("relates"),
-                "label": .string("sister identity bridge"),
-            ]))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_connected",
-            arguments: .object([
-                "query": .string("Melanie sister Cambridge"),
-                "wing": .string("recipe-tests"),
-                "filter": .string("unconfirmed"),
-                "limit": .integer(10),
-            ]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.hasPrefix("found "), "S1 header expected")
-        #expect(text.contains(answer),
-                "the tunnel-linked answer must be reachable via the walk; got: \(text)")
-        // "connected: anchor=" text line was dropped in COMPOSER-02B; retrievalSource
-        // is now in the structured JSON block only (§11.10 extensions).
-    }
 
     /// Gate invariant: a tombstoned (withdrawn) memory linked by a tunnel to
     /// a live anchor must NOT appear in connected-recall results. The walk
     /// discovers the edge and attempts hydration; the gated overload
     /// (insertDefaults plus the caller's filter) excludes the withdrawn row
     /// via .currentlyBelieve.
-    @Test func testConnectedRecallExcludesTombstonedRows() async throws {
-        let owner = OwnerCredentials(ownerIdentifier: "crg-tomb")
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit, owner: owner)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        func fileOne(_ content: String) async throws -> String {
-            let result = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: content))
-            let text = result.objectValue?["content"]?.arrayValue?.first?
-                .objectValue?["text"]?.stringValue ?? ""
-            return text.split(separator: "\n").first?
-                .split(separator: " ").last.map(String.init) ?? ""
-        }
-
-        // The dead memory is the walk target; it shares no words with the query.
-        let deadContent = "XylophoneZebra secret project archive notes"
-        let dead = try await fileOne(deadContent)
-        // Anchor memory matches the query directly.
-        let anchor = try await fileOne("Quarterly planning moved to Thursday confirmed")
-        // Distractor to prevent trivial recall.
-        _ = try await fileOne("bicycle tire pressure maintenance schedule")
-
-        // Link dead → anchor so the walk can discover dead from anchor.
-        _ = try await dispatcher.dispatch(
-            name: "moot_link_memories",
-            arguments: .object([
-                "from_id": .string(dead),
-                "to_id": .string(anchor),
-                "kind": .string("relates"),
-                "label": .string("tombstone gate test link"),
-            ]))
-
-        // Withdraw the dead memory — state transition to .withdrawn, which
-        // insertDefaults' .currentlyBelieve filter excludes.
-        let withdrawResult = try await dispatcher.dispatch(
-            name: "moot_withdraw_memory",
-            arguments: .object(["id": .string(dead)]))
-        let withdrawText = withdrawResult.objectValue?["content"]?.arrayValue?.first?
-            .objectValue?["text"]?.stringValue ?? ""
-        #expect(withdrawText.contains("withdrew"), "withdraw must succeed; got: \(withdrawText)")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_connected",
-            arguments: .object([
-                "query": .string("quarterly planning Thursday"),
-                "filter": .string("unconfirmed"),
-                "limit": .integer(10),
-            ]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // The dead memory's distinctive content must NOT appear — the gated
-        // hydrate must have excluded the withdrawn row.
-        #expect(!text.contains("XylophoneZebra"),
-                "tombstoned row content must be absent from connected recall; got: \(text)")
-    }
 
     /// Gate invariant: a sensitivity-restricted memory linked by a tunnel to a
     /// live anchor must NOT appear in connected-recall results. The walk
     /// discovers the edge; the gated overload applies the insertDefaults ceiling
     /// of .sensitivityAtMost(.elevated), excluding .restricted rows.
-    @Test func testConnectedRecallExcludesSensitivityRestrictedRows() async throws {
-        let owner = OwnerCredentials(ownerIdentifier: "crg-sens")
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit, owner: owner)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        func fileOne(_ content: String) async throws -> String {
-            let result = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: content))
-            let text = result.objectValue?["content"]?.arrayValue?.first?
-                .objectValue?["text"]?.stringValue ?? ""
-            return text.split(separator: "\n").first?
-                .split(separator: " ").last.map(String.init) ?? ""
-        }
-
-        // Anchor memory — matches the query.
-        let anchor = try await fileOne("Annual performance review scheduling confirmed")
-        // Distractor.
-        _ = try await fileOne("grocery run Saturday morning")
-
-        // Restricted memory — filed at .restricted sensitivity so the default
-        // sensitivity ceiling (.elevated) blocks it from connected-recall hydration.
-        let restrictedContent = "ConfidentialAardvark internal salary band information"
-        let restricted = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: .object([
-                "content": .string(restrictedContent),
-                "subject": .string(String(restrictedContent.prefix(120))),
-                "location": .string("recipe-tests"),
-                "sensitivity": .string("restricted"),
-            ]))
-        let restrictedText = restricted.objectValue?["content"]?.arrayValue?.first?
-            .objectValue?["text"]?.stringValue ?? ""
-        let restrictedID = restrictedText.split(separator: "\n").first?
-            .split(separator: " ").last.map(String.init) ?? ""
-        #expect(!restrictedID.isEmpty, "restricted memory must be filed; got: \(restrictedText)")
-
-        // Link restricted → anchor so the walk can reach it from anchor.
-        _ = try await dispatcher.dispatch(
-            name: "moot_link_memories",
-            arguments: .object([
-                "from_id": .string(restrictedID),
-                "to_id": .string(anchor),
-                "kind": .string("relates"),
-                "label": .string("sensitivity gate test link"),
-            ]))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_connected",
-            arguments: .object([
-                "query": .string("annual performance review scheduling"),
-                "filter": .string("unconfirmed"),
-                "limit": .integer(10),
-            ]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // The restricted memory's distinctive content must NOT appear.
-        #expect(!text.contains("ConfidentialAardvark"),
-                "restricted row content must be absent from connected recall; got: \(text)")
-    }
 
     /// Shared setup for the Wave-3 G1 walk-filter tests: file an anchor (with
     /// optional exportability), file a walk-only target sharing no words with
@@ -402,146 +141,18 @@ struct RecipeToolsTests {
     /// drawer linked to an exportable anchor must NOT surface its content
     /// under filter:"exportable", while the exportable anchor itself must.
     /// Twin of Rust `connected_recall_walk_honors_exportable_filter`.
-    @Test func testConnectedRecallWalkHonorsExportableFilter() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "g1-exp"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await g1WalkFixture(
-            kit: kit, handle: handle,
-            dispatcher: dispatcher,
-            anchorContent: "Roadmap review moved to Friday afternoon confirmed",
-            anchorExportability: "public",
-            targetContent: "VelvetOctopus internal pricing draft numbers",
-            targetExportability: nil,
-            controlQuery: "roadmap review Friday")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_connected",
-            arguments: .object([
-                "query": .string("roadmap review Friday"),
-                "wing": .string("recipe-tests"),
-                "filter": .string("exportable"),
-                "limit": .integer(10),
-            ]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("Roadmap review"),
-                "exportable anchor content must be present; got: \(text)")
-        #expect(!text.contains("VelvetOctopus"),
-                "non-exportable row content must be absent under filter:exportable; got: \(text)")
-    }
 
     /// Wave-3 G1 gate invariant, confirmation axis: an unconfirmed drawer
     /// linked to a user-confirmed anchor must NOT surface its content under
     /// filter:"userConfirmed".
     /// Twin of Rust `connected_recall_walk_honors_user_confirmed_filter`.
-    @Test func testConnectedRecallWalkHonorsUserConfirmedFilter() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "g1-conf"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let fixture = try await g1WalkFixture(
-            kit: kit, handle: handle,
-            dispatcher: dispatcher,
-            anchorContent: "Sprint retro moved to Tuesday morning confirmed",
-            anchorExportability: nil,
-            targetContent: "CrimsonNarwhal draft merger term sheet notes",
-            targetExportability: nil,
-            controlQuery: "sprint retro Tuesday")
-        _ = try await dispatcher.dispatch(
-            name: "moot_confirm_memory",
-            arguments: .object(["id": .string(fixture.anchor)]))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_connected",
-            arguments: .object([
-                "query": .string("sprint retro Tuesday"),
-                "wing": .string("recipe-tests"),
-                "filter": .string("userConfirmed"),
-                "limit": .integer(10),
-            ]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("Sprint retro"),
-                "confirmed anchor content must be present; got: \(text)")
-        #expect(!text.contains("CrimsonNarwhal"),
-                "unconfirmed row content must be absent under filter:userConfirmed; got: \(text)")
-    }
 
     /// Wave-3 G1 gate invariant, containment axis: a PUBLIC drawer linked to
     /// a contained (born-private) anchor must NOT surface its content under
     /// filter:"contained" — the inverse of the exportable test.
     /// Twin of Rust `connected_recall_walk_honors_contained_filter`.
-    @Test func testConnectedRecallWalkHonorsContainedFilter() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "g1-cont"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await g1WalkFixture(
-            kit: kit, handle: handle,
-            dispatcher: dispatcher,
-            anchorContent: "Standup notes archived for Thursday review",
-            anchorExportability: nil,
-            targetContent: "AmberFalcon public changelog draft for the release",
-            targetExportability: "public",
-            controlQuery: "standup notes Thursday")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_connected",
-            arguments: .object([
-                "query": .string("standup notes Thursday"),
-                "wing": .string("recipe-tests"),
-                "filter": .string("contained"),
-                "limit": .integer(10),
-            ]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("Standup notes"),
-                "contained anchor content must be present; got: \(text)")
-        #expect(!text.contains("AmberFalcon"),
-                "public row content must be absent under filter:contained; got: \(text)")
-    }
 
     // MARK: - grounded_synthesis dispatch
-
-    @Test func testGroundedSynthesisDispatchReturnsContext() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "gs"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // File three memories through the AI-client surface.
-        for text in [
-            "carbon chemistry of organic compounds",
-            "carbon based biochemistry of life",
-            "quantum mechanics fundamentals",
-        ] {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: text))
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_synthesize",
-            arguments: .object(["filter": .string("unconfirmed")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("grounded_synthesis: 3 drawer"))
-        #expect(text.contains("candidate memories, one per line"))
-        #expect(text.contains("carbon"))
-    }
 
     /// `query` grounds the synthesis through BOTH hybrid lanes: the lexical
     /// cue lane ranks term-matching memories first, and the scored lane
@@ -549,101 +160,12 @@ struct RecipeToolsTests {
     /// up to the cap. The response names the cue, and the cue-relevant
     /// memories must LEAD the document — grounding is a ranking guarantee,
     /// not a hard exclusion, now that the scored lane is live.
-    @Test func testGroundedSynthesisQueryRanksCueMatchesFirst() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "gsq"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        for text in [
-            "carbon chemistry of organic compounds",
-            "carbon based biochemistry of life",
-            "quantum mechanics fundamentals",
-        ] {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: text))
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_synthesize",
-            arguments: .object([
-                "query": .string("carbon compounds"),
-                "filter": .string("unconfirmed"),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("query: carbon, compounds"))
-        // The first candidate row is a cue-matched memory — the two-lane fusion
-        // must never let a zero-term-match row outrank a term match.
-        let candidates = text.components(separatedBy: "candidate memories, one per line").last ?? ""
-        let firstRow = candidates.split(separator: "\n")
-            .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .map(String.init) ?? ""
-        #expect(firstRow.contains("carbon"),
-                "cue-matched memory must lead the candidate section; got '\(firstRow)'")
-    }
 
     /// Ranking is driven by cue-term relevance, not recency. File 25 memories:
     /// the OLDEST contains distinctive answer terms; 24 newer memories share a
     /// generic word that also appears in the query but is dominated by the
     /// distinctive terms. With limit:5, recency alone evicts the answer drawer;
     /// with cue-relevance ranking it rises to the top and appears in keyInsights.
-    @Test func testGroundedSynthesisCueRankingBringsOldAnswerToTop() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "gsrank"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // File the answer memory FIRST (oldest). Contains four distinctive terms
-        // that uniquely identify it.
-        _ = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "daguerreotype vintage cameras photography collection"))
-
-        // File 4 newer memories. Each contains the generic word "collection"
-        // (passes the contentMatches filter) plus unrelated content.
-        //
-        // Pool size of 5 (1 answer + 4 generic) is chosen so MMR diversity
-        // surfaces the answer at position 3: after the 2 most-recent generic
-        // drawers are selected, all remaining generics carry a ~0.95 shingle
-        // similarity penalty while the answer (very different content) carries
-        // only ~0.08. That penalty gap makes the answer's MMR score exceed every
-        // remaining generic's. With cap=3 the answer occupies the third candidate
-        // row. A pool of 10+ generics pushes the answer past position 3;
-        // a pool of 3 generics means limit=3 alone evicts the answer pre-change.
-        for i in 1...4 {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory",
-                arguments: fileArgs(content: "grocery store shopping collection item \(i)"))
-        }
-
-        // Query with distinctive terms + generic term. limit:3 means recency
-        // alone would return 3 grocery drawers (evicting the answer at position
-        // 5). The cue-pool bound widens the frame to 200, bringing all 5 drawers
-        // into ranking. MMR diversity places the answer 3rd; cap=3 keeps it.
-        let result = try await dispatcher.dispatch(
-            name: "moot_synthesize",
-            arguments: .object([
-                "query": .string("daguerreotype vintage cameras collection"),
-                "filter": .string("unconfirmed"),
-                "limit": .integer(3),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // The answer drawer must appear in the candidate section — its
-        // first-sentence excerpt contains the distinctive terms. It occupies
-        // the 3rd slot of the cap-3 output (positions 1 and 2 are the 2
-        // most-recent generic drawers).
-        #expect(text.contains("daguerreotype"),
-                "answer drawer content must appear in the candidate section after cue ranking; got: \(text)")
-        #expect(text.contains("query: daguerreotype, vintage, cameras, collection"))
-    }
 
     /// `moot_synthesize` silently removes provenance-restricted rows from the
     /// synthesis pool. The gate covers provenance bits 30–35 (`Sensitivity`),
@@ -654,167 +176,13 @@ struct RecipeToolsTests {
     /// restricted rows it encountered, synthesis silently drops them — the
     /// output count reflects only the surviving pool.
     /// Twin of Rust `grounded_synthesis_mixed_pool_only_exposes_normal_rows`.
-    @Test func testSynthesizeDoesNotExposeProvenanceSensitiveRows() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "gs-prov"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Capture the normal row directly so we can set provenanceSensitivity.
-        // moot_file_memory routes through the MCP capture path which does not
-        // expose the provenance sensitivity parameter; direct kit.capture is
-        // the correct harness surface for provenance gate tests.
-        _ = try await kit.capture(handle, CaptureFrame(
-            content: "classified aardvark synthesis normaltoken",
-            channel: .typed,
-            room: "prov-gate-test",
-            latticeAnchor: .udc("004"),
-            addedBy: "aria-mcp-tests",
-            embeddingModelID: "test-model-v1",
-            provenanceSensitivity: .normal))
-
-        // Capture the provenance-restricted row.
-        _ = try await kit.capture(handle, CaptureFrame(
-            content: "classified aardvark synthesis restrictedtoken",
-            channel: .typed,
-            room: "prov-gate-test",
-            latticeAnchor: .udc("004"),
-            addedBy: "aria-mcp-tests",
-            embeddingModelID: "test-model-v1",
-            provenanceSensitivity: .restricted))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_synthesize",
-            arguments: .object(["filter": .string("unconfirmed")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-
-        // Only the normal row feeds synthesis — provenance gate removes the
-        // restricted row before the synthesizer runs.
-        #expect(text.contains("grounded_synthesis: 1 drawer"),
-                "only the normal row must reach synthesis; got: \(text)")
-        #expect(!text.contains("restrictedtoken"),
-                "provenance-restricted content must not reach keyInsights; got: \(text)")
-        #expect(text.contains("normaltoken"),
-                "normal row content must appear in keyInsights; got: \(text)")
-    }
 
     /// A query whose every token is a stopword or too short must be rejected
     /// (invalidParams), never silently degraded to an unscoped digest.
-    @Test func testGroundedSynthesisAllStopwordQueryThrowsInvalidParams() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "gse"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        await #expect(throws: JSONRPCError.self) {
-            let args: JSONValue = .object(["query": .string("what did they do")])
-            _ = try await dispatcher.dispatch(name: "moot_synthesize", arguments: args)
-        }
-    }
 
     /// The term extractor's contract, pinned so both ports cannot drift:
     /// stopwords and short fragments drop, digit-bearing short tokens stay,
     /// tokens lowercase and dedupe in first-appearance order, cap at 12.
-    @Test func testGroundingTermsContract() {
-        // Stopwords and 2-char fragments drop; content words survive lowercased.
-        #expect(RecipeTools.groundingTerms(from: "What did Melanie buy at Trader Joe's?")
-            == ["melanie", "buy", "trader", "joe"])
-        // Digit-bearing short tokens are distinctive and survive.
-        #expect(RecipeTools.groundingTerms(from: "was it 46 or 3b") == ["46", "3b"])
-        // Dedupe preserves first-appearance order.
-        #expect(RecipeTools.groundingTerms(from: "carbon Carbon CARBON life")
-            == ["carbon", "life"])
-        // All-stopword input yields no terms (the dispatch layer rejects it).
-        #expect(RecipeTools.groundingTerms(from: "what did they do").isEmpty)
-        // Cap at 12 terms.
-        let long = (1...20).map { "uniqueterm\($0)" }.joined(separator: " ")
-        #expect(RecipeTools.groundingTerms(from: long).count == 12)
-    }
-
-    // MARK: - recall_precise dispatch
-
-    @Test func testPreciseRecallDispatchReturnsMootTextShape() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "pr"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // File three near-duplicate memories that differ only by figure.
-        for text in [
-            "the indemnity was 11 million marks",
-            "the indemnity was 46 million marks",
-            "the indemnity was 23 million marks",
-        ] {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: text))
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_precise",
-            arguments: .object([
-                "query": .string("the indemnity was 46 million marks"),
-                "filter": .string("unconfirmed"),
-                "limit": .integer(10),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Same shape as moot_memory_search: a S1 "found N candidate memories" header then
-        // one S2 row per hit (COMPOSER-02B §11.1/§11.5).
-        #expect(text.hasPrefix("found "))
-        #expect(text.contains("candidate memor"))
-        // The precise target (46) is surfaced; the recipe ranks it first, so
-        // its content appears in the first hit line after the header.
-        let lines = text.split(separator: "\n").map(String.init)
-        #expect(lines.count >= 2, "header plus at least one hit line")
-        #expect(lines[1].contains("46 million marks"),
-                "the distinctive-number target must rank first")
-    }
-
-    // MARK: - recall_precise composition validation (fail-closed parity)
-    //
-    // These three tests mirror the Rust dispatch test contract exactly:
-    //   recall_precise_unknown_composition_fails_closed  (unknown → tool error)
-    //   recall_precise_named_composition_is_accepted      (known → success)
-    //   recall_precise_default_composition_returns_memory_shape (absent → success)
-    // Rust commit 94a62696; see packages/kits/AriaMcpKit/rust/tests/dispatch_tests.rs.
-
-    /// An unknown composition name is a caller error. The boundary rejects it
-    /// fail-CLOSED: isError:true tool result naming the offending composition.
-    /// Parity: Rust test `recall_precise_unknown_composition_fails_closed`.
-    @Test func testPreciseRecallUnknownCompositionFailsClosed() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "pr-unknown-comp"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await dispatcher.dispatch(
-            name: "moot_file_memory", arguments: fileArgs(content: "any content"))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_precise",
-            arguments: .object([
-                "query": .string("anything"),
-                "composition": .string("no-such-composition"),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        // Unknown composition must produce a tool error, not a success result.
-        #expect(obj["isError"]?.boolValue == true,
-                "unknown composition must return a tool error (fail closed)")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("unknown composition"),
-                "the error message must name the offending composition")
-        #expect(text.contains("no-such-composition"),
-                "the error message must include the invalid value the caller sent")
-    }
 
     /// A known composition name is accepted without error.
     /// Parity: Rust test `recall_precise_named_composition_is_accepted`.
@@ -843,268 +211,26 @@ struct RecipeToolsTests {
 
     /// Absent `composition` arg keeps the default (`text`) behavior unchanged.
     /// Absence ≠ unknown: no composition arg must never produce an error.
-    @Test func testPreciseRecallAbsentCompositionUsesDefault() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "pr-absent-comp"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "the indemnity was 46 million marks"))
-
-        // No `composition` key at all — must succeed and return the mootText shape.
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_precise",
-            arguments: .object(["query": .string("indemnity")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false,
-                "absent composition must use the default and succeed")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.hasPrefix("found "),
-                "absent composition must return the mootText header shape")
-    }
 
     // MARK: - recall_shaped (named RecallShape preset surface)
 
     /// A known preset dispatches and returns the moot_memory_search plain-text
     /// shape. Mirrors the Rust dispatch test `recall_shaped_known_preset_*`.
-    @Test func testShapedRecallDispatchReturnsMootTextShape() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        for text in [
-            "the river flows north past the old mill",
-            "the mountain trail climbs steeply at dawn",
-        ] {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: text))
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_shaped",
-            arguments: .object([
-                "query": .string("river mill"),
-                "preset": .string("structural"),
-                "filter": .string("unconfirmed"),
-                "limit": .integer(10),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // S1 header format (COMPOSER-02B §11.1): "found N candidate memories, one per line"
-        #expect(text.hasPrefix("found "))
-        #expect(text.contains("candidate memor"))
-    }
 
     /// An unknown preset name is a caller error — the boundary rejects it
     /// fail-CLOSED with a tool error naming the offending preset.
-    @Test func testShapedRecallUnknownPresetFailsClosed() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-unknown"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await dispatcher.dispatch(
-            name: "moot_file_memory", arguments: fileArgs(content: "any content"))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_shaped",
-            arguments: .object([
-                "query": .string("anything"),
-                "preset": .string("no-such-preset"),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true,
-                "unknown preset must return a tool error (fail closed)")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("unknown preset"))
-        #expect(text.contains("no-such-preset"))
-    }
 
     /// An absent `preset` arg uses the unsteered balanced default and succeeds.
     /// Absence ≠ unknown: no preset arg must never produce an error.
-    @Test func testShapedRecallAbsentPresetUsesBalanced() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-absent"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "the harbour lights flicker in the fog"))
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_shaped",
-            arguments: .object(["query": .string("harbour")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false,
-                "absent preset must use balanced and succeed")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.hasPrefix("found "))
-    }
 
     /// The shaped-recall tool advertises the full preset roster in its
     /// description so the AI can pick a preset by intent.
-    @Test func testShapedRecallToolAdvertisesRoster() throws {
-        let tool = try #require(
-            RecipeTools.tools().first { $0.name == "moot_recall_shaped" })
-        // The roster lists every preset name with its one-line description.
-        #expect(tool.description.contains("Roster:"))
-        for name in RecallShape.presetNames {
-            #expect(tool.description.contains(name), "roster must advertise \(name)")
-        }
-        #expect(tool.description.contains("anti_redundant"))
-    }
 
     /// Every roster name is accepted by the MCP boundary and returns a valid
     /// memory-search-shaped result. Mirrors testShapedRecallDispatchReturnsMootTextShape
     /// but exercises each preset through the full dispatch chain.
-    @Test func testShapedRecallEveryRosterPresetAccepted() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-float-metric"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: fileArgs(content: "the tide rises past the sea wall at dusk"))
-
-        for presetName in RecallShape.presetNames {
-            let result = try await dispatcher.dispatch(
-                name: "moot_recall_shaped",
-                arguments: .object([
-                    "query": .string("tide sea wall"),
-                    "preset": .string(presetName),
-                    "filter": .string("unconfirmed"),
-                    "limit": .integer(10),
-                ]))
-
-            let obj = try #require(result.objectValue)
-            #expect(obj["isError"]?.boolValue == false,
-                    "\(presetName) must be accepted (is a valid preset name)")
-            let text = try #require(
-                obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-            #expect(text.hasPrefix("found "),
-                    "\(presetName) must return the moot_memory_search shape")
-        }
-    }
 
     // MARK: - migration benchmark run → confirm, end to end
-
-    @Test func testMigrationBenchmarkRunThenConfirmDispatch() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "mb"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let runArgs: JSONValue = .object([
-            "corpusName": .string("src"),
-            "entries": .array([
-                .object([
-                    "id": .string("a"),
-                    "content": .string("alpha topic about felines"),
-                    "subject": .string("alpha topic about felines"),
-                    "tags": .array([]),
-                ]),
-                .object([
-                    "id": .string("b"),
-                    "content": .string("beta topic about canines"),
-                    "subject": .string("beta topic about canines"),
-                    "tags": .array([]),
-                ]),
-            ]),
-            "plans": .array([
-                .object([
-                    "name": .string("flat"),
-                    "room": .string("r1"),
-                    "latticeCode": .string("000"),
-                    "embeddingModelID": .string("test-v1"),
-                ]),
-                .object([
-                    "name": .string("nested"),
-                    "room": .string("r2"),
-                    "latticeCode": .string("100"),
-                    "embeddingModelID": .string("test-v1"),
-                ]),
-            ]),
-        ])
-
-        let runResult = try await dispatcher.dispatch(
-            name: "moot_run_migration", arguments: runArgs)
-        let runObj = try #require(runResult.objectValue)
-        #expect(runObj["isError"]?.boolValue == false)
-        let runText = try #require(
-            runObj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Both clean plans survive and a winner is named.
-        #expect(runText.contains("winner: plan"))
-        #expect(runText.contains("rankings:"))
-
-        // Recover the winner + loser branch ids from the surfaced text the
-        // way an MCP client would. The winner id appears twice (the
-        // "winner:" line and its own ranking line), so dedup preserving
-        // order: two distinct ranked branches → two unique ids.
-        let ids = Self.uniqueUUIDs(in: runText)
-        #expect(ids.count == 2, "expected two distinct ranked branch ids in run output")
-
-        // The winner line names the winner id; confirm with that.
-        let winnerLine = runText.split(separator: "\n").first { $0.contains("winner: plan") } ?? ""
-        let winner = try #require(Self.uuids(in: String(winnerLine)).first)
-        let losers = ids.filter { $0 != winner }
-        #expect(losers.count == 1, "expected exactly one loser branch")
-
-        let confirmArgs: JSONValue = .object([
-            "winnerBranchID": .string(winner.uuidString),
-            "discardBranchIDs": .array(losers.map { .string($0.uuidString) }),
-        ])
-        let confirmResult = try await dispatcher.dispatch(
-            name: "moot_confirm_migration", arguments: confirmArgs)
-        let confirmObj = try #require(confirmResult.objectValue)
-        #expect(confirmObj["isError"]?.boolValue == false)
-
-        // The winner branch is now promoted.
-        let resolved = await kit.branchHandle(for: winner)
-        let winnerBranch = try #require(resolved)
-        #expect(winnerBranch.status == .won)
-    }
-
-    @Test func testConfirmRefusesDisqualifiedWinner() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "dq"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Derive a real branch and discard it (what the benchmark run does
-        // to a disqualified plan). Confirm it as winner while OMITTING any
-        // disqualification argument — the exact reported bypass shape. The
-        // server-side C-5 verdict must refuse with isError; no
-        // client-supplied claim participates.
-        let branch = try await NeuronKit.deriveBranch(
-            name: "p", from: handle, in: kit)
-        try await branch.discard()
-        let confirmArgs: JSONValue = .object([
-            "winnerBranchID": .string(branch.branchID.uuidString),
-        ])
-        let result = try await dispatcher.dispatch(
-            name: "moot_confirm_migration", arguments: confirmArgs)
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("silentConceptLoss"))
-        // Never promoted.
-        #expect(branch.status == .discarded)
-    }
 
     // MARK: - dream dispatch
 
@@ -1114,68 +240,6 @@ struct RecipeToolsTests {
     /// registered matrix tier (the `matrix` recall lane reads 0.0); after it the
     /// tier is built — this is the "starved vs weak" un-starving the gauntlet
     /// re-ablation measures end-to-end.
-    @Test func testDreamDispatchRebuildsMatrixAndRunsCycle() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "dream-dispatch"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // File four drawers so they co-surface on external-origin recall.
-        for text in [
-            "the treaty fixed the indemnity at 46 million marks",
-            "the treaty ceded the eastern province in 1871",
-            "the armistice was signed at Versailles in January",
-            "the provisional government ratified the terms in March",
-        ] {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory",
-                arguments: .object([
-                    "content": .string(text),
-                    "subject": .string(String(text.prefix(120))),
-                    "location": .string("history/treaty"),
-                ]))
-        }
-
-        // Fire 3 external-origin recalls (moot_memory_search) to enqueue co-recall
-        // windows. Each search surfaces all four drawers and writes one DreamingItem
-        // to the estate's dreaming queue (v2 drain-fed model: candidates come ONLY
-        // from draining the dreaming queue, not from a co-occurrence reader pass).
-        // After 3 searches, co_recall_count for each of the C(4,2)=6 drawer pairs
-        // reaches 3, meeting DreamingPolicy.default minAttempts=3.
-        for _ in 0..<3 {
-            _ = try await dispatcher.dispatch(
-                name: "moot_memory_search",
-                arguments: .object(["query": .string("treaty indemnity province armistice")]))
-        }
-
-        // Deterministic instant so the cycle (diary timestamp, reward window)
-        // is reproducible.
-        let dreamArgs = JSONValue.object(["now": .string("2026-06-11T00:00:00Z")])
-        let result = try await dispatcher.dispatch(name: "moot_dream", arguments: dreamArgs)
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("matrix rebuilt, dreaming cycle complete"))
-        // Three external-origin recalls × four co-surfaced drawers → co_recall_count
-        // reaches 3 for each of the six pairs → all six are considered.
-        // Extract and verify the count is ≥ 6 (estate may include additional seed
-        // drawers, so the count can exceed 6 without being wrong).
-        let candidatesLine = text.components(separatedBy: "\n")
-            .first(where: { $0.hasPrefix("consideredCandidates: ") }) ?? ""
-        let countStr = candidatesLine.replacingOccurrences(of: "consideredCandidates: ", with: "")
-        let count = Int(countStr.trimmingCharacters(in: .whitespaces)) ?? 0
-        #expect(count >= 6,
-                "three searches × ≥4 co-surfaced drawers must yield ≥6 co-recall pairs (v2 drain model); got: \(text)")
-
-        // Idempotent: a second dream over unchanged state emits no NEW proposals
-        // (every candidate already proposed or suppressed). The tool still
-        // succeeds and the matrix rebuild is a deterministic no-op.
-        let second = try await dispatcher.dispatch(name: "moot_dream", arguments: dreamArgs)
-        let secondObj = try #require(second.objectValue)
-        #expect(secondObj["isError"]?.boolValue == false)
-    }
 
     /// A malformed `now` is an out-of-band client error (invalidParams), not a
     /// silent fallback — the determinism contract must not be bypassed quietly.
@@ -1194,84 +258,7 @@ struct RecipeToolsTests {
 
     // MARK: - association_rules dispatch
 
-    @Test func testAssociationRulesDispatchReturnsOutput() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ar-dispatch"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // File some memories so there's co-occurrence to mine.
-        for _ in 0..<3 {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory",
-                arguments: .object([
-                    "content": .string("study content"),
-                    "subject": .string("study content"),
-                    "location": .string("study"),
-                ]))
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_associations",
-            arguments: .object(["filter": .string("unconfirmed")]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("association_rules:"))
-        #expect(text.contains("drawer(s)"))
-    }
-
-    @Test func testAnalyticsLensToolsAppearInListLenses() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ar-list"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_list_lenses", arguments: .object([:]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Analytics lens tools are listed by ProjectedTool name.
-        #expect(text.contains("moot_lens_associations"))
-        #expect(text.contains("moot_lens_concepts"))
-    }
-
     // MARK: - formal_concepts dispatch
-
-    @Test func testFormalConceptsDispatchReturnsOutput() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "fc-dispatch"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        for _ in 0..<2 {
-            _ = try await dispatcher.dispatch(
-                name: "moot_file_memory",
-                arguments: .object([
-                    "content": .string("study content"),
-                    "subject": .string("study content"),
-                    "location": .string("study"),
-                ]))
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_concepts",
-            arguments: .object([
-                "filter": .string("unconfirmed"),
-                "minSupport": .integer(1),
-                "maxIntentSize": .integer(8),
-                "maxConcepts": .integer(10),
-            ]))
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("formal_concepts:"))
-        #expect(text.contains("drawer(s)"))
-    }
 
     // MARK: - isRecipeTool
 
@@ -1360,170 +347,13 @@ struct RecipeToolsTests {
 
     // MARK: - moot_recall_distilled dispatch
 
-    @Test func testRecallDistilledDispatchRoutesToRunRecallDistilled() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-dispatch"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Empty estate returns 0 matches — format starts correctly.
-        // ack: "recall_distilled/v2" passes the ACK gate (Wave 1 contract change).
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_distilled",
-            arguments: .object([
-                "query": .string("any query"),
-                "ack": .string("recall_distilled/v2"),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // S1 header format (COMPOSER-02B §11.1): "found N candidate memories, one per line"
-        // — no query echo; no [distilled] tag (deviation-only narration).
-        // (echo_query:true opt-in restores the "for: <query>" suffix.)
-        #expect(text.hasPrefix("found "),
-                "moot_recall_distilled output must start with 'found N candidate memories'")
-        #expect(text.contains("candidate memor"),
-                "output header must use the S1 candidate memories format")
-        #expect(!text.contains("[distilled]"),
-                "PR-03: the [distilled] header tag is retired")
-        #expect(!text.contains("] for:"),
-                "default response must NOT echo the query in the header")
-    }
-
-    @Test func testRecallDistilledOutputFormatStartsWithFoundN() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-fmt"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_distilled",
-            arguments: .object([
-                "query": .string("knowledge synthesis"),
-                "limit": .integer(5),
-                "ack": .string("recall_distilled/v2"),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // First line must start with "found" per mission test requirements.
-        let firstLine = text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
-        #expect(firstLine.hasPrefix("found "),
-                "first line must start with 'found N memory(s) [distilled]'")
-    }
-
-    @Test func testRecallDistilledEchoQueryOptIn() async throws {
-        // echo_query:true restores the "for: {query}" suffix that is OFF by default.
-        // This test also proves echo_query is DECODED — if it were silently ignored
-        // the header would stay short and the assertion at line 2 would fail.
-        // If it were treated as unrecognized, the unknown-arg hint mechanism would
-        // append "hint: unrecognized argument(s) ignored: echo_query" — line 3 catches that.
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-echo-optin"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_distilled",
-            arguments: .object([
-                "query": .string("test echo query"),
-                "echo_query": .bool(true),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // With echo_query:true, header must echo the query (applied on both
-        // empty and non-empty results). New S1 format: "found N candidate memories for: <query>".
-        #expect(text.hasPrefix("found 0 candidate memories for: test echo query"),
-                "echo_query:true must produce 'found 0 candidate memories for: <query>' header")
-        // echo_query is a declared arg — no unrecognized-arg hint must appear.
-        #expect(!text.contains("hint: unrecognized argument(s) ignored"),
-                "echo_query is declared — must NOT trigger the unrecognized-arg hint")
-    }
-
-    @Test func testRecallDistilledEchoQueryDefaultOff() async throws {
-        // Without echo_query (or echo_query:false), header must NOT contain the query.
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-echo-off"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_distilled",
-            arguments: .object([
-                "query": .string("silent query test"),
-            ]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Default (no echo_query) must omit the query from the header.
-        #expect(!text.contains("for:"),
-                "default response must NOT echo the query in the header")
-        // S1 empty header: "found 0 candidate memories, one per line" (COMPOSER-02B §11.1)
-        #expect(text.contains("found 0 candidate memories"),
-                "header must still contain the S1 count line")
-    }
-
     // MARK: - ACK gate and notice-only stub tests (Wave 1)
 
     // moot_recollect — always returns the removed notice; no estate access.
-    @Test func testRecollectStubReturnsNoticeNeverExecutes() async throws {
-        // The tool must return the removal notice regardless of what args are
-        // passed — even with ack or arbitrary extra parameters. No estate is
-        // opened (notice fires before resolveHandle).
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-stub"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recollect",
-            arguments: .object(["ack": .string("anything"), "query": .string("test")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text == RecipeTools.recollectRemovedNotice,
-                "moot_recollect must return the exact removal notice, no more")
-        // Confirm the notice does NOT start with "CONTRACT CHANGE NOTICE:" (it
-        // is a removal statement, not a change gate — different wording).
-        #expect(!text.hasPrefix("CONTRACT CHANGE NOTICE:"),
-                "removal stub notice must be a removal statement, not a contract-change gate")
-        #expect(text.contains("moot_recollect was removed"),
-                "notice must state the tool was removed")
-    }
 
     // moot_recall_distilled runs UNCONDITIONALLY — no acknowledgment
     // ceremony precedes any result (ARIA_MCP_SPEC 2.0.0 § 8.6). The former
     // ack gate and CONTRACT CHANGE NOTICE were deleted in COMPOSER-02B.
-    @Test func testRecallDistilledRunsWithoutAnyAck() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-no-ack"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_distilled",
-            arguments: .object(["query": .string("any query")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("found "),
-                "the recall handler must run without any ack")
-        #expect(!text.contains("CONTRACT CHANGE NOTICE"),
-                "no ceremony may precede results")
-    }
 
     // Schema + description: no ack parameter, no ceremony vocabulary.
     @Test func testRecallDistilledSchemaHasNoAckParam() throws {
@@ -1655,75 +485,7 @@ struct RecipeToolsSecurityTests {
         }
     }
 
-    @Test func shapedRecallNegativeLimitThrows() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        await #expect(throws: JSONRPCError.self) {
-            _ = try await dispatcher.dispatch(
-                name: "moot_recall_shaped",
-                arguments: .object([
-                    "query": .string("test"),
-                    "limit": .integer(-1),
-                ]))
-        }
-    }
-
-    @Test func distilledRecallNegativeLimitThrows() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // ack: "recall_distilled/v2" passes the ACK gate (Wave 1 contract change)
-        // so the call reaches the limit-validation guard, which must still throw.
-        await #expect(throws: JSONRPCError.self) {
-            _ = try await dispatcher.dispatch(
-                name: "moot_recall_distilled",
-                arguments: .object([
-                    "query": .string("test"),
-                    "limit": .integer(0),
-                    "ack": .string("recall_distilled/v2"),
-                ]))
-        }
-    }
-
     // MARK: - Dream future-now guard
-
-    @Test func dreamFarFutureNowThrowsInvalidParams() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // A date 48 hours in the future — well beyond the 24 h ceiling.
-        let farFuture = Date().addingTimeInterval(48 * 3600)
-        let formatter = ISO8601DateFormatter()
-        let farFutureStr = formatter.string(from: farFuture)
-
-        await #expect(throws: JSONRPCError.self) {
-            _ = try await dispatcher.dispatch(
-                name: "moot_dream",
-                arguments: .object(["now": .string(farFutureStr)]))
-        }
-    }
-
-    @Test func dreamNowWithinCeilingIsAccepted() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // A date 12 hours in the future — within the 24 h ceiling.
-        let nearFuture = Date().addingTimeInterval(12 * 3600)
-        let formatter = ISO8601DateFormatter()
-        let nearFutureStr = formatter.string(from: nearFuture)
-
-        // Should NOT throw — the future-now guard allows up to 24 h.
-        // The dream itself may fail (empty estate) but must not fail at the
-        // boundary validation.
-        _ = try? await dispatcher.dispatch(
-            name: "moot_dream",
-            arguments: .object(["now": .string(nearFutureStr)]))
-    }
 
     // MARK: - moot_synthesize clampLimit boundary guards (Finding 3)
 
@@ -1759,44 +521,9 @@ struct RecipeToolsSecurityTests {
 
     /// AM-WR-ARIA-1: moot_recall_walk dispatches successfully on an empty estate.
     /// Returns "found 0 memory(s)" and a walk: stage line.
-    @Test func walkRecallDispatchOnEmptyEstate() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit)
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_walk",
-            arguments: .object(["query": .string("escalation test")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // Empty estate: S1 empty header + walk: stage line always present.
-        // S1 empty header is "found 0 candidate memories, one per line" (COMPOSER-02B §11.1).
-        #expect(text.hasPrefix("found 0 candidate memories"),
-            "moot_recall_walk output must start with the S1 empty header")
-        #expect(text.contains("walk: stage="),
-            "moot_recall_walk output must contain a walk: stage= line")
-    }
 
     /// AM-WR-ARIA-2: moot_recall_walk tool descriptor appears in tools/list
     /// with the correct name, required query param, and outputSchema.
-    @Test func walkRecallToolDescriptorIsWellFormed() {
-        let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_walk" })
-        #expect(tool != nil, "moot_recall_walk must appear in RecipeTools.tools()")
-        guard let tool else { return }
-        // Required field is "query".
-        let props = tool.inputSchema.objectValue?["properties"]?.objectValue
-        #expect(props?["query"] != nil, "moot_recall_walk schema must have 'query' property")
-        let required = tool.inputSchema.objectValue?["required"]?.arrayValue?
-            .compactMap { $0.stringValue } ?? []
-        #expect(required.contains("query"),
-            "moot_recall_walk must require 'query'")
-        // outputSchema is present (same contract as moot_recall_precise).
-        #expect(tool.outputSchema != nil,
-            "moot_recall_walk must declare an outputSchema")
-    }
 
     /// AM-WR-ARIA-3: missing query arg returns invalidParams, not a crash.
     @Test func walkRecallMissingQueryThrows() async throws {

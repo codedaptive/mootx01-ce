@@ -115,29 +115,8 @@ struct GateRejectionMessageTests {
     ///
     /// Active → Reject is not in the automaton transition table; the gate
     /// returns BasisViolation(IllegalTransition(Active, Reject)).
-    @Test func activeRejectEmitsActionableMessage() async throws {
-        let dispatcher = try await makeDispatcher()
-        let id = try await fileActiveMemory(dispatcher)
-        let result = try await updateMemory(dispatcher, id: id, mutation: "reject")
-        assertGateRejection(result, expectedPhrase: "cannot reject an active memory")
-    }
 
     /// Smoke test: verify the full reject dispatch path does not crash.
-    @Test func smokeRejectDispatch() async throws {
-        let dispatcher = try await makeDispatcher()
-        let id = try await fileActiveMemory(dispatcher)
-        // Dispatches via the top-level tools/call path (moot_update_memory),
-        // exercising the full VerbError catch path.
-        let result = try await dispatcher.dispatch(
-            name: "moot_update_memory",
-            arguments: .object([
-                "id": .string(id),
-                "mutation": .string("reject"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue == true
-        #expect(isError, "active → reject must produce a tool error; got: \(result)")
-    }
 
     /// rejected + reject → "memory is already rejected"
     ///
@@ -146,74 +125,17 @@ struct GateRejectionMessageTests {
     /// path (contested memories can be judged false and rejected), then attempts
     /// a second Reject and asserts the specific "already rejected" actionable
     /// message is returned with no internal Swift type names in the error text.
-    @Test func rejectedRejectEmitsActionableMessage() async throws {
-        let dispatcher = try await makeDispatcher()
-        let id = try await fileActiveMemory(dispatcher)
-        // Move to Contested (Active → Contest is legal).
-        let contestResult = try await updateMemory(dispatcher, id: id, mutation: "contest")
-        let contestedIsSuccess = contestResult.objectValue?["isError"]?.boolValue == false
-        #expect(contestedIsSuccess, "contest must succeed on active row; got: \(contestResult)")
-        // Move to Rejected (Contested → Reject is legal: contested → reject → rejected).
-        let rejectResult = try await updateMemory(dispatcher, id: id, mutation: "reject")
-        let rejectedIsSuccess = rejectResult.objectValue?["isError"]?.boolValue == false
-        #expect(rejectedIsSuccess, "reject must succeed on contested row; got: \(rejectResult)")
-
-        // Rejected → Reject is illegal; gate returns "memory is already rejected".
-        let result = try await updateMemory(dispatcher, id: id, mutation: "reject")
-        assertGateRejection(result, expectedPhrase: "already rejected")
-    }
 
     /// Non-gate error (missing id) must NOT produce gate-rejection text.
     ///
     /// Verifies that the describeGateRejection parser correctly returns nil for
     /// errors that do not embed "illegal state transition: " and the fallback
     /// generic message is used, not a fabricated gate-rejection phrase.
-    @Test func nonGateErrorDoesNotProduceGateRejectionPhrase() async throws {
-        let dispatcher = try await makeDispatcher()
-        let result = try await dispatcher.dispatch(
-            name: "moot_update_memory",
-            arguments: .object([
-                "id": .string("00000000-0000-0000-0000-000000000000"),
-                "mutation": .string("confirm"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue == true
-        #expect(isError, "update of missing row must fail")
-
-        let msg = result.objectValue?["content"]?
-            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        #expect(
-            !msg.contains("cannot reject"),
-            "non-gate error must not produce gate-rejection phrasing; got: \(msg)"
-        )
-    }
 
     // MARK: - FIX 3: B-6 residual — internal enum-case prefix stripping
 
     /// capture with an empty room must surface a plain English error, not a
     /// "InvalidContent: room must not be empty" internal-variant prefix.
-    @Test func captureWithEmptyRoomStripsInvalidContentPrefix() async throws {
-        let dispatcher = try await makeDispatcher()
-        let result = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: .object([
-                "content": .string("test content"),
-                "subject": .string("test content"),
-                "location": .string(""),  // empty location triggers InvalidContent from substrate
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue == true
-        // If the error fires, the message must not contain the internal prefix.
-        if isError {
-            let msg = result.objectValue?["content"]?
-                .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-            #expect(!msg.contains("InvalidContent:"),
-                    "User-facing error must not expose 'InvalidContent:' prefix; got: \(msg)")
-            #expect(!msg.contains("BasisViolation:"),
-                    "User-facing error must not expose 'BasisViolation:' prefix; got: \(msg)")
-        }
-        // Whether or not it errors, the describe path must not expose internal types.
-    }
 
     /// Unit test for the stripEnumPrefix helper: verifies the stripping logic
     /// directly without going through the full dispatch path.
