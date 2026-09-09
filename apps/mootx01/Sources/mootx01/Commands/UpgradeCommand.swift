@@ -1393,7 +1393,8 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// daemon from its EXISTING plist via `LaunchAgent.restart`, never
     /// rewriting it).
     private func rematerializePluginDepth(home: URL, binaryPath: String) {
-        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) {
+        refreshInstalledCodexPlugin(home: home, binaryPath: binaryPath)
+        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) where host.id != "codex" {
             do {
                 // preserveRecordedPluginDisable: an upgrade is routine
                 // convergence, not a user request to activate the plugin —
@@ -1429,6 +1430,8 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// command class. The three helper functions this method calls are independently
     /// covered in MootInstallerCoreTests (InstallDepthTests, PluginDedupeTests).
     private func updatePluginManifestIfNeeded(home: URL) {
+        refreshInstalledCodexPlugin(home: home,
+            binaryPath: MootPaths.installedBinaryURL(homeDirectory: home).path)
         let pluginVersion = PluginDetector.installedVersion(
             pluginID: "mootx01@mootx01", homeDirectory: home)
         guard let pluginVersion else { return }
@@ -1437,7 +1440,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
         let binaryPath = MootPaths.installedBinaryURL(homeDirectory: home).path
-        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) {
+        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) where host.id != "codex" {
             do {
                 // preserveRecordedPluginDisable: same posture as
                 // rematerializePluginDepth — the cache refresh keeps the
@@ -1450,6 +1453,23 @@ struct UpgradeCommand: AsyncParsableCommand {
             } catch {
                 print("  ✗ \(host.displayName): could not update plugin manifest (non-fatal): \(error)")
             }
+        }
+    }
+
+    /// Consult Codex's registry even when no installer-owned directory exists.
+    /// This also covers installations made directly from the public marketplace.
+    private func refreshInstalledCodexPlugin(home: URL, binaryPath: String) {
+        do {
+            switch try CodexPluginInstaller.apply(homeDirectory: home,
+                binaryPath: binaryPath, upgradeOnly: true) {
+            case .plugin:
+                print("  ✓ Codex: plugin refreshed — start a new session to load it.")
+            case let .pluginFellBackToSkills(_, reason):
+                print("  ⓘ Codex: \(reason)")
+            default: break
+            }
+        } catch {
+            print("  ✗ Codex: could not refresh plugin (non-fatal): \(error)")
         }
     }
 
