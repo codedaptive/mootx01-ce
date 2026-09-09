@@ -33,6 +33,8 @@ struct InstallDepthTests {
     func bundleDecodes() {
         let b = InstallBundle.embedded
         #expect(b.skillMarkdown.contains("name: mootx01-memory"))
+        #expect(b.ariaVersion == InstallBundle.selectedARIAReleaseVersion)
+        #expect(b.ariaBundleIdentity.hasPrefix("mootx01/\(b.ariaVersion)/"))
         // Ten matrix hosts — assert the exact set, not a bare count, so a
         // failure names the drifted host when one is added or removed.
         let expected: Set<String> = [
@@ -45,6 +47,27 @@ struct InstallDepthTests {
         #expect(b.host(forClientID: "continue") == nil)
         #expect(b.host(forClientID: "kiro") == nil)
     }
+
+    #if MOOTX01_ARIA_V2
+    @Test("selected v2 embedded bundle identity agrees with the ARIA Registry")
+    func v2EmbeddedBundleIdentityMatchesRegistry() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let registryURL = root.appendingPathComponent(
+            "packages/kits/AriaMcpKit/Registry/aria-v2-selected-release.json")
+        let registry = try #require(try JSONSerialization.jsonObject(
+            with: Data(contentsOf: registryURL)) as? [String: String])
+        let catalogIdentity = try #require(registry["catalogIdentity"])
+        let bundle = InstallBundle.embedded
+        #expect(registry["ariaVersion"] == "v2")
+        #expect(bundle.ariaVersion == "v2")
+        #expect(bundle.ariaBundleIdentity == "mootx01/v2/\(catalogIdentity)")
+    }
+    #endif
 
     @Test("manifest-bundle hosts support plugin; module/ide hosts ceil at skills")
     func pluginCeiling() {
@@ -68,7 +91,33 @@ struct InstallDepthTests {
         }
         // The package SKILL.md is byte-identical to the canonical skill (§0.4).
         let pkgSkill = b.packageFiles(forHostID: "claude-code")["skills/mootx01-memory/SKILL.md"]
-        #expect(pkgSkill == b.skillMarkdown)
+        #expect(pkgSkill == b.skillMarkdown(forHostID: "claude-code"))
+    }
+
+    @Test("staged bundle selects the host payload and writes only in a fixture home")
+    func stagedBundleSelectsHostPayload() throws {
+        let bundle = try InstallBundle(json: stagedBundleJSON(version: InstallBundle.selectedARIAReleaseVersion))
+        #expect(bundle.ariaBundleIdentity == "mootx01/fixture/selected")
+        #expect(bundle.skillMarkdown(forHostID: "codex") == "codex teaching")
+        #expect(bundle.skillMarkdown(forHostID: "unknown") == "shared teaching")
+
+        let home = sandbox()
+        defer { cleanup(home) }
+        let host = try #require(bundle.host(forClientID: "codex"))
+        _ = try DepthInstaller.writeSkill(host: host, bundle: bundle, homeDirectory: home)
+        let written = try String(
+            contentsOf: home.appendingPathComponent(".codex/skills/mootx01-memory/SKILL.md"),
+            encoding: .utf8
+        )
+        #expect(written == "codex teaching")
+    }
+
+    @Test("staged bundle rejects a release not selected by the executable")
+    func stagedBundleRejectsUnselectedRelease() {
+        let other = InstallBundle.selectedARIAReleaseVersion == "v1" ? "v2" : "v1"
+        #expect(throws: InstallBundleError.self) {
+            try InstallBundle(json: stagedBundleJSON(version: other))
+        }
     }
 
     // MARK: - apply()
@@ -93,7 +142,7 @@ struct InstallDepthTests {
         }
         #expect(path == dest.path)
         let written = try String(contentsOf: dest, encoding: .utf8)
-        #expect(written == InstallBundle.embedded.skillMarkdown)
+        #expect(written == InstallBundle.embedded.skillMarkdown(forHostID: "claude-code"))
     }
 
     @Test("plugin depth installs the package tree for a manifest-bundle host")
@@ -494,5 +543,35 @@ struct InstallDepthTests {
 
     private func cleanup(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    private func stagedBundleJSON(version: String) -> String {
+        """
+        {
+          "schemaVersion": 1,
+          "ariaVersion": "\(version)",
+          "ariaBundleIdentity": "mootx01/fixture/selected",
+          "skillMarkdown": "shared teaching",
+          "skillMarkdownByHost": {
+            "claude-code": "claude teaching",
+            "codex": "codex teaching"
+          },
+          "installMap": {
+            "hosts": [
+              {
+                "id": "codex",
+                "displayName": "Codex",
+                "family": "manifestBundle",
+                "mcpMapKey": "mcpServers",
+                "mcpUserFormat": "json",
+                "mcpUserPath": "~/.codex/config.json",
+                "roadmap": "now",
+                "skillUserPath": "~/.codex/skills/mootx01-memory/SKILL.md"
+              }
+            ]
+          },
+          "packages": {}
+        }
+        """
     }
 }
