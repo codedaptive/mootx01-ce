@@ -22,11 +22,14 @@
 //  16. transientAttachRefusesARogueManifest — foreign name, unknown key, symlinked file
 //  17. backendRoundTripsAndDefaultsToSQLite — PostgreSQL entry carries its connection string
 //  18. loadRefusesAMalformedBackendEntry
+//  19. registeredRecordResolvesByCanonicalDirectory — a registered estate named by its
+//      directory (symlinked or not) resolves to its record; transients and strangers do not
 
 import Foundation
 import MootProductIdentity
 import Testing
 @testable import GeniusLocusKit
+@_spi(Testing) import GeniusLocusKit
 
 @Suite("EstateCatalog", .serialized)   // the tests share the platform-directory override
 struct EstateCatalogTests {
@@ -224,7 +227,14 @@ struct EstateCatalogTests {
         let trailing = try EstateCatalog.EstateSelector("/Volumes/big/research/")
         #expect(trailing == abs)
         let home = try EstateCatalog.EstateSelector("~/moot/x")
-        #expect(home.directory?.path.hasSuffix("/moot/x") == true && home.directory?.path.hasPrefix("/") == true)
+        #expect(home.directory == URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("moot/x", isDirectory: true).standardizedFileURL)
+        // `~user` is a literal component in both ports (the Rust port follows
+        // Linux conventions and has no user-database lookup), so it is a
+        // directory named `~bob` under the working directory, never a home.
+        let user = try EstateCatalog.EstateSelector("~bob/x")
+        #expect(user.path == cwd.appendingPathComponent("~bob", isDirectory: true).standardizedFileURL)
+        #expect(user.name == "x")
         for bad in ["", "/", "a/..", "./."] {
             #expect(throws: EstateCatalogError.invalidName(bad)) { _ = try EstateCatalog.EstateSelector(bad) }
         }
@@ -266,6 +276,39 @@ struct EstateCatalogTests {
         #expect(byName.active.selectorArgument == "research")
         #expect(attached.active.selectorArgument == "/Volumes/tmp/scratch7")
         #expect(try EstateCatalog.open(selecting: attached.active.selectorArgument).active == attached.active)
+    }
+
+    /// A registered estate named by its directory (through a symbolic link or
+    /// not) is found as its record; a genuine transient path and a bare
+    /// unregistered name are not. `open(selecting:)` still attaches a transient
+    /// for any pathname; this is the question a guard asks before it does.
+    @Test func registeredRecordResolvesByCanonicalDirectory() throws {
+        let data = try configuration()
+        defer { try? FileManager.default.removeItem(at: data); EstateCatalog.configurationDirectoryOverride = nil }
+        let real = data.appendingPathComponent("volumes/big", isDirectory: true)
+        try FileManager.default.createDirectory(at: real.appendingPathComponent("research"), withIntermediateDirectories: true)
+        var catalog = try EstateCatalog.create()
+        try catalog.register(name: "research", directory: real.appendingPathComponent("research", isDirectory: true))
+        // By name.
+        #expect(try catalog.registeredRecord(selecting: "research")?.name == "research")
+        #expect(try catalog.registeredRecord(selecting: "nowhere") == nil)
+        // By directory, plain and with a `..` in the value.
+        #expect(try catalog.registeredRecord(selecting: real.path + "/research")?.name == "research")
+        #expect(try catalog.registeredRecord(selecting: real.path + "/other/../research")?.name == "research")
+        // Through a symbolic link to the volume.
+        let link = data.appendingPathComponent("linked-volume")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        #expect(try catalog.registeredRecord(selecting: link.path + "/research")?.name == "research")
+        #expect(catalog.record(atDirectory: link.appendingPathComponent("research", isDirectory: true))?.name == "research")
+        // An unregistered directory, and a registered directory's sibling: nil.
+        #expect(try catalog.registeredRecord(selecting: real.path + "/scratch") == nil)
+        #expect(catalog.record(atDirectory: real.appendingPathComponent("research2", isDirectory: true)) == nil)
+        // A transient record in the array is never matched by directory.
+        let attached = try EstateCatalog.open(selecting: real.path + "/scratch")
+        #expect(attached.active.kind == .transient)
+        #expect(attached.record(atDirectory: real.appendingPathComponent("scratch", isDirectory: true)) == nil)
+        // A malformed value is a selector error, not nil.
+        #expect(throws: EstateCatalogError.invalidName("a/..")) { _ = try catalog.registeredRecord(selecting: "a/..") }
     }
 
     @Test func registerFromValueLandsWhereDbWouldLook() throws {

@@ -38,10 +38,6 @@ import PersistenceKit
 // db key and `KeychainEstateIdentityKeyStore.deletePrivateKey()` for the
 // identity key, the same two steps this method performs.
 
-#if canImport(PersistenceKitSQLite)
-import PersistenceKitSQLite
-#endif
-
 public extension GeniusLocusKit {
 
     private static var disposalLog: Logger {
