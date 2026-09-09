@@ -83,6 +83,7 @@ pub mod recall_discrimination;
 pub mod result_composer;
 pub mod recipe_tools;
 pub mod runtime;
+pub use runtime::stats_store_path; // re-exported for integration tests
 pub mod sensitivity_grant_ledger;
 pub mod server;
 pub mod session_protocol;
