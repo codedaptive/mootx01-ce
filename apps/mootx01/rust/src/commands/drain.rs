@@ -11,8 +11,8 @@
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use aria_mcp::estate_registry::{DrainStatus, EstateRegistry, SqliteOpening};
-use genius_locus_kit::{EstateBackend, EstateCatalog, EstateOpenPosture};
+use aria_mcp::estate_registry::{DrainStatus, EstateRegistry, EstateOpening};
+use genius_locus_kit::{EstateBackend, EstateOpenPosture};
 
 use crate::exit;
 
@@ -34,12 +34,9 @@ pub fn run(db: Option<String>) -> ExitCode {
 
     // The estate is the catalog's: the `--db` value the spawning serve was
     // launched with (a registered name or a transient path), else the active
-    // estate. Nothing here computes a path.
-    let catalog = match db.as_deref() {
-        Some(value) => EstateCatalog::open_selecting(value),
-        None => EstateCatalog::open(),
-    };
-    let record = match catalog {
+    // estate. Routes through the funnel (Windows base-directory adoption +
+    // catalog open) so the adoption always precedes the open.
+    let record = match crate::core::estate_open::catalog(db.as_deref()) {
         Ok(catalog) => catalog.active().clone(),
         Err(e) => {
             eprintln!("mootx01 drain: {e}");
@@ -69,7 +66,7 @@ pub fn run(db: Option<String>) -> ExitCode {
     // (the registry's SQLite open wires the estate through GLK
     // wire_glk_substores), so the backlog drains without any capture. The
     // record's kind decides federation; a finisher never seeds charters.
-    let opening = SqliteOpening { seed_charters: false, ..SqliteOpening::for_record(&record) };
+    let opening = EstateOpening { seed_charters: false, ..EstateOpening::for_record(&record) };
     let reg = match EstateRegistry::new_sqlite_with(&estate, OWNER, opening) {
         Ok(r) => r,
         Err(e) => {
