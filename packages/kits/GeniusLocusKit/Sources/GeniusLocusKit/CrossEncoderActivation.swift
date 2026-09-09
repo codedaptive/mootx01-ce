@@ -13,6 +13,7 @@
 import Foundation
 import CorpusKit
 import CorpusKitProviders
+import LocusKit
 import MootProductIdentity
 import OSLog
 
@@ -172,16 +173,110 @@ extension GeniusLocusKit {
         limits: CrossEncoderLimits?,
         hits: [RecallHit]
     ) async -> (hits: [RecallHit], report: CrossEncoderReport, degraded: Bool) {
+        let strict = directive.requirement == .strictTranscript
+        var strictEligibleHits: [RecallHit]?
+        func unavailable(
+            _ reason: StrictTranscriptRerankOutcome.Reason,
+            record: EncoderModelRow? = nil,
+            queryDimension: Int? = nil,
+            fresh: Int = 0,
+            scored: Int = 0
+        ) -> (hits: [RecallHit], report: CrossEncoderReport, degraded: Bool) {
+            let outcome = StrictTranscriptRerankOutcome(
+                status: .unavailable, reason: reason, encoderModelID: record?.modelID,
+                encoderModelVersion: record?.modelVersion, queryDimension: queryDimension,
+                freshHeadCandidates: fresh, scoredHeadCandidates: scored)
+            return (strictEligibleHits ?? hits, .degraded(
+                directive, reason: reason.rawValue, limits: limits, strictTranscript: outcome), true)
+        }
         guard directive.action == .apply else {
             return (hits, .bypassed(directive), false)
         }
         guard let profile, let limits else {
-            return (hits, .degraded(directive, reason: CrossEncoderStage.Reason.profileUnknown, limits: nil), true)
+            return strict
+                ? unavailable(.profileMismatch)
+                : (hits, .degraded(directive, reason: CrossEncoderStage.Reason.profileUnknown, limits: nil), true)
         }
-        let query = (request.queryText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawQuery = request.queryText ?? ""
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            return (hits, .degraded(directive, reason: CrossEncoderStage.Reason.noQueryText, limits: limits), true)
+            return strict
+                ? unavailable(.invalidQueryVector)
+                : (hits, .degraded(directive, reason: CrossEncoderStage.Reason.noQueryText, limits: limits), true)
         }
+
+        let requestedPool = min(limits.pool, hits.count)
+        let strictPool = strict
+            ? hits.prefix(requestedPool).filter { hit in
+                hit.drawer.map { drawer in
+                    // Capture provenance is independent of the current
+                    // adjective ceiling. Reject unknown encodings as well as
+                    // restricted/secret sources before sending text to a scorer.
+                    let provenanceSensitivity = (drawer.provenance >> 30) & 0x3f
+                    return (provenanceSensitivity == 0 || provenanceSensitivity == 16)
+                        && TranscriptEligibility.classify(drawer) != .notTranscript
+                } ?? false
+            }
+            : Array(hits.prefix(requestedPool))
+        strictEligibleHits = strict ? strictPool : nil
+        if strict, strictPool.isEmpty {
+            return unavailable(.ineligibleTranscript)
+        }
+        let pool = strictPool.count
+        let head = min(limits.head, pool)
+        let headHits = Array(strictPool.prefix(head))
+
+        var strictRecord: EncoderModelRow?
+        var strictQuery: [Float]?
+        var strictRows: [String: [SpanRerankVector]] = [:]
+        var strictSnapshot: StrictSynapseSpanRerankSnapshot?
+        if strict {
+            guard profile == .minilmL6,
+                  CrossEncoderProfile.minilmL6Revision == "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+                  limits == CrossEncoderLimits(profile: .minilmL6) else {
+                return unavailable(.profileMismatch)
+            }
+            guard let record = try? await activeEncoderModelRecord(for: handle) else {
+                return unavailable(.activeEncoderUnavailable)
+            }
+            guard record == Self.defaultEncoderModelRow(isActive: true),
+                  let encoder = spanEncoders[handle],
+                  encoder.spec == EncoderModelSpec(row: record) else {
+                return unavailable(.activeEncoderMismatch, record: record)
+            }
+            guard let source = spanRerankSources[handle],
+                  source.encoder.modelID == record.modelID,
+                  let strictSource = source.store as? SynapseSpanVectorReader else {
+                return unavailable(.spanSourceUnavailable, record: record)
+            }
+            strictRecord = record
+            do {
+                let vector = try await source.encoder.encodeQuery(rawQuery)
+                guard vector.count == EncoderModelSeed.dim, vector.allSatisfy(\.isFinite) else {
+                    return unavailable(.invalidQueryVector, record: record, queryDimension: vector.count)
+                }
+                strictQuery = vector
+                let snapshot = try await strictSource.strictSpanVectorSnapshot(
+                    itemIDs: headHits.map(\.id), modelID: record.modelID)
+                guard snapshot.malformedRows.isEmpty else {
+                    return unavailable(.spansStaleOrMalformed, record: record,
+                                       queryDimension: vector.count)
+                }
+                strictSnapshot = snapshot
+                strictRows = snapshot.rows
+            } catch {
+                return unavailable(.spansUnavailable, record: record)
+            }
+            guard let after = try? await activeEncoderModelRecord(for: handle), after == record,
+                  spanEncoders[handle]?.spec == EncoderModelSpec(row: record),
+                  spanRerankSources[handle]?.encoder.modelID == record.modelID,
+                  let snapshot = strictSnapshot,
+                  (try? await strictSource.revalidatesStrictSpanVectorSnapshot(snapshot)) == true else {
+                return unavailable(.servingStateChanged, record: record,
+                                   queryDimension: strictQuery?.count)
+            }
+        }
+
         let scorer: any PairScorer
         let coldLoad: Bool
         switch pairScorer(profile: profile, for: handle) {
@@ -189,57 +284,118 @@ extension GeniusLocusKit {
             scorer = value
             coldLoad = cold
         case .unavailable(let reason):
-            return (hits, .degraded(directive, reason: reason, limits: limits), true)
+            return strict
+                ? unavailable(.scorerUnavailable, record: strictRecord,
+                              queryDimension: strictQuery?.count)
+                : (hits, .degraded(directive, reason: reason, limits: limits), true)
         }
 
         let clock = ContinuousClock()
         let started = clock.now
-        let pool = min(limits.pool, hits.count)
-        let head = min(limits.head, pool)
-        let headHits = Array(hits.prefix(head))
 
         // Span rows and the query vector come from the registered span rerank
         // source when there is one; a read failure only means the windowed
         // fallback in `selectSpans` is used, never a degrade.
         var rows: [String: [SpanRerankVector]] = [:]
         var queryVector: [Float]? = nil
-        if let source = spanRerankSources[handle], !headHits.isEmpty,
+        if !strict, let source = spanRerankSources[handle], !headHits.isEmpty,
            let vector = try? await source.encoder.encodeQuery(query), !vector.isEmpty {
             queryVector = vector
             rows = (try? await source.store.spanVectors(
                 itemIDs: headHits.map(\.id), modelID: source.encoder.modelID)) ?? [:]
         }
-        let spec = spanEncoders[handle]?.spec ?? EncoderModelSpec.floor
+        let spec = strictRecord.map { EncoderModelSpec(row: $0) }
+            ?? spanEncoders[handle]?.spec ?? EncoderModelSpec.floor
 
         var logits: [String: [Float]] = [:]
+        var fresh = 0
         var scored = 0
         for hit in headHits {
             guard let content = hit.drawer?.content else { continue }
-            let spans = CrossEncoderStage.selectSpans(
-                content: content, rows: rows[hit.id], queryVector: queryVector,
-                limit: limits.spans, windowWords: spec.windowWords, overlapDivisor: spec.overlapDivisor)
+            let spans: [String]
+            if strict {
+                let expectedVersion = SpanContentVersion.fnv1a64(content)
+                let wordCount = Spanner.words(content).count
+                guard let rows = strictRows[hit.id], !rows.isEmpty,
+                      rows.allSatisfy({ row in
+                          row.contentVersion == expectedVersion && row.int8.count == EncoderModelSeed.dim &&
+                          row.scale.isFinite && row.scale > 0 && row.startWord >= 0 &&
+                          row.endWord > row.startWord && row.endWord <= wordCount
+                      }), let strictQuery else {
+                    return unavailable(.spansStaleOrMalformed, record: strictRecord,
+                                       queryDimension: strictQuery?.count, fresh: fresh, scored: scored)
+                }
+                fresh += 1
+                spans = CrossEncoderStage.selectSpans(
+                    content: content, rows: rows, queryVector: strictQuery,
+                    limit: limits.spans, windowWords: spec.windowWords,
+                    overlapDivisor: spec.overlapDivisor)
+                guard !spans.isEmpty,
+                      (rows.count < limits.spans || spans.count == limits.spans) else {
+                    return unavailable(.spansUnavailable, record: strictRecord,
+                                       queryDimension: strictQuery.count, fresh: fresh, scored: scored)
+                }
+            } else {
+                spans = CrossEncoderStage.selectSpans(
+                    content: content, rows: rows[hit.id], queryVector: queryVector,
+                    limit: limits.spans, windowWords: spec.windowWords,
+                    overlapDivisor: spec.overlapDivisor)
+            }
             guard !spans.isEmpty else { continue }
             do {
-                let values = try await scorer.score(query: query, spans: spans)
+                let values = try await scorer.score(query: strict ? rawQuery : query, spans: spans)
                 logits[hit.id] = values
                 if !values.isEmpty { scored += 1 }
             } catch {
                 Self.crossEncoderLog.error(
                     "cross encoder: scoring failed (\(String(describing: error), privacy: .public)); incoming order stands (estate: \(handle.estateUUID, privacy: .public))"
                 )
-                return (hits, .degraded(directive, reason: CrossEncoderStage.Reason.scorerFailed, limits: limits), true)
+                return strict
+                    ? unavailable(.scorerFailed, record: strictRecord,
+                                  queryDimension: strictQuery?.count, fresh: fresh, scored: scored)
+                    : (hits, .degraded(directive, reason: CrossEncoderStage.Reason.scorerFailed, limits: limits), true)
+            }
+        }
+        if strict {
+            guard let record = strictRecord,
+                  let after = try? await activeEncoderModelRecord(for: handle), after == record,
+                  spanEncoders[handle]?.spec == EncoderModelSpec(row: record),
+                  spanRerankSources[handle]?.encoder.modelID == record.modelID,
+                  let source = spanRerankSources[handle],
+                  let strictSource = source.store as? SynapseSpanVectorReader,
+                  let snapshot = strictSnapshot,
+                  (try? await strictSource.revalidatesStrictSpanVectorSnapshot(snapshot)) == true else {
+                return unavailable(.servingStateChanged, record: strictRecord,
+                                   queryDimension: strictQuery?.count, fresh: fresh, scored: scored)
+            }
+            guard scored == headHits.count else {
+                return unavailable(.spansUnavailable, record: record,
+                                   queryDimension: strictQuery?.count, fresh: fresh, scored: scored)
             }
         }
         let order = CrossEncoderStage.fuse(
-            incoming: hits.prefix(pool).map(\.id), head: head, logits: logits, rrfK: profile.rrfK)
-        let reordered = CrossEncoderStage.reorder(hits: hits, pool: pool, order: order)
+            incoming: strictPool.map(\.id), head: head, logits: logits, rrfK: profile.rrfK)
+        let reordered = strict
+            ? CrossEncoderStage.reorder(hits: strictPool, pool: pool, order: order)
+            : CrossEncoderStage.reorder(hits: hits, pool: pool, order: order)
         let elapsed = clock.now - started
         let report = CrossEncoderReport(
             status: .applied, requested: true, reason: directive.reason,
             profileID: directive.profileID, modelVersion: profile.modelVersion,
             backend: scorer.backend, pool: pool, head: head, spans: limits.spans,
             scored: scored, coldLoad: coldLoad,
-            stageMillis: Int(elapsed / .milliseconds(1)))
+            stageMillis: Int(elapsed / .milliseconds(1)),
+            strictTranscript: strict ? StrictTranscriptRerankOutcome(
+                status: .applied, reason: nil, encoderModelID: strictRecord?.modelID,
+                encoderModelVersion: strictRecord?.modelVersion,
+                queryDimension: strictQuery?.count, freshHeadCandidates: fresh,
+                scoredHeadCandidates: scored,
+                classifierProfileID: profile.modelID,
+                classifierModelRevision: CrossEncoderProfile.minilmL6Revision,
+                validatedPoolLimit: limits.pool, validatedHeadLimit: limits.head,
+                validatedSpansLimit: limits.spans, validatedRRFK: profile.rrfK,
+                servingGeneration: strictSnapshot?.servingGeneration,
+                freshnessVerified: fresh == headHits.count) : nil)
         return (reordered, report, false)
     }
 }

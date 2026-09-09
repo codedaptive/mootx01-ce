@@ -24,9 +24,9 @@ public protocol SpanRerankEncoding: Sendable {
     func encodeQuery(_ text: String) async throws -> [Float]
 }
 
-/// One stored span vector as the recall stage reads it: the sheet §3 span row
-/// without `contentVersion` (the drain duty's staleness key, which recall does
-/// not consult — a stale row still ranks; the duty replaces it).
+/// One stored span vector as the recall stage reads it. Generic recall does
+/// not use `contentVersion`; strict transcript recall requires it to match the
+/// hydrated drawer before it reconstructs any source window.
 public struct SpanRerankVector: Sendable, Equatable {
     /// Span index within the item (0-based, span order).
     public let index: UInt32
@@ -38,13 +38,19 @@ public struct SpanRerankVector: Sendable, Equatable {
     public let startWord: Int
     /// End word of the span (exclusive).
     public let endWord: Int
+    /// The content version stamped by the span-encode duty.
+    public let contentVersion: String
 
-    public init(index: UInt32, int8: [Int8], scale: Float, startWord: Int, endWord: Int) {
+    public init(
+        index: UInt32, int8: [Int8], scale: Float, startWord: Int, endWord: Int,
+        contentVersion: String = ""
+    ) {
         self.index = index
         self.int8 = int8
         self.scale = scale
         self.startWord = startWord
         self.endWord = endWord
+        self.contentVersion = contentVersion
     }
 }
 

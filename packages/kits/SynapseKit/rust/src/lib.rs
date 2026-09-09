@@ -58,6 +58,7 @@ pub use error::SynapseKitError;
 pub use simhash_embedding_provider::FloatSimHashEmbeddingProvider;
 pub use representation_claims::{VectorRepresentationClaims, VectorRepresentationKey};
 pub use vector_store::{
-    SpanVectorInput, SpanVectorRow, StoredVector, VectorExactKey, VectorMatch, VectorPayloadInput,
-    VectorStore,
+    SpanVectorInput, SpanVectorRow, StrictSpanVectorMalformedRow,
+    StrictSpanVectorSnapshot, StoredVector, VectorExactKey, VectorMatch,
+    VectorPayloadInput, VectorStore,
 };

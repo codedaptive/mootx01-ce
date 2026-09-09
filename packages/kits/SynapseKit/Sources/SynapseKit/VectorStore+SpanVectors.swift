@@ -43,7 +43,7 @@ import PersistenceKit
 /// half-open word bounds `[startWord, endWord)` of the span in the
 /// product's word split, kept so the composer can render the evidence
 /// snippet without re-spanning. `contentVersion` is the drawer's
-/// `content_hash` at encode time; a later content write changes it, which
+/// FNV-1a64 of the drawer content at encode time; a later content write changes it, which
 /// is how a stale span set is recognised.
 public struct SpanVectorInput: Sendable, Equatable {
     /// Span index within the item (0-based, in span order). Stored as
@@ -57,7 +57,7 @@ public struct SpanVectorInput: Sendable, Equatable {
     public let startWord: Int
     /// End word of the span (exclusive).
     public let endWord: Int
-    /// The drawer's content version (`content_hash`) the span was cut from.
+    /// The FNV-1a64 content version of the drawer the span was cut from.
     public let contentVersion: String
 
     public init(index: UInt32, int8: [Int8], scale: Float,
@@ -90,6 +90,50 @@ public struct SpanVectorRow: Sendable, Equatable {
         self.startWord = startWord
         self.endWord = endWord
         self.contentVersion = contentVersion
+    }
+}
+
+/// A malformed serving-generation span row observed by a strict reader.
+///
+/// Generic span retrieval deliberately skips malformed rows so ordinary
+/// recall remains available. Strict transcript rerank instead needs the
+/// observation: it refuses the entire request rather than quietly scoring a
+/// partial head.
+public struct StrictSpanVectorMalformedRow: Sendable, Equatable {
+    /// Drawer id from the stored row, which is necessarily one of the ids the
+    /// strict snapshot requested.
+    public let itemID: String
+    /// Stored span index when the value has the expected integer shape.
+    public let index: UInt32?
+
+    public init(itemID: String, index: UInt32?) {
+        self.itemID = itemID
+        self.index = index
+    }
+}
+
+/// An all-or-nothing read receipt for strict transcript rerank.
+///
+/// `servingGeneration` pins the exact serving lane read by `rows`; callers
+/// must revalidate this receipt immediately before treating a strict rerank
+/// as applied. `malformedRows` retains evidence which the tolerant
+/// `spanVectors` API intentionally omits.
+public struct StrictSpanVectorSnapshot: Sendable, Equatable {
+    public let modelID: String
+    public let servingGeneration: Int64
+    public let rows: [String: [SpanVectorRow]]
+    public let malformedRows: [StrictSpanVectorMalformedRow]
+
+    public init(
+        modelID: String,
+        servingGeneration: Int64,
+        rows: [String: [SpanVectorRow]],
+        malformedRows: [StrictSpanVectorMalformedRow]
+    ) {
+        self.modelID = modelID
+        self.servingGeneration = servingGeneration
+        self.rows = rows
+        self.malformedRows = malformedRows
     }
 }
 
@@ -206,6 +250,76 @@ extension VectorStore {
             }
         }
         return result
+    }
+
+    /// Read every requested serving-generation span row without discarding
+    /// malformed rows, returning a receipt that can be revalidated before a
+    /// strict transcript result is applied.
+    ///
+    /// This API is intentionally separate from `spanVectors`: generic recall
+    /// keeps its established tolerant behavior. A strict caller must reject a
+    /// nonempty `malformedRows` collection and call
+    /// `revalidatesStrictSpanVectorSnapshot` before publishing its result.
+    public func strictSpanVectorSnapshot(
+        itemIDs: [String],
+        modelID: String
+    ) async throws -> StrictSpanVectorSnapshot {
+        let servingGeneration = try await _servingGeneration(for: modelID)
+        guard !itemIDs.isEmpty else {
+            return StrictSpanVectorSnapshot(
+                modelID: modelID, servingGeneration: servingGeneration,
+                rows: [:], malformedRows: [])
+        }
+        var result: [String: [SpanVectorRow]] = [:]
+        var malformed: [StrictSpanVectorMalformedRow] = []
+        let unique = Array(Set(itemIDs))
+        var start = 0
+        while start < unique.count {
+            let end = min(start + Self.spanQueryIDChunk, unique.count)
+            let chunk = unique[start..<end].map { TypedValue.text($0) }
+            start = end
+            let rows = try await storage.rowStore.query(
+                table: "vectors",
+                where: .and([
+                    .in(Column(table: "vectors", name: "item_id"), chunk),
+                    .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
+                    .eq(Column(table: "vectors", name: "kind"), .int(Int64(VectorKind.int8.rawValue))),
+                    .eq(Column(table: "vectors", name: "generation"), .int(servingGeneration)),
+                ]),
+                orderBy: [
+                    OrderClause(column: Column(table: "vectors", name: "item_id"), direction: .ascending),
+                    OrderClause(column: Column(table: "vectors", name: "vector_index"), direction: .ascending),
+                ],
+                limit: nil,
+                offset: nil
+            )
+            for row in rows {
+                // The query predicate admits only requested, text item ids
+                // written by VectorStore. Keep a malformed row observable if
+                // a damaged database violates that shape nonetheless.
+                guard case let .text(itemID) = row["item_id"] ?? .null else {
+                    continue
+                }
+                if let span = Self.spanRow(from: row) {
+                    result[itemID, default: []].append(span)
+                } else {
+                    malformed.append(StrictSpanVectorMalformedRow(
+                        itemID: itemID, index: Self.spanIndex(from: row)))
+                }
+            }
+        }
+        return StrictSpanVectorSnapshot(
+            modelID: modelID, servingGeneration: servingGeneration,
+            rows: result, malformedRows: malformed)
+    }
+
+    /// Whether `snapshot` still describes the serving generation of its
+    /// model. It makes no content claim; strict callers validate every row's
+    /// content version separately.
+    public func revalidatesStrictSpanVectorSnapshot(
+        _ snapshot: StrictSpanVectorSnapshot
+    ) async throws -> Bool {
+        try await _servingGeneration(for: snapshot.modelID) == snapshot.servingGeneration
     }
 
     // MARK: - Delete
@@ -409,6 +523,14 @@ extension VectorStore {
             endWord: bounds.end,
             contentVersion: bounds.contentVersion
         )
+    }
+
+    static func spanIndex(from row: StorageRow) -> UInt32? {
+        guard case let .int(index) = row["vector_index"] ?? .null,
+              index >= 0, index <= Int64(UInt32.max) else {
+            return nil
+        }
+        return UInt32(index)
     }
 
     /// Parse the `ext` JSON object; key order is not assumed.

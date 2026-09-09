@@ -95,7 +95,10 @@ use uuid::Uuid;
 // fields and helpers (`storage`, `state`, `serving_generation`) without
 // widening their visibility.
 mod span_vectors;
-pub use span_vectors::{SpanVectorInput, SpanVectorRow};
+pub use span_vectors::{
+    SpanVectorInput, SpanVectorRow, StrictSpanVectorMalformedRow,
+    StrictSpanVectorSnapshot,
+};
 
 /// One row of the `vectors` table. Parallel to the Swift `StoredVector`.
 ///
