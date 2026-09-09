@@ -97,64 +97,58 @@ public enum AriaResident {
     /// default path is computed so telemetry is live out-of-the-box without
     /// any manual configuration.
     ///
-    /// Resolution order:
+    /// Resolution:
     ///
-    /// 1. `ARIA_MCP_STATS_STORE` set and non-empty → use that exact path.
-    /// 2. `useDefault` is `true` (resident HTTP mode) → fall back to the
-    ///    platform default:
-    ///    `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite`
-    ///    This is the same file the `moot-mgr` manager process owns; the resident
-    ///    daemon writes its dropbox rows here and the manager reads them. On macOS
-    ///    the app-support root is `~/Library/Application Support`; on Linux Swift
-    ///    it is `~/.local/share`.
-    /// 3. `useDefault` is `false` (stdio mode) → return `nil` (telemetry off).
+    /// 1. `useDefault` is `false` (stdio mode) → return `nil` (telemetry off).
     ///    Short-lived stdio processes get startup-once install only (no continuous
     ///    monitoring gate), and without an explicit path the caller opts out.
+    /// 2. `useDefault` is `true` (resident HTTP mode):
+    ///    a. `daemon.stats_store` key in `<config-dir>/config.json` (R6 setting,
+    ///       2026-09-09): a changeable value operators can edit without rebuilding.
+    ///       `mootx01 install` seeds the default when the key is absent;
+    ///       `mootx01 upgrade` leaves it untouched.
+    ///    b. Fallback: `<config-dir>/moot-mgr/stats.sqlite` (the same file
+    ///       `moot-mgr`'s `ManagerConfig` targets when no override is set).
     ///
     /// The store file and its parent directories are created by `StatsStore.open()`
     /// (via SQLiteStorage) — the caller does not need to pre-create them.
     ///
+    /// Twin of Rust `stats_store_path(use_default:, config_dir:)` in runtime.rs.
+    ///
     /// - Parameters:
-    ///   - env:        Environment variable map (injectable for tests).
-    ///   - useDefault: When `true` and the env var is absent, compute the
-    ///                 platform-default path. Pass `true` for resident HTTP mode;
-    ///                 `false` for stdio mode.
+    ///   - useDefault: When `true`, compute the platform-default path. Pass `true`
+    ///                 for resident HTTP mode; `false` for stdio mode.
+    ///   - configurationDirectory: The directory that contains `config.json`.
+    ///                             Defaults to `Storage.configurationDirectory`.
+    ///                             Inject a scratch directory in tests.
     /// - Returns: A path string, or `nil` when telemetry should be off.
-    public static func statsStorePathFromEnv(
-        env: [String: String] = ProcessInfo.processInfo.environment,
-        useDefault: Bool = false
+    public static func statsStorePath(
+        useDefault: Bool = false,
+        configurationDirectory: URL = MootProductIdentity.Storage.configurationDirectory
     ) -> String? {
-        // Explicit env override takes precedence over everything.
-        if let raw = env["ARIA_MCP_STATS_STORE"], !raw.isEmpty {
-            return raw
-        }
         guard useDefault else {
             // stdio mode: no default — telemetry off unless explicitly configured.
             return nil
         }
-        // Resident HTTP mode: compute the moot-mgr default path so the daemon
-        // self-reports without any manual operator configuration.
+        // Resident HTTP mode: step 1 — check the product settings file.
+        // `daemon.stats_store` in `config.json` is the operator-editable setting
+        // (R6, 2026-09-09). Reading through the injected directory makes this
+        // testable without touching the developer's real configuration file.
+        if let overridePath = MootProductIdentity.Settings.load(
+            configurationDirectory: configurationDirectory
+        ).daemonStatsStore {
+            return overridePath
+        }
+        // Resident HTTP mode: step 2 — computed default. The same path
+        // ManagerConfig resolves when the setting is absent, so both processes
+        // open the same store out of the box without any operator configuration.
         //
-        // Path: <app-support>/com.mootx01.ce/moot-mgr/stats.sqlite
-        //   - com.mootx01.ce is the shared data-dir bundle convention
-        //   - moot-mgr/ is the manager's subdirectory (matches ManagerConfig.storeSubdirectory)
-        //   - stats.sqlite is the manager's store file (matches ManagerConfig.storeFileName)
-        //
-        // macOS: ~/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite
-        // Linux: ~/.local/share/com.mootx01.ce/moot-mgr/stats.sqlite
-        // Fallback (app-support unavailable, e.g. headless CI): <tmp>/com.mootx01.ce/moot-mgr/stats.sqlite
-        let base = (try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        )) ?? FileManager.default.temporaryDirectory
-        let path = base
-            .appendingPathComponent(MootProductIdentity.Storage.applicationSupportFolder, isDirectory: true)
+        // macOS (Apple container): ~/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite
+        // Swift ships on Apple platforms only; the Rust port owns the Linux and Windows paths.
+        return configurationDirectory
             .appendingPathComponent("moot-mgr", isDirectory: true)
             .appendingPathComponent("stats.sqlite", isDirectory: false)
             .path
-        return path
     }
 
     // MARK: - Telemetry install (resident-mode, opt-in)
