@@ -2925,6 +2925,7 @@ dependencies = [
 name = "substrate-ml"
 version = "1.0.0-skeleton"
 dependencies = [
+ "context-distill-lib",
  "intellectus-lib",
  "substrate-kernel",
  "substrate-types",

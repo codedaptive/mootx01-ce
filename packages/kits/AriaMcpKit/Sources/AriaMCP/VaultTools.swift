@@ -284,6 +284,24 @@ enum VaultTools {
         scope: VaultExportScope = .exportable,
         jobRegistry: VaultJobRegistry
     ) async throws -> JSONValue {
+        let launch = try await launchExport(
+            kit: kit, handle: handle, vaultURL: vaultURL,
+            scope: scope, jobRegistry: jobRegistry)
+        return ToolDispatcher.textResult("""
+        job_id: \(launch.jobID.uuidString)
+        vault: \(launch.vaultPath)
+        scope: \(launch.scope ?? scope.rawValue)
+        poll: moot_vault_job to check status
+        """)
+    }
+
+    /// Starts the real asynchronous export and returns the registry-minted job
+    /// identity.  V1 rendering and v2 structured projection share this core.
+    static func launchExport(
+        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
+        scope: VaultExportScope = .exportable,
+        jobRegistry: VaultJobRegistry
+    ) async throws -> VaultJobLaunch {
         // Atomic cap-check-and-register: a single actor turn enforces the cap
         // and inserts the job record. Using two separate actor calls
         // (runningJobCount then register) had a TOCTOU window — concurrent
@@ -334,12 +352,24 @@ enum VaultTools {
             }
         }
 
-        return ToolDispatcher.textResult("""
-        job_id: \(jobID)
-        vault: \(vaultURL.path)
-        scope: \(capturedScope.rawValue)
-        poll: moot_vault_job to check status
-        """)
+        guard let parsedID = UUID(uuidString: jobID) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.internalError, message: "vault export generated an invalid job id")
+        }
+        return VaultJobLaunch(
+            jobID: parsedID, kind: .export, vaultPath: vaultURL.path,
+            noteCount: nil, scope: capturedScope.rawValue)
+    }
+
+    /// Canonical-string entry point for the selected v2 provider.  Parsing is
+    /// shared with v1 rather than permitting a second scope vocabulary.
+    static func launchExport(
+        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
+        scopeName: String?, jobRegistry: VaultJobRegistry
+    ) async throws -> VaultJobLaunch {
+        let scope = try parseScope(scopeName.map(JSONValue.string))
+        return try await launchExport(
+            kit: kit, handle: handle, vaultURL: vaultURL,
+            scope: scope, jobRegistry: jobRegistry)
     }
 
     /// Register a vault import job and immediately return its `job_id`.
@@ -368,6 +398,26 @@ enum VaultTools {
         kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
         mode: EncodeSpeed, jobRegistry: VaultJobRegistry
     ) async throws -> JSONValue {
+        let launch = try await launchImport(
+            kit: kit, handle: handle, vaultURL: vaultURL,
+            mode: mode, jobRegistry: jobRegistry)
+        return ToolDispatcher.textResult("""
+        job_id: \(launch.jobID.uuidString)
+        vault: \(launch.vaultPath)
+        note_count: \(launch.noteCount ?? 0)
+        status: RUNNING — import is processing in the background.
+        IMPORTANT: Vault imports are long-running (~2 seconds per document). A \(launch.noteCount ?? 0)-note \
+        vault will take approximately \((launch.noteCount ?? 0) * 2 / 60) minutes. Do NOT cancel or re-issue \
+        the import — it is running correctly. Poll moot_vault_job with this job_id to check progress.
+        """)
+    }
+
+    /// Starts the real asynchronous import and returns its typed lifecycle
+    /// receipt.  This preserves the cap/preflight/task ownership of v1.
+    static func launchImport(
+        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
+        mode: EncodeSpeed, jobRegistry: VaultJobRegistry
+    ) async throws -> VaultJobLaunch {
         // Acquire the cap slot BEFORE running the expensive preflight.
         // The cap must bound expensive filesystem/estate work; running hashAllNotes
         // outside checkAndRegister allowed up to the HTTP transport concurrency
@@ -467,30 +517,77 @@ enum VaultTools {
             }
         }
 
-        return ToolDispatcher.textResult("""
-        job_id: \(jobID)
-        vault: \(vaultURL.path)
-        note_count: \(noteCount)
-        status: RUNNING — import is processing in the background.
-        IMPORTANT: Vault imports are long-running (~2 seconds per document). A \(noteCount)-note \
-        vault will take approximately \(noteCount * 2 / 60) minutes. Do NOT cancel or re-issue \
-        the import — it is running correctly. Poll moot_vault_job with this job_id to check progress.
-        """)
+        guard let parsedID = UUID(uuidString: jobID) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.internalError, message: "vault import generated an invalid job id")
+        }
+        return VaultJobLaunch(
+            jobID: parsedID, kind: .import, vaultPath: vaultURL.path,
+            noteCount: noteCount, scope: nil)
+    }
+
+    /// Canonical-string entry point for the selected v2 provider.  The mode is
+    /// encode speed only; write strategy remains owned by VaultBridge.
+    static func launchImport(
+        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
+        modeName: String?, jobRegistry: VaultJobRegistry
+    ) async throws -> VaultJobLaunch {
+        let mode: EncodeSpeed
+        switch (modeName ?? "foreground").lowercased() {
+        case "foreground": mode = .foreground
+        case "background": mode = .background
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)")
+        }
+        return try await launchImport(
+            kit: kit, handle: handle, vaultURL: vaultURL,
+            mode: mode, jobRegistry: jobRegistry)
+    }
+
+    struct VaultStatusSnapshot: Sendable, Equatable {
+        let path: String
+        let manifest: ExportManifest?
+    }
+
+    struct VaultReconcileCandidate: Sendable, Equatable {
+        let stableSourceKey: String
+        let vaultPath: String
+        let sha256: String
+    }
+
+    struct VaultReconcileSnapshot: Sendable, Equatable {
+        let added: [String]
+        let modified: [String]
+        let deleted: [String]
+        let candidates: [VaultReconcileCandidate]
+        let missing: [String]
+        let importSetCount: Int
+        let candidateCount: Int
+        let applied: Bool
+        let importReport: ImportReport?
+        let manifestWasLegacy: Bool
+        let restampedCount: Int?
     }
 
     /// Report manifest presence and, when present, its header. Pure
     /// filesystem read — mutates nothing.
+    static func statusSnapshot(vaultURL: URL) throws -> VaultStatusSnapshot {
+        .init(path: vaultURL.path, manifest: try readManifest(vaultURL: vaultURL))
+    }
+
     private static func runStatus(vaultURL: URL) throws -> JSONValue {
-        guard let manifest = try readManifest(vaultURL: vaultURL) else {
+        let snapshot = try statusSnapshot(vaultURL: vaultURL)
+        guard let manifest = snapshot.manifest else {
             return ToolDispatcher.textResult("""
             vault_status: no export manifest at \(manifestRelativePath)
-            path: \(vaultURL.path)
+            path: \(snapshot.path)
             (run moot_vault_export to stamp one)
             """)
         }
         return ToolDispatcher.textResult("""
         vault_status: manifest present
-        path: \(vaultURL.path)
+        path: \(snapshot.path)
         noteCount: \(manifest.noteCount)
         lastExport: \(manifest.exportedAt)
         """)
@@ -521,16 +618,15 @@ enum VaultTools {
     ///
     /// `now` is the operation instant, supplied by the caller (determinism
     /// rule — this method never reads the wall clock).
-    private static func runReconcile(
+    static func reconcileSnapshot(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         vaultURL: URL,
         apply: Bool,
         now: Date
-    ) async throws -> JSONValue {
+    ) async throws -> VaultReconcileSnapshot? {
         guard let manifest = try readManifest(vaultURL: vaultURL) else {
-            return ToolDispatcher.errorResult(
-                "vault_reconcile: no export manifest at \(manifestRelativePath). Run moot_vault_export first.")
+            return nil
         }
         let current = try hashAllNotes(vaultURL: vaultURL)
 
@@ -570,22 +666,6 @@ enum VaultTools {
         // write, and the apply-mode re-stamp converges the manifest to v2 so
         // the full surface happens once, not forever.
         let candidatePaths = manifestCertifies ? Set(added + modified) : Set(current.keys)
-        let candidatePathsSorted = candidatePaths.sorted()
-
-        var lines = [
-            "vault_reconcile: \(added.count) added, \(modified.count) modified, \(deletedSorted.count) deleted",
-        ]
-        if !manifestCertifies {
-            lines.append(
-                "manifest: legacy (pre-certification) — prior hashes unavailable; all \(current.count) note(s) classified changed / needs review")
-        }
-        lines.append("added:")
-        lines += added.map { "  + \($0)" }
-        lines.append("modified:")
-        lines += modified.map { "  ~ \($0)" }
-        lines.append("deleted (reported, not actioned):")
-        lines += deletedSorted.map { "  - \($0)" }
-
         // The review gate (VR-01 Finding B): the FULL import set — candidates
         // union the notes the estate does not hold ("missing") — is computed
         // by one body of VaultBridge code and surfaced in BOTH modes. The
@@ -619,22 +699,8 @@ enum VaultTools {
             report = nil
         }
         let missingSorted = selected.subtracting(candidatePaths).sorted()
-        lines.append("missing (estate lacks — apply imports these):")
-        lines += missingSorted.map { "  * \($0)" }
-        lines.append(
-            "import set: \(selected.count) note(s) — \(candidatePaths.count) candidate(s) + \(missingSorted.count) missing")
 
         if let report {
-            lines.append("apply: true — imported exactly the surfaced import set")
-            lines.append("  drawersWritten: \(report.drawersWritten)")
-            lines.append("  drawersUpdated: \(report.drawersUpdated)")
-            lines.append("  itemsSkipped: \(report.itemsSkipped)")
-            lines.append("  tunnelsCreated: \(report.tunnelsCreated)")
-            lines.append("  fdcClassified: \(report.fdcClassified)")
-            lines.append("  fdcUnclassified: \(report.fdcUnclassified)")
-            lines.append("  drawersSkippedUnchanged: \(report.drawersSkippedUnchanged)")
-            lines.append("  drawersSkippedTombstoned: \(report.drawersSkippedTombstoned)")
-
             // Re-stamp: the import above made the estate agree with the disk
             // content hashed at reconcile start, so each imported path's stamp
             // becomes a true certification (schema v2). Without this, a
@@ -657,19 +723,79 @@ enum VaultTools {
                 noteCount: restampedFiles.count,
                 files: restampedFiles)
             try writeManifest(restamped, to: vaultURL)
-            lines.append("manifest: re-stamped \(selected.count) imported path(s) (schema v\(manifestSchemaVersion))")
+        }
+        let candidates = candidatePaths.sorted().map { path in
+            VaultReconcileCandidate(
+                stableSourceKey: path.hasSuffix(".md") ? String(path.dropLast(3)) : path,
+                vaultPath: path,
+                sha256: current[path]?.sha256 ?? "")
+        }
+        return .init(
+            added: added,
+            modified: modified,
+            deleted: deletedSorted,
+            candidates: candidates,
+            missing: missingSorted,
+            importSetCount: selected.count,
+            candidateCount: candidatePaths.count,
+            applied: apply,
+            importReport: report,
+            manifestWasLegacy: !manifestCertifies,
+            restampedCount: report == nil ? nil : selected.count)
+    }
+
+    private static func runReconcile(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        vaultURL: URL,
+        apply: Bool,
+        now: Date
+    ) async throws -> JSONValue {
+        guard let snapshot = try await reconcileSnapshot(
+            kit: kit, handle: handle, vaultURL: vaultURL, apply: apply, now: now
+        ) else {
+            return ToolDispatcher.errorResult(
+                "vault_reconcile: no export manifest at \(manifestRelativePath). Run moot_vault_export first.")
+        }
+        return ToolDispatcher.textResult(renderReconcile(snapshot))
+    }
+
+    private static func renderReconcile(_ snapshot: VaultReconcileSnapshot) -> String {
+        var lines = [
+            "vault_reconcile: \(snapshot.added.count) added, \(snapshot.modified.count) modified, \(snapshot.deleted.count) deleted",
+        ]
+        if snapshot.manifestWasLegacy {
+            let currentCount = snapshot.candidates.count
+            lines.append("manifest: legacy (pre-certification) — prior hashes unavailable; all \(currentCount) note(s) classified changed / needs review")
+        }
+        lines.append("added:")
+        lines += snapshot.added.map { "  + \($0)" }
+        lines.append("modified:")
+        lines += snapshot.modified.map { "  ~ \($0)" }
+        lines.append("deleted (reported, not actioned):")
+        lines += snapshot.deleted.map { "  - \($0)" }
+        lines.append("missing (estate lacks — apply imports these):")
+        lines += snapshot.missing.map { "  * \($0)" }
+        lines.append("import set: \(snapshot.importSetCount) note(s) — \(snapshot.candidateCount) candidate(s) + \(snapshot.missing.count) missing")
+        if let report = snapshot.importReport {
+            lines.append("apply: true — imported exactly the surfaced import set")
+            lines.append("  drawersWritten: \(report.drawersWritten)")
+            lines.append("  drawersUpdated: \(report.drawersUpdated)")
+            lines.append("  itemsSkipped: \(report.itemsSkipped)")
+            lines.append("  tunnelsCreated: \(report.tunnelsCreated)")
+            lines.append("  fdcClassified: \(report.fdcClassified)")
+            lines.append("  fdcUnclassified: \(report.fdcUnclassified)")
+            lines.append("  drawersSkippedUnchanged: \(report.drawersSkippedUnchanged)")
+            lines.append("  drawersSkippedTombstoned: \(report.drawersSkippedTombstoned)")
+            lines.append("manifest: re-stamped \(snapshot.restampedCount ?? 0) imported path(s) (schema v\(manifestSchemaVersion))")
         } else {
-            // Dry-run mode: list the changed/needs-review candidates with
-            // their stable keys and hashes, write nothing.
             lines.append("candidates (dry-run — pass apply=true to action):")
-            for path in candidatePathsSorted {
-                let key = path.hasSuffix(".md") ? String(path.dropLast(3)) : path
-                let hash = current[path]?.sha256 ?? ""
-                lines.append("  candidate stableSourceKey=\(key) vaultPath=\(path) sha256=\(hash)")
+            for candidate in snapshot.candidates {
+                lines.append("  candidate stableSourceKey=\(candidate.stableSourceKey) vaultPath=\(candidate.vaultPath) sha256=\(candidate.sha256)")
             }
             lines.append("no Proposal written — dry-run")
         }
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        return lines.joined(separator: "\n")
     }
 
     /// Return the current status of a vault job, or an error result when
@@ -679,68 +805,66 @@ enum VaultTools {
     private static func runJob(
         jobID: String, registry: VaultJobRegistry
     ) async -> JSONValue {
-        guard let job = await registry.job(for: jobID) else {
+        guard let parsedID = UUID(uuidString: jobID),
+              let snapshot = await registry.snapshot(for: parsedID) else {
             return ToolDispatcher.errorResult("unknown job_id: \(jobID)")
         }
-        let elapsed = Date().timeIntervalSince(job.startedAt)
-        let elapsedStr = String(format: "%.1f", elapsed)
+        return ToolDispatcher.textResult(renderJobSnapshot(snapshot))
+    }
 
-        switch job.status {
-        case .running:
+    /// V1's presentation layer over the same typed lifecycle snapshot exposed
+    /// to the v2 data-mobility provider.  No response text is read back.
+    static func renderJobSnapshot(_ snapshot: VaultJobSnapshot) -> String {
+        let elapsedStr = String(format: "%.1f", snapshot.elapsedSeconds)
+
+        switch snapshot.state {
+        case .running(let progress):
             var runningLines = """
-            job_id: \(job.jobID)
-            kind: \(job.kind.rawValue)
-            vault: \(job.vaultPath)
+            job_id: \(snapshot.jobID.uuidString)
+            kind: \(snapshot.kind.rawValue)
+            vault: \(snapshot.vaultPath)
             status: running
             elapsed_s: \(elapsedStr)
             """
-            if let p = job.latestProgress {
+            if let p = progress {
                 runningLines += "\nprogress: \(p.processed)/\(p.total)"
             }
-            return ToolDispatcher.textResult(runningLines)
-        case .complete:
-            switch job.result {
-            case .imported(let r):
-                return ToolDispatcher.textResult("""
-                job_id: \(job.jobID)
-                kind: \(job.kind.rawValue)
-                vault: \(job.vaultPath)
-                status: complete
-                elapsed_s: \(elapsedStr)
-                drawersWritten: \(r.drawersWritten)
-                drawersUpdated: \(r.drawersUpdated)
-                itemsSkipped: \(r.itemsSkipped)
-                tunnelsCreated: \(r.tunnelsCreated)
-                fdcClassified: \(r.fdcClassified)
-                fdcUnclassified: \(r.fdcUnclassified)
-                drawersSkippedUnchanged: \(r.drawersSkippedUnchanged)
-                drawersSkippedTombstoned: \(r.drawersSkippedTombstoned)
-                """)
-            case .exported(let r):
-                return ToolDispatcher.textResult("""
-                job_id: \(job.jobID)
-                kind: \(job.kind.rawValue)
-                vault: \(job.vaultPath)
-                status: complete
-                elapsed_s: \(elapsedStr)
-                noteCount: \(r.noteCount)
-                exportedAt: \(r.exportedAt)
-                """)
-            case nil:
-                // Unreachable: registry.complete always sets result before
-                // transitioning to .complete.
-                return ToolDispatcher.errorResult(
-                    "job \(jobID): complete but no result recorded — unexpected state")
-            }
-        case .failed:
-            return ToolDispatcher.textResult("""
-            job_id: \(job.jobID)
-            kind: \(job.kind.rawValue)
-            vault: \(job.vaultPath)
+            return runningLines
+        case .imported(let r):
+            return """
+            job_id: \(snapshot.jobID.uuidString)
+            kind: \(snapshot.kind.rawValue)
+            vault: \(snapshot.vaultPath)
+            status: complete
+            elapsed_s: \(elapsedStr)
+            drawersWritten: \(r.drawersWritten)
+            drawersUpdated: \(r.drawersUpdated)
+            itemsSkipped: \(r.itemsSkipped)
+            tunnelsCreated: \(r.tunnelsCreated)
+            fdcClassified: \(r.fdcClassified)
+            fdcUnclassified: \(r.fdcUnclassified)
+            drawersSkippedUnchanged: \(r.drawersSkippedUnchanged)
+            drawersSkippedTombstoned: \(r.drawersSkippedTombstoned)
+            """
+        case .exported(let r):
+            return """
+            job_id: \(snapshot.jobID.uuidString)
+            kind: \(snapshot.kind.rawValue)
+            vault: \(snapshot.vaultPath)
+            status: complete
+            elapsed_s: \(elapsedStr)
+            noteCount: \(r.noteCount)
+            exportedAt: \(r.exportedAt)
+            """
+        case .failed(let error):
+            return """
+            job_id: \(snapshot.jobID.uuidString)
+            kind: \(snapshot.kind.rawValue)
+            vault: \(snapshot.vaultPath)
             status: failed
             elapsed_s: \(elapsedStr)
-            error: \(job.errorMessage ?? "(unknown error)")
-            """)
+            error: \(error)
+            """
         }
     }
 
