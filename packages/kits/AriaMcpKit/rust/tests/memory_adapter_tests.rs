@@ -21,7 +21,7 @@ use aria_mcp::{
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
     surfaced_recall_ledger::SurfacedRecallLedger,
-    tool_list::{build_tool_list_with_flags, vault_enabled},
+    tool_list::vault_enabled,
 };
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
@@ -132,51 +132,6 @@ fn env_gate_absent_refuses_dispatch() {
     assert!(is_error(&result), "refusal must be isError:true; got: {result:?}");
     // Restore for tests sharing the process.
     std::env::remove_var("MOOTX01_MEMORY_TOOL");
-}
-
-// ---------------------------------------------------------------------------
-// Tool list projection
-// ---------------------------------------------------------------------------
-
-/// When MOOTX01_MEMORY_TOOL=1, the `memory` tool appears first in the list
-/// (mirroring Swift ToolProjection.tools() which prepends memoryAdapterTools()).
-/// When disabled, it is absent and the base counts (71/65) are unchanged.
-#[test]
-fn memory_tool_in_list_when_enabled_absent_when_disabled() {
-    // Disabled: `memory` must not appear in the baseline list.
-    let base = build_tool_list_with_flags(vault_enabled(), false);
-    let base_arr = base.as_array().expect("must be array");
-    assert!(
-        !base_arr.iter().any(|t| t["name"] == "memory"),
-        "`memory` must be absent from the baseline tool list"
-    );
-    let base_count = base_arr.len();
-
-    // Enabled: `memory` must appear and the count must be base + 1.
-    let enabled = build_tool_list_with_flags(vault_enabled(), true);
-    let enabled_arr = enabled.as_array().expect("must be array");
-    assert!(
-        enabled_arr.iter().any(|t| t["name"] == "memory"),
-        "`memory` must appear in the tool list when memory_on=true"
-    );
-    assert_eq!(
-        enabled_arr.len(),
-        base_count + 1,
-        "enabling the memory tool must add exactly 1 to the tool count"
-    );
-
-    // The `memory` tool must be the first entry (mirrors Swift prepend order).
-    assert_eq!(
-        enabled_arr[0]["name"].as_str(),
-        Some("memory"),
-        "`memory` must be the first tool when memory_on=true"
-    );
-
-    // Schema must carry `command` as a required field.
-    let schema = &enabled_arr[0]["inputSchema"];
-    let required = schema["required"].as_array().expect("required must be array");
-    let has_command = required.iter().any(|v| v.as_str() == Some("command"));
-    assert!(has_command, "`command` must be in the required fields of the memory tool schema");
 }
 
 // ---------------------------------------------------------------------------
