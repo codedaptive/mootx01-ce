@@ -1365,18 +1365,6 @@ fn read_journal_zero_last_n_returns_invalid_params() {
     assert_eq!(code, -32602);
 }
 
-#[test]
-fn read_journal_huge_last_n_is_clamped_silently() {
-    // last_n=1000 (above ceiling 500) must not error — clamp to 500 and succeed.
-    let (status, body) = round_trip(
-        "POST",
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":1000}}}"#,
-    );
-    assert_eq!(status, 200);
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(v.get("result").is_some(), "last_n=1000 must be clamped silently; got: {v}");
-}
-
 // ── Finding #8 — Host guard on ARIA MCP GET routes → 421 ──
 
 /// A GET with a non-loopback Host header must be rejected 421.

@@ -54,7 +54,7 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_connection_map") == .allow)
         #expect(PermissionsWriter.classify("moot_estate_map") == .allow)
         #expect(PermissionsWriter.classify("moot_read_journal") == .allow)
-        #expect(PermissionsWriter.classify("moot_federated_search") == .allow)
+        #expect(PermissionsWriter.classify("moot_federated_recall") == .allow)
         #expect(PermissionsWriter.classify("moot_lens_keystones") == .allow, "every lens is a read")
         #expect(PermissionsWriter.classify("moot_lens_apriori") == .allow)
 
@@ -83,7 +83,7 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_vault_export") == .ask)
         #expect(PermissionsWriter.classify("moot_vault_reconcile") == .ask)
         // monitoring_status mutates daemon behaviour when `enabled` is supplied.
-        #expect(PermissionsWriter.classify("moot_monitoring_status") == .ask, "monitoring_status is mutating — ask tier")
+        #expect(PermissionsWriter.classify("moot_monitoring_status") == .allow, "inspection-only in v2 — pure read, no estate writes")
 
         // Destructive.
         #expect(PermissionsWriter.classify("moot_erase_memory") == .deny)
@@ -113,15 +113,17 @@ struct PermissionsWriterTests {
     /// of `readTools` (here) or `ToolMutationInventory.additiveWriteTools` /
     /// `.mutationTools` / `.destructiveTools` (AriaMcpKit) the new tool
     /// belongs in.
-    @Test("classify's tier tables are exhaustive over the real 80-tool inventory")
+    @Test("classify's tier tables are exhaustive over the real 84-tool inventory")
     func classificationTableIsExhaustive() {
         let realTools: Set<String> = [
-            "moot_confirm_memory", "moot_confirm_migration", "moot_connection_map",
+            "moot_confirm_memory", "moot_migration_confirm", "moot_connection_map",
             "moot_connection_search", "moot_drain_status", "moot_dream",
             "moot_dataset_query", "moot_dataset_stats", "moot_file_dataset",
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
-            "moot_fact_search", "moot_fact_timeline", "moot_federated_search", "moot_file_fact",
+            "moot_fact_search", "moot_fact_timeline", "moot_federated_recall", "moot_file_fact",
             "moot_file_memory", "moot_file_packet", "moot_hunt_contradictions",
+            // +1 (v2): moot_help — capability discovery, always a pure read.
+            "moot_help",
             "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",
             "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts",
             "moot_lens_constellation", "moot_lens_contradiction", "moot_lens_divergence",
@@ -131,13 +133,23 @@ struct PermissionsWriterTests {
             "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
             "moot_json_import",
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
-            "moot_memory_list", "moot_memory_search", "moot_monitoring_status", "moot_move_memory",
+            "moot_memory_list", "moot_memory_search",
+            // +1 (v2): moot_memory_recall_transcript — reads session transcript, no estate writes.
+            "moot_memory_recall_transcript",
+            // +1 (v2): moot_migration_run replaces moot_run_migration (v2 name) — read-only.
+            "moot_migration_run",
+            "moot_monitoring_status",
+            // +1 (v2): moot_monitoring_set — write path for daemon telemetry; Ask tier.
+            "moot_monitoring_set",
+            "moot_move_memory",
             "moot_palace_import",
+            // +1 (v2): moot_propose_contradictions replaces inline contradiction proposal.
+            "moot_propose_contradictions",
             "moot_read_journal", "moot_recall_connected", "moot_recall_distilled",
             "moot_recall_precise", "moot_recall_shaped", "moot_recall_temporal",
             "moot_recall_vague", "moot_recall_walk",
             "moot_reclassify_fdc", "moot_reindex", "moot_retire_fact", "moot_timing_report",
-            "moot_review_tunnel", "moot_run_migration",
+            "moot_review_tunnel",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
             "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory",
             "moot_write_journal",
@@ -171,7 +183,7 @@ struct PermissionsWriterTests {
         // −2 (Encoder Rerank Program): moot_distill and moot_redistill retired
         // (distillation is inline at read); moot_synthesize now classified as a
         // read (it was live but unclassified).
-        #expect(realTools.count == 80, "pinned tool inventory drifted from the real surface count")
+        #expect(realTools.count == 84, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)
