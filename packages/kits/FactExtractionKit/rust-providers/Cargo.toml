@@ -1,0 +1,52 @@
+[package]
+name = "fact-extraction-kit-providers"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Concrete providers for FactExtractionKit, including the isolated resident NuExtract worker."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "fact_extraction_kit_providers"
+path = "src/lib.rs"
+
+[[bin]]
+name = "moot-nuextract-worker"
+path = "src/bin/moot_nuextract_worker.rs"
+required-features = ["candle"]
+
+[features]
+default = []
+candle = [
+    "dep:candle-core",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+]
+
+[dependencies]
+fact-extraction-kit = { path = "../rust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dependencies.candle-core]
+version = "=0.9.2"
+optional = true
+
+[dependencies.candle-transformers]
+version = "=0.9.2"
+optional = true
+
+[dependencies.tokenizers]
+version = "=0.21.4"
+default-features = false
+features = ["onig"]
+optional = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "=0.9.2", features = ["metal"], optional = true }
+candle-transformers = { version = "=0.9.2", features = ["metal"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
