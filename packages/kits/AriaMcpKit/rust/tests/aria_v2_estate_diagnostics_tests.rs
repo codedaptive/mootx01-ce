@@ -1,4 +1,3 @@
-#![cfg(feature = "aria-v2")]
 
 #[path = "../src/v2/estate_diagnostics.rs"]
 mod estate_diagnostics;

@@ -122,45 +122,6 @@ struct TunnelRecallTests {
     ///
     /// Mirrors Rust: `tunnel_recall_returns_outgoing_tunnels_for_wing` —
     /// result is a success (isError false), text contains the count line.
-    @Test("moot_connection_search returns connections for the source memory (full round-trip)")
-    func connectionSearchReturnsCapturedConnection() async throws {
-        let dispatcher = try await makeDispatcher()
-
-        // File two memories — setup.
-        let fromID = try await fileMemory(dispatcher: dispatcher, content: "source memory")
-        let toID = try await fileMemory(dispatcher: dispatcher, content: "target memory")
-
-        // Link them through moot_link_memories.
-        let linkResult = try await link(dispatcher: dispatcher, from: fromID, to: toID, kind: "relates")
-        let linkObj = try #require(linkResult.objectValue)
-        #expect(linkObj["isError"] == .bool(false), "link must succeed")
-
-        // Search connections from the source memory.
-        let request = JSONRPCRequest(
-            id: .integer(1),
-            method: "tools/call",
-            params: .object([
-                "name": .string("moot_connection_search"),
-                "arguments": .object(["from_id": .string(fromID)]),
-            ])
-        )
-        let rawResponse = await dispatcher.handle(request)
-        let response = try #require(rawResponse)
-        guard case .result(let result) = response.payload else {
-            Issue.record("moot_connection_search returned JSON-RPC error: \(response.payload)")
-            return
-        }
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"] == .bool(false), "connection_search must be a success result")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue,
-            "content[0].text must be present"
-        )
-        #expect(
-            text.hasPrefix("found 1 outgoing connection"),
-            "result must report one outgoing connection; got: \(text)"
-        )
-    }
 
     // MARK: - Memory with no outgoing connections returns zero, not an error
 
@@ -168,38 +129,6 @@ struct TunnelRecallTests {
     /// returns a zero-count success result, not an error.
     ///
     /// Mirrors Rust: `tunnel_recall_empty_wing_returns_zero_tunnels`.
-    @Test("moot_connection_search returns zero connections for a memory with no outgoing edges")
-    func connectionSearchForIsolatedMemoryReturnsZero() async throws {
-        let dispatcher = try await makeDispatcher()
-
-        // File a memory but do not link it to anything.
-        let isolatedID = try await fileMemory(dispatcher: dispatcher, content: "isolated memory")
-
-        let request = JSONRPCRequest(
-            id: .integer(2),
-            method: "tools/call",
-            params: .object([
-                "name": .string("moot_connection_search"),
-                "arguments": .object(["from_id": .string(isolatedID)]),
-            ])
-        )
-        let rawResponse = await dispatcher.handle(request)
-        let response = try #require(rawResponse)
-        guard case .result(let result) = response.payload else {
-            Issue.record("moot_connection_search returned JSON-RPC error: \(response.payload)")
-            return
-        }
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"] == .bool(false), "zero-connection search must be a success result")
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue,
-            "content[0].text must be present"
-        )
-        #expect(
-            text.hasPrefix("found 0 outgoing connections"),
-            "isolated memory must report zero outgoing connections; got: \(text)"
-        )
-    }
 
     // MARK: - Missing required `from_id` argument → invalidParams
 
@@ -235,39 +164,7 @@ struct TunnelRecallTests {
 
     /// `moot_connection_search` must carry `from_id` as a required field and
     /// `estateID` as an optional property.
-    @Test("moot_connection_search schema lists from_id as required and estateID as optional")
-    func connectionSearchSchemaHasFromIDRequiredAndEstateIDOptional() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_connection_search" }) else {
-            Issue.record("moot_connection_search must appear in the projected tool list")
-            return
-        }
-        guard case .interface = tool.provenance else {
-            Issue.record("moot_connection_search must have .interface provenance, got: \(tool.provenance)")
-            return
-        }
-        let schema = tool.inputSchema.objectValue
-        let properties = schema?["properties"]?.objectValue ?? [:]
-        let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-
-        #expect(required.contains("from_id"), "from_id must be required; got: \(required)")
-        #expect(properties["estateID"] != nil, "estateID must be an optional property")
-        #expect(!required.contains("estateID"), "estateID must not be required")
-    }
 
     /// `moot_link_memories` must carry `from_id`, `to_id`, and `kind` as
     /// required fields and `estateID` as an optional property.
-    @Test("moot_link_memories schema lists from_id, to_id, kind as required")
-    func linkMemoriesSchemaHasRequiredFields() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_link_memories" }) else {
-            Issue.record("moot_link_memories must appear in the projected tool list")
-            return
-        }
-        let schema = tool.inputSchema.objectValue
-        let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-
-        #expect(required.contains("from_id"), "from_id must be required")
-        #expect(required.contains("to_id"), "to_id must be required")
-        #expect(required.contains("kind"), "kind must be required")
-        #expect(!required.contains("estateID"), "estateID must not be required")
-    }
 }

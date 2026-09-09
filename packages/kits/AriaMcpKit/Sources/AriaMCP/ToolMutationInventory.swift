@@ -42,6 +42,10 @@ public enum ToolMutationInventory {
         // Work-packet filing (the Swift-only packet surface, PacketTools):
         // captures a new structuredJSON drawer; nothing committed changes.
         "moot_file_packet",
+        // Contradiction resolution: settles proposed contradiction tunnel
+        // lifecycle records (transitions PROPOSED → SETTLED). Creates or
+        // updates tunnel records without removing any prior content.
+        "moot_propose_contradictions",
     ]
 
     /// Mutations of existing state: something already committed changes
@@ -52,7 +56,7 @@ public enum ToolMutationInventory {
     /// every pure read; this table exists so only genuine mutations land here.
     public static let mutationTools: Set<String> = [
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
-        "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
+        "moot_retire_fact", "moot_migration_confirm",
         "moot_reindex", "moot_reclassify_fdc", "moot_dream",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
         // Seed-file JSON import (MXE-JI-1): reads a seed file from the
@@ -62,11 +66,12 @@ public enum ToolMutationInventory {
         // Dataset import (MX-TAB-7): creates a backend table and can read a
         // csv_path from the filesystem — same Ask posture as palace/vault import.
         "moot_file_dataset",
-        // Monitoring flag mutation: sets daemon telemetry state
-        // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
-        "moot_monitoring_status",
+        // Monitoring set: writes the daemon telemetry enabled/disabled flag.
+        // moot_monitoring_status is a pure read (inspection only) and lives
+        // in frozenReadTools.
+        "moot_monitoring_set",
         // Contradiction hunter: estate-wide sweep that persists PROPOSED
-        // contradicts tunnels (same sweep runs inside moot_dream, already ask
+        // contradiction tunnels (same sweep runs inside moot_dream, already ask
         // tier). Review settles a proposed tunnel's lifecycle — a mutation
         // of committed state, and rejection is durable (never re-proposed).
         "moot_hunt_contradictions", "moot_review_tunnel",
@@ -105,23 +110,25 @@ public enum ToolMutationInventory {
     /// on purpose: the completeness test fails, naming the tool, when an
     /// advertised name is in none of the three frozen sets, so the read set
     /// is a triage decision and never a fall-through.
-    /// Tools a serve dispatches by name without advertising them: retired
-    /// names that answer with a notice so an old client learns the
-    /// replacement. They perform no write. The completeness tests count them
-    /// as reachable, so a dispatchable name can never sit outside the sets.
-    public static let dispatchableUnadvertisedTools: Set<String> = ["moot_recollect"]
-
     public static let frozenReadTools: Set<String> = [
+        // Surface help: capability discovery, always a pure read.
+        "moot_help",
         // Tier 1-5 interface reads.
         "moot_memory_search", "moot_memory_list", "moot_memory_get",
+        "moot_memory_recall_transcript",
         "moot_connection_search", "moot_connection_map",
         "moot_fact_search", "moot_fact_timeline",
         "moot_read_journal",
         "moot_estate_status", "moot_estate_map", "moot_estate_ping",
         // Maintenance and diagnostics that only report.
         "moot_drain_status", "moot_rebuild_status", "moot_timing_report",
-        // Grant-authorized federated read.
-        "moot_federated_search",
+        // Monitoring inspection: reads daemon telemetry state without changing it.
+        // moot_monitoring_set (the write path) lives in mutationTools.
+        "moot_monitoring_status",
+        // Grant-authorized federated read (v2 name: moot_federated_recall).
+        "moot_federated_recall",
+        // Migration candidate evaluation (read-only, does not commit).
+        "moot_migration_run",
         // Recipe reads: catalogs and the recall family.
         "moot_list_lenses", "moot_list_recipes",
         "moot_recall_precise", "moot_recall_temporal", "moot_recall_shaped",
@@ -131,7 +138,6 @@ public enum ToolMutationInventory {
         // writes no drawer, packet, journal, meta, trace, or reward — pure read.
         // Moved from mutationTools (FRZ-3): a frozen serve must answer it.
         "moot_synthesize",
-        "moot_recollect",
         // The 23 reasoning lenses.
         "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",
         "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity",

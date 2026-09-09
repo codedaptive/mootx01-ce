@@ -1,25 +1,5 @@
 import AriaMCPWire
 
-/// The selected public ARIA surface for this binary.
-///
-/// V1 remains the default.  `MOOTX01_ARIA_V2` is supplied only by the
-/// off-by-default `AriaV2` SwiftPM trait, so a binary has one public surface
-/// rather than a runtime mixture of V1 and V2 names.
-enum AriaSurface: Sendable, Equatable {
-    case v1
-    case v2
-
-    static let selected: AriaSurface = {
-        #if MOOTX01_ARIA_V2
-        .v2
-        #else
-        .v1
-        #endif
-    }()
-
-    static var isV2: Bool { selected == .v2 }
-}
-
 /// A stable public-operation identity.  Policy is based on this identity,
 /// rather than on the spelling a surface used to reach an implementation.
 enum AriaOperation: String, Sendable {
