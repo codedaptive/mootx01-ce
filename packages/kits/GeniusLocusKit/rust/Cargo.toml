@@ -40,6 +40,7 @@ substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 # library's converter ID is what distill_item writes to
 # distilled_pipeline_version. Foundation tier (no kit deps); no inversion.
 context-distill-lib = { path = "../../../libs/ContextDistillLib/rust" }
+fact-extraction-kit = { path = "../../FactExtractionKit/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # substrate-lib: locus-kit's audit seam (Estate::audit_events, the C3/A6
 # timing-derivation paging surface) returns substrate_lib::verbs::AuditEvent,

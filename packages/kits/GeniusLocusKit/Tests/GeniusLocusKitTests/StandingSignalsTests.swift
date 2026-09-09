@@ -514,6 +514,19 @@ struct StandingSignalsTests {
     // MARK: - Registration helper
 
     @Test
+    func factExtractionSignalFiresInjectedCycle() async throws {
+        let (kit, handle) = try await openOneEstate()
+        let id = try await registerAndFire(
+            kit, in: handle,
+            spec: FactExtractionSignal.spec(factExtractionCycle: { _ in 3 }),
+            cadence: FactExtractionSignal.defaultCadenceSeconds)
+        let report = try await report(kit, in: handle, for: id)
+        #expect(report.name == FactExtractionSignal.signalName)
+        #expect(report.recentDiagnostics.first?.title == "fact-extraction.complete")
+        #expect(report.recentDiagnostics.first?.detail.contains("completed 3 source(s)") == true)
+    }
+
+    @Test
     func registerDefaultStandingSignalsRegistersAll() async throws {
         let (kit, handle) = try await openOneEstate()
         let emptyStore = try await makeEmptyVectorStore()
@@ -525,14 +538,14 @@ struct StandingSignalsTests {
         // as signal 12; ENCODER_RERANK_CONTRACT §10 added SpanEncodeSignal as signal 13
         // (replaces the former AdornmentPassSignal). Signal 8's slot is empty: the
         // distilled rendering is computed inline at read time, so no sweep signal
-        // exists for it, and twelve signals register.
+        // exists for it. Distilled fact extraction is signal 14.
         // Any future addition must update this count and extend defaultStandingSignalNames.
-        #expect(registered.count == 12, "all twelve standing signals register")
+        #expect(registered.count == 13, "all thirteen standing signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 12)
+        #expect(reports.count == 13)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")
@@ -575,6 +588,8 @@ struct StandingSignalsTests {
         // is indexed before queries arrive.
         #expect(SpanEncodeSignal.defaultCadenceSeconds == 30,
             "span-encode drain runs every 30 s (REM-ALPHA cadence, contract §10)")
+        #expect(FactExtractionSignal.defaultCadenceSeconds == 300,
+            "fact extraction runs as a bounded five-minute standing duty")
     }
 
     // MARK: - T-population end-to-end

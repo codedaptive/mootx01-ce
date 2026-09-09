@@ -260,6 +260,10 @@ let package = Package(
         // is the value written to `distilled_pipeline_version`. Layering:
         // ContextDistillLib is foundation tier (zero kit deps); no inversion.
         .package(path: "../../libs/ContextDistillLib"),
+        // Provider-neutral contract for distilled, source-grounded KGFact
+        // extraction. Concrete Apple and worker runtimes live in provider
+        // targets; GLK owns only activation, duty orchestration and filing.
+        .package(path: "../FactExtractionKit"),
         // IntellectusLib is the zero-dependency telemetry floor. GeniusLocusKit
         // emits per-estate rollup metrics at open/close/provision/quiesce/drain
         // and at the verb-error boundary (GLK_ROLLUPS_001). When monitoring is
@@ -507,6 +511,7 @@ let package = Package(
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "ContextDistillLib", package: "ContextDistillLib"),
+                .product(name: "FactExtractionKit", package: "FactExtractionKit"),
                 // IntellectusLib: per-estate rollup telemetry (GLK_ROLLUPS_001).
                 // Off-path is a single Atomic<Bool> load — zero cost when disabled.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
@@ -548,6 +553,8 @@ let package = Package(
             name: "GeniusLocusKitTests",
             dependencies: [
                 "GeniusLocusKit",
+                .product(name: "FactExtractionKit", package: "FactExtractionKit"),
+                .product(name: "FactExtractionKitProviders", package: "FactExtractionKit"),
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 // SubstrateKernel: DatasetSignatureTests calls SHA256.hash
                 // directly to verify cross-leg preimage hashes without starting
