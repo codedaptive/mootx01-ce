@@ -402,7 +402,10 @@ struct InstallCommand: AsyncParsableCommand {
                     // resident daemon carries the vault posture in its own
                     // launchd environment (`daemonEnv` above), independent
                     // of this call.
-                    let outcome = try DepthInstaller.apply(
+                    let outcome = try client.id == "codex" && depth == .plugin
+                        ? CodexPluginInstaller.apply(homeDirectory: home, binaryPath: binaryPath,
+                            upgradeOnly: false, vaultOff: vaultOff)
+                        : DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,
                         homeDirectory: home,
