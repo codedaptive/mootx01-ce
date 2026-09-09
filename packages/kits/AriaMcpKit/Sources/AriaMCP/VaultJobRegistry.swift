@@ -80,6 +80,35 @@ struct VaultJob: Sendable {
     var latestProgress: (processed: Int, total: Int)?
 }
 
+/// Typed lower-layer view of a vault job.  Both v1 text rendering and the v2
+/// structured provider read this value; neither reconstructs lifecycle state
+/// from a rendered job response.
+struct VaultJobSnapshot: Sendable {
+    enum State: Sendable {
+        case running(progress: (processed: Int, total: Int)?)
+        case imported(ImportResult)
+        case exported(ExportResult)
+        case failed(String)
+    }
+
+    let jobID: UUID
+    let kind: JobKind
+    let vaultPath: String
+    let elapsedSeconds: TimeInterval
+    let state: State
+}
+
+/// Immediate receipt for an accepted asynchronous vault launch.  The UUID is
+/// minted by `VaultJobRegistry`, not supplied by a caller, and remains the
+/// only identity that can later be polled.
+struct VaultJobLaunch: Sendable {
+    let jobID: UUID
+    let kind: JobKind
+    let vaultPath: String
+    let noteCount: Int?
+    let scope: String?
+}
+
 // MARK: - Registry
 
 /// Actor-isolated in-process registry for vault import and export jobs.
@@ -171,6 +200,32 @@ actor VaultJobRegistry {
     /// Return the job for `id`, or `nil` when no such job is registered.
     func job(for id: String) -> VaultJob? {
         jobs[id]
+    }
+
+    /// Returns the lifecycle state as typed data at one observation instant.
+    /// Unknown/non-UUID ids have no snapshot; registry keys are locally minted
+    /// UUID strings by `checkAndRegister`.
+    func snapshot(for id: UUID, now: Date = Date()) -> VaultJobSnapshot? {
+        guard let job = jobs[id.uuidString] else { return nil }
+        let state: VaultJobSnapshot.State
+        switch job.status {
+        case .running:
+            state = .running(progress: job.latestProgress)
+        case .complete:
+            switch job.result {
+            case .imported(let result): state = .imported(result)
+            case .exported(let result): state = .exported(result)
+            case nil: state = .failed("complete but no result recorded — unexpected state")
+            }
+        case .failed:
+            state = .failed(job.errorMessage ?? "(unknown error)")
+        }
+        return VaultJobSnapshot(
+            jobID: id,
+            kind: job.kind,
+            vaultPath: job.vaultPath,
+            elapsedSeconds: now.timeIntervalSince(job.startedAt),
+            state: state)
     }
 
 }
