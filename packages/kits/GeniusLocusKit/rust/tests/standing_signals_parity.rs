@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use genius_locus_kit::brain::signals::{AnomalySweepSignal, ContradictionScoutSignal, SpanEncodeSignal};
+use genius_locus_kit::brain::signals::{AnomalySweepSignal, ContradictionScoutSignal, FactExtractionSignal, SpanEncodeSignal};
 use genius_locus_kit::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
     ConsolidationSignal, DecaySweepSignal, DreamingSignal,
@@ -143,6 +143,8 @@ fn default_signal_names_and_cadences_match_swift_reference() {
         SpanEncodeSignal::DEFAULT_CADENCE_SECONDS, 30,
         "span-encode drain runs every 30 s (REM-ALPHA cadence, ENCODER_RERANK_CONTRACT §10)"
     );
+    assert_eq!(FactExtractionSignal::SIGNAL_NAME, "fact-extraction");
+    assert_eq!(FactExtractionSignal::DEFAULT_CADENCE_SECONDS, 300);
 }
 
 #[test]
@@ -168,19 +170,20 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
             "consolidation-sweep",
             "anomaly-flag-sweep",
             "span-encode",
+            "fact-extraction",
         ]
     );
 }
 
 #[test]
-fn default_standing_signal_specs_returns_twelve_specs_with_interval_triggers() {
+fn default_standing_signal_specs_returns_thirteen_specs_with_interval_triggers() {
     // Twelve specs: signal 13 is SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10,
     // REM-ALPHA 30 s drain; replaces the former AdornmentPassSignal); signal 8's
     // slot is empty (the distilled rendering is computed inline at read time).
     // hunt_cycle, anomaly_cycle, and span_encode_cycle are None → no-op defaults.
     let store = make_empty_vector_store();
-    let specs = default_standing_signal_specs(store, "test-model", None, None, None, None);
-    assert_eq!(specs.len(), 12);
+    let specs = default_standing_signal_specs(store, "test-model", None, None, None, None, None);
+    assert_eq!(specs.len(), 13);
     for spec in &specs {
         match spec.trigger {
             SignalTrigger::Interval { .. } => {}
@@ -464,18 +467,18 @@ fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
 }
 
 #[test]
-fn registering_all_twelve_default_specs_produces_twelve_reports() {
+fn registering_all_thirteen_default_specs_produces_thirteen_reports() {
     // Twelve specs including signal 13 (SpanEncodeSignal, REM-ALPHA 30 s,
     // ENCODER_RERANK_CONTRACT §10; replaces the former AdornmentPassSignal).
     // The "span-encode" name must appear in the report.
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
     // hunt_cycle, anomaly_cycle, and span_encode_cycle are None → no-op defaults.
-    for spec in default_standing_signal_specs(store, "test-model", None, None, None, None) {
+    for spec in default_standing_signal_specs(store, "test-model", None, None, None, None, None) {
         scheduler.register(spec, T0_NANOS);
     }
     let reports = scheduler.report();
-    assert_eq!(reports.len(), 12);
+    assert_eq!(reports.len(), 13);
     let mut names: Vec<String> = reports.iter().map(|r| r.name.clone()).collect();
     names.sort();
     let mut expected: Vec<String> = default_standing_signal_names()
@@ -862,7 +865,7 @@ fn live_hunt_closure_emits_complete_diagnostic_not_noop_fired() {
 
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(
-        store, "test-model", None, Some(hunt_cycle), None, None,
+        store, "test-model", None, Some(hunt_cycle), None, None, None,
     );
 
     let scout_spec = specs
@@ -920,7 +923,7 @@ fn live_anomaly_closure_emits_complete_diagnostic_not_noop_fired() {
 
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(
-        store, "test-model", None, None, Some(anomaly_cycle), None,
+        store, "test-model", None, None, Some(anomaly_cycle), None, None,
     );
 
     let anomaly_spec = specs
@@ -974,7 +977,7 @@ fn live_span_encode_closure_emits_complete_diagnostic_not_noop_fired() {
 
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(
-        store, "test-model", None, None, None, Some(span_encode_cycle),
+        store, "test-model", None, None, None, Some(span_encode_cycle), None,
     );
 
     let span_encode_spec = specs
@@ -1005,4 +1008,28 @@ fn live_span_encode_closure_emits_complete_diagnostic_not_noop_fired() {
         detail.contains("encoded 0 drawer(s)"),
         "detail must contain encoded-drawer count; got: {detail}"
     );
+}
+
+#[test]
+fn live_fact_extraction_closure_emits_complete_diagnostic() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let called = Arc::new(AtomicBool::new(false));
+    let called_by_cycle = called.clone();
+    let cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(move || {
+        called_by_cycle.store(true, Ordering::SeqCst);
+        Ok(3)
+    });
+    let specs = default_standing_signal_specs(
+        make_empty_vector_store(), "test-model", None, None, None, None, Some(cycle),
+    );
+    let report = fire(
+        specs
+            .into_iter()
+            .find(|spec| spec.name == FactExtractionSignal::SIGNAL_NAME)
+            .expect("fact-extraction must be in the default spec set"),
+    );
+    assert!(called.load(Ordering::SeqCst));
+    assert_eq!(report.recent_diagnostics[0].title, "fact-extraction.complete");
+    assert!(report.recent_diagnostics[0].detail.contains("completed 3 source(s)"));
 }
