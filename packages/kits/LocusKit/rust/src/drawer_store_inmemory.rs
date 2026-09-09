@@ -2707,6 +2707,68 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.len())
     }
 
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent("drawerId must not be empty".into()));
+        }
+        let store = self.storage.row_store();
+        let predicate = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"), TypedValue::Text(drawer_id.to_string()));
+        let rows = store.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else { return Ok(0) };
+        let current = i64_value_of(row.get("operationalBitmap"));
+        let updated = current | DrawerFeatureFlags::FACTS_EXTRACTED;
+        if updated == current { return Ok(0); }
+        let mut values = BTreeMap::new();
+        values.insert("operationalBitmap".into(), TypedValue::Bitmap(updated));
+        store.update(T_DRAWERS, values, &predicate).map_err(map_storage_err)
+    }
+
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent("drawerId must not be empty".into()));
+        }
+        let store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(drawer_id.into())),
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "content"), TypedValue::Text(expected_content.into())),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        ]);
+        let rows = store.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else { return Ok(0) };
+        let current = i64_value_of(row.get("operationalBitmap"));
+        let updated = current | DrawerFeatureFlags::FACTS_EXTRACTED;
+        if updated == current { return Ok(1); }
+        let mut values = BTreeMap::new();
+        values.insert("operationalBitmap".into(), TypedValue::Bitmap(updated));
+        store.update(T_DRAWERS, values, &predicate).map_err(map_storage_err)
+    }
+
+    fn fact_extraction_debt_batch(
+        &self, limit: usize, after_drawer_id: Option<&str>
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let mut clauses = vec![fact_extraction_debt_predicate()];
+        if let Some(after) = after_drawer_id {
+            clauses.push(StoragePredicate::Gt(
+                Column::new(T_DRAWERS, "id"), TypedValue::Text(after.to_string())));
+        }
+        let (rows, _) = self.storage.row_store().query_skip_corrupt(
+            T_DRAWERS, Some(&StoragePredicate::And(clauses)),
+            &[OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending)],
+            Some(limit), None).map_err(map_storage_err)?;
+        decode_rows_skip_corrupt(&rows, "fact_extraction_debt_batch")
+    }
+
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        Ok(self.storage.row_store().query_projected(
+            T_DRAWERS, &["id"], Some(&fact_extraction_debt_predicate()), &[], None, None)
+            .map_err(map_storage_err)?.len())
+    }
+
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
     ///
     /// A DERIVED SIGNAL write — no audit event, no supersession cascade, no
@@ -5992,6 +6054,24 @@ impl DrawerStore for InMemoryDrawerStore {
     fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
         self.inner.count_span_index_debt()
     }
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.inner.set_facts_extracted(drawer_id)
+    }
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.inner.set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+    fn fact_extraction_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_fact_extraction_debt()
+    }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.inner.set_anomalous_flag(drawer_id, anomalous)
     }
@@ -6515,6 +6595,23 @@ fn span_index_debt_predicate() -> StoragePredicate {
     ])
 }
 
+/// Active, non-empty, bit 28 clear — the distilled-fact extraction duty's
+/// work predicate. A successful zero-fact extraction sets the bit too, so
+/// absence of KGFact rows is never interpreted as unfinished work.
+fn fact_extraction_debt_predicate() -> StoragePredicate {
+    StoragePredicate::And(vec![
+        StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        StoragePredicate::Neq(
+            Column::new(T_DRAWERS, "content"),
+            TypedValue::Text(String::new()),
+        ),
+        StoragePredicate::BitmaskNone {
+            column: Column::new(T_DRAWERS, "operationalBitmap"),
+            mask: DrawerFeatureFlags::FACTS_EXTRACTED,
+        },
+    ])
+}
+
 pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedValue>) {
     // Covers every content-derived column: ssc_facts (Encoder Rerank
     // Program §6 — NULL after a content write is the enrichment stage's
@@ -6835,6 +6932,18 @@ fn kg_fact_values(f: &KGFact) -> BTreeMap<String, TypedValue> {
         "foreignRecordID".to_string(),
         TypedValue::Text(f.foreign_record_id.clone()),
     );
+    m.insert("evidenceQuote".to_string(), TypedValue::Text(f.evidence_quote.clone()));
+    m.insert("evidenceStart".to_string(), TypedValue::Int(f.evidence_start));
+    m.insert("evidenceEnd".to_string(), TypedValue::Int(f.evidence_end));
+    m.insert("evidenceStartUTF8Byte".to_string(), TypedValue::Int(f.evidence_start_utf8_byte));
+    m.insert("evidenceEndUTF8Byte".to_string(), TypedValue::Int(f.evidence_end_utf8_byte));
+    m.insert("sourceDigest".to_string(), TypedValue::Text(f.source_digest.clone()));
+    m.insert("extractorProviderID".to_string(), TypedValue::Text(f.extractor_provider_id.clone()));
+    m.insert("extractorModelID".to_string(), TypedValue::Text(f.extractor_model_id.clone()));
+    m.insert("extractorModelVersion".to_string(), TypedValue::Text(f.extractor_model_version.clone()));
+    m.insert("extractionSchemaVersion".to_string(), TypedValue::Text(f.extraction_schema_version.clone()));
+    m.insert("searchProjection".to_string(), TypedValue::Text(f.search_projection.clone()));
+    m.insert("searchProjectionVersion".to_string(), TypedValue::Text(f.search_projection_version.clone()));
     m.insert(
         "adjectiveBitmap".to_string(),
         TypedValue::Bitmap(f.adjective_bitmap),
@@ -7485,6 +7594,18 @@ fn kg_fact_from_row(row: &StorageRow) -> KGFact {
         added_by: string_value_of(row.get("addedBy")),
         foreign_source_key: string_value_of(row.get("foreignSourceKey")),
         foreign_record_id: string_value_of(row.get("foreignRecordID")),
+        evidence_quote: string_value_of(row.get("evidenceQuote")),
+        evidence_start: i64_value_of(row.get("evidenceStart")),
+        evidence_end: i64_value_of(row.get("evidenceEnd")),
+        evidence_start_utf8_byte: i64_value_of(row.get("evidenceStartUTF8Byte")),
+        evidence_end_utf8_byte: i64_value_of(row.get("evidenceEndUTF8Byte")),
+        source_digest: string_value_of(row.get("sourceDigest")),
+        extractor_provider_id: string_value_of(row.get("extractorProviderID")),
+        extractor_model_id: string_value_of(row.get("extractorModelID")),
+        extractor_model_version: string_value_of(row.get("extractorModelVersion")),
+        extraction_schema_version: string_value_of(row.get("extractionSchemaVersion")),
+        search_projection: string_value_of(row.get("searchProjection")),
+        search_projection_version: string_value_of(row.get("searchProjectionVersion")),
         adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
         provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),
@@ -9612,6 +9733,7 @@ mod tests {
         store.add_drawer(&d, NOW).unwrap();
         store.set_ssc_facts(&d.id, Some("kind: note")).unwrap();
         store.set_span_indexed(&d.id).unwrap();
+        store.set_facts_extracted(&d.id).unwrap();
         store
             .expunge_gated(&d.id, "alice", Some("erasure covers derived columns"), NOW + 500, true)
             .unwrap();
@@ -9619,6 +9741,7 @@ mod tests {
         assert_eq!(after.content, "");
         assert!(after.ssc_facts.is_none());
         assert!(!after.is_span_indexed(), "bit 27 must clear with the content");
+        assert!(!after.are_facts_extracted(), "bit 28 must clear with the content");
     }
 
     /// The shared content-write helper NULLs ssc_facts alongside the
