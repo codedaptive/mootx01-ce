@@ -682,6 +682,30 @@
       "expectedText": "found 2 facts, one per line\nFACT-001 · Entelo · is-tool-type · AI recruitment · 30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · 2026-01-01T00:08:00Z\nFACT-002 · TechFest · held-in · 2026 · - · 2026-01-01T00:09:00Z"
     },
     {
+      "name": "s4_fact_search_normalization",
+      "description": "S4 normalization: embedded newline and middle-dot in object are mapped before emission",
+      "shape": "s4_search",
+      "facts": [
+        {
+          "factID": "FACT-NRM-001",
+          "subject": "Entelo",
+          "predicate": "note",
+          "object": "line one\nline two",
+          "sourceDrawerID": null,
+          "filedAt": "2026-01-01T00:00:00Z"
+        },
+        {
+          "factID": "FACT-NRM-002",
+          "subject": "TechFest",
+          "predicate": "note",
+          "object": "alpha · beta",
+          "sourceDrawerID": null,
+          "filedAt": "2026-01-01T00:01:00Z"
+        }
+      ],
+      "expectedText": "found 2 facts, one per line\nFACT-NRM-001 · Entelo · note · line one line two · - · 2026-01-01T00:00:00Z\nFACT-NRM-002 · TechFest · note · alpha - beta · - · 2026-01-01T00:01:00Z"
+    },
+    {
       "name": "s4_fact_timeline",
       "description": "S4 fact timeline: seven columns, time-major, lifecycle tags",
       "shape": "s4_timeline",
@@ -727,6 +751,27 @@
         }
       ],
       "expectedText": "found 1 outgoing connection, one per line\nTUNNEL-001 · relates · E70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · - · - · 2026-01-01T00:07:48Z"
+    },
+    {
+      "name": "s5_edge_rows_normalize_kind_label",
+      "description": "S5 edge rows: kindLabel containing U+00B7 middle-dot is normalized (separator injection prevention)",
+      "shape": "s5",
+      "direction": "outgoing",
+      "edges": [
+        {
+          "tunnelID": "TUNNEL-002",
+          "kindLabel": "type·A relation",
+          "lifecycle": null,
+          "farEndpoint": {
+            "id": "A1B2C3D4-0000-0000-0000-000000000001",
+            "subject": "target node",
+            "bestSpan": null,
+            "sscFacts": null,
+            "eventTime": "2026-01-01T00:08:00Z"
+          }
+        }
+      ],
+      "expectedText": "found 1 outgoing connection, one per line\nTUNNEL-002 · type-A relation · A1B2C3D4-0000-0000-0000-000000000001 · target node · - · - · 2026-01-01T00:08:00Z"
     },
     {
       "name": "s6_tabular_query_lossless",
@@ -1071,6 +1116,43 @@
         "adornment",
         "adornments"
       ]
+    },
+    {
+      "name": "s1_ssc_normalization_embedded_separator",
+      "description": "S1 row: sscFacts containing U+00B7 is normalized before rendering (middle-dot maps to '-'); pins the sscFacts normalization path in renderS1Row / render_s1_row",
+      "shape": "s1",
+      "rows": [
+        {
+          "id": "A0000000-0000-0000-0000-000000000001",
+          "subject": "Meeting notes",
+          "eventTime": "2026-01-01T00:00:00Z",
+          "score": 0.9,
+          "bestSpan": "A span.",
+          "sscFacts": "kind: decision · entity: Entelo"
+        }
+      ],
+      "control": {
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
+      },
+      "expectedText": "found 1 candidate memory, one per line\nA0000000-0000-0000-0000-000000000001 · Meeting notes · A span. · kind: decision - entity: Entelo · 2026-01-01T00:00:00Z · 0.9000",
+      "expectedStructured": {
+        "results": [
+          {
+            "id": "A0000000-0000-0000-0000-000000000001",
+            "subject": "Meeting notes",
+            "eventTime": "2026-01-01T00:00:00Z",
+            "score": 0.9,
+            "bestSpan": "A span.",
+            "sscFacts": "kind: decision · entity: Entelo"
+          }
+        ]
+      }
     }
   ]
 }
