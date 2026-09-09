@@ -110,9 +110,10 @@ impl CognitionCatalogService {
         self.validate(request)?;
         let _ = request.verbose;
 
-        let tools = crate::tool_list::build_tool_list_with_flags(false, false)
+        let tools = crate::v2::catalog::selected_tools();
+        let tools = tools
             .as_array()
-            .expect("the static lower tool registry must be an array")
+            .expect("the v2 catalog must return an array")
             .iter()
             .filter_map(|tool| {
                 let name = tool.get("name")?.as_str()?;

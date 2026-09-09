@@ -151,8 +151,8 @@ public enum ToolProjection {
     /// The complete advertised tool list.
     ///
     /// Order: tier 1–5 interface tools, then federation, recipe, lens, vault.
-    /// Every tool schema is wrapped with `withTeachme` so callers can pass
-    /// `teachme: true` on any tool to receive its usage guide.
+    /// Every tool schema carries the v2 input schema defined in the ARIA v2 catalog.
+    /// 
     ///
     /// Vault tools are omitted when `MOOTX01_VAULT=0` (installed with
     /// `--vault-off`). All other tiers are unaffected. See the open 1.0 Vault posture.
@@ -184,8 +184,8 @@ public enum ToolProjection {
 
     // MARK: - Tier 1: Core Memory (9 tools)
 
-    // Internal (not private) so TeachmeGuides can derive per-tier counts at
-    // runtime; the guide's tallies stay in sync with the registry automatically.
+    
+
     static func coreMemoryTools() -> [ProjectedTool] {
         [
             ProjectedTool(
@@ -346,7 +346,7 @@ public enum ToolProjection {
 
     // MARK: - Tier 2: Connections (4 tools)
 
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    // Internal so tests can verify per-tier counts.
     static func connectionTools() -> [ProjectedTool] {
         [
             ProjectedTool(
@@ -405,7 +405,7 @@ public enum ToolProjection {
 
     // MARK: - Tier 3: Knowledge Graph (4 tools)
 
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    // Internal so tests can verify per-tier counts.
     static func knowledgeGraphTools() -> [ProjectedTool] {
         [
             ProjectedTool(
@@ -465,7 +465,7 @@ public enum ToolProjection {
 
     // MARK: - Tier 4: Journal (2 tools)
 
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    // Internal so tests can verify per-tier counts.
     static func journalTools() -> [ProjectedTool] {
         [
             ProjectedTool(
@@ -497,7 +497,7 @@ public enum ToolProjection {
 
     // MARK: - Tier 5: Estate (3 tools) + Maintenance + Monitoring (10 total; palace_import + json_import vault-gated)
 
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
+    // Internal so tests can verify per-tier counts.
     // Returns 9 tools including moot_palace_import and moot_json_import.
     // tools() removes both when vault is off; the remaining 7 are always present.
     static func estateTools() -> [ProjectedTool] {
@@ -722,47 +722,6 @@ public enum ToolProjection {
     ///
     /// Applied to every tool in `tools()` so the `mode` argument is
     /// advertised in every tool's inputSchema and recognized by
-    /// `acceptedArgKeys(for:)`. The dispatch layer extracts the mode
-    /// value, updates sticky session state, and routes the unknown-mode
-    /// hint path when the value is not in the registry (fail-open).
-    ///
-    /// Mode arg grammar: `"Recall=Auto"` (name=variant) or `"Recall"` (bare
-    /// name, advisory only). See `ModeRegistry.swift` for the full roster.
-    static func withModeArg(_ schema: JSONValue) -> JSONValue {
-        guard case .object(var object) = schema,
-              case .object(var properties)? = object["properties"] else {
-            return schema
-        }
-        properties["mode"] = stringSchema(
-            "Optional mode declaration (advisory): name a tool bundle for this session. "
-            + "Format: name or name=variant. "
-            + "Modes: Recall (variants: Auto=answer:auto session default, Rows=rows-only, Answer=answer:always), "
-            + "Filing, Lenses, Vault, Curator. "
-            + "The last declared mode+variant is sticky for the session; per-call args always override. "
-            + "Unknown modes are accepted and ignored with a hint. "
-            + "Example: mode:\"Recall=Auto\" sets answer:auto as the search default for this session."
-        )
-        object["properties"] = .object(properties)
-        return .object(object)
-    }
-
-    /// Inject an optional `teachme` property into an object schema.
-    /// Parallel to `withEstateID` — applied in `tools()` after all per-tool
-    /// schemas are built. Callers pass `true` to receive a usage guide for
-    /// the tool rather than executing it; the dispatch layer intercepts this
-    /// before any runner fires.
-    static func withTeachme(_ schema: JSONValue) -> JSONValue {
-        guard case .object(var object) = schema,
-              case .object(var properties)? = object["properties"] else {
-            return schema
-        }
-        properties["teachme"] = booleanSchema(
-            "Pass true to receive a usage guide for this tool instead of executing it."
-        )
-        object["properties"] = .object(properties)
-        return .object(object)
-    }
-
     /// Inject an optional `estateID` property into an object schema.
     /// Never required — omitting it targets the default estate.
     static func withEstateID(_ schema: JSONValue) -> JSONValue {
