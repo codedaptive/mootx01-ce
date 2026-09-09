@@ -41,7 +41,7 @@ use super::*;
 /// half-open word bounds `[start_word, end_word)` of the span in the
 /// product's word split, kept so the composer can render the evidence
 /// snippet without re-spanning. `content_version` is the drawer's
-/// `content_hash` at encode time; a later content write changes it, which
+/// FNV-1a64 of the drawer content at encode time; a later content write changes it, which
 /// is how a stale span set is recognised. Mirrors Swift `SpanVectorInput`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpanVectorInput {
@@ -56,7 +56,7 @@ pub struct SpanVectorInput {
     pub start_word: usize,
     /// End word of the span (exclusive).
     pub end_word: usize,
-    /// The drawer's content version (`content_hash`) the span was cut from.
+    /// The FNV-1a64 content version of the drawer the span was cut from.
     pub content_version: String,
 }
 
@@ -72,6 +72,34 @@ pub struct SpanVectorRow {
     pub start_word: usize,
     pub end_word: usize,
     pub content_version: String,
+}
+
+/// A malformed serving-generation span row observed by a strict reader.
+///
+/// Generic span retrieval deliberately skips malformed rows so ordinary
+/// recall remains available. Strict transcript rerank instead needs the
+/// observation: it refuses the entire request rather than quietly scoring a
+/// partial head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrictSpanVectorMalformedRow {
+    /// The requested item id to which the damaged row belongs.
+    pub item_id: String,
+    /// Stored span index when it has the expected integer shape.
+    pub index: Option<u32>,
+}
+
+/// An all-or-nothing read receipt for strict transcript rerank.
+///
+/// `serving_generation` pins the exact serving lane read by `rows`; callers
+/// revalidate this receipt immediately before treating a strict rerank as
+/// applied. `malformed_rows` retains evidence which the tolerant
+/// `span_vectors` API deliberately omits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrictSpanVectorSnapshot {
+    pub model_id: String,
+    pub serving_generation: i64,
+    pub rows: BTreeMap<String, Vec<SpanVectorRow>>,
+    pub malformed_rows: Vec<StrictSpanVectorMalformedRow>,
 }
 
 /// Upper bound on ids per `IN (...)` clause. SQLite caps expression-tree
@@ -218,6 +246,92 @@ impl VectorStore {
             }
         }
         Ok(result)
+    }
+
+    /// Read every requested serving-generation span row without discarding
+    /// malformed rows, returning a receipt that strict transcript rerank can
+    /// revalidate before publishing a result.
+    ///
+    /// This is intentionally separate from `span_vectors`: generic recall
+    /// keeps its established tolerant behaviour. A strict caller rejects a
+    /// nonempty `malformed_rows` collection and validates the receipt again
+    /// after scoring.
+    pub fn strict_span_vector_snapshot(
+        &self,
+        item_ids: &[&str],
+        model_id: &str,
+    ) -> Result<StrictSpanVectorSnapshot, SynapseKitError> {
+        let serving_generation = self.serving_generation(model_id)?;
+        if item_ids.is_empty() {
+            return Ok(StrictSpanVectorSnapshot {
+                model_id: model_id.to_string(),
+                serving_generation,
+                rows: BTreeMap::new(),
+                malformed_rows: Vec::new(),
+            });
+        }
+        let mut result: BTreeMap<String, Vec<SpanVectorRow>> = BTreeMap::new();
+        let mut malformed_rows = Vec::new();
+        let mut unique: Vec<&str> = item_ids.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        let row_store = self.storage.row_store();
+        for chunk in unique.chunks(SPAN_QUERY_ID_CHUNK) {
+            let ids: Vec<TypedValue> = chunk.iter().map(|s| TypedValue::Text(s.to_string())).collect();
+            let predicate = StoragePredicate::And(vec![
+                StoragePredicate::In(Column::new("vectors", "item_id"), ids),
+                StoragePredicate::Eq(
+                    Column::new("vectors", "model_id"),
+                    TypedValue::Text(model_id.to_string()),
+                ),
+                StoragePredicate::Eq(
+                    Column::new("vectors", "kind"),
+                    TypedValue::Int(VectorKind::Int8.raw()),
+                ),
+                StoragePredicate::Eq(
+                    Column::new("vectors", "generation"), TypedValue::Int(serving_generation),
+                ),
+            ]);
+            let order = vec![
+                OrderClause::new(Column::new("vectors", "item_id"), OrderDirection::Ascending),
+                OrderClause::new(Column::new("vectors", "vector_index"), OrderDirection::Ascending),
+            ];
+            let rows = row_store
+                .query("vectors", Some(&predicate), &order, None, None)
+                .map_err(|e| SynapseKitError::StoreUnavailable(e.to_string()))?;
+            for row in rows {
+                let item_id = match row.get("item_id") {
+                    Some(TypedValue::Text(item_id)) => item_id.clone(),
+                    // The predicate can only match requested text ids. Keep
+                    // this guard for a damaged storage backend without
+                    // inventing an id that the caller did not request.
+                    _ => continue,
+                };
+                match span_row_from(&row) {
+                    Some(span) => result.entry(item_id).or_default().push(span),
+                    None => malformed_rows.push(StrictSpanVectorMalformedRow {
+                        item_id,
+                        index: span_row_index(&row),
+                    }),
+                }
+            }
+        }
+        Ok(StrictSpanVectorSnapshot {
+            model_id: model_id.to_string(),
+            serving_generation,
+            rows: result,
+            malformed_rows,
+        })
+    }
+
+    /// Whether `snapshot` still names this model's serving generation.
+    /// Content freshness is deliberately separate and remains a strict caller
+    /// responsibility for every returned row.
+    pub fn revalidates_strict_span_vector_snapshot(
+        &self,
+        snapshot: &StrictSpanVectorSnapshot,
+    ) -> Result<bool, SynapseKitError> {
+        Ok(self.serving_generation(&snapshot.model_id)? == snapshot.serving_generation)
     }
 
     /// Remove every span row of `(item_id, model_id)` across all generations.
@@ -607,6 +721,13 @@ fn span_row_from(row: &persistence_kit::StorageRow) -> Option<SpanVectorRow> {
         end_word,
         content_version,
     })
+}
+
+fn span_row_index(row: &persistence_kit::StorageRow) -> Option<u32> {
+    match row.get("vector_index") {
+        Some(TypedValue::Int(value)) if *value >= 0 && *value <= u32::MAX as i64 => Some(*value as u32),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

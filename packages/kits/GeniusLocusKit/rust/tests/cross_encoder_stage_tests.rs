@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use corpus_kit::encoder::{
-    CrossEncoderProfile, EncoderError, PairScorer, RerankAction, RerankDirective,
+    CrossEncoderProfile, EncoderError, PairScorer, RerankDirective,
 };
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
@@ -33,7 +33,7 @@ use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallFallbackPolicy,
     RecallOrigin,
 };
-use genius_locus_kit::span_rerank::SpanRerankVector;
+use genius_locus_kit::span_rerank::{SpanRerankVector, StrictSpanRerankVector};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
@@ -115,6 +115,71 @@ fn span_rows_are_ranked_by_cosine_and_rebuilt_from_bounds() {
     let wrong = vec![SpanRerankVector { index: 0, int8: vec![1, 2, 3], scale: 1.0, start_word: 0, end_word: 5 }];
     let fallback = stage::select_spans(&content, Some(&wrong), Some(&[1.0, 0.0]), 2, 60, 2);
     assert_eq!(fallback, vec![content.clone()]);
+}
+
+#[test]
+fn strict_span_selection_requires_fresh_rows_and_never_windows() {
+    let content = "zero one two three four five";
+    let fresh = vec![StrictSpanRerankVector {
+        vector: SpanRerankVector { index: 0, int8: vec![127, 0], scale: 0.01, start_word: 0, end_word: 3 },
+        content_version: genius_locus_kit::span_content_version::span_content_version(content),
+    }];
+    assert_eq!(
+        stage::select_strict_spans(content, &fresh, &[1.0, 0.0], 3, &genius_locus_kit::span_content_version::span_content_version(content)).unwrap(),
+        vec!["zero one two".to_string()]
+    );
+    let mut stale = fresh.clone();
+    stale[0].content_version = "0000000000000000".to_string();
+    assert_eq!(stage::select_strict_spans(content, &stale, &[1.0, 0.0], 3, &genius_locus_kit::span_content_version::span_content_version(content)), Err(reason::STRICT_SPANS_STALE));
+    assert_eq!(stage::select_strict_spans(content, &[], &[1.0, 0.0], 3, &genius_locus_kit::span_content_version::span_content_version(content)), Err(reason::STRICT_SPANS_UNAVAILABLE));
+}
+
+#[test]
+fn transcript_eligibility_accepts_declared_and_multiline_legacy_turns() {
+    use locus_kit::drawer::Drawer;
+    use locus_kit::drawer_operational::ContentKind;
+
+    let legacy = Drawer::new("legacy", "\nUser:\nThe LME summary is attached.\nIt includes the evidence receipt.\n\nAssistant: I will preserve the receipt\nand keep the original query bytes.", "room", "test", NOW, "test");
+    assert_eq!(stage::classify_transcript(&legacy), stage::TranscriptEligibility::LegacyRoleTurns);
+    let prose = Drawer::new("prose", "The report begins with an editorial note.\nUser: where is the file?\nAssistant: it is in the cabinet", "room", "test", NOW, "test");
+    assert_eq!(stage::classify_transcript(&prose), stage::TranscriptEligibility::NotTranscript);
+    let quoted = Drawer::new("quoted", "> User: where is the file?\n> Assistant: it is in the cabinet", "room", "test", NOW, "test");
+    assert_eq!(stage::classify_transcript(&quoted), stage::TranscriptEligibility::NotTranscript);
+    let mut declared = Drawer::new("declared", "ordinary prose remains authoritative when declared transcript", "room", "test", NOW, "test");
+    declared.operational_bitmap = ContentKind::Transcript.raw_value() << 6;
+    assert_eq!(stage::classify_transcript(&declared), stage::TranscriptEligibility::DeclaredTranscript);
+}
+
+#[test]
+fn strict_transcript_pool_retains_eligible_hits_in_order() {
+    let (coord, h) = open_estate();
+    let result = coord.recall_scored(&h, request(3, Some(QUERY), None, None), NOW + 1000).unwrap();
+    let mut eligible = result.hits[0].clone();
+    eligible.drawer.as_mut().unwrap().operational_bitmap = 2 << 6;
+    let prose = result.hits[1].clone();
+    let mut quoted = result.hits[2].clone();
+    quoted.drawer.as_mut().unwrap().content = "> User: where is the file?\n> Assistant: it is in the cabinet".to_string();
+    let filtered = stage::strict_transcript_pool(&[eligible.clone(), prose, quoted]);
+    assert_eq!(filtered.iter().map(|hit| &hit.id).collect::<Vec<_>>(), vec![&eligible.id]);
+}
+
+#[test]
+fn strict_transcript_pool_excludes_sensitive_and_unknown_capture_provenance() {
+    let (coord, h) = open_estate();
+    let result = coord.recall_scored(&h, request(1, Some(QUERY), None, None), NOW + 1000).unwrap();
+    for raw in [0_i64, 16, 32, 48, 63] {
+        let mut hit = result.hits[0].clone();
+        let drawer = hit.drawer.as_mut().unwrap();
+        drawer.operational_bitmap = 2 << 6; // Declared transcript, regardless of wording.
+        drawer.provenance = raw << 30;
+        let selected = stage::strict_transcript_pool(&[hit.clone()]);
+        if raw == 0 || raw == 16 {
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].id, hit.id);
+        } else {
+            assert!(selected.is_empty(), "capture sensitivity {raw} reached strict pool");
+        }
+    }
 }
 
 // ── director ─────────────────────────────────────────────────────────────────
@@ -316,7 +381,7 @@ fn degrades_carry_their_reason_and_the_incoming_order() {
     let unknown = coord
         .recall_scored(
             &h,
-            request(20, Some(QUERY), None, Some(RerankDirective { action: RerankAction::Apply, profile_id: "nope-v9".into(), reason: None })),
+            request(20, Some(QUERY), None, Some({ let mut directive = RerankDirective::apply(None); directive.profile_id = "nope-v9".into(); directive })),
             NOW + 1000,
         )
         .unwrap();
@@ -352,6 +417,21 @@ fn degrades_carry_their_reason_and_the_incoming_order() {
     assert_eq!(r.status, CrossEncoderStatus::Degraded);
     assert_eq!(r.reason.as_deref(), Some(reason::SCORER_FAILED));
     assert!(failed.degraded_stages.iter().any(|s| s == DEGRADED_STAGE));
+}
+
+#[test]
+fn strict_rerank_refuses_ineligible_content_before_the_classifier() {
+    let (mut coord, h) = open_estate();
+    let (scorer, calls) = FakePairScorer::new("none", false);
+    coord.register_pair_scorer(&h, scorer);
+    let result = coord
+        .recall_scored(&h, request(20, Some(QUERY), None, Some(RerankDirective::strict_transcript(None))), NOW + 1000)
+        .unwrap();
+    let report = result.cross_encoder.as_ref().expect("report");
+    assert!(result.hits.is_empty());
+    assert_eq!(report.status, CrossEncoderStatus::Degraded);
+    assert_eq!(report.reason.as_deref(), Some(reason::STRICT_TRANSCRIPT_INELIGIBLE));
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[test]

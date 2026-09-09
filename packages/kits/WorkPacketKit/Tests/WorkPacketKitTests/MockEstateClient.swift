@@ -77,7 +77,10 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
     /// `.elevated` when the chain carries none — the same default
     /// BitmapEvaluator inserts. Wing/room filters are ignored, as in
     /// `listDrawers` — the test controls what is planted.
-    func getDrawers(ids: [String], matchingFrame frame: RecallFrame) async throws -> [Drawer] {
+    func getDrawers(
+        ids: [String], matchingFrame frame: RecallFrame,
+        preservePhysicalUUIDSpellings: Bool
+    ) async throws -> [Drawer] {
         frameGatedCalls += 1
         var ceiling: AdjectiveSensitivity = .elevated
         for filter in frame.filterChain {
@@ -105,7 +108,8 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
         _ packet: WorkPacket,
         filedAt: Date = MockEstateClient.epoch,
         sensitivity: AdjectiveSensitivity = .normal,
-        provenanceSensitivity: Sensitivity = .normal
+        provenanceSensitivity: Sensitivity = .normal,
+        rawProvenanceSensitivity: Int64? = nil
     ) throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -118,7 +122,7 @@ final class MockEstateClient: WorkPacketEstateClient, @unchecked Sendable {
             addedBy: "mock",
             filedAt: filedAt,
             embeddingModelID: "none",
-            provenance: Int64(provenanceSensitivity.rawValue) << 30,
+            provenance: (rawProvenanceSensitivity ?? Int64(provenanceSensitivity.rawValue)) << 30,
             adjectiveBitmap: Int64(sensitivity.rawValue) << 6,
             udcCode: "004"
         )
