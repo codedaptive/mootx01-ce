@@ -53,12 +53,9 @@ pub fn dispatch(command: Command) -> ExitCode {
             upgrade::run(from, db, check, yes, no_restart, converge_only, backfill_only)
         }
         // sensitivity unlock / lock.
-        Command::Unlock { tier, db: _ } => {
-            // Resolve the data directory for the sidecar and daemon-port files.
-            // The `--db` flag (estate override) is accepted by the parser but the
-            // daemon itself owns grant-issuance — the estate name affects which
-            // estate is opened by `serve`, not which port to unlock on. The port
-            // is always resolved via the standard daemon-port-file mechanism.
+        Command::Unlock { tier } => {
+            // The port is always resolved via the standard daemon-port-file
+            // mechanism; unlock always targets the active estate's daemon.
             let data_dir = genius_locus_kit::EstateCatalog::configuration_directory();
             ExitCode::from(unlock::run_unlock(&tier, &data_dir) as u8)
         }

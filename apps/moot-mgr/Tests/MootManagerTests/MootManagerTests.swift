@@ -403,34 +403,78 @@ struct MootManagerStatusTests {
 
 struct ManagerConfigTests {
 
-    @Test("Env override sets the store path verbatim")
-    func envStorePathOverride() {
-        let env = [ManagerConfig.storePathEnvKey: "/tmp/custom/stats.sqlite"]
-        let config = ManagerConfig.fromEnvironment(env)
-        #expect(config.storeURL.path == "/tmp/custom/stats.sqlite")
+    // MARK: Helpers
+
+    private func tempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("com.mootx01.mgrconfig-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func writeConfig(_ json: String, to dir: URL) throws {
+        let url = dir.appendingPathComponent("config.json")
+        try json.data(using: .utf8)!.write(to: url)
+    }
+
+    // MARK: Wiring tests — configurationDirectory seam proves the reader honours the setting
+
+    /// Wiring test (key set): fromEnvironment with a scratch config dir that has
+    /// `daemon.stats_store` set returns that configured URL. Deleting the
+    /// Settings.load call in resolveStoreURL makes this test red.
+    @Test("wiring: key set in scratch config dir → storeURL returns it")
+    func wiring_keySet_returnsConfiguredURL() throws {
+        let scratch = try tempDir()
+        let customPath = scratch.appendingPathComponent("custom-stats.sqlite").path
+        try writeConfig(#"{"daemon":{"stats_store":"\#(customPath)"}}"#, to: scratch)
+        let config = ManagerConfig.fromEnvironment([:], configurationDirectory: scratch)
+        #expect(config.storeURL.path == customPath,
+                "resolveStoreURL must return daemon.stats_store from config.json; got \(config.storeURL.path)")
+    }
+
+    /// Wiring test (key absent): fromEnvironment with a scratch config dir that has
+    /// no key falls back to the computed default under that dir.
+    @Test("wiring: key absent in scratch config dir → storeURL returns computed default")
+    func wiring_keyAbsent_returnsComputedDefault() throws {
+        let scratch = try tempDir()
+        // No config.json written — key is absent.
+        let config = ManagerConfig.fromEnvironment([:], configurationDirectory: scratch)
+        let expected = scratch
+            .appendingPathComponent(ManagerConfig.storeSubdirectory)
+            .appendingPathComponent(ManagerConfig.storeFileName)
+        #expect(config.storeURL.path == expected.path,
+                "resolveStoreURL must fall back to <configDir>/moot-mgr/stats.sqlite; got \(config.storeURL.path)")
     }
 
     @Test("Default store path uses the moot-mgr subdirectory and file name")
-    func defaultStorePath() {
-        let config = ManagerConfig.fromEnvironment([:])
+    func defaultStorePath() throws {
+        // Use a scratch dir so no real config.json is read.
+        let scratch = try tempDir()
+        let config = ManagerConfig.fromEnvironment([:], configurationDirectory: scratch)
         #expect(config.storeURL.lastPathComponent == ManagerConfig.storeFileName)
         #expect(config.storeURL.deletingLastPathComponent().lastPathComponent
                 == ManagerConfig.storeSubdirectory)
     }
 
     @Test("Retention window env parses positive seconds; rejects non-positive")
-    func retentionWindowParsing() {
+    func retentionWindowParsing() throws {
+        // Use a scratch directory so no real config.json is consulted (W-1).
+        let scratch = try tempDir()
         #expect(ManagerConfig.fromEnvironment(
-            [ManagerConfig.retentionWindowEnvKey: "3600"]).retentionWindow == 3600)
+            [ManagerConfig.retentionWindowEnvKey: "3600"],
+            configurationDirectory: scratch).retentionWindow == 3600)
         // Non-positive / non-numeric fall back to the default.
         #expect(ManagerConfig.fromEnvironment(
-            [ManagerConfig.retentionWindowEnvKey: "0"]).retentionWindow
+            [ManagerConfig.retentionWindowEnvKey: "0"],
+            configurationDirectory: scratch).retentionWindow
             == ManagerConfig.defaultRetentionWindow)
         #expect(ManagerConfig.fromEnvironment(
-            [ManagerConfig.retentionWindowEnvKey: "-5"]).retentionWindow
+            [ManagerConfig.retentionWindowEnvKey: "-5"],
+            configurationDirectory: scratch).retentionWindow
             == ManagerConfig.defaultRetentionWindow)
         #expect(ManagerConfig.fromEnvironment(
-            [ManagerConfig.retentionWindowEnvKey: "abc"]).retentionWindow
+            [ManagerConfig.retentionWindowEnvKey: "abc"],
+            configurationDirectory: scratch).retentionWindow
             == ManagerConfig.defaultRetentionWindow)
     }
 }

@@ -50,6 +50,8 @@
 import Foundation
 import AriaMCP
 import MootDaemonProvider
+import MootProductIdentity
+import MootEstateOpen
 import PersistenceKit
 import PersistenceKitSQLite
 import LocusKit
@@ -308,7 +310,7 @@ public enum CommunityResidentMain {
     /// state, Obsidian authorization and state, LAN state, estate metadata and
     /// operation state) live here; the estate lives where its catalog record says.
     static var daemonStateDirectory: URL {
-        EstateCatalog.configurationDirectory.appendingPathComponent("community-daemon", isDirectory: true)
+        EstateCatalog.configurationDirectory.appendingPathComponent(MootProductIdentity.Storage.communityDaemonFolder, isDirectory: true)
     }
 
     /// Build the CommunityEstateHost over the catalog's active record.
@@ -323,7 +325,11 @@ public enum CommunityResidentMain {
     /// signed team identifier. Called before DaemonProvider.activate(), whose
     /// step 6 opens the estate through this host under the provider lock.
     private static func buildEstateHost() throws -> CommunityEstateHost {
-        let record = try EstateCatalog.open().active
+        // Route through the shared funnel: adopt (no-op on Apple) then open.
+        // MootEstateOpen is a lightweight target that MootCommunityDaemon now
+        // depends on directly, so the funnel is the one path regardless of
+        // which command opens the catalog first after a Windows upgrade.
+        let record = try EstateOpen.catalog(selecting: nil).active
         let ownerIdentifier: String
         if let identity = try? SecCodeEntitlementReadback().processIdentity() {
             ownerIdentifier = identity.teamIdentifier ?? "unknown"
