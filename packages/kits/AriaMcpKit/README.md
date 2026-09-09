@@ -58,7 +58,14 @@ value names a database.
 | `aria-mcp` | the catalog's active estate | the record's backend |
 | `aria-mcp --db <name>` | a registered estate by name | the record's backend |
 | `aria-mcp --db <dir>/<name>` | a transient estate at that directory, this process only | SQLite, plaintext |
-| `aria-mcp --in-memory` | the selected estate on the in-memory backend | In-memory; gone at exit |
+| `aria-mcp --in-memory` | record resolved for validation; estate starts empty | In-memory; no federation, no charters; gone at exit |
+| `aria-mcp --help` / `-h` | none opened | prints the usage line, exit 0 |
+
+`--in-memory` opens the catalog and resolves the record before the backend is
+chosen, so a `--db` that names no estate is refused rather than ignored. What
+it then serves is a **fresh empty estate** — the record's content is NOT
+loaded; the estate starts with zero drawers. The same rule holds in both ports
+and in `mootx01 serve`.
 
 A record's backend is SQLite (the default: `estate.sqlite` in the record's
 directory, opened under the posture its file requires; an encrypted estate whose
@@ -66,8 +73,12 @@ key is missing fails closed) or PostgreSQL (the record's connection string;
 pooled, lazy; defaults poolSize=10, connectionTimeout=5s, idleTimeout=300s).
 
 **Unusable estate** (a file that will not open, an unreachable server at startup,
-an unregistered name without a path, any other argument): exit 1 with a clear
-stderr message. No half-open state.
+an unregistered name without a path): exit 1 with a clear stderr message. No
+half-open state.
+
+**Refused command line** (an unrecognised argument, `--db` with no value,
+`--db` followed by a flag, a repeated `--db`): the reason and the usage line
+on stderr, exit 1. Both ports, same four shapes, same code.
 
 **Lazy-vs-probe (PostgreSQL):** `PostgreSQLStorage` uses a lazy connection pool —
 no TCP connection is opened at construction time. The first real connection attempt

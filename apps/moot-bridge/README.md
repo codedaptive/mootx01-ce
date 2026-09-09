@@ -113,7 +113,8 @@ into the secondary backend's vocabulary.
       "queryArg": "query",
       "subjectArg": "subject",
       "constantArgs": {
-        "location": "scratch/notes"
+        "wing": "scratch",
+        "location": "notes"
       },
       "resultFormat": {
         "kind": "mootText"

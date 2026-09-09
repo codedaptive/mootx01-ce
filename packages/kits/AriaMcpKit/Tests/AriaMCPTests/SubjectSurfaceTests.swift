@@ -131,6 +131,44 @@ struct SubjectSurfaceTests {
             "error text must contain the offending length, got: \(errorText)")
     }
 
+    /// The 120 of the subject contract is 120 Unicode SCALARS, the unit the
+    /// Rust twin counts and both moot-bridge ports cut on. A non-ASCII case is
+    /// what tells the rules apart: 70 clusters of "e" + U+0301 is 70
+    /// Characters — under the limit by that count — and 140 scalars, over it.
+    /// Twin of the Rust `subject_length_counts_scalars_not_graphemes`.
+    @Test func subjectLengthCountsScalarsNotGraphemes() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "subject-scalar-unit"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let clusters = 70
+        let combining = String(repeating: "e\u{0301}", count: clusters)
+        #expect(combining.count == clusters, "70 grapheme clusters")
+        #expect(combining.unicodeScalars.count == clusters * 2, "140 Unicode scalars")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("some content"),
+                "subject": .string(combining),
+                "location": .string("subject-tests"),
+            ]))
+        guard case let .object(obj) = result,
+              obj["isError"]?.boolValue == true,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(errorText)? = first["text"]
+        else {
+            Issue.record("a 140-scalar subject must return isError:true, got: \(result)")
+            return
+        }
+        // The reported length is the scalar count, so the model is told how
+        // much to cut in the unit the contract measures.
+        #expect(errorText.contains("(got \(clusters * 2))"),
+                "the refusal must report the scalar count, got: \(errorText)")
+    }
+
     @Test func setSubjectOversizeReturnsContractError() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
