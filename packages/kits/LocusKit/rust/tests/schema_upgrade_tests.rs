@@ -1,12 +1,12 @@
-//! The single v10 → v19 hop (ENCODER_RERANK_CONTRACT §12) against a
+//! The v10 → v19 → v20 ladder against a
 //! schema-10 SQLite file. Twin of Swift `SchemaUpgradeTests`.
 //!
 //! The fixture is built here from the CE v1.0.37 declaration shape (schema
 //! 10: no subject trio, no kg_facts identity trio, no operationalAND, none
 //! of the v16–v18 objects), stamped 10 in the ledger by opening it with a
 //! version-10 declaration. Opening it again with the current LocusKit
-//! schema must land at 19 with `encoder_models`, `ssc_facts` and the
-//! surviving v11–v15 deltas present, and none of the retired objects.
+//! schema must land at 20 with both model registries, `ssc_facts`, the
+//! surviving v11–v15 deltas, and none of the retired objects.
 //!
 //! Failure modes pinned:
 //!   1. The ladder silently re-appearing: a `distilled` column or an
@@ -151,7 +151,7 @@ fn columns_exist(storage: &Arc<dyn Storage>, table: &str, columns: &[&str]) -> b
 }
 
 #[test]
-fn schema_10_estate_lands_at_19_with_only_surviving_deltas() {
+fn schema_10_estate_lands_at_20_with_only_surviving_deltas() {
     let db = TempDb::new();
     {
         let storage = open(&db.path);
@@ -160,13 +160,18 @@ fn schema_10_estate_lands_at_19_with_only_surviving_deltas() {
         storage.close().unwrap();
     }
     let storage = open(&db.path);
-    storage.open(&schema::schema()).expect("open at 19");
+    storage.open(&schema::schema()).expect("open at 20");
     assert_eq!(storage.current_schema_version_for("LocusKit").unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 19);
+    assert_eq!(SCHEMA_VERSION, 20);
 
     // v19 additions.
     assert!(columns_exist(&storage, "encoder_models", &["model_id", "is_active"]), "encoder_models present");
     assert!(columns_exist(&storage, "drawers", &["ssc_facts"]), "ssc_facts present");
+    assert!(columns_exist(&storage, "fact_extractor_models", &["recipe_id", "is_active"]));
+    assert!(columns_exist(&storage, "kg_facts", &[
+        "evidenceQuote", "evidenceStart", "evidenceEnd", "sourceDigest",
+        "extractorProviderID", "extractorModelID", "searchProjection", "searchProjectionVersion",
+    ]));
     // Surviving v11–v15 deltas.
     assert!(columns_exist(&storage, "drawers", &["subject", "subject_pipeline_version", "subject_at"]));
     assert!(columns_exist(&storage, "kg_facts", &["addedBy", "foreignSourceKey", "foreignRecordID"]));
@@ -185,8 +190,9 @@ fn schema_10_estate_lands_at_19_with_only_surviving_deltas() {
 fn upgrade_path_refuses_every_version_but_fresh_floor_and_current() {
     assert_eq!(schema::upgrade_path(0), SchemaUpgradePath::Fresh);
     assert_eq!(schema::upgrade_path(10), SchemaUpgradePath::Upgrade { from: 10 });
-    assert_eq!(schema::upgrade_path(19), SchemaUpgradePath::Current);
-    for found in [1, 9, 11, 15, 18, 20] {
+    assert_eq!(schema::upgrade_path(19), SchemaUpgradePath::Upgrade { from: 19 });
+    assert_eq!(schema::upgrade_path(20), SchemaUpgradePath::Current);
+    for found in [1, 9, 11, 15, 18, 21] {
         assert_eq!(schema::upgrade_path(found), SchemaUpgradePath::Unsupported { found });
     }
 }

@@ -229,12 +229,17 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     /// Wire value: 1 << 27 = 134217728 (0x8000000).
     public static let spanIndexed = DrawerFeatureFlags(rawValue: 1 << 27)
 
+    /// Bit 28 — distilled fact extraction has settled for this drawer's
+    /// current content under the active extractor recipe. A settled result
+    /// may contain zero facts. Cleared by content writes and recipe activation.
+    public static let factsExtracted = DrawerFeatureFlags(rawValue: 1 << 28)
+
     /// The bits every content write clears in the same UPDATE that changes
     /// `content`: bit 19 (retained, always cleared) and bit 27 (the span
     /// rows describe the previous content). Applied as
     /// `operationalBitmap & ~clearedOnContentWrite`.
     public static let clearedOnContentWrite: Int64 =
-        hasCurrentRepresentation.rawValue | spanIndexed.rawValue
+        hasCurrentRepresentation.rawValue | spanIndexed.rawValue | factsExtracted.rawValue
 
 }
 
@@ -376,6 +381,11 @@ public extension Drawer {
     /// Mirrors Rust `Drawer::is_span_indexed()`.
     var isSpanIndexed: Bool {
         operationalBitmap & DrawerFeatureFlags.spanIndexed.rawValue != 0
+    }
+
+    /// True when bit 28 is set for the current content and active extractor.
+    var areFactsExtracted: Bool {
+        operationalBitmap & DrawerFeatureFlags.factsExtracted.rawValue != 0
     }
 
 }

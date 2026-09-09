@@ -68,6 +68,46 @@ pub struct KGFactOrigin {
     pub foreign_source_key: String,
     /// The foreign palace's own id for the record that produced the fact.
     pub foreign_record_id: String,
+
+}
+
+/// Optional machine-extraction fields threaded through the composed KGFact
+/// capture door. Manual and imported callers use `Default::default()`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KGFactExtractionMetadata {
+    pub evidence_quote: String,
+    pub evidence_start: i64,
+    pub evidence_end: i64,
+    pub evidence_start_utf8_byte: i64,
+    pub evidence_end_utf8_byte: i64,
+    pub source_digest: String,
+    pub extractor_provider_id: String,
+    pub extractor_model_id: String,
+    pub extractor_model_version: String,
+    pub extraction_schema_version: String,
+    pub search_projection: String,
+    pub search_projection_version: String,
+    pub operational_bitmap: i64,
+}
+
+impl Default for KGFactExtractionMetadata {
+    fn default() -> Self {
+        Self {
+            evidence_quote: String::new(),
+            evidence_start: -1,
+            evidence_end: -1,
+            evidence_start_utf8_byte: -1,
+            evidence_end_utf8_byte: -1,
+            source_digest: String::new(),
+            extractor_provider_id: String::new(),
+            extractor_model_id: String::new(),
+            extractor_model_version: String::new(),
+            extraction_schema_version: String::new(),
+            search_projection: String::new(),
+            search_projection_version: String::new(),
+            operational_bitmap: 0,
+        }
+    }
 }
 
 /// A knowledge-graph fact extracted from drawer content.
@@ -131,6 +171,23 @@ pub struct KGFact {
     /// `foreign_source_key` is empty, so it too must round-trip verbatim.
     pub foreign_record_id: String,
 
+    /// Verbatim evidence and its half-open source ranges. Negative offsets
+    /// denote a legacy/manual fact without machine-resolved grounding.
+    pub evidence_quote: String,
+    pub evidence_start: i64,
+    pub evidence_end: i64,
+    pub evidence_start_utf8_byte: i64,
+    pub evidence_end_utf8_byte: i64,
+
+    /// Source and extractor provenance plus the rebuildable recall projection.
+    pub source_digest: String,
+    pub extractor_provider_id: String,
+    pub extractor_model_id: String,
+    pub extractor_model_version: String,
+    pub extraction_schema_version: String,
+    pub search_projection: String,
+    pub search_projection_version: String,
+
     /// Adjective bitmap encoding state, trust, sensitivity, and
     /// exportability per spec § 5.5. Shares the encoding with
     /// `Drawer::adjective_bitmap`.
@@ -176,6 +233,18 @@ impl KGFact {
             added_by: String::new(),
             foreign_source_key: String::new(),
             foreign_record_id: String::new(),
+            evidence_quote: String::new(),
+            evidence_start: -1,
+            evidence_end: -1,
+            evidence_start_utf8_byte: -1,
+            evidence_end_utf8_byte: -1,
+            source_digest: String::new(),
+            extractor_provider_id: String::new(),
+            extractor_model_id: String::new(),
+            extractor_model_version: String::new(),
+            extraction_schema_version: String::new(),
+            search_projection: String::new(),
+            search_projection_version: String::new(),
             adjective_bitmap: 0,
             operational_bitmap: 0,
             provenance_bitmap: 0,

@@ -1,0 +1,19 @@
+[package]
+name = "fact-extraction-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Provider-neutral distilled fact extraction contract and source-grounding gate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "fact_extraction_kit"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

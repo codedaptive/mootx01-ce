@@ -56,6 +56,11 @@ pub const KIT_ID: &str = "LocusKit";
 
 /// Current schema version. Matches Swift `LocusKitSchema.version`.
 ///
+/// v20 (Distilled Fact Extraction, 2026-09-08). Delta from v19:
+/// `+ fact_extractor_models`, source-grounding and extractor-provenance
+/// columns on `kg_facts`, and a rebuildable search projection. Drawer bit 28
+/// records extraction completion for the active recipe.
+///
 /// v19 (Encoder Rerank Program, 2026-09-05). Delta from v18:
 /// `+ encoder_models` (the span-encoder registry, one row per shipped
 /// model, exactly one `is_active = 1`), `+ drawers.ssc_facts` (the
@@ -86,7 +91,7 @@ pub const KIT_ID: &str = "LocusKit";
 /// recomputed at open); v12 subject trio; v13 kg_facts identity trio; v14
 /// idx_drawers_filedAt; v15 recall_trace door/composition/laneRanks;
 /// v16–v18 adornment and distilled storage, retired at v19.
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 20;
 
 /// The lowest stored schema version `mootx01 upgrade` brings to
 /// `SCHEMA_VERSION` in one hop: the version CE 1.0.35 and 1.0.37 shipped.
@@ -118,7 +123,7 @@ pub enum SchemaUpgradePath {
 pub fn upgrade_path(stored_version: i32) -> SchemaUpgradePath {
     match stored_version {
         0 => SchemaUpgradePath::Fresh,
-        SUPPORTED_UPGRADE_FLOOR => SchemaUpgradePath::Upgrade { from: stored_version },
+        SUPPORTED_UPGRADE_FLOOR | 19 => SchemaUpgradePath::Upgrade { from: stored_version },
         SCHEMA_VERSION => SchemaUpgradePath::Current,
         other => SchemaUpgradePath::Unsupported { found: other },
     }
@@ -154,6 +159,8 @@ pub fn schema() -> SchemaDeclaration {
             snapshot_attestations_table(),
             // The span-encoder registry (Encoder Rerank Program, v19).
             encoder_models_table(),
+            // Distilled Fact Extraction provider/model registry (v20).
+            fact_extractor_models_table(),
         ],
         indices: indices(),
         migrations: vec![
@@ -162,13 +169,13 @@ pub fn schema() -> SchemaDeclaration {
             // distilled columns). Every operation is idempotent — AddColumn
             // skips a present column (PRAGMA table_info probe), CreateTable
             // and AddIndex are IF NOT EXISTS — so a fresh estate, which the
-            // runner creates at the v19 layout before replaying the ladder,
+            // runner creates at the current layout before replaying the ladder,
             // is unchanged by it. Populated estates exist at 10 (CE
             // 1.0.35/1.0.37) and at 19; nothing in between is supported here
             // (see `upgrade_path`). Matches Swift LocusKitSchema v10 → v19.
             Migration {
                 from_version: SUPPORTED_UPGRADE_FLOOR,
-                to_version: SCHEMA_VERSION,
+                to_version: 19,
                 operations: vec![
                     // v11: AND-aggregate on container_fingerprints. Default -1
                     // (AND identity) so an empty container never falsely
@@ -247,6 +254,25 @@ pub fn schema() -> SchemaDeclaration {
                         table: "drawers".to_string(),
                         column: ColumnDeclaration::text("ssc_facts").nullable(),
                     },
+                ],
+            },
+            Migration {
+                from_version: 19,
+                to_version: 20,
+                operations: vec![
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("evidenceQuote").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::int("evidenceStart").with_default(TypedValue::Int(-1)) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::int("evidenceEnd").with_default(TypedValue::Int(-1)) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::int("evidenceStartUTF8Byte").with_default(TypedValue::Int(-1)) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::int("evidenceEndUTF8Byte").with_default(TypedValue::Int(-1)) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("sourceDigest").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("extractorProviderID").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("extractorModelID").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("extractorModelVersion").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("extractionSchemaVersion").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("searchProjection").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::AddColumn { table: "kg_facts".into(), column: ColumnDeclaration::text("searchProjectionVersion").with_default(TypedValue::Text(String::new())) },
+                    SchemaOperation::CreateTable(fact_extractor_models_table()),
                 ],
             },
         ],
@@ -544,6 +570,18 @@ fn kg_facts_table() -> TableDeclaration {
             ColumnDeclaration::text("addedBy"),
             ColumnDeclaration::text("foreignSourceKey"),
             ColumnDeclaration::text("foreignRecordID"),
+            ColumnDeclaration::text("evidenceQuote"),
+            ColumnDeclaration::int("evidenceStart").with_default(TypedValue::Int(-1)),
+            ColumnDeclaration::int("evidenceEnd").with_default(TypedValue::Int(-1)),
+            ColumnDeclaration::int("evidenceStartUTF8Byte").with_default(TypedValue::Int(-1)),
+            ColumnDeclaration::int("evidenceEndUTF8Byte").with_default(TypedValue::Int(-1)),
+            ColumnDeclaration::text("sourceDigest"),
+            ColumnDeclaration::text("extractorProviderID"),
+            ColumnDeclaration::text("extractorModelID"),
+            ColumnDeclaration::text("extractorModelVersion"),
+            ColumnDeclaration::text("extractionSchemaVersion"),
+            ColumnDeclaration::text("searchProjection"),
+            ColumnDeclaration::text("searchProjectionVersion"),
             ColumnDeclaration::bitmap("adjectiveBitmap"),
             ColumnDeclaration::bitmap("operationalBitmap"),
             ColumnDeclaration::bitmap("provenanceBitmap"),
@@ -1298,6 +1336,31 @@ fn encoder_models_table() -> TableDeclaration {
     }
 }
 
+/// Distilled Fact Extraction provider/model registry. One row per recipe;
+/// `FactExtractorModelStore` is the only activation writer.
+fn fact_extractor_models_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "fact_extractor_models".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("recipe_id"),
+            ColumnDeclaration::text("provider_id"),
+            ColumnDeclaration::text("model_id"),
+            ColumnDeclaration::text("model_version"),
+            ColumnDeclaration::text("schema_version"),
+            ColumnDeclaration::text("extractor_kind"),
+            ColumnDeclaration::int("maximum_input_characters"),
+            ColumnDeclaration::int("maximum_facts_per_source"),
+            ColumnDeclaration::int("is_active").with_default(TypedValue::Int(0)),
+            ColumnDeclaration::json("ext").nullable(),
+        ],
+        primary_key: vec!["recipe_id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+        hashable: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,15 +1371,13 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
-    /// v19: one ladder entry, v10 → v19, carrying exactly the surviving
-    /// deltas. A second entry, or any operation naming a distilled or
-    /// adornment object, is the retired ladder re-appearing.
+    /// v20: v10 → v19 followed by the fact-extraction delta.
     #[test]
-    fn schema_version_is_nineteen_with_one_hop() {
-        assert_eq!(SCHEMA_VERSION, 19);
+    fn schema_version_is_twenty_with_fact_extraction_hop() {
+        assert_eq!(SCHEMA_VERSION, 20);
         assert_eq!(SUPPORTED_UPGRADE_FLOOR, 10);
         let m = schema();
-        assert_eq!(m.migrations.len(), 1);
+        assert_eq!(m.migrations.len(), 2);
         let hop = &m.migrations[0];
         assert_eq!((hop.from_version, hop.to_version), (10, 19));
         // operationalAND + subject trio + kg_facts trio + idx_drawers_filedAt
@@ -1338,6 +1399,13 @@ mod tests {
             &hop.operations[11],
             SchemaOperation::CreateTable(decl) if decl.name == "encoder_models"
         ));
+        let facts = &m.migrations[1];
+        assert_eq!((facts.from_version, facts.to_version), (19, 20));
+        assert_eq!(facts.operations.len(), 13);
+        assert!(matches!(
+            &facts.operations[12],
+            SchemaOperation::CreateTable(decl) if decl.name == "fact_extractor_models"
+        ));
         assert!(matches!(
             &hop.operations[12],
             SchemaOperation::AddColumn { table, column } if table == "drawers" && column.name == "ssc_facts"
@@ -1352,10 +1420,11 @@ mod tests {
     fn upgrade_path_accepts_only_fresh_floor_and_current() {
         assert_eq!(upgrade_path(0), SchemaUpgradePath::Fresh);
         assert_eq!(upgrade_path(10), SchemaUpgradePath::Upgrade { from: 10 });
-        assert_eq!(upgrade_path(19), SchemaUpgradePath::Current);
+        assert_eq!(upgrade_path(19), SchemaUpgradePath::Upgrade { from: 19 });
+        assert_eq!(upgrade_path(20), SchemaUpgradePath::Current);
         assert_eq!(upgrade_path(18), SchemaUpgradePath::Unsupported { found: 18 });
         assert_eq!(upgrade_path(11), SchemaUpgradePath::Unsupported { found: 11 });
-        assert_eq!(upgrade_path(20), SchemaUpgradePath::Unsupported { found: 20 });
+        assert_eq!(upgrade_path(21), SchemaUpgradePath::Unsupported { found: 21 });
     }
 
     /// Tables in the declared order, matching the Swift declaration.
@@ -1389,6 +1458,7 @@ mod tests {
                 "snapshot_registry",
                 "snapshot_attestations",
                 "encoder_models",
+                "fact_extractor_models",
             ]
         );
     }

@@ -492,7 +492,7 @@ mod tests {
 
     /// The schema leg: a pre-MXE-KH SQLite estate at the supported upgrade
     /// floor (schema 10) whose `kg_facts` table lacks the identity trio
-    /// gains the columns through the v10 → v19 hop when the backfill opens
+    /// gains the columns through the v10 → v19 → v20 ladder when the backfill opens
     /// it, and its rows migrate. Without the ladder entry this run dies with
     /// "no such column: addedBy" (Smythe CRITICAL-1, the gap MXE-KH shipped).
     #[test]
@@ -510,10 +510,17 @@ mod tests {
         let mut v10 = schema();
         v10.version = crate::schema::SUPPORTED_UPGRADE_FLOOR;
         v10.migrations.clear();
-        let trio = ["addedBy", "foreignSourceKey", "foreignRecordID"];
+        let post_v10 = [
+            "addedBy", "foreignSourceKey", "foreignRecordID", "evidenceQuote",
+            "evidenceStart", "evidenceEnd", "evidenceStartUTF8Byte",
+            "evidenceEndUTF8Byte", "sourceDigest", "extractorProviderID",
+            "extractorModelID", "extractorModelVersion", "extractionSchemaVersion",
+            "searchProjection", "searchProjectionVersion",
+        ];
         for table in v10.tables.iter_mut().filter(|t| t.name == "kg_facts") {
-            table.columns.retain(|c| !trio.contains(&c.name.as_str()));
+            table.columns.retain(|c| !post_v10.contains(&c.name.as_str()));
         }
+        v10.tables.retain(|table| table.name != "fact_extractor_models");
 
         {
             let config = EstateConfiguration::new(
