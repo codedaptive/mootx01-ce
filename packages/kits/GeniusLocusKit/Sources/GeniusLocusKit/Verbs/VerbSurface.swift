@@ -214,10 +214,13 @@ public extension GeniusLocusKit {
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func resolveNodeNames(
         _ handle: EstateHandle,
-        parentNodeIds: [String]
+        parentNodeIds: [String],
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> [String: (wing: String, room: String)] {
         let estate = try estate(for: handle)
-        return try await estate.resolveNodeNames(parentNodeIds: parentNodeIds)
+        return try await estate.resolveNodeNames(
+            parentNodeIds: parentNodeIds,
+            preservePhysicalUUIDSpellings: preservePhysicalUUIDSpellings)
     }
 
     // MARK: - recallTunnels

@@ -27,9 +27,60 @@
 use std::collections::{HashMap, HashSet};
 
 use corpus_kit::encoder::{spanner, CrossEncoderProfile, RerankDirective};
+use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::ContentKind;
 
 use crate::recall::RecallHit;
-use crate::span_rerank::{dot_query, SpanRerankVector};
+use crate::span_rerank::{dot_query, StrictSpanRerankVector, SpanRerankVector};
+
+/// Evidence carried only for the transcript operation.  Generic rerank
+/// reports retain their existing compact shape and best-effort semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrictTranscriptEvidence {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub active_model_id: Option<String>,
+    pub active_model_version: Option<String>,
+    pub query_dimension: Option<usize>,
+    pub fresh_head_candidates: usize,
+    pub scored_head_candidates: usize,
+    /// Classifier receipt, deliberately distinct from the active Arctic
+    /// encoder row above.
+    pub classifier_profile_id: Option<String>,
+    pub classifier_model_revision: Option<String>,
+    /// Fixed recipe values captured after strict validation, not supplied by
+    /// an ARIA projection default.
+    pub validated_pool_limit: Option<usize>,
+    pub validated_head_limit: Option<usize>,
+    pub validated_spans_limit: Option<usize>,
+    pub validated_rrf_k: Option<usize>,
+    /// Serving-generation receipt from the strict Synapse snapshot.
+    pub serving_generation: Option<i64>,
+    /// Every scored-head member was validated against its FNV content version.
+    pub freshness_verified: bool,
+}
+
+impl StrictTranscriptEvidence {
+    pub fn unavailable(reason: &str) -> Self {
+        Self {
+            available: false,
+            reason: Some(reason.to_string()),
+            active_model_id: None,
+            active_model_version: None,
+            query_dimension: None,
+            fresh_head_candidates: 0,
+            scored_head_candidates: 0,
+            classifier_profile_id: None,
+            classifier_model_revision: None,
+            validated_pool_limit: None,
+            validated_head_limit: None,
+            validated_spans_limit: None,
+            validated_rrf_k: None,
+            serving_generation: None,
+            freshness_verified: false,
+        }
+    }
+}
 
 /// The three adjustable maxima the stage runs under, resolved from the estate
 /// manifest and clamped to the packaged profile (never above it).
@@ -105,6 +156,8 @@ pub struct CrossEncoderReport {
     pub cold_load: bool,
     /// Wall-clock milliseconds of the stage (scorer load excluded), when it ran.
     pub stage_millis: Option<u64>,
+    /// Present only for an explicit strict transcript request.
+    pub strict_transcript: Option<StrictTranscriptEvidence>,
 }
 
 impl CrossEncoderReport {
@@ -123,6 +176,7 @@ impl CrossEncoderReport {
             scored: 0,
             cold_load: false,
             stage_millis: None,
+            strict_transcript: None,
         }
     }
 
@@ -141,6 +195,7 @@ impl CrossEncoderReport {
             scored: 0,
             cold_load: false,
             stage_millis: None,
+            strict_transcript: None,
         }
     }
 
@@ -186,6 +241,118 @@ pub mod reason {
     pub const NO_QUERY_TEXT: &str = "no_query_text";
     /// The scorer failed while scoring; the incoming order stands.
     pub const SCORER_FAILED: &str = "scorer_failed";
+    pub const STRICT_SOURCE_UNAVAILABLE: &str = "strict_source_unavailable";
+    pub const STRICT_PROFILE_MISMATCH: &str = "strict_profile_mismatch";
+    pub const STRICT_QUERY_INVALID: &str = "strict_query_invalid";
+    pub const STRICT_TRANSCRIPT_INELIGIBLE: &str = "strict_transcript_ineligible";
+    pub const STRICT_SPANS_UNAVAILABLE: &str = "strict_spans_unavailable";
+    pub const STRICT_SPANS_STALE: &str = "strict_spans_stale";
+    pub const STRICT_PARTIAL_CLASSIFIER: &str = "strict_partial_classifier";
+    pub const SERVING_STATE_CHANGED: &str = "serving_state_changed";
+}
+
+/// Source-based transcript admission. A declared transcript kind is
+/// authoritative; legacy content must be a complete sequence of role turns.
+/// Continuation lines belong to the preceding turn, so quoted dialogue and
+/// prose-first documents cannot qualify by mentioning role labels later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptEligibility {
+    DeclaredTranscript,
+    LegacyRoleTurns,
+    NotTranscript,
+}
+
+pub fn classify_transcript(drawer: &Drawer) -> TranscriptEligibility {
+    if drawer.content_kind() == ContentKind::Transcript {
+        return TranscriptEligibility::DeclaredTranscript;
+    }
+    fn header(line: &str) -> Option<&str> {
+        let trimmed = line.trim();
+        let (role, body) = trimmed.split_once(':')?;
+        matches!(role.trim().to_ascii_lowercase().as_str(),
+            "user" | "assistant" | "system" | "human" | "ai" | "speaker" | "agent" | "customer")
+            .then_some(body)
+    }
+    let Some(first) = drawer.content.lines().find(|line| !line.trim().is_empty()) else {
+        return TranscriptEligibility::NotTranscript;
+    };
+    if header(first).is_none() {
+        return TranscriptEligibility::NotTranscript;
+    }
+    let mut turns = 0usize;
+    let mut current_turn_has_body = false;
+    for line in drawer.content.lines() {
+        if let Some(body) = header(line) {
+            if turns > 0 && !current_turn_has_body {
+                return TranscriptEligibility::NotTranscript;
+            }
+            turns += 1;
+            current_turn_has_body = !body.trim().is_empty();
+        } else if turns > 0 && !line.trim().is_empty() {
+            current_turn_has_body = true;
+        }
+    }
+    if turns >= 2 && current_turn_has_body {
+        TranscriptEligibility::LegacyRoleTurns
+    } else {
+        TranscriptEligibility::NotTranscript
+    }
+}
+
+/// Preserve the incoming order while retaining only records eligible for the
+/// strict transcript recipe. The coordinator bounds the input to the stage
+/// pool before calling this helper.
+pub fn strict_transcript_pool(hits: &[RecallHit]) -> Vec<RecallHit> {
+    hits.iter()
+        .filter(|hit| hit.drawer.as_ref().is_some_and(|drawer| {
+            // The current adjective ceiling does not admit capture-sensitive
+            // text. Fail closed before a classifier receives any source body.
+            matches!((drawer.provenance >> 30) & 0x3f, 0 | 16)
+                && classify_transcript(drawer) != TranscriptEligibility::NotTranscript
+        }))
+        .cloned()
+        .collect()
+}
+
+/// Rebuild strict source spans from validated stored rows.  Unlike
+/// `select_spans`, this never falls back to Spanner and rejects stale,
+/// malformed, or dimension-mismatched rows before the classifier sees a pair.
+pub fn select_strict_spans(
+    content: &str,
+    rows: &[StrictSpanRerankVector],
+    query: &[f32],
+    limit: usize,
+    expected_content_version: &str,
+) -> Result<Vec<String>, &'static str> {
+    if rows.is_empty() || limit == 0 {
+        return Err(reason::STRICT_SPANS_UNAVAILABLE);
+    }
+    let words = spanner::words(content);
+    if words.is_empty() {
+        return Err(reason::STRICT_SPANS_UNAVAILABLE);
+    }
+    let mut ranked: Vec<(&StrictSpanRerankVector, f32)> = rows
+        .iter()
+        .map(|row| {
+            if row.content_version != expected_content_version
+                || row.vector.int8.len() != query.len()
+                || !row.vector.scale.is_finite()
+                || row.vector.scale <= 0.0
+                || row.vector.start_word >= row.vector.end_word
+                || row.vector.end_word > words.len()
+            {
+                return Err(if row.content_version != expected_content_version { reason::STRICT_SPANS_STALE } else { reason::STRICT_SPANS_UNAVAILABLE });
+            }
+            Ok((row, dot_query(query, &row.vector.int8, row.vector.scale)))
+        })
+        .collect::<Result<_, _>>()?;
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.vector.index.cmp(&b.0.vector.index)));
+    let spans: Vec<String> = ranked
+        .iter()
+        .take(limit)
+        .map(|(row, _)| words[row.vector.start_word..row.vector.end_word].join(" "))
+        .collect();
+    if spans.is_empty() { Err(reason::STRICT_SPANS_UNAVAILABLE) } else { Ok(spans) }
 }
 
 /// The `degraded_stages` entry every degraded apply appends.

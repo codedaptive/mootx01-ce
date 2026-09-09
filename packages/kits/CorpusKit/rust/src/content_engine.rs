@@ -430,6 +430,28 @@ impl CorpusContentEngine {
         source: Arc<dyn CorpusContentSource>,
         models: Vec<EmbeddingModelConfig>,
     ) -> CorpusKitResult<Self> {
+        Self::open_with_policy(storage, configuration, source, models, false)
+    }
+
+    /// Open existing compatible derived stores without migrations or policy writes.
+    /// Query providers and persisted counts are rehydrated normally. Callers must
+    /// also refrain from invoking mutation/reconciliation operations on this engine.
+    pub fn open_readonly(
+        storage: Arc<dyn Storage>,
+        configuration: CorpusContentConfiguration,
+        source: Arc<dyn CorpusContentSource>,
+        models: Vec<EmbeddingModelConfig>,
+    ) -> CorpusKitResult<Self> {
+        Self::open_with_policy(storage, configuration, source, models, true)
+    }
+
+    fn open_with_policy(
+        storage: Arc<dyn Storage>,
+        configuration: CorpusContentConfiguration,
+        source: Arc<dyn CorpusContentSource>,
+        models: Vec<EmbeddingModelConfig>,
+        readonly: bool,
+    ) -> CorpusKitResult<Self> {
         if models.is_empty() {
             return Err(CorpusKitError::InvalidConfiguration(
                 "CorpusContentEngine requires at least one embedding model".into(),
@@ -452,37 +474,67 @@ impl CorpusContentEngine {
             }
             CorpusOperatingMode::Attached => attached_declaration(),
         };
-        storage
-            .migrate(&profile)
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        #[cfg(feature = "standalone-passages")]
-        if configuration.mode() == CorpusOperatingMode::Standalone {
-            crate::index_configuration_store::CorpusIndexConfigurationStore::new(Arc::clone(
-                &storage,
-            ))
-            .bind(configuration.index_unit())?;
-        }
-        // SECURITY: a populated estate opened before the VectorKit → SynapseKit
-        // rename keys its two vector-tier ledger rows (store and claims) by the
-        // old ids; migrating under the new ids without moving those rows
-        // replays both ladders from version 0 — the vector ladder folds every
-        // row's generation to 0. Both renames run first; a conflicted ledger
-        // (rows under both ids) is left as it is with one warning and the
-        // estate still opens — each migrate below reads its ladder position
-        // from the current-id row, so nothing replays.
-        VectorStore::prepare_schema_ledger(storage.as_ref())
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        storage
-            .migrate(&VectorStore::schema_declaration())
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        VectorRepresentationClaims::prepare_schema_ledger(storage.as_ref())
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        storage
-            .migrate(&VectorRepresentationClaims::schema_declaration())
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        if readonly {
+            for declaration in [
+                profile,
+                VectorStore::schema_declaration(),
+                VectorRepresentationClaims::schema_declaration(),
+            ] {
+                let current = storage.current_schema_version_for(&declaration.kit_id)
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+                if current != declaration.version {
+                    return Err(CorpusKitError::StoreUnavailable(format!(
+                        "read-only corpus open requires compatible {} schema {}; found {}. Open writable to upgrade first",
+                        declaration.kit_id, declaration.version, current
+                    )));
+                }
+            }
+            #[cfg(feature = "standalone-passages")]
+            if configuration.mode() == CorpusOperatingMode::Standalone {
+                use crate::index_configuration_store::{CorpusIndexConfigurationStore, policy_fingerprint};
+                let existing = CorpusIndexConfigurationStore::new(Arc::clone(&storage)).fingerprint()?;
+                if existing.as_deref() != Some(policy_fingerprint(configuration.index_unit()).as_str()) {
+                    return Err(CorpusKitError::InvalidConfiguration(
+                        "read-only corpus open requires an existing matching index policy".into(),
+                    ));
+                }
+            }
+        } else {
+            storage
+                .migrate(&profile)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            #[cfg(feature = "standalone-passages")]
+            if configuration.mode() == CorpusOperatingMode::Standalone {
+                crate::index_configuration_store::CorpusIndexConfigurationStore::new(Arc::clone(
+                    &storage,
+                ))
+                .bind(configuration.index_unit())?;
+            }
+            // SECURITY: a populated estate opened before the VectorKit → SynapseKit
+            // rename keys its two vector-tier ledger rows (store and claims) by the
+            // old ids; migrating under the new ids without moving those rows
+            // replays both ladders from version 0 — the vector ladder folds every
+            // row's generation to 0. Both renames run first; a conflicted ledger
+            // (rows under both ids) is left as it is with one warning and the
+            // estate still opens — each migrate below reads its ladder position
+            // from the current-id row, so nothing replays.
+            VectorStore::prepare_schema_ledger(storage.as_ref())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            storage
+                .migrate(&VectorStore::schema_declaration())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            VectorRepresentationClaims::prepare_schema_ledger(storage.as_ref())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            storage
+                .migrate(&VectorRepresentationClaims::schema_declaration())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
 
-        let inverted_index = InvertedIndexStore::open_for_storage(&storage)
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        }
+        let inverted_index = if readonly {
+            InvertedIndexStore::open_readonly_for_storage(&storage)
+        } else {
+            InvertedIndexStore::open_for_storage(&storage)
+        }.map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         let vector_store = Arc::new(VectorStore::new(
             Arc::clone(&storage),
             VectorStore::default_sidecar_path(&storage),

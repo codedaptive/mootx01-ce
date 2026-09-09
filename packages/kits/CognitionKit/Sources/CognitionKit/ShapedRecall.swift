@@ -154,29 +154,10 @@ public struct ShapedRecall: Recipe {
         // preference) the preset roster steers. `.full` hydration so each hit
         // carries its body for the result projection. The shape is passed through
         // unchanged; when `nil`, the engine fuses uniformly.
-        let frame = LocusKit.RecallFrame(
-            filterChain: [input.filter],
-            hydrationLevel: .full,
-            limit: input.limit,
-            ordering: .byCaptureTimeDesc)
-        let request = GLKRecallRequest(
-            frame: frame,
-            mode: .unionBest,
-            scoring: .matrixAware,
-            limit: input.limit,
-            fallback: .allowDegraded,
-            queryText: input.query,
-            origin: .internal,
-            recallShape: shape,
-            // frontierK: caller-supplied per-call pool depth override (see
-            // Input.frontierK). Nil preserves byte-identical behaviour when
-            // the argument is absent. The engine clamps to [64, 256] so
-            // out-of-range caller values are silently clamped rather than
-            // rejected here.
-            frontierK: input.frontierK,
-            // Sub-span scoring is an additive-cost stage this caller does not
-            // request; every caller names the switch (ruling 2026-09-07).
-            subSpanScoring: .off)
+        let request = Self.balancedRequest(
+            query: input.query, filter: input.filter, limit: input.limit,
+            shape: shape, frontierK: input.frontierK,
+            fallback: .allowDegraded)
         let result = try await kit.recall(estate, request)
 
         // Project each hit into a PreciseMatch. The hits arrive in the shaped
@@ -193,6 +174,44 @@ public struct ShapedRecall: Recipe {
         }
 
         return Output(matches: matches, appliedPreset: appliedPreset)
+    }
+
+    /// The common balanced unionBest composition. Transcript recall uses this
+    /// lower-level builder to add its strict directive without invoking a
+    /// public tool or duplicating the first-stage policy.
+    static func balancedRequest(
+        query: String,
+        filter: LocusKit.Filter,
+        limit: Int,
+        shape: RecallShape? = nil,
+        frontierK: Int? = nil,
+        fallback: RecallFallbackPolicy
+    ) -> GLKRecallRequest {
+        let frame = LocusKit.RecallFrame(
+            filterChain: [filter], hydrationLevel: .full, limit: limit,
+            ordering: .byCaptureTimeDesc)
+        return GLKRecallRequest(
+            frame: frame, mode: .unionBest, scoring: .matrixAware, limit: limit,
+            fallback: fallback, queryText: query, origin: .internal,
+            recallShape: shape, frontierK: frontierK, subSpanScoring: .off,
+            rerankDirective: nil)
+    }
+
+    /// The transcript-only balanced composition. Keeping construction here lets
+    /// CognitionKit select the strict lower-layer policy without importing the
+    /// CorpusKit implementation type directly.
+    static func balancedTranscriptRequest(
+        query: String,
+        filter: LocusKit.Filter
+    ) -> GLKRecallRequest {
+        let frame = LocusKit.RecallFrame(
+            filterChain: [filter], hydrationLevel: .full, limit: 50,
+            ordering: .byCaptureTimeDesc)
+        return GLKRecallRequest(
+            frame: frame, mode: .unionBest, scoring: .matrixAware, limit: 50,
+            fallback: .allowDegraded, queryText: query, origin: .internal,
+            recallShape: nil, frontierK: nil, subSpanScoring: .off,
+            rerankDirective: .strictTranscript())
     }
 
     /// Session-hybrid recall path: hybridRecall scoredLane + temporal window

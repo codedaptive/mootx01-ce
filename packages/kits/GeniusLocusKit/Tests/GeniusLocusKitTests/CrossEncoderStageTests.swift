@@ -27,6 +27,7 @@ import CorpusKit
 import CorpusKitProviders
 import PersistenceKit
 import PersistenceKitInMemory
+@testable import SynapseKit
 @testable import GeniusLocusKit
 
 // MARK: - Fixture
@@ -113,6 +114,26 @@ struct CrossEncoderSpanSelectionTests {
     }
 }
 
+@Suite("Transcript eligibility")
+struct TranscriptEligibilityTests {
+    private func drawer(_ content: String) -> Drawer {
+        Drawer(content: content, parentNodeId: "room", addedBy: "test",
+               filedAt: .distantPast, embeddingModelID: "test")
+    }
+
+    @Test("declared and multiline legacy turns qualify; prose and quoted dialogue do not")
+    func legacyRoleTurns() {
+        #expect(TranscriptEligibility.classify(drawer("\nUser:\nThe LME summary is attached.\nIt includes the evidence receipt.\n\nAssistant: I will preserve the receipt\nand keep the original query bytes.")) == .legacyRoleTurns)
+        #expect(TranscriptEligibility.classify(drawer("The report begins with an editorial note.\nUser: where is the file?\nAssistant: it is in the cabinet")) == .notTranscript)
+        #expect(TranscriptEligibility.classify(drawer("> User: where is the file?\n> Assistant: it is in the cabinet")) == .notTranscript)
+        #expect(TranscriptEligibility.classify(Drawer(
+            content: "ordinary prose remains authoritative when declared transcript", parentNodeId: "room",
+            addedBy: "test", filedAt: .distantPast, embeddingModelID: "test",
+            operationalBitmap: Int64(ContentKind.transcript.rawValue) << 6
+        )) == .declaredTranscript)
+    }
+}
+
 // MARK: - Director
 
 /// Records every (query, spans) it scores; a span carrying `favored` wins.
@@ -134,6 +155,31 @@ private struct FakePairScorer: PairScorer {
     }
 }
 
+private struct FixedStrictSpanEncoder: SpanEncoder {
+    let spec: EncoderModelSpec
+
+    func encodeQuery(_ text: String) async throws -> [Float] {
+        Array(repeating: Float(1.0) / Float(384.0).squareRoot(), count: 384)
+    }
+
+    func encodeSpans(_ spans: [String]) async throws -> [[Float]] {
+        spans.map { _ in Array(repeating: Float(1.0) / Float(384.0).squareRoot(), count: 384) }
+    }
+}
+
+private struct GenerationFlippingPairScorer: PairScorer {
+    let store: VectorStore
+    let modelID: String
+    let profile: CrossEncoderProfile = .minilmL6
+    var backend: String { "generation-flip" }
+
+    func score(query: String, spans: [String]) async throws -> [Float] {
+        _ = try await store.beginShadowGeneration(modelIDs: [modelID])
+        try await store.publishShadowGeneration(modelIDs: [modelID])
+        return Array(repeating: 1, count: spans.count)
+    }
+}
+
 @Suite("Cross-encoder stage in recall", .serialized)
 struct CrossEncoderStageDirectorTests {
 
@@ -142,7 +188,10 @@ struct CrossEncoderStageDirectorTests {
     /// 200 drawers; every fourth carries the query terms at differing lengths
     /// (the SpanRerankStageTests corpus) and every drawer carries a unique
     /// `tag<i>zz` token so a scorer can favour exactly one.
-    private func openEstate(owner ownerID: String) async throws -> (kit: GeniusLocusKit, handle: EstateHandle) {
+    private func openEstate(
+        owner ownerID: String,
+        legacyTranscriptContent: Bool = false
+    ) async throws -> (kit: GeniusLocusKit, handle: EstateHandle) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: ownerID)
         let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
@@ -157,9 +206,12 @@ struct CrossEncoderStageDirectorTests {
             })])
         for i in 0..<200 {
             let padding = (0..<(i % 9 + 1)).map { "filler\($0 + i)" }.joined(separator: " ")
-            let content = i % 4 == 0
+            let baseContent = i % 4 == 0
                 ? "ledger note tag\(i)zz \(padding) reconciled by clerk \(i % 13)"
                 : "invoice archive tag\(i)zz \(padding) filed by assistant \(i % 11)"
+            let content = legacyTranscriptContent
+                ? "User: \(baseContent)\nAssistant: acknowledged tag\(i)zz"
+                : baseContent
             let frame = CaptureFrame(content: content, channel: .typed, room: "cross-stage-tests",
                                      latticeAnchor: .udc("000"), addedBy: "cross-stage-tests",
                                      embeddingModelID: "test-model-v1")
@@ -176,6 +228,44 @@ struct CrossEncoderStageDirectorTests {
             mode: .unionBest, scoring: .matrixAware, limit: limit,
             fallback: .failClosed, queryText: query, origin: .internal,
             frontierK: frontierK, rerankDirective: directive)
+    }
+
+    private func strictStageFixture() async throws -> (
+        kit: GeniusLocusKit, handle: EstateHandle, store: VectorStore, hit: RecallHit
+    ) {
+        let (kit, handle) = try await openEstate(owner: "ce-strict-fixture-\(UUID().uuidString)")
+        let content = "User:\nalpha beta gamma delta epsilon zeta\nThe LME receipt remains attached.\n\nAssistant: eta theta iota kappa lambda mu\nI will retain the original query bytes."
+        let drawer = try await kit.capture(handle, CaptureFrame(
+            content: content, channel: .typed, room: "cross-stage-tests",
+            latticeAnchor: .udc("000"), addedBy: "cross-stage-tests",
+            embeddingModelID: "test-model-v1"))
+        let vectorStorage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        try await vectorStorage.open(schema: VectorStore.schemaDeclaration)
+        let store = VectorStore(storage: vectorStorage)
+        let record = GeniusLocusKit.defaultEncoderModelRow(isActive: true)
+        let encoder = FixedStrictSpanEncoder(spec: EncoderModelSpec(row: record))
+        try await kit.seedDefaultEncoderModelIfAbsent(for: handle)
+        await kit.registerSpanEncoder(encoder, for: handle)
+        await kit.registerSpanRerank(
+            SpanEncoderQuerySeam(encoder: encoder),
+            spanVectors: SynapseSpanVectorReader(store: store), for: handle)
+        let contentVersion = SpanContentVersion.fnv1a64(content)
+        try await store.writeSpanVectors(itemID: drawer.id, modelID: record.modelID,
+                                         modelVersion: record.modelVersion, spans: [
+            SpanVectorInput(index: 0, int8: Array(repeating: 1, count: 384), scale: 0.01,
+                            startWord: 0, endWord: 4, contentVersion: contentVersion),
+            SpanVectorInput(index: 1, int8: Array(repeating: 1, count: 384), scale: 0.01,
+                            startWord: 4, endWord: 8, contentVersion: contentVersion),
+            SpanVectorInput(index: 2, int8: Array(repeating: 1, count: 384), scale: 0.01,
+                            startWord: 8, endWord: 12, contentVersion: contentVersion),
+        ], filedAt: Self.t0)
+        let hit = RecallHit(id: drawer.id, drawer: drawer, sources: [.locusBitmap],
+                            score: .locus(1), explanation: [])
+        return (kit, handle, store, hit)
+    }
+
+    private func strictRequest(query: String) -> GLKRecallRequest {
+        request(limit: 1, query: query, directive: .strictTranscript())
     }
 
     /// The page an apply widens to: the pool as the limit, at the frontier the
@@ -301,6 +391,152 @@ struct CrossEncoderStageDirectorTests {
         #expect(failed.crossEncoder?.status == .degraded)
         #expect(failed.crossEncoder?.reason == CrossEncoderStage.Reason.scorerFailed)
         #expect(failed.degradedStages.contains(CrossEncoderStage.degradedStage))
+    }
+
+    @Test("strict transcript directive propagates typed unavailable evidence")
+    func strictTranscriptUnavailable() async throws {
+        let (kit, handle) = try await openEstate(
+            owner: "ce-strict-unavailable",
+            legacyTranscriptContent: true
+        )
+        try await kit.provisionCrossEncoderLimits(pool: 8, head: 4, spans: 1, for: handle)
+        let result = try await kit.recall(handle, request(directive: .strictTranscript()))
+        let report = try #require(result.crossEncoder)
+        let outcome = try #require(result.strictTranscriptRerank)
+        #expect(report.status == .degraded)
+        #expect(outcome.status == .unavailable)
+        #expect(outcome.reason == .activeEncoderUnavailable)
+        #expect(outcome == report.strictTranscript)
+        #expect(outcome.policyVersion == StrictTranscriptRerankOutcome.policyVersion)
+        #expect(CrossEncoderProfile.minilmL6Revision == "233902d25c440f23af6f7d6e94d2946bac0bee0a")
+        #expect((report.pool, report.head, report.spans) == (50, 30, 3))
+        #expect(result.hits.count == 20)
+    }
+
+    @Test("strict scorer receives the original whitespace and newline query bytes")
+    func strictQueryPreservesRawBytes() async throws {
+        let fixture = try await strictStageFixture()
+        let rawQuery = "  alpha\n"
+        let log = ScoreLog()
+        await fixture.kit.registerPairScorer(
+            FakePairScorer(favored: "alpha", log: log, failing: false), for: fixture.handle)
+        let result = await fixture.kit.runCrossEncoderStage(
+            handle: fixture.handle, request: strictRequest(query: rawQuery),
+            directive: .strictTranscript(), profile: .minilmL6,
+            limits: CrossEncoderLimits(profile: .minilmL6), hits: [fixture.hit])
+        let outcome = try #require(result.report.strictTranscript)
+        #expect(result.report.status == .applied)
+        #expect(await log.calls.map(\.query) == [rawQuery])
+        #expect(outcome.classifierProfileID == CrossEncoderProfile.minilmL6.modelID)
+        #expect(outcome.classifierModelRevision == CrossEncoderProfile.minilmL6Revision)
+        #expect(outcome.encoderModelID == EncoderModelSeed.modelID)
+        #expect(outcome.encoderModelVersion == EncoderModelSeed.modelVersion)
+        #expect((outcome.validatedPoolLimit, outcome.validatedHeadLimit,
+                 outcome.validatedSpansLimit, outcome.validatedRRFK) == (50, 30, 3, 60))
+        #expect(outcome.servingGeneration == 0 && outcome.freshnessVerified)
+    }
+
+    @Test("strict rerank filters mixed pools and refuses an all-ineligible pool before the classifier")
+    func strictIneligibleContentRefusesBeforeClassifier() async throws {
+        let fixture = try await strictStageFixture()
+        let log = ScoreLog()
+        await fixture.kit.registerPairScorer(
+            FakePairScorer(favored: "alpha", log: log, failing: false), for: fixture.handle)
+        let prose = Drawer(content: "The report begins with an editorial note.\nUser: alpha",
+                           parentNodeId: "room", addedBy: "test", filedAt: Self.t0,
+                           embeddingModelID: "test-model-v1")
+        let ineligible = RecallHit(id: prose.id, drawer: prose, sources: [.locusBitmap],
+                                   score: .locus(1), explanation: [])
+        let result = await fixture.kit.runCrossEncoderStage(
+            handle: fixture.handle, request: strictRequest(query: "alpha"),
+            directive: .strictTranscript(), profile: .minilmL6,
+            limits: CrossEncoderLimits(profile: .minilmL6), hits: [fixture.hit, ineligible])
+        #expect(result.report.status == .applied)
+        #expect(result.hits.map(\.id) == [fixture.hit.id])
+        #expect(await log.calls.count == 1)
+
+        let refused = await fixture.kit.runCrossEncoderStage(
+            handle: fixture.handle, request: strictRequest(query: "alpha"),
+            directive: .strictTranscript(), profile: .minilmL6,
+            limits: CrossEncoderLimits(profile: .minilmL6), hits: [ineligible])
+        #expect(refused.hits.isEmpty)
+        #expect(refused.report.status == .degraded)
+        #expect(refused.report.strictTranscript?.reason == .ineligibleTranscript)
+        #expect(await log.calls.count == 1)
+    }
+
+    @Test("strict transcript provenance admission runs before classifier exposure")
+    func strictCaptureProvenanceAdmission() async throws {
+        let fixture = try await strictStageFixture()
+        let log = ScoreLog()
+        await fixture.kit.registerPairScorer(
+            FakePairScorer(favored: "alpha", log: log, failing: false), for: fixture.handle)
+        let original = try #require(fixture.hit.drawer)
+        for raw in [Int64(0), 16, 32, 48, 63] {
+            let drawer = Drawer(
+                id: original.id, content: original.content,
+                parentNodeId: original.parentNodeId, addedBy: "test", filedAt: Self.t0,
+                embeddingModelID: "test-model-v1", provenance: raw << 30)
+            let hit = RecallHit(id: drawer.id, drawer: drawer, sources: [.locusBitmap],
+                                score: .locus(1), explanation: [])
+            let result = await fixture.kit.runCrossEncoderStage(
+                handle: fixture.handle, request: strictRequest(query: "alpha"),
+                directive: .strictTranscript(), profile: .minilmL6,
+                limits: CrossEncoderLimits(profile: .minilmL6), hits: [hit])
+            if raw == 0 || raw == 16 {
+                #expect(result.report.status == .applied)
+                #expect(result.hits.map(\.id) == [original.id])
+            } else {
+                #expect(result.hits.isEmpty)
+                #expect(result.report.strictTranscript?.reason == .ineligibleTranscript)
+                #expect(await log.calls.count == 2)
+            }
+        }
+        #expect(await log.calls.count == 2)
+    }
+
+    @Test("strict rerank refuses a partial Synapse snapshot with one malformed row")
+    func strictMalformedSpanSnapshotRefuses() async throws {
+        let fixture = try await strictStageFixture()
+        let record = GeniusLocusKit.defaultEncoderModelRow(isActive: true)
+        _ = try await fixture.store.storage.rowStore.delete(
+            table: "vectors",
+            where: .and([
+                .eq(Column(table: "vectors", name: "item_id"), .text(fixture.hit.id)),
+                .eq(Column(table: "vectors", name: "model_id"), .text(record.modelID)),
+                .eq(Column(table: "vectors", name: "vector_index"), .int(1)),
+                .eq(Column(table: "vectors", name: "kind"), .int(Int64(VectorKind.int8.rawValue))),
+                .eq(Column(table: "vectors", name: "generation"), .int(0)),
+            ]))
+        _ = try await fixture.store.storage.rowStore.insert(table: "vectors", values: [
+            "id": .uuid(UUID()), "item_id": .text(fixture.hit.id), "vector_index": .int(1),
+            "model_id": .text(record.modelID), "model_version": .text(record.modelVersion),
+            "kind": .int(Int64(VectorKind.int8.rawValue)), "dim": .int(384),
+            "payload": .blob(Data(repeating: 1, count: 384)), "scale": .float(0.01),
+            "filed_at": .timestamp(Self.t0), "ext": .text("bad-ext"), "generation": .int(0),
+        ])
+        await fixture.kit.registerPairScorer(
+            FakePairScorer(favored: "alpha", log: ScoreLog(), failing: false), for: fixture.handle)
+        let result = await fixture.kit.runCrossEncoderStage(
+            handle: fixture.handle, request: strictRequest(query: "alpha"),
+            directive: .strictTranscript(), profile: .minilmL6,
+            limits: CrossEncoderLimits(profile: .minilmL6), hits: [fixture.hit])
+        #expect(result.report.strictTranscript?.reason == .spansStaleOrMalformed)
+        #expect(result.report.status == .degraded)
+    }
+
+    @Test("strict rerank refuses when the Synapse serving generation changes while scoring")
+    func strictServingGenerationFlipRefuses() async throws {
+        let fixture = try await strictStageFixture()
+        let record = GeniusLocusKit.defaultEncoderModelRow(isActive: true)
+        await fixture.kit.registerPairScorer(
+            GenerationFlippingPairScorer(store: fixture.store, modelID: record.modelID), for: fixture.handle)
+        let result = await fixture.kit.runCrossEncoderStage(
+            handle: fixture.handle, request: strictRequest(query: "alpha"),
+            directive: .strictTranscript(), profile: .minilmL6,
+            limits: CrossEncoderLimits(profile: .minilmL6), hits: [fixture.hit])
+        #expect(result.report.strictTranscript?.reason == .servingStateChanged)
+        #expect(result.report.status == .degraded)
     }
 
     @Test("close drops the scorer slot")

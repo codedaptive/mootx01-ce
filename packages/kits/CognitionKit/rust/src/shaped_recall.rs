@@ -24,7 +24,7 @@ use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallShape,
 };
-use genius_locus_kit::EstateCoordinator;
+use genius_locus_kit::{EstateCoordinator, RerankDirective};
 use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
 
 use crate::error::{RecipeRunError, SubstrateError};
@@ -41,6 +41,29 @@ pub struct ShapedRecallOutput {
     /// The preset name that was applied. Echoes the requested preset, or
     /// `"balanced"` when an unknown name degraded to unsteered recall.
     pub applied_preset: String,
+}
+
+/// The unsteered balanced composition shared by shaped and transcript recall.
+/// It is kept below the public JSON/tool layer so the specialised operation
+/// can add a typed strict directive without constructing a second recipe.
+pub(crate) fn balanced_union_best_request(
+    query: &str,
+    filter: Filter,
+    limit: usize,
+    frontier_k: Option<usize>,
+    rerank_directive: Option<RerankDirective>,
+) -> GLKRecallRequest {
+    let frame = RecallFrame {
+        filter_chain: vec![filter], hydration_level: HydrationLevel::Full,
+        limit: Some(limit), ordering: Ordering::ByCaptureTimeDesc, as_of: None, trace_limit: None,
+    };
+    GLKRecallRequest {
+        frame, mode: GLKRecallMode::UnionBest, scoring: GLKRecallScoring::MatrixAware,
+        limit, fallback: RecallFallbackPolicy::AllowDegraded, query_text: Some(query.to_string()), trace_limit: None,
+        origin: genius_locus_kit::recall::RecallOrigin::Internal, recall_shape: None, door: None, composition: None,
+        frontier_k, anomalous_filter: None, sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
+        rerank_directive,
+    }
 }
 
 /// Recall `query` with the named RecallShape `preset` applied, returning up to
@@ -109,41 +132,8 @@ pub fn run(
     // preset roster steers. `.full` hydration so each hit carries its body for the
     // projection. The shape passes through unchanged; when `None`, fusion is
     // uniform.
-    let frame = RecallFrame {
-        filter_chain: vec![filter],
-        hydration_level: HydrationLevel::Full,
-        limit: Some(limit),
-        ordering: Ordering::ByCaptureTimeDesc,
-        as_of: None,
-        trace_limit: None,
-    };
-    let request = GLKRecallRequest {
-        frame,
-        mode: GLKRecallMode::UnionBest,
-        scoring: GLKRecallScoring::MatrixAware,
-        limit,
-        fallback: RecallFallbackPolicy::AllowDegraded,
-        query_text: Some(query.to_string()),
-        trace_limit: None,
-        // Internal origin (the default): a recipe is an internal read, so no
-        // recall-trace rows are written (B-10a).
-        origin: genius_locus_kit::recall::RecallOrigin::Internal,
-        recall_shape: shape,
-        // W2.5 Track R(a): recipes are internal-origin — no trace rows are
-        // written, so door/composition stay None.
-        door: None,
-        composition: None,
-        // Caller-supplied pool depth override (see `frontier_k` param above).
-        // None = engine default, byte-identical to today. Clamped to [64, 256]
-        // by the coordinator. Mirrors Swift ShapedRecall.run GLKRecallRequest.frontierK.
-        frontier_k,
-        // §11.18: internal recall — no anomalous-flag filter applied.
-        anomalous_filter: None,
-        // Sub-span scoring is an additive-cost stage this recipe does not
-        // request; every caller names the switch (ruling 2026-09-07).
-        sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
-        rerank_directive: None,
-    };
+    let mut request = balanced_union_best_request(query, filter, limit, frontier_k, None);
+    request.recall_shape = shape;
     let result = coord
         .recall_scored(handle, request, now)
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;

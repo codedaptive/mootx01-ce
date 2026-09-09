@@ -17,7 +17,7 @@ use persistence_kit::{BackendConfiguration, Storage};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 
 // MARK: — InvertedIndexStore
 
@@ -104,6 +104,24 @@ impl InvertedIndexStore {
             _ => Connection::open_in_memory()?,
         };
         Self::open(conn)
+    }
+
+    /// Open existing SQLite index tables without DDL or a writable connection.
+    /// Non-SQLite backends retain their ephemeral index and write no durable data.
+    pub fn open_readonly_for_storage(storage: &Arc<dyn Storage>) -> Result<Self, rusqlite::Error> {
+        match &storage.configuration().backend {
+            BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
+                let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                persistence_kit::apply_install_encryption_to_conn(&conn, path)?;
+                conn.busy_timeout(std::time::Duration::from_secs_f64(*busy_timeout_secs))?;
+                // Validate the columns used by query hydration, without creating
+                // missing tables or reading the complete index at startup.
+                conn.prepare("SELECT term, item_id, freq FROM iix_termfreqs LIMIT 0")?;
+                conn.prepare("SELECT item_id, length FROM iix_doclens LIMIT 0")?;
+                Ok(Self { state: Mutex::new(StoreState { conn, cached: None }) })
+            }
+            _ => Self::open(Connection::open_in_memory()?),
+        }
     }
 
     fn create_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
