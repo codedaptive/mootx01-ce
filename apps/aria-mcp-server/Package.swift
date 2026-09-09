@@ -72,5 +72,25 @@ let package = Package(
             ],
             path: "Sources/aria-mcp"
         ),
+        // The command-line surface is the only part of this executable that
+        // can be tested without opening an estate, and it is the part that
+        // decides which estate opens. Twin of the Rust bin's inline
+        // `parse_arguments` tests.
+        .testTarget(
+            name: "aria-mcpTests",
+            dependencies: [
+                "aria-mcp",
+                // GeniusLocusKit needed for EstateCatalog.configurationDirectoryOverride
+                // in EstateSelectionTests (the test seam that redirects the catalog dir).
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                // LocusKit needed for LocusKit.hintRoom in charter-seeding tests.
+                .product(name: "LocusKit", package: "LocusKit"),
+                // PersistenceKit needed for EstateConfiguration in charter-seeding tests.
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                // PersistenceKitInMemory needed for InMemoryStorage in charter-seeding tests.
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+            ],
+            path: "Tests/aria-mcpTests"
+        ),
     ]
 )
