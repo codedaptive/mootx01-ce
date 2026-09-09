@@ -45,6 +45,7 @@
 
 pub mod audit;
 pub mod brain;
+pub use brain::fact_extraction_duty::FactExtractionBatchResult;
 
 /// The product's active read-time converter: complete-form v6.
 /// Compacts the complete source rather than selecting passages. Twin of Swift
@@ -103,6 +104,7 @@ pub mod migration;
 pub mod node_topology;
 pub mod substrate_node_topology_provider;
 pub mod recall;
+pub mod fact_first_recall;
 pub mod recall_explainer;
 pub mod span_rerank;
 // The retrieval-time cross-encoder stage (fusion rule, span selection,
@@ -145,7 +147,7 @@ pub use brain::scheduler::{
 #[cfg(any(test, feature = "test-seams"))]
 pub use brain::scheduler::NoopDispatcher as SchedulerNoopDispatcher;
 pub use brain::signals::{
-    default_standing_signal_names, default_standing_signal_specs, SpanEncodeSignal,
+    default_standing_signal_names, default_standing_signal_specs, FactExtractionSignal, SpanEncodeSignal,
     AssociationEdgeChecker, ByReferenceValiditySignal, ConsolidationSignal, DecaySweepSignal,
     DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
     TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,

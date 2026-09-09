@@ -250,6 +250,8 @@ public extension GeniusLocusKit {
             corpusKits[handle] = nil
             vectorStores[handle] = nil
             spanEncoders[handle] = nil
+            factExtractorRecipeIDs[handle] = nil
+            factExtractors[handle] = nil
             spanRerankSources[handle] = nil
             pairScorers[handle] = nil
             // Derived-rebuild span depth (moot_rebuild_status): plain
@@ -311,6 +313,8 @@ public extension GeniusLocusKit {
         corpusKits[handle] = nil
         vectorStores[handle] = nil
         spanEncoders[handle] = nil
+        factExtractorRecipeIDs[handle] = nil
+        factExtractors[handle] = nil
         spanRerankSources[handle] = nil
         pairScorers[handle] = nil
         derivedRebuildDepth[handle] = nil

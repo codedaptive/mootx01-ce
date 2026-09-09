@@ -1,4 +1,4 @@
-// brain/signals/default_set.rs — registration helper for the twelve
+// brain/signals/default_set.rs — registration helper for the thirteen
 // standing signals. Mirrors `DefaultStandingSignals.swift`.
 //
 // Signal history:
@@ -22,6 +22,8 @@
 //                (REM-ALPHA 30 s span-encode drain; writes int8 vectors to
 //                vectors_v6, sets bit 27 spanIndexed). Replaces the former
 //                AdornmentPassSignal (removed). Rust twin of SpanEncodeSignal.swift.
+//   Signal 14    Distilled Fact Extraction / 2026-09-08: bounded bit-28
+//                extraction debt drain. Rust twin of FactExtractionSignal.swift.
 //
 // The VectorSimilaritySignal spec is parameterized on a VectorStore (to query
 // real row embeddings on each fire). Signals 7, 9 and 11 use their
@@ -44,13 +46,13 @@ use crate::brain::scheduler::api::SignalSpec;
 use crate::brain::signals::{
     AnomalySweepSignal, ByReferenceValiditySignal, ConsolidationSignal,
     ContradictionScoutSignal, DecaySweepSignal, DreamingSignal,
-    EndOfDayTournamentSignal, MaintenanceSignal, SpanEncodeSignal, TemporalCausalitySignal,
+    EndOfDayTournamentSignal, FactExtractionSignal, MaintenanceSignal, SpanEncodeSignal, TemporalCausalitySignal,
     TrainingSignal, VectorSimilaritySignal,
 };
 
-/// Stable names of the twelve standing signals, in registration
+/// Stable names of the thirteen standing signals, in registration
 /// order. Mirrors Swift's `GeniusLocusKit.defaultStandingSignalNames`.
-pub fn default_standing_signal_names() -> [&'static str; 12] {
+pub fn default_standing_signal_names() -> [&'static str; 13] {
     [
         DreamingSignal::SIGNAL_NAME,
         MaintenanceSignal::SIGNAL_NAME,
@@ -64,6 +66,7 @@ pub fn default_standing_signal_names() -> [&'static str; 12] {
         ConsolidationSignal::SIGNAL_NAME,
         AnomalySweepSignal::SIGNAL_NAME,
         SpanEncodeSignal::SIGNAL_NAME,
+        FactExtractionSignal::SIGNAL_NAME,
     ]
 }
 
@@ -73,14 +76,15 @@ pub fn default_standing_signal_names() -> [&'static str; 12] {
 /// `VectorSimilaritySignal::spec` so the signal can query real row
 /// embeddings on each five-minute fire.
 ///
-/// `hunt_cycle`, `anomaly_cycle`, and `span_encode_cycle` are optional live
-/// closures for signals 10, 12, and 13 respectively. When `Some`, the live
+/// `hunt_cycle`, `anomaly_cycle`, `span_encode_cycle`, and
+/// `fact_extraction_cycle` are optional live closures for signals 10, 12, 13,
+/// and 14 respectively. When `Some`, the live
 /// `spec(…)` factory is used so the resident's real `EstateCoordinator`
 /// methods are called on each fire. When `None`, the diagnostic-only
 /// `default_spec()` is used (no-op, correct for test contexts and callers
 /// that have not yet wired a live estate). This matches the Swift
 /// `registerDefaultStandingSignals(huntCycle:anomalyCycle:spanEncodeCycle:)`
-/// parameter pattern where all three default to the no-op closure.
+/// parameter pattern where all four default to the no-op closure.
 ///
 /// Signals 7, 9 and 11 (TemporalCausalitySignal, TrainingSignal,
 /// ConsolidationSignal) retain their `default_spec()` no-op variants in this
@@ -98,6 +102,7 @@ pub fn default_standing_signal_specs(
     hunt_cycle: Option<Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync>>,
     anomaly_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
     span_encode_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+    fact_extraction_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
 ) -> Vec<SignalSpec> {
     // Signal 10: ContradictionScoutSignal. Use the live hunt closure when
     // provided; fall back to the diagnostic no-op. Mirrors Swift's default
@@ -127,6 +132,10 @@ pub fn default_standing_signal_specs(
     let span_encode_spec = match span_encode_cycle {
         Some(f) => SpanEncodeSignal::spec(Arc::new(move || f())),
         None => SpanEncodeSignal::default_spec(),
+    };
+    let fact_extraction_spec = match fact_extraction_cycle {
+        Some(f) => FactExtractionSignal::spec(Arc::new(move || f())),
+        None => FactExtractionSignal::default_spec(),
     };
     vec![
         // No-op daemon cycle: returns zero proposals. Callers that have a live
@@ -177,5 +186,8 @@ pub fn default_standing_signal_specs(
         // with bit 27 clear into int8 span rows (vectors_v6) and sets bit 27
         // (spanIndexed, contract §5) on success.
         span_encode_spec,
+        // Signal 14: explicitly activated distilled-fact duty. Default
+        // registration is inert; hosts with a runtime register the live spec.
+        fact_extraction_spec,
     ]
 }

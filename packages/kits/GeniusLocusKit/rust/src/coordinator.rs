@@ -1227,6 +1227,11 @@ pub struct EstateCoordinator {
     /// otherwise (lexical-only recall). Removed on close. Mirrors Swift
     /// `GeniusLocusKit.spanEncoders`.
     pub(crate) span_encoders: HashMap<EstateHandle, Arc<dyn SpanEncoder>>,
+    /// Per-estate runtime and recipe for the distilled-fact duty. Explicitly
+    /// activated; no model loads as a side effect of estate open.
+    pub(crate) fact_extractors:
+        HashMap<EstateHandle, Arc<dyn fact_extraction_kit::contract::FactExtractor>>,
+    pub(crate) fact_extractor_recipe_ids: HashMap<EstateHandle, String>,
     /// Where encoder model directories live on this device. The bundling
     /// unit installs the production resolver via `set_model_directory_resolver`;
     /// the default answers `None` for every model id. Mirrors Swift
@@ -1548,6 +1553,8 @@ impl EstateCoordinator {
             subject_producers: HashMap::new(),
             vector_stores: HashMap::new(),
             span_encoders: HashMap::new(),
+            fact_extractors: HashMap::new(),
+            fact_extractor_recipe_ids: HashMap::new(),
             model_directory_resolver: Box::new(NilModelDirectoryResolver),
             span_rerank_sources: HashMap::new(),
             pair_scorers: RefCell::new(HashMap::new()),
@@ -2061,6 +2068,8 @@ impl EstateCoordinator {
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
         self.span_encoders.remove(handle);
+        self.fact_extractors.remove(handle);
+        self.fact_extractor_recipe_ids.remove(handle);
         self.span_rerank_sources.remove(handle);
         self.pair_scorers.borrow_mut().remove(handle);
         // Derived-rebuild span depth (moot_rebuild_status): plain counter,
@@ -7973,6 +7982,34 @@ impl EstateCoordinator {
         origin: &locus_kit::kg_fact::KGFactOrigin,
         now: i64,
     ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
+        self.add_kg_fact_with_id_origin_and_extraction(
+            handle,
+            id,
+            subject,
+            predicate,
+            object,
+            source_drawer_id,
+            origin,
+            &locus_kit::kg_fact::KGFactExtractionMetadata::default(),
+            now,
+        )
+    }
+
+    /// File a source-grounded machine-extracted KGFact through the same
+    /// composed capture door used by manual and imported facts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_kg_fact_with_id_origin_and_extraction(
+        &self,
+        handle: &EstateHandle,
+        id: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        source_drawer_id: &str,
+        origin: &locus_kit::kg_fact::KGFactOrigin,
+        extraction: &locus_kit::kg_fact::KGFactExtractionMetadata,
+        now: i64,
+    ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         // A fact drawn from a drawer is as sensitive as the drawer it came
         // from, so it inherits that drawer's adjective and provenance bitmaps
@@ -8002,6 +8039,19 @@ impl EstateCoordinator {
             foreign_source_key: origin.foreign_source_key.clone(),
             foreign_record_id: origin.foreign_record_id.clone(),
             adjective_bitmap,
+            evidence_quote: extraction.evidence_quote.clone(),
+            evidence_start: extraction.evidence_start,
+            evidence_end: extraction.evidence_end,
+            evidence_start_utf8_byte: extraction.evidence_start_utf8_byte,
+            evidence_end_utf8_byte: extraction.evidence_end_utf8_byte,
+            source_digest: extraction.source_digest.clone(),
+            extractor_provider_id: extraction.extractor_provider_id.clone(),
+            extractor_model_id: extraction.extractor_model_id.clone(),
+            extractor_model_version: extraction.extractor_model_version.clone(),
+            extraction_schema_version: extraction.extraction_schema_version.clone(),
+            search_projection: extraction.search_projection.clone(),
+            search_projection_version: extraction.search_projection_version.clone(),
+            operational_bitmap: extraction.operational_bitmap,
             provenance_bitmap,
             ..locus_kit::kg_fact::KGFact::new(
                 id.to_string(),

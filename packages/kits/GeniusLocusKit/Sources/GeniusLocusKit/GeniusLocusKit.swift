@@ -1,5 +1,6 @@
 import ConvergenceKit
 import CorpusKit
+import FactExtractionKit
 import Foundation
 import MootProductIdentity
 import OSLog
@@ -168,6 +169,12 @@ public actor GeniusLocusKit {
     /// absent otherwise (lexical-only recall). Dropped when the estate is
     /// closed. See EncoderActivation.swift.
     internal var spanEncoders: [EstateHandle: any SpanEncoder] = [:]
+
+    /// Per-estate runtime and active recipe for the distilled-fact standing
+    /// duty. Registration is explicit; no model loads inside the long-lived
+    /// server merely because an estate opens.
+    internal var factExtractors: [EstateHandle: any FactExtractor] = [:]
+    internal var factExtractorRecipeIDs: [EstateHandle: String] = [:]
 
     /// Where encoder model directories live on this device. The bundling
     /// unit installs the production resolver via
