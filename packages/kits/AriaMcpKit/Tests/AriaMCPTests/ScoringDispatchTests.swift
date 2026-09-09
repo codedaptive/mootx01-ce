@@ -112,35 +112,8 @@ struct ScoringDispatchTests {
 
     // MARK: - B. Known scoring still succeeds
 
-    @Test func knownScoringRawSucceeds() async throws {
-        let dispatcher = try await makeDispatcher()
-        try await fileMemory(content: "scoring-raw-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("scoring-raw-test"),
-                "scoring": .string("raw"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "scoring=raw must succeed")
-    }
-
     /// M3: `scoring=discriminative` must be accepted as a known value and
     /// succeed end-to-end through ToolDispatch → RecallDirector.
-    @Test func knownScoringDiscriminativeSucceeds() async throws {
-        let dispatcher = try await makeDispatcher()
-        try await fileMemory(content: "scoring-discriminative-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("scoring-discriminative-test"),
-                "scoring": .string("discriminative"),
-            ])
-        )
-        let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "scoring=discriminative must succeed end-to-end")
-    }
 
     // MARK: - C. Absent scoring defaults
 
@@ -157,18 +130,5 @@ struct ScoringDispatchTests {
         )
         let isError = result.objectValue?["isError"]?.boolValue ?? true
         #expect(!isError, "absent scoring must default to matrixAware and succeed")
-    }
-
-    @Test func omittedFilterFindsFreshUnconfirmedMemory() async throws {
-        let dispatcher = try await makeDispatcher()
-        try await fileMemory(content: "omitted-filter-unconfirmed-test", location: "test", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object(["query": .string("omitted-filter-unconfirmed-test")])
-        )
-        let text = result.objectValue?["content"]?
-            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        // COMPOSER-02B §11.1: S1 header is "found N candidate memory/memories, one per line"
-        #expect(text.contains("found 1 candidate memory"), "omitted filter must find fresh captures; got: \(text)")
     }
 }

@@ -1,4 +1,3 @@
-#![cfg(feature = "aria-v2")]
 
 use aria_mcp::{dispatcher::Dispatcher, estate_posture::EstatePosture,
     estate_registry::EstateRegistry, jsonrpc::JSONRPCRequest};

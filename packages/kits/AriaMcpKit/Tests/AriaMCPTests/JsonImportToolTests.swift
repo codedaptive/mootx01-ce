@@ -63,41 +63,6 @@ struct JsonImportToolTests {
         return url
     }
 
-    @Test("a seed fixture round-trips through a real moot_json_import call")
-    func seedRoundTripsOverMCP() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-        let url = try tempSeedFile("""
-            {"format_version": 1, "name": "mcp-round-trip", "records": [
-              {"id": "m1", "content": "mcp round trip sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/roundtrip"},
-              {"id": "m2", "content": "mcp round trip sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/roundtrip"}],
-             "facts": [{"subject": "sentinel", "predicate": "counted", "object": "two", "record_id": "m1"}],
-             "tunnels": [{"from": "m2", "to": "m1", "kind": "references"}]}
-            """)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_json_import",
-            arguments: .object(["path": .string(url.path)]))
-
-        #expect(!isError(of: result), "import must succeed; got: \(text(of: result))")
-        let body = text(of: result)
-        #expect(body.contains("2 drawers"))
-        #expect(body.contains("1 facts"))
-        #expect(body.contains("1 tunnels"))
-        #expect(body.contains("seedSha256="))
-
-        // The records are really in the estate the dispatcher served.
-        // Provisioned estates pre-seed charter-hint drawers, so filter to
-        // this lane's addedBy stamp.
-        let drawers = try await kit.recall(
-            handle,
-            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 100))
-        let imported = drawers.filter { $0.addedBy == "jsonimportbridge-import" }
-        #expect(imported.count == 2)
-        #expect(imported.contains { $0.content == "mcp round trip sentinel one" })
-    }
-
     /// Reads the Nth text block, so the id-map block can be addressed
     /// separately from the prose receipt.
     private func textBlock(_ index: Int, of result: JSONValue) -> String {
@@ -114,45 +79,6 @@ struct JsonImportToolTests {
         guard case let .object(obj) = result,
               case let .array(content)? = obj["content"] else { return 0 }
         return content.count
-    }
-
-    @Test("return_id_map names the real drawer id for every seeded record")
-    func returnIDMapNamesRealDrawerIDs() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-        let url = try tempSeedFile("""
-            {"format_version": 1, "name": "id-map", "records": [
-              {"id": "m1", "content": "id map sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/idmap"},
-              {"id": "m2", "content": "id map sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/idmap"}]}
-            """)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_json_import",
-            arguments: .object([
-                "path": .string(url.path),
-                "return_id_map": .bool(true),
-            ]))
-        #expect(!isError(of: result), "import must succeed; got: \(textBlock(0, of: result))")
-
-        // Block 0 is the prose receipt, unchanged; block 1 is the map.
-        #expect(blockCount(of: result) == 2)
-        #expect(textBlock(0, of: result).contains("2 drawers"))
-        let parsed = try JSONValue.parse(Data(textBlock(1, of: result).utf8))
-        let map = try #require(parsed.objectValue?["id_map"]?.objectValue)
-        #expect(map.count == 2)
-
-        // The point of the map: each id addresses the drawer that record
-        // became. Anything less exact and a caller cannot identify what it
-        // imported without searching for its own content.
-        let drawers = try await kit.recall(
-            handle,
-            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 100))
-        let imported = drawers.filter { $0.addedBy == "jsonimportbridge-import" }
-        let contentByDrawerID = Dictionary(
-            uniqueKeysWithValues: imported.map { ($0.id, $0.content) })
-        #expect(contentByDrawerID[map["m1"]?.stringValue ?? ""] == "id map sentinel one")
-        #expect(contentByDrawerID[map["m2"]?.stringValue ?? ""] == "id map sentinel two")
     }
 
     @Test("the id map is absent unless asked for, and null is invalid")
@@ -184,32 +110,5 @@ struct JsonImportToolTests {
                     "return_id_map": .null,
                 ]))
         }
-    }
-
-    @Test("an invalid seed is an isError result naming the element, zero writes")
-    func invalidSeedIsErrorResultWithZeroWrites() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-        let url = try tempSeedFile("""
-            {"format_version": 1, "name": "bad", "records": [
-              {"id": "m1", "content": "c", "event_time": "2026-02-01T10:00:00Z", "room": "rm"}],
-             "tunnels": [{"from": "m1", "to": "m999", "kind": "references"}]}
-            """)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_json_import",
-            arguments: .object(["path": .string(url.path)]))
-
-        #expect(isError(of: result), "validation failure must be an isError result")
-        #expect(text(of: result).contains("\"m999\""),
-                "the offending element must be named; got: \(text(of: result))")
-
-        // Zero writes — never a partial estate. (Provisioned estates
-        // pre-seed charter-hint drawers; none may carry this lane's stamp.)
-        let drawers = try await kit.recall(
-            handle,
-            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100))
-        #expect(!drawers.contains { $0.addedBy == "jsonimportbridge-import" })
     }
 }

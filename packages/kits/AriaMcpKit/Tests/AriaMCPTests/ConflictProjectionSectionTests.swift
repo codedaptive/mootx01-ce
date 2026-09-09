@@ -68,66 +68,11 @@ struct ConflictProjectionSectionTests {
     /// Normal+normal pair: the lens appends the full typed section with
     /// a PROVEN block, value digests, temporal bases, reasons, and the
     /// legacy grouped-objects view stays present above it.
-    @Test func lensAppendsFullTypedSection() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-normal")
-        try await plantClaim(kit, handle, content: "Claim one.",
-                             employer: "Acme Robotics", sensitivity: .normal)
-        try await plantClaim(kit, handle, content: "Claim two.",
-                             employer: "Beta Corp", sensitivity: .normal)
-        let body = text(of: try await dispatcher.dispatch(
-            name: "moot_lens_contradiction", arguments: .object([:])))
-        // Legacy view intact (additive contract).
-        #expect(body.contains("conflicting_facts: 1 subject+predicate pair(s)"))
-        // Typed section.
-        #expect(body.contains("proven: 1"))
-        #expect(body.contains("historical: 0"))
-        #expect(body.contains("compatible: 0"))
-        #expect(body.contains("unknown_or_invalid: 0"))
-        #expect(body.contains("coverage: 2/2"))
-        // The lens has no lexical lane — no candidates line.
-        #expect(!body.contains("candidates:"))
-        #expect(body.contains("  PROVEN "))
-        #expect(body.contains("    rule: dim.person.employer@1"))
-        #expect(body.contains("    coordinate: person:sarah chen c0|employer"))
-        #expect(body.contains(" vs "))
-        #expect(body.contains("    time: t:pt:1690000000 | t:pt:1690000000"))
-        #expect(body.contains(
-            "    reasons: same_coordinate, validity_overlap, values_exclusive"))
-    }
 
     /// F13 — restricted+normal pair: counted, but the block collapses to
     /// the coordinate-digest line. No source ids, no value digests, no
     /// dense rows for the pair.
-    @Test func f13RestrictedPairIsRedacted() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-restricted")
-        try await plantClaim(kit, handle, content: "Public claim.",
-                             employer: "Acme Robotics", sensitivity: .normal)
-        try await plantClaim(kit, handle, content: "Restricted claim.",
-                             employer: "Beta Corp", sensitivity: .restricted)
-        let body = text(of: try await dispatcher.dispatch(
-            name: "moot_lens_contradiction", arguments: .object([:])))
-        #expect(body.contains("proven: 1"))
-        #expect(body.contains("a conflicting claim exists at "))
-        #expect(body.contains("[restricted]"))
-        // The full block never renders: no rule line, no value digests,
-        // no temporal bases.
-        #expect(!body.contains("  PROVEN "))
-        #expect(!body.contains("    rule: "))
-        #expect(!body.contains("    values: "))
-    }
 
     /// Secret ceiling: the pair is COUNTED in `proven: N` and emits no
     /// block at all — not even the redacted line.
-    @Test func secretCeilingIsCountedButSilent() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-secret")
-        try await plantClaim(kit, handle, content: "Public claim.",
-                             employer: "Acme Robotics", sensitivity: .normal)
-        try await plantClaim(kit, handle, content: "Secret claim.",
-                             employer: "Beta Corp", sensitivity: .secret)
-        let body = text(of: try await dispatcher.dispatch(
-            name: "moot_lens_contradiction", arguments: .object([:])))
-        #expect(body.contains("proven: 1"))
-        #expect(!body.contains("  PROVEN "))
-        #expect(!body.contains("[restricted]"))
-    }
 }

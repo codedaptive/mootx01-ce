@@ -116,7 +116,6 @@ struct StdioFramingTests {
         #expect(!tools.isEmpty, "tools/list must project the tool surface")
     }
 
-    #if MOOTX01_ARIA_V2
     @Test func v2ToolsListAndMonitoringStatusRoundTripOverPipes() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-v2-stdio-transport-tests")
@@ -172,7 +171,6 @@ struct StdioFramingTests {
         #expect(structured["tool"] == JSONValue.string("moot_monitoring_status"))
         #expect(structured["meta"]?.objectValue?["effect"] == JSONValue.string("read"))
     }
-    #endif
 
     /// Verifies the frame size cap (CAND-051): a frame that exceeds the cap
     /// without a newline terminator causes the server to close input cleanly

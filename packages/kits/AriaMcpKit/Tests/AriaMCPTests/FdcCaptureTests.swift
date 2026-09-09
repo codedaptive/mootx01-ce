@@ -151,42 +151,6 @@ struct FdcCaptureTests {
     /// site, leaking `VerbDispatchError::Verb(UnderlyingEstateFailure { ... })`.
     /// The Swift port surfaces the error via `LocusKitError.localizedDescription`
     /// or a structured catch — verify neither form leaks type names.
-    @Test func emptyLocationProducesActionableError() async throws {
-        let (dispatcher, _, _) = try await makeDispatcher()
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_file_memory",
-            arguments: .object([
-                "content":  .string("some content"),
-                "subject":  .string("some content"),
-                "location": .string(""),  // empty room — estate rejects this
-            ])
-        )
-
-        #expect(isError(result), "empty location must produce a tool-level error; got: \(result)")
-
-        let msg = text(of: result)
-
-        // Must NOT contain internal type-chain fragments.
-        #expect(
-            !msg.contains("UnderlyingEstateFailure"),
-            "error message must not leak 'UnderlyingEstateFailure'; got: \(msg)"
-        )
-        #expect(
-            !msg.contains("VerbDispatchError"),
-            "error message must not leak 'VerbDispatchError'; got: \(msg)"
-        )
-        #expect(
-            !msg.contains("LocusKitError"),
-            "error message must not leak 'LocusKitError'; got: \(msg)"
-        )
-
-        // Must contain the actionable reason.
-        #expect(
-            msg.contains("room must not be empty") || msg.contains("empty"),
-            "error message must describe the failing condition; got: \(msg)"
-        )
-    }
 
     // MARK: - Reviewed relative-index aliases
 

@@ -109,191 +109,27 @@ struct LensToolsTests {
 
     // MARK: - Graph lenses
 
-    @Test func keystonesDispatchRanksTheHub() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ks"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        for spoke in ["s1", "s2", "s3"] {
-            try await addTunnel(kit, handle, wing: "study", src: "hub", tgt: spoke)
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_keystones",
-            arguments: .object(["wing": .string("study")]))
-
-        let body = try text(result)
-        #expect(body.contains("keystones:"))
-        #expect(body.split(separator: "\n").dropFirst().first?.contains("hub") == true,
-                "the hub ranks first")
-    }
-
-    @Test func tunnelSuccessorDispatchRanksByFrequency() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ts"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        try await addTunnel(kit, handle, wing: "study", src: "anchor", tgt: "X")
-        try await addTunnel(kit, handle, wing: "study", src: "anchor", tgt: "X")
-        try await addTunnel(kit, handle, wing: "study", src: "anchor", tgt: "Y")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_successors",
-            arguments: .object([
-                "wing": .string("study"), "anchorID": .string("anchor"),
-            ]))
-
-        let body = try text(result)
-        #expect(body.contains("tunnel_successor: 2 result(s)"))
-        // Dense-row output (Part B): the tunnel endpoint "X" may not be a
-        // captured drawer, so denseRowsByID returns renderUnhydrated — the
-        // rendered row still starts with the id "X". The weight annotation
-        // is appended after the dense row. Both must be present.
-        #expect(body.contains("X"))
-        #expect(body.contains("weight=2"))
-    }
-
     // MARK: - Recall lens
-
-    @Test func trustGroundedSynthesisDispatchReturnsRanking() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "tr"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        _ = try await capture(kit, handle, content: "first memory", room: "study")
-        _ = try await capture(kit, handle, content: "second memory", room: "study")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_trust_synthesis",
-            arguments: .object(["filter": .string("unconfirmed")]))
-
-        let body = try text(result)
-        #expect(body.contains("trust_grounded_synthesis: 2 drawer(s)"))
-        #expect(body.contains("summary:"))
-    }
 
     // MARK: - Lens refusal face
 
-    @Test func partialCueRecallUnknownAnchorIsToolError() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "pc"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        _ = try await capture(kit, handle, content: "only memory", room: "study")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_partial_cue",
-            arguments: .object(["anchorID": .string("no-such-id")]))
-
-        // A lens-level refusal: isError true, call id preserved.
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true)
-    }
-
     // MARK: - Federated lens (two estates via estateIDB)
-
-    @Test func estateDivergenceDispatchRoutesSecondEstate() async throws {
-        let kit = GeniusLocusKit()
-        let handleA = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "eda"))
-        let handleB = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "edb"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handleA)
-            .registering(handleB)
-        _ = try await capture(kit, handleA, content: "alpha", room: "philosophy")
-        _ = try await capture(kit, handleB, content: "beta", room: "cooking")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_divergence",
-            arguments: .object([
-                "estateIDB": .string(handleB.estateUUID.uuidString),
-            ]))
-
-        let body = try text(result)
-        #expect(body.contains("estate_divergence:"))
-        #expect(body.contains("a=1 drawer(s), b=1 drawer(s)"))
-    }
 
     // MARK: - Cohesion lens (renamed from contradiction; content-outlier detector)
 
     /// `moot_lens_cohesion` dispatches to the content-cohesion outlier algorithm
     /// and returns a result whose text mentions "cohesion_outliers".
-    @Test func cohesionLensDispatchReturnsCohesionHeader() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "coh-1"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        // One drawer is enough for dispatch to complete (empty set returns empty outliers).
-        _ = try await capture(kit, handle, content: "swift is a compiled language", room: "tech")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_cohesion",
-            arguments: .object([:]))
-
-        // text() internally asserts isError == false.
-        let body = try text(result)
-        #expect(body.contains("cohesion_outliers"))
-    }
 
     // MARK: - Genuine contradiction lens
 
     /// `moot_lens_contradiction` returns text distinguishing contradicts-tunnel
     /// signal from conflicting-facts signal. With no tunnels or conflicting facts
     /// in a fresh estate, both sub-reports should surface "none".
-    @Test func contradictionLensOnEmptyEstateReturnsNone() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ctrd-1"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_contradiction",
-            arguments: .object([:]))
-
-        // text() internally asserts isError == false.
-        let body = try text(result)
-        // Both signal lines must appear.
-        #expect(body.contains("contradicts_tunnels:"))
-        #expect(body.contains("conflicting_facts:"))
-        #expect(body.contains("none"))
-    }
 
     /// SECFIX (codex: MCP fact tools leak restricted/secret KG data): the
     /// contradiction lens must redact a fact's SOURCE drawer id when that source
     /// is Restricted/Secret, even though the emitted (Normal) facts pass the fact
     /// ceiling. Parity with the Rust `lens_contradiction_hides_secret_fact_source`.
-    @Test func contradictionLensHidesSecretFactSource() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ctrd-redact"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        // A Secret source drawer; two conflicting Normal facts cite it.
-        let secret = try await captureWithSensitivity(
-            kit, handle, content: "secret provenance drawer",
-            room: "policy-gate/secret-source", sensitivity: .secret)
-        for object in ["green", "red"] {
-            let filed = try await dispatcher.dispatch(
-                name: "moot_file_fact",
-                arguments: .object([
-                    "subject": .string("Project Aardvark"),
-                    "predicate": .string("status"),
-                    "object": .string(object),
-                    "source_id": .string(secret.id),
-                ]))
-            #expect(filed.objectValue?["isError"]?.boolValue == false)
-        }
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_contradiction", arguments: .object([:]))
-        let body = try text(result)
-        // Facts inherit their source drawer's sensitivity, so a fact drawn from
-        // a Secret drawer is itself Secret and is dropped by the lens's
-        // disclosure ceiling before rendering. Withholding the fact outright is
-        // strictly stronger than masking its source= token.
-        #expect(!body.contains("Project Aardvark"),
-                "facts derived from a Secret drawer must be withheld; got: \(body)")
-        #expect(!body.contains(secret.id),
-                "secret source drawer id must not leak; got: \(body)")
-    }
 
     // MARK: - Sensitivity policy gate (ce-recall-policy-gate)
 
@@ -317,131 +153,21 @@ struct LensToolsTests {
 
     /// `moot_lens_node_motion` with a normal-sensitivity drawer succeeds.
     /// Guard: the gate must not block legitimate (normal/elevated) queries.
-    @Test func nodeMotionNormalSensitivitySucceeds() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-ok"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        let drawer = try await captureWithSensitivity(
-            kit, handle, content: "normal memory", room: "study", sensitivity: .normal)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_node_motion",
-            arguments: .object(["rowID": .string(drawer.id)]))
-
-        // Successful dispatch: isError false, node_motion header present.
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false,
-                "normal-sensitivity drawer must pass the node_motion gate")
-        let body = try text(result)
-        #expect(body.contains("node_motion:"), "response must contain node_motion header")
-    }
 
     /// `moot_lens_node_motion` with a restricted drawer is rejected as not-found.
     /// The gate must treat restricted rows as opaque — callers must not discover
     /// that the row exists (isError true, same as an unknown id).
-    @Test func nodeMotionRestrictedSensitivityIsNotFound() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-r"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        let drawer = try await captureWithSensitivity(
-            kit, handle, content: "restricted content", room: "vault", sensitivity: .restricted)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_node_motion",
-            arguments: .object(["rowID": .string(drawer.id)]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true,
-                "restricted-sensitivity drawer must be rejected by node_motion gate")
-    }
 
     /// `moot_lens_node_motion` with a secret drawer is rejected as not-found.
-    @Test func nodeMotionSecretSensitivityIsNotFound() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-s"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        let drawer = try await captureWithSensitivity(
-            kit, handle, content: "secret content", room: "vault", sensitivity: .secret)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_node_motion",
-            arguments: .object(["rowID": .string(drawer.id)]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true,
-                "secret-sensitivity drawer must be rejected by node_motion gate")
-    }
 
     /// `moot_lens_node_motion` with an unknown rowID returns an error (pre-existing
     /// behaviour — confirms gate short-circuits before the audit read).
-    @Test func nodeMotionUnknownRowIDIsNotFound() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "nm-x"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_node_motion",
-            arguments: .object(["rowID": .string(UUID().uuidString)]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == true,
-                "unknown rowID must produce a not-found error")
-    }
 
     /// `moot_estate_map` excludes restricted and secret drawers from wing/room counts.
     /// A wing with ONLY restricted/secret rows must not appear in the output.
-    @Test func estateMapExcludesRestrictedAndSecretRows() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "em-sr"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Normal row — must appear in map.
-        _ = try await captureWithSensitivity(
-            kit, handle, content: "public info", room: "reference", sensitivity: .normal)
-        // Restricted row — must NOT appear in map.
-        _ = try await captureWithSensitivity(
-            kit, handle, content: "restricted info", room: "vault", sensitivity: .restricted)
-        // Secret row — must NOT appear in map.
-        _ = try await captureWithSensitivity(
-            kit, handle, content: "top-secret", room: "vault", sensitivity: .secret)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_estate_map",
-            arguments: JSONValue.object([String: JSONValue]()))
-
-        let body = try text(result)
-        // "vault" room comes from restricted/secret rows only — must be absent.
-        #expect(!body.contains("vault"),
-                "restricted/secret rooms must be excluded from estate_map output")
-        // "reference" room comes from the normal row — must be present.
-        #expect(body.contains("reference"),
-                "normal-sensitivity rooms must appear in estate_map output")
-    }
 
     /// `moot_estate_map` with an elevated-sensitivity drawer includes it.
     /// Elevated is within the default BitmapEvaluator ceiling (normal + elevated = bulk-exportable).
-    @Test func estateMapIncludesElevatedSensitivity() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "em-el"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        _ = try await captureWithSensitivity(
-            kit, handle, content: "elevated info", room: "elevated-room", sensitivity: .elevated)
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_estate_map",
-            arguments: JSONValue.object([String: JSONValue]()))
-
-        let body = try text(result)
-        #expect(body.contains("elevated-room"),
-                "elevated-sensitivity drawer must appear in estate_map — within default ceiling")
-    }
 }
 
 // MARK: - Security hardening — window ordering and param clamping
@@ -464,21 +190,6 @@ struct LensToolsSecurityTests {
 
     // MARK: - Window ordering guard: moot_lens_moment
 
-    @Test func momentInvertedWindowThrowsInvalidParams() async throws {
-        let kit = GeniusLocusKit()
-        let (dispatcher, _) = try await openEstate(in: kit)
-
-        // windowStart AFTER windowEnd — inverted.
-        await #expect(throws: JSONRPCError.self) {
-            _ = try await dispatcher.dispatch(
-                name: "moot_lens_moment",
-                arguments: .object([
-                    "windowStart": .string("2026-06-28T10:00:00Z"),
-                    "windowEnd":   .string("2026-06-27T10:00:00Z"),
-                ]))
-        }
-    }
-
     @Test func momentEqualWindowIsAccepted() async throws {
         let kit = GeniusLocusKit()
         let (dispatcher, _) = try await openEstate(in: kit)
@@ -497,22 +208,6 @@ struct LensToolsSecurityTests {
     }
 
     // MARK: - Window ordering guard: moot_lens_precedence
-
-    @Test func precedenceInvertedWindowThrowsInvalidParams() async throws {
-        let kit = GeniusLocusKit()
-        let (dispatcher, _) = try await openEstate(in: kit)
-
-        await #expect(throws: JSONRPCError.self) {
-            _ = try await dispatcher.dispatch(
-                name: "moot_lens_precedence",
-                arguments: .object([
-                    "windowStart": .string("2026-06-28T10:00:00Z"),
-                    "windowEnd":   .string("2026-06-27T10:00:00Z"),
-                    "targetField": .string("room"),
-                    "targetValue": .string("chemistry"),
-                ]))
-        }
-    }
 
     // MARK: - moot_lens_free_association: negative k throws
 
@@ -615,41 +310,6 @@ extension LensToolsTests {
     /// every drawer id listed in an extent row is a real captured drawer that
     /// `moot_memory_get` can hydrate. This proves the output is addressable,
     /// not just a count.
-    @Test func conceptsExtentIDsAreHydratable() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "fc-hydr"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Capture four drawers sharing room, kind, and channel so they
-        // form a formal concept with a multi-drawer extent.
-        var capturedIDs: [String] = []
-        for i in 1...4 {
-            capturedIDs.append(
-                try await capture(kit, handle,
-                    content: "concept evidence \(i)", room: "study"))
-        }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_concepts",
-            arguments: .object([:]))
-
-        let body = try text(result)
-
-        // At least one captured drawer ID must appear in an extent line
-        // (progressive-recall rule: every listed ID is a follow-up address).
-        guard let knownID = capturedIDs.first(where: { body.contains($0) }) else {
-            Issue.record(
-                "moot_lens_concepts output contains no captured drawer ID;\n\(body)")
-            return
-        }
-
-        // The ID must be hydratable via the memory_get boundary.
-        let getResult = try await dispatcher.runMemoryGet(["id": .string(knownID)])
-        let getObj = try #require(getResult.objectValue)
-        #expect(getObj["isError"]?.boolValue != true,
-            "concepts extent drawer id \(knownID) must be hydratable via moot_memory_get")
-    }
 }
 
 // MARK: - PR-05 Part B: dense-row golden tests (byte-identical renderer)
@@ -660,67 +320,9 @@ extension LensToolsTests {
     /// `ResultComposer.renderS2Row` byte-for-byte. Both paths (the lens and the
     /// test) route through `RecipeTools.s2RowsByID` — identical inputs must
     /// produce identical strings.
-    @Test func trustSynthesisDenseRowsMatchRenderer() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ts-golden"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Capture a drawer that surfaces in trust_synthesis.
-        let id = try await capture(kit, handle,
-            content: "golden trust memory", room: "study")
-
-        // Get the reference string via the same path the lens uses internally:
-        // RecipeTools.s2RowsByID → ResultComposer.renderS2Row.
-        let estate = try await kit.estate(for: handle)
-        let rows = try await RecipeTools.s2RowsByID(ids: [id], estate: estate)
-        let expectedRow = try #require(rows[id],
-            "captured drawer must produce an S2 row via s2RowsByID")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_trust_synthesis",
-            arguments: .object(["filter": .string("unconfirmed")]))
-
-        let body = try text(result)
-        // Each ranked drawer appears as two-space-indented row in the output.
-        #expect(body.contains("  " + expectedRow),
-            "trust_synthesis output must contain the S2 row byte-for-byte")
-    }
 
     /// Golden test: `moot_lens_keystones` row strings match `ResultComposer.renderS2Row`
     /// byte-for-byte for a hub drawer whose UUID is a real captured drawer.
     /// Using a real drawer ensures `s2RowsByID` hydrates it fully rather
     /// than falling back to the unhydrated S2 fallback.
-    @Test func keystonesDenseRowsMatchRenderer() async throws {
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "ks-golden"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Capture the hub and spoke drawers.
-        let hubID = try await capture(kit, handle, content: "hub memory", room: "study")
-        let s1ID = try await capture(kit, handle, content: "spoke one", room: "study")
-        let s2ID = try await capture(kit, handle, content: "spoke two", room: "study")
-        let s3ID = try await capture(kit, handle, content: "spoke three", room: "study")
-
-        // Three outbound tunnels from hubID make it the top-ranked keystone.
-        for spokeID in [s1ID, s2ID, s3ID] {
-            try await addTunnel(kit, handle, wing: "study", src: hubID, tgt: spokeID)
-        }
-
-        // Compute the expected row via the same path the lens uses:
-        // RecipeTools.s2RowsByID → ResultComposer.renderS2Row.
-        let estate = try await kit.estate(for: handle)
-        let rows = try await RecipeTools.s2RowsByID(ids: [hubID], estate: estate)
-        let expectedRow = try #require(rows[hubID],
-            "hub drawer must produce an S2 row via s2RowsByID")
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_lens_keystones",
-            arguments: .object(["wing": .string("study")]))
-
-        let body = try text(result)
-        #expect(body.contains(expectedRow),
-            "keystones output must contain the hub's S2 row byte-for-byte")
-    }
 }

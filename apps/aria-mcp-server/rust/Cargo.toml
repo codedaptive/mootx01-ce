@@ -32,6 +32,3 @@ genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust", featur
 serde_json = "1"
 
 [features]
-# Forward the compile-time ARIA public-surface selection to the server logic.
-# No default features are changed, so this binary remains v1 unless selected.
-aria-v2 = ["aria-mcp/aria-v2"]

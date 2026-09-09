@@ -3,7 +3,6 @@
 //! The serialized integration owner exposes `aria_mcp::v2` and activates this
 //! file with the `aria-v2` feature.  This unit must not add that module export.
 
-#![cfg(feature = "aria-v2")]
 
 use std::collections::BTreeSet;
 

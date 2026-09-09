@@ -1,4 +1,3 @@
-#![cfg(feature = "aria-v2")]
 
 #[path = "../src/jsonrpc.rs"]
 mod jsonrpc;

@@ -1,4 +1,3 @@
-#![cfg(feature = "aria-v2")]
 
 use aria_mcp::v2::capability_digest::{
     canonical_capability_bytes, canonical_json_bytes, capability_digest, CapabilityEffect,
