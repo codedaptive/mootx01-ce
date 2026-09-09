@@ -192,6 +192,14 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.storage()
     }
 
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        self.0.atomic_file_conflict_proposal(request, now)
+    }
+
     fn resolve_node_names(
         &self,
         parent_node_ids: &[String],

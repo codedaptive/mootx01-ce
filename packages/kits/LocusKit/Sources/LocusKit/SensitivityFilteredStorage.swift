@@ -564,6 +564,10 @@ public final class SensitivityFilteredStorage: Storage, @unchecked Sendable {
         try await base.transaction(isolation: isolation, block)
     }
 
+    public func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        try await base.captureInventorySnapshot(limits: limits)
+    }
+
     public func currentSchemaVersion() async throws -> Int {
         try await base.currentSchemaVersion()
     }

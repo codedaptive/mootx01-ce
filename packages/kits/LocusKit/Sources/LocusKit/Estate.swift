@@ -209,7 +209,9 @@ public actor Estate {
         storage: any Storage,
         owner: OwnerCredentials,
         identityKeyStore: (any EstateIdentityKeyStore)? = nil,
-        federate: Bool = false
+        federate: Bool = false,
+        frozen: Bool = false,
+        fingerprintStorage: (any Storage)? = nil
     ) async throws -> Estate {
         guard !owner.ownerIdentifier.isEmpty else {
             throw EstateError.emptyOwnerIdentifier
@@ -217,7 +219,7 @@ public actor Estate {
         let identityKeyStore = identityKeyStore ?? Self.defaultIdentityKeyStore(for: storage)
         let store: DrawerStore
         do {
-            store = try await DrawerStore(storage: storage)
+            store = try await DrawerStore(storage: storage, frozen: frozen)
         } catch {
             throw EstateError.substrateUnavailable("\(error)")
         }
@@ -269,7 +271,7 @@ public actor Estate {
         // Never a persistent estate property: a non-federating open followed by
         // a federating one mints then.
         var privateSigningKeyData: Data?
-        if !federate {
+        if frozen || !federate {
             // Declared non-federating open: zero identity-key-store contact
             // either direction. issueGrant throws invalidManifest when the
             // signing key is absent — the documented non-federating posture.
@@ -301,7 +303,14 @@ public actor Estate {
         }
         let containerFP: ContainerFingerprintStore
         do {
-            containerFP = try await ContainerFingerprintStore(storage: storage)
+            let aggregateStorage: any Storage
+            if frozen {
+                guard let fingerprintStorage, case .inMemory = fingerprintStorage.configuration.backend else {
+                    throw EstateError.substrateUnavailable("frozen open requires private in-memory fingerprint storage")
+                }
+                aggregateStorage = fingerprintStorage
+            } else { aggregateStorage = storage }
+            containerFP = try await ContainerFingerprintStore(storage: aggregateStorage)
         } catch {
             throw EstateError.substrateUnavailable("\(error)")
         }
@@ -309,7 +318,13 @@ public actor Estate {
         let nodeStore = NodeStore(storage: storage)
         // ensure root node exists. createRoot is idempotent —
         // returns existing root if already seeded.
-        _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
+        if frozen {
+            guard try await nodeStore.rootNode() != nil else {
+                throw EstateError.substrateUnavailable("frozen estate has no root node")
+            }
+        } else {
+            _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
+        }
         // Backfill so the aggregate covers every active row and is
         // therefore sound to prune against. One full scan at open.
         let active = (try await store.allDrawers()).filter { $0.tombstonedAt == nil }
@@ -755,7 +770,8 @@ public actor Estate {
     public func getDrawers(
         ids: [String],
         matchingFrame frame: RecallFrame,
-        hydrationLevel: HydrationLevel
+        hydrationLevel: HydrationLevel,
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> FrameFilteredDrawers {
         // Content-tier predicates need the body for the substring match; force
         // .full in that case so the frame is evaluated faithfully. Otherwise the
@@ -770,7 +786,9 @@ public actor Estate {
         let nodeNames: [String: (wing: String, room: String)]
         if BitmapEvaluator.chainHasStructuredNameFilter(frame.filterChain) {
             let parentIds = Set(loaded.map(\.parentNodeId))
-            nodeNames = try await store.resolveNodeNames(parentNodeIds: Array(parentIds))
+            nodeNames = try await store.resolveNodeNames(
+                parentNodeIds: Array(parentIds),
+                preservePhysicalUUIDSpellings: preservePhysicalUUIDSpellings)
         } else {
             nodeNames = [:]
         }
@@ -944,6 +962,16 @@ public actor Estate {
         try await store.addTunnel(t)
     }
 
+    /// File one selected contradiction proposal through the store's
+    /// serializable fresh-read/write boundary.  The request carries retained
+    /// digests rather than copied bodies; the store verifies them before it
+    /// can create a proposed edge.
+    public func fileAtomicConflictProposal(
+        _ request: AtomicConflictProposalRequest
+    ) async throws -> AtomicConflictProposalOutcome {
+        try await store.fileAtomicConflictProposal(request)
+    }
+
     /// Fetch one tunnel by id (nil when absent). Read-only estate-level
     /// pass-through over `DrawerStore.getTunnel` — the GLK review-ladder
     /// verbs (endorse/object) read the current bitmap and ext ledger
@@ -1107,9 +1135,12 @@ public actor Estate {
     /// Higher kits call this to obtain display names after node-tree integrity
     /// removed them from the Drawer struct.
     public func resolveNodeNames(
-        parentNodeIds: [String]
+        parentNodeIds: [String],
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> [String: (wing: String, room: String)] {
-        try await store.resolveNodeNames(parentNodeIds: parentNodeIds)
+        try await store.resolveNodeNames(
+            parentNodeIds: parentNodeIds,
+            preservePhysicalUUIDSpellings: preservePhysicalUUIDSpellings)
     }
 
     // MARK: - Manifest and identity

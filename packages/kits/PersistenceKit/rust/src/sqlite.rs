@@ -30,6 +30,10 @@ use crate::{
     StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
+use crate::inventory_snapshot::{
+    inventory_snapshot_columns, InventorySnapshot, InventorySnapshotBuilder, InventorySnapshotError, InventorySnapshotLimits,
+    InventorySnapshotResult, INVENTORY_SNAPSHOT_DRAWERS_TABLE, INVENTORY_SNAPSHOT_NODES_TABLE,
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Value codec — TypedValue <-> SQLite. Mirrors SQLiteConnection.swift's
@@ -1306,6 +1310,53 @@ impl Storage for SqliteStorage {
         })
     }
 
+    fn capture_inventory_snapshot(
+        &self,
+        limits: InventorySnapshotLimits,
+    ) -> InventorySnapshotResult<InventorySnapshot> {
+        // Snapshot reads must begin after any writer transaction ends. The
+        // coordinator blocks a different thread's bracket; a same-thread
+        // request inside one cannot wait for itself, so it fails closed.
+        self.tx_coord.acquire();
+        let mut inner = self.inner.lock().unwrap();
+        let result = (|| {
+            if inner.tx_depth != 0 {
+                return Err(InventorySnapshotError::from(StorageError::TransactionConflict {
+                    detail: "inventory snapshot requires a fresh SQLite read transaction".to_owned(),
+                }));
+            }
+            // This is deliberately a deferred read transaction, never the
+            // BEGIN IMMEDIATE writer helper used by Storage::transaction.
+            inner
+                .conn
+                .execute_batch("BEGIN")
+                .map_err(|error| InventorySnapshotError::from(map_sql_err(error, "inventory snapshot begin")))?;
+            match capture_sqlite_inventory_snapshot(
+                &mut inner,
+                &self.config.encryption_config,
+                limits,
+            ) {
+                Ok(snapshot) => {
+                    inner
+                        .conn
+                        .execute_batch("COMMIT")
+                        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, "inventory snapshot commit")))?;
+                    Ok(snapshot)
+                }
+                Err(error) => {
+                    let _ = inner.conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
+        })();
+        // Keep an enclosing same-thread writer bracket's coordinator claim
+        // intact when the snapshot correctly refuses to run inside it.
+        let depth = inner.tx_depth;
+        drop(inner);
+        self.tx_coord.release_if_closed(depth);
+        result
+    }
+
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         apply_schema(&mut self.inner.lock().unwrap(), schema)
     }
@@ -1632,6 +1683,191 @@ impl Storage for SqliteStorage {
             duration_seconds: started.elapsed().as_secs_f64(),
         })
     }
+}
+
+fn capture_sqlite_inventory_snapshot(
+    inner: &mut Inner,
+    encryption_config: &EstateEncryptionConfig,
+    limits: InventorySnapshotLimits,
+) -> InventorySnapshotResult<InventorySnapshot> {
+    let drawer_count = sqlite_snapshot_row_count(&inner.conn, INVENTORY_SNAPSHOT_DRAWERS_TABLE, limits)?;
+    let node_count = sqlite_snapshot_row_count(&inner.conn, INVENTORY_SNAPSHOT_NODES_TABLE, limits)?;
+    let mut snapshot = InventorySnapshotBuilder::new(limits, drawer_count, node_count)?;
+    let drawer_columns = inventory_snapshot_columns(inner.schema.as_ref(), INVENTORY_SNAPSHOT_DRAWERS_TABLE)?;
+    let node_columns = inventory_snapshot_columns(inner.schema.as_ref(), INVENTORY_SNAPSHOT_NODES_TABLE)?;
+    // The lower-bound query reads only stored lengths. It cannot reject an
+    // exact-fit canonical row; when expansion is uncertain, the bounded row
+    // stream below performs exact accounting before retaining each row.
+    let drawer_preflight = sqlite_snapshot_raw_lower_bound_bytes(
+        &inner.conn,
+        INVENTORY_SNAPSHOT_DRAWERS_TABLE,
+        &drawer_columns,
+        encryption_config,
+    )?;
+    let node_preflight = sqlite_snapshot_raw_lower_bound_bytes(
+        &inner.conn,
+        INVENTORY_SNAPSHOT_NODES_TABLE,
+        &node_columns,
+        encryption_config,
+    )?;
+    if drawer_preflight
+        .checked_add(node_preflight)
+        .filter(|total| *total <= limits.max_serialized_bytes())
+        .is_none()
+    {
+        return Err(InventorySnapshotError::ByteLimitExceeded {
+            limit: limits.max_serialized_bytes(),
+        });
+    }
+    sqlite_snapshot_rows(
+        inner,
+        encryption_config,
+        INVENTORY_SNAPSHOT_DRAWERS_TABLE,
+        &drawer_columns,
+        &mut snapshot,
+        InventorySnapshotBuilder::push_drawer,
+    )?;
+    sqlite_snapshot_rows(
+        inner,
+        encryption_config,
+        INVENTORY_SNAPSHOT_NODES_TABLE,
+        &node_columns,
+        &mut snapshot,
+        InventorySnapshotBuilder::push_node,
+    )?;
+    Ok(snapshot.finish())
+}
+
+fn sqlite_snapshot_raw_lower_bound_bytes(
+    connection: &Connection,
+    table: &str,
+    columns: &[(String, ColumnType)],
+    encryption_config: &EstateEncryptionConfig,
+) -> InventorySnapshotResult<usize> {
+    let fields = columns.iter().map(|(name, column_type)| {
+        let column = format!("\"{name}\"");
+        let stored_bytes = format!("length(CAST({column} AS BLOB))");
+        let storage_class = format!("typeof({column})");
+        if encryption_config.uses_row_crypto()
+            && protected_cols_for_table(table).contains(&name.as_str())
+        {
+            // AES-GCM envelopes are plaintext plus a fixed 12-byte nonce and
+            // 16-byte tag. Subtracting 28 is a lower bound, never a final
+            // decision, and keeps exact-fit encrypted rows eligible.
+            format!(
+                "CASE WHEN {column} IS NULL THEN 0 WHEN typeof({column}) = 'blob' THEN MAX({stored_bytes} - 28, 0) ELSE {stored_bytes} END"
+            )
+        } else {
+            match column_type {
+                // A declared SQLite type is advisory. These expressions are
+                // typeof-aware so a corrupt TEXT/BLOB in a fixed-width column
+                // is bounded before ValueRef can expose its full body.
+                ColumnType::Uuid => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                // Canonical SQLite writes use the 24-byte millisecond UTC
+                // ISO-8601 shape, while the smallest canonical snapshot form
+                // is `s:0` (3 bytes). The 21-byte adjustment is the only
+                // fixed representation allowance; longer corrupt text still
+                // contributes enough raw bytes to block body acquisition.
+                ColumnType::Timestamp => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 WHEN 'text' THEN MAX({stored_bytes} - 21, 0) ELSE {stored_bytes} END"
+                ),
+                ColumnType::Float => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Bool => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN 3 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Bitmap => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Int => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Hlc => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN CASE WHEN {column} < -8446744073709551616 THEN 21 WHEN {column} < 0 THEN 22 ELSE {stored_bytes} + 2 END WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                // Variable declared types preserve a textual/blob body's raw
+                // bytes or expand it on canonical encoding; raw is therefore
+                // a safe acquisition lower bound. Wrong numeric classes are
+                // decoded as their native TypedValue variants.
+                ColumnType::Text | ColumnType::Blob | ColumnType::Json | ColumnType::Fingerprint => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+            }
+        }
+    }).collect::<Vec<_>>().join(" + ");
+    let query = format!("SELECT COALESCE(SUM({fields}), 0) FROM \"{table}\"");
+    let total: i64 = connection
+        .query_row(&query, [], |row| row.get(0))
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    usize::try_from(total).map_err(|_| InventorySnapshotError::from(StorageError::BackendError {
+        underlying: format!("inventory snapshot raw lower bound for {table} is outside usize"),
+    }))
+}
+
+fn sqlite_snapshot_row_count(
+    table_conn: &Connection,
+    table: &str,
+    limits: InventorySnapshotLimits,
+) -> InventorySnapshotResult<usize> {
+    let scan_limit = i64::try_from(limits.max_rows_per_table().saturating_add(1)).map_err(|_| {
+        InventorySnapshotError::from(StorageError::BackendError {
+            underlying: "inventory snapshot row limit is outside SQLite range".to_owned(),
+        })
+    })?;
+    let count: i64 = table_conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM (SELECT 1 FROM \"{table}\" LIMIT ?1)"),
+            [scan_limit],
+            |row| row.get(0),
+        )
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    usize::try_from(count).map_err(|_| {
+        InventorySnapshotError::from(StorageError::BackendError {
+            underlying: format!("inventory snapshot count for {table} is outside usize"),
+        })
+    })
+}
+
+fn sqlite_snapshot_rows(
+    inner: &mut Inner,
+    encryption_config: &EstateEncryptionConfig,
+    table: &str,
+    columns: &[(String, ColumnType)],
+    snapshot: &mut InventorySnapshotBuilder,
+    push: fn(&mut InventorySnapshotBuilder, StorageRow) -> InventorySnapshotResult<()>,
+) -> InventorySnapshotResult<()> {
+    let mut statement = inner
+        .conn
+        .prepare(&format!(
+            "SELECT {} FROM \"{table}\"",
+            columns.iter().map(|(name, _)| format!("\"{name}\"")).collect::<Vec<_>>().join(", ")
+        ))
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?
+    {
+        let mut values = BTreeMap::new();
+        for (index, (name, column_type)) in columns.iter().enumerate() {
+            let value_ref = row
+                .get_ref(index)
+                .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+            values.insert(
+                name.clone(),
+                read_value(value_ref, Some(*column_type), table, name).map_err(InventorySnapshotError::from)?,
+            );
+        }
+        let values = decrypted_for_read(values, table, encryption_config, &AesGcmAeadProvider)
+            .map_err(InventorySnapshotError::from)?;
+        push(snapshot, StorageRow::new(values))?;
+    }
+    Ok(())
 }
 
 /// Size on disk of `path`, or 0 when absent / in-memory.

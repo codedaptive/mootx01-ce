@@ -67,6 +67,9 @@ pub struct Estate {
     /// Wrapped in Arc so Estate remains Clone.
     pub(crate) node_store: Option<Arc<NodeStore>>,
 
+    /// Frozen opens rebuild pruning aggregates only in private memory.
+    pub(crate) frozen_fingerprints: Option<Arc<crate::container_fingerprint_store::ContainerFingerprintStore>>,
+
     /// Parsed UUID form of the manifest's `estate_uuid` row. Cached at
     /// init time because the value never changes for the lifetime of
     /// the backing store (the manifest's `estate_uuid` is set once at
@@ -182,6 +185,13 @@ impl Estate {
         owner: OwnerCredentials,
         federate: bool,
     ) -> Result<Estate, EstateError> {
+        Self::open_with_policy(store, owner, federate, false)
+    }
+
+    /// Open without persistent maintenance when serving a frozen snapshot.
+    pub fn open_with_policy(
+        store: Arc<dyn DrawerStore>, owner: OwnerCredentials, federate: bool, frozen: bool,
+    ) -> Result<Estate, EstateError> {
         if owner.owner_identifier.is_empty() {
             return Err(EstateError::EmptyOwnerIdentifier);
         }
@@ -200,7 +210,7 @@ impl Estate {
                 expected: EXPECTED_BITMAP_LAYOUT_VERSION.to_string(),
             });
         }
-        Estate::from_manifest(store, manifest, federate)
+        Estate::from_manifest(store, manifest, federate, frozen)
     }
 
     // -----------------------------------------------------------------
@@ -254,7 +264,7 @@ impl Estate {
             .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
         // Create never mints the federation identity; the open that follows
         // decides, per `open_with_federation`. Twin of Swift `create`.
-        Estate::from_manifest(store, manifest, false)
+        Estate::from_manifest(store, manifest, false, false)
     }
 
     // -----------------------------------------------------------------
@@ -351,6 +361,7 @@ impl Estate {
         store: Arc<dyn DrawerStore>,
         manifest: ManifestValues,
         federate: bool,
+        frozen: bool,
     ) -> Result<Estate, EstateError> {
         let uuid =
             Uuid::parse_str(&manifest.estate_uuid).map_err(|_| EstateError::ManifestMismatch {
@@ -376,7 +387,7 @@ impl Estate {
         // key. Never a persistent estate property: a non-federating open
         // followed by a federating one mints then. Twin of the Swift
         // `federate:` parameter.
-        if federate && manifest.ed25519_public_key.is_none() {
+        if !frozen && federate && manifest.ed25519_public_key.is_none() {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD;
             let signing_key = SigningKey::generate(&mut OsRng);
@@ -393,9 +404,24 @@ impl Estate {
         // `now` is sourced from the manifest's `last_modified` row rather than
         // a system clock, honouring the deterministic-engine rule: the
         // aggregate's `updatedAt` stamp is reproducible from on-disk state.
-        store
-            .rebuild_container_fingerprints(manifest.last_modified)
-            .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+        let frozen_fingerprints = if frozen {
+            let build = || -> Result<_, crate::error::LocusKitError> {
+                let active: Vec<_> = store.all_drawers_bounded_projected(None)?
+                    .into_iter().filter(|d| d.tombstoned_at.is_none()).collect();
+                let ids: Vec<_> = active.iter().map(|d| d.parent_node_id.clone()).collect();
+                let names = store.resolve_node_names(&ids)?;
+                let memory: Arc<dyn persistence_kit::Storage> = Arc::new(
+                    persistence_kit::inmemory::InMemoryStorage::with_estate(uuid));
+                let fingerprints = crate::container_fingerprint_store::ContainerFingerprintStore::new(memory)?;
+                fingerprints.rebuild_all(&active, &names, manifest.last_modified)?;
+                Ok(Arc::new(fingerprints))
+            };
+            Some(build().map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?)
+        } else {
+            store.rebuild_container_fingerprints(manifest.last_modified)
+                .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+            None
+        };
         // node-tree integrity NT-L2: construct NodeStore from the same storage that
         // backs the DrawerStore. The `storage()` trait method returns the
         // underlying Storage so NodeStore shares the same connection.
@@ -403,12 +429,19 @@ impl Estate {
         // seed root node. create_root is idempotent — returns
         // existing root if already seeded.
         if let Some(ref ns) = node_store {
-            ns.create_root("Estate", manifest.last_modified)
-                .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+            if frozen {
+                if ns.root_node().map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?.is_none() {
+                    return Err(EstateError::SubstrateUnavailable("frozen estate has no root node".into()));
+                }
+            } else {
+                ns.create_root("Estate", manifest.last_modified)
+                    .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+            }
         }
         Ok(Estate {
             store,
             node_store,
+            frozen_fingerprints,
             estate_uuid: uuid,
             #[cfg(any(test, feature = "test-seams"))]
             test_force_internal_read_error: std::sync::Arc::new(

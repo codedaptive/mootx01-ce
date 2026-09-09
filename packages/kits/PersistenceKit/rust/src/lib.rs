@@ -35,6 +35,7 @@ pub mod generated_column;
 pub mod hashing_row_store;
 pub mod inmemory;
 pub mod introspection;
+pub mod inventory_snapshot;
 // Canonical schema layout signatures + deterministic table inventories
 // (GLK shared-content 1.1, P0). Accessed via module path or the re-exports
 // below.
@@ -74,6 +75,7 @@ pub use encryption::{
 pub use error::*;
 pub use generated_column::*;
 pub use introspection::{StorageIntrospection, StorageStats};
+pub use inventory_snapshot::*;
 pub use layout_signature::{layout_signature_digest, layout_signature_text};
 pub use database_inventory::{capture_inventory, TableInventory};
 pub use telemetry::report_storage_stats;

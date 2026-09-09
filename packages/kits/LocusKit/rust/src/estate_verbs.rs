@@ -177,6 +177,26 @@ pub(crate) mod audit_verbs {
 }
 
 impl Estate {
+    /// The contradiction proposal write boundary. The drawer store performs
+    /// selected evidence revalidation and filing in one transaction.
+    pub fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        self.store.atomic_file_conflict_proposal(request, now)
+    }
+
+    /// Resolve the display coordinates for already-authorized drawer parents.
+    /// This exposes no drawer content and lets a lower transactional writer
+    /// retain the established frame-validation vocabulary.
+    pub fn resolve_drawer_node_names(
+        &self,
+        parent_node_ids: &[String],
+    ) -> Result<BTreeMap<String, (String, String)>, LocusKitError> {
+        self.store.resolve_node_names(parent_node_ids)
+    }
+
     // -----------------------------------------------------------------------
     // node-name resolution
     // -----------------------------------------------------------------------
@@ -1018,7 +1038,7 @@ impl Estate {
                     degraded_stages.push(recall_stage::ROOM_FINGERPRINTS_READ_FAILED.to_string());
                     Vec::new()
                 } else {
-                    match self.store.room_level_fingerprints() {
+                    match self.room_level_fingerprints() {
                         Ok(e) => e,
                         Err(_) => {
                             degraded_stages
@@ -1045,7 +1065,7 @@ impl Estate {
                             // yet (possible on an estate that never called
                             // or_in/rebuild). None → treat as surviving (sound:
                             // absent aggregate must not prune, per spec § 11.5).
-                            match self.store.get_container_fingerprint(
+                            match self.pruning_container_fingerprint(
                                 &entry.wing,
                                 crate::container_fingerprint_store::ContainerFingerprintStore::WING_ROLLUP_ROOM,
                             ) {
@@ -1707,7 +1727,17 @@ impl Estate {
     pub fn room_level_fingerprints(
         &self,
     ) -> Result<Vec<crate::container_fingerprint_store::RoomLevelEntry>, LocusKitError> {
-        self.store.room_level_fingerprints()
+        match &self.frozen_fingerprints {
+            Some(store) => store.room_level_entries(),
+            None => self.store.room_level_fingerprints(),
+        }
+    }
+
+    fn pruning_container_fingerprint(&self, wing: &str, room: &str) -> Result<Option<crate::container_fingerprint_store::ContainerFingerprint>, LocusKitError> {
+        match &self.frozen_fingerprints {
+            Some(store) => store.get(wing, room),
+            None => self.store.get_container_fingerprint(wing, room),
+        }
     }
 
     /// All non-tombstoned drawers in a room, ordered by `filedAt` ascending.
@@ -3655,6 +3685,30 @@ mod tests {
     }
 
     // --- capture container-fingerprint maintenance (P0-PARITY #33) ---
+
+    #[test]
+    fn frozen_open_uses_current_private_fingerprints_without_persisting() {
+        let live = make_estate();
+        let drawer = basic_capture(&live, "frozen span candidate", "study");
+        let before = live.store.room_level_fingerprints().unwrap();
+        let names = live.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
+        let (wing, _) = names.get(&drawer.parent_node_id).unwrap();
+        let wing_before = live.store.get_container_fingerprint(wing, "").unwrap();
+        live.store.set_span_indexed(&drawer.id).unwrap();
+        assert_eq!(live.store.room_level_fingerprints().unwrap(), before);
+        let manifest_before = live.store.read_manifest().unwrap();
+        let frozen = Estate::open_with_policy(
+            Arc::clone(&live.store), OwnerCredentials::new("frozen-reader"), true, true,
+        ).unwrap();
+        assert_eq!(frozen.store.room_level_fingerprints().unwrap(), before);
+        assert_eq!(frozen.store.get_container_fingerprint(wing, "").unwrap(), wing_before);
+        assert_eq!(frozen.store.read_manifest().unwrap().ed25519_public_key, manifest_before.ed25519_public_key);
+        assert_ne!(frozen.room_level_fingerprints().unwrap()[0].fingerprint.operational & DrawerFeatureFlags::SPAN_INDEXED, 0);
+        let frame = RecallFrame::new(vec![Filter::HasFeatureFlag(DrawerFeatureFlags::SPAN_INDEXED)]);
+        let hits = frozen.recall(frame, 1_700_000_000).collect_all();
+        assert!(hits.iter().any(|hit| hit.id == drawer.id));
+        assert_eq!(frozen.store.room_level_fingerprints().unwrap(), before);
+    }
 
     #[test]
     fn capture_ors_into_room_level_container_fingerprint() {
