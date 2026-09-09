@@ -358,6 +358,13 @@ impl EstateRegistry {
         // First run = no estate file before this open. Read before anything
         // below can create the file; it gates the create-time defaults.
         let first_run = !std::path::Path::new(path).exists();
+        let frozen = crate::estate_posture::EstatePosture::from_process_environment().is_frozen();
+        // This startup policy belongs only to the selected v2 surface. Legacy
+        // v1 opens retain their existing frozen wiring behaviour.
+        let preserve_v2_frozen_configuration = frozen && cfg!(feature = "aria-v2");
+        if frozen && first_run {
+            return Err("frozen SQLite open requires an existing estate".to_string());
+        }
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         // Production model-directory resolver, installed before `coord.open`
         // and the semantic-recall wiring below: the wiring acts on the
@@ -381,10 +388,12 @@ impl EstateRegistry {
         // connection is always opened on the canonical normalized path; no stale fd
         // survives the atomic rename. Errors are parked so a geometry failure never
         // blocks the estate from opening (VACUUM will surface the issue later).
-        if let Err(e) = run_geometry_normalization(std::path::Path::new(path)) {
-            eprintln!(
-                "aria-mcp: geometry normalization for estate at {path:?}: {e} (parked; VACUUM will surface this)"
-            );
+        if !frozen {
+            if let Err(e) = run_geometry_normalization(std::path::Path::new(path)) {
+                eprintln!(
+                    "aria-mcp: geometry normalization for estate at {path:?}: {e} (parked; VACUUM will surface this)"
+                );
+            }
         }
         let store: Arc<dyn DrawerStore> = Arc::new(
             SqliteDrawerStore::from_path(path, INIT_NOW, None, SQLITE_BUSY_TIMEOUT_SECS)
@@ -406,8 +415,8 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open_with_federation(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100, opening.federate)
-            .expect("default sqlite estate open must succeed");
+            .open_with_policy(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100, opening.federate, frozen)
+            .map_err(|e| format!("aria-mcp: cannot open SQLite estate at {path:?}: {e:?}"))?;
 
         // Semantic recall wiring (SQLite branch only — mirrors AriaMCPMain.swift).
         //
@@ -447,9 +456,9 @@ impl EstateRegistry {
                 .provision_default_encoder_if_absent(&handle)
                 .map_err(|e| format!("aria-mcp: default encoder provisioning failed for {path:?}: {e:?}"))?;
         }
-        wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord, preserve_v2_frozen_configuration)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
-        if opening.seed_charters {
+        if opening.seed_charters && !frozen {
             // Idempotently seed the seven default wings. Non-fatal: seeding
             // failure logs and continues — the estate is open and functional.
             // Mirrors Swift ServeCommand's seedDefaultWings call after
@@ -545,7 +554,10 @@ impl EstateRegistry {
         let shared_storage = store.storage().ok_or_else(|| {
             format!("aria-mcp: SqliteDrawerStore at {path:?} did not expose its backing Storage — cannot wire semantic recall")
         })?;
-        wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord)
+        let preserve_v2_frozen_configuration =
+            crate::estate_posture::EstatePosture::from_process_environment().is_frozen()
+                && cfg!(feature = "aria-v2");
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord, preserve_v2_frozen_configuration)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
@@ -866,7 +878,7 @@ fn wire_inmemory_semantic_recall(
     EstateFormatStore::new(Arc::clone(&storage))
         .stamp(EstateFormatVersion::CURRENT, INIT_NOW)
         .map_err(|error| format!("estate-format stamp: {error:?}"))?;
-    wire_glk(handle, coord, storage, INIT_NOW)
+    wire_glk(handle, coord, storage, INIT_NOW, false)
 }
 
 /// Wire the semantic recall lanes for a PostgreSQL-backed estate.
@@ -923,7 +935,7 @@ fn wire_postgres_semantic_recall(
             .run_migration_chain(handle, now, default_ensemble())
             .map_err(|error| format!("estate migration chain: {error}"))?;
     }
-    wire_glk(handle, coord, storage, now)
+    wire_glk(handle, coord, storage, now, false)
 }
 
 /// Wire the semantic recall lanes for a SQLite-backed estate.
@@ -951,17 +963,24 @@ fn wire_sqlite_semantic_recall(
     shared_storage: Arc<dyn Storage>,
     handle: &EstateHandle,
     coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
+    preserve_v2_frozen_configuration: bool,
 ) -> Result<(), String> {
-    // This binary declares a 1.0 floor, so prepare the estate through the
-    // separately compiled migration capsules before current-runtime wiring.
     let now = wall_now_millis();
-    {
+    if preserve_v2_frozen_configuration {
+        // A frozen v2 open must use a prepared estate. This reads the current
+        // stamp without writing an unstamped or older estate forward.
+        EstateFormatStore::new(Arc::clone(&shared_storage))
+            .require_current()
+            .map_err(|error| format!("frozen selected-v2 SQLite open requires current estate format: {error:?}"))?;
+    } else {
+        // This binary declares a 1.0 floor, so prepare the estate through the
+        // separately compiled migration capsules before current-runtime wiring.
         let mut guard = coord.lock().unwrap();
         guard
             .run_migration_chain(handle, now, default_ensemble())
             .map_err(|error| format!("estate migration chain for {path:?}: {error}"))?;
     }
-    wire_glk(handle, coord, shared_storage, now)
+    wire_glk(handle, coord, shared_storage, now, preserve_v2_frozen_configuration)
 }
 
 /// The one wire call every backend shares: `EstateCoordinator::wire_glk_substores`
@@ -980,12 +999,15 @@ fn wire_glk(
     coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
     storage: Arc<dyn Storage>,
     now_millis: i64,
+    preserve_v2_frozen_configuration: bool,
 ) -> Result<(), String> {
-    coord
-        .lock()
-        .unwrap()
-        .wire_glk_substores(handle, storage, default_ensemble(), now_millis)
-        .map_err(|e| format!("wire_glk_substores failed: {e:?}"))
+    let mut guard = coord.lock().unwrap();
+    let result = if preserve_v2_frozen_configuration {
+        guard.wire_glk_substores_readonly(handle, storage, default_ensemble(), now_millis)
+    } else {
+        guard.wire_glk_substores(handle, storage, default_ensemble(), now_millis)
+    };
+    result.map_err(|e| format!("wire_glk_substores failed: {e:?}"))
 }
 
 fn wall_now_millis() -> i64 {

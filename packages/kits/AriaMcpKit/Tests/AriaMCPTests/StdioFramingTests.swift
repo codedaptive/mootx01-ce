@@ -116,6 +116,64 @@ struct StdioFramingTests {
         #expect(!tools.isEmpty, "tools/list must project the tool surface")
     }
 
+    #if MOOTX01_ARIA_V2
+    @Test func v2ToolsListAndMonitoringStatusRoundTripOverPipes() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-stdio-transport-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        let server = StdioServer(dispatcher: ARIA_MCPDispatcher(
+            info: .init(name: "ARIA_MCP", version: "test"),
+            tooling: ToolDispatcher(kit: kit, handle: handle)
+        ))
+
+        let listFrame: JSONValue = .object([
+            "jsonrpc": .string("2.0"), "id": .integer(1), "method": .string("tools/list"),
+        ])
+        let monitoringFrame: JSONValue = .object([
+            "jsonrpc": .string("2.0"), "id": .integer(2), "method": .string("tools/call"),
+            "params": .object([
+                "name": .string("moot_monitoring_status"), "arguments": .object([:]),
+            ]),
+        ])
+        var payload = try listFrame.encoded()
+        payload.append(0x0A)
+        payload.append(try monitoringFrame.encoded())
+        payload.append(0x0A)
+
+        let input = Pipe(), output = Pipe()
+        try input.fileHandleForWriting.write(contentsOf: payload)
+        try input.fileHandleForWriting.close()
+        let drain = Task { (try? output.fileHandleForReading.readToEnd()) ?? Data() }
+        await server.run(input: input.fileHandleForReading, output: output.fileHandleForWriting)
+        try output.fileHandleForWriting.close()
+
+        let response = await drain.value
+        let replies = response.split(separator: 0x0A).filter { !$0.isEmpty }
+        #expect(replies.count == 2)
+        let decoded = try replies.map { try JSONValue.parse(Data($0)) }
+        let byID: [Int64: [String: JSONValue]] = Dictionary(uniqueKeysWithValues: decoded.compactMap { value in
+            guard let object = value.objectValue, let id = object["id"]?.integerValue else { return nil }
+            return (id, object)
+        })
+        let listResult = try #require(byID[1]?["result"]?.objectValue)
+        let listedNames = Set((try #require(listResult["tools"]?.arrayValue)).compactMap {
+            $0.objectValue?["name"]?.stringValue
+        })
+        #expect(listedNames == Set(ToolProjection.tools(environment: [:]).map(\.name)))
+        #expect(listedNames.contains("moot_monitoring_status"))
+
+        let callResult = try #require(byID[2]?["result"]?.objectValue)
+        let structured = try #require(callResult["structuredContent"]?.objectValue)
+        #expect(structured["surface_version"] == JSONValue.string("v2"))
+        #expect(structured["tool"] == JSONValue.string("moot_monitoring_status"))
+        #expect(structured["meta"]?.objectValue?["effect"] == JSONValue.string("read"))
+    }
+    #endif
+
     /// Verifies the frame size cap (CAND-051): a frame that exceeds the cap
     /// without a newline terminator causes the server to close input cleanly
     /// rather than growing the buffer unboundedly. The writer gets no response
