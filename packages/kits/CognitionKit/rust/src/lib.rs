@@ -78,6 +78,7 @@ pub mod precise_recall;
 pub mod rhythm_recipe;
 pub mod session_hybrid_fusion;
 pub mod shaped_recall;
+pub mod transcript_recall;
 pub mod theme_weather_recipe;
 pub mod trust_lens_recipe;
 pub mod tunnel_successor_recipe;
@@ -100,10 +101,16 @@ pub use drift_recipe::{run_drift, DriftOutput};
 pub use error::{AnchorNotInRecalledSetError, RecipeError, RecipeRunError, SubstrateError};
 pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
 pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
-pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};
+pub use formal_concepts_recipe::{
+    run_formal_concepts, run_formal_concepts_receipt, FormalConceptResult,
+    FormalConceptsOutput, FormalConceptsReceipt,
+};
 pub use exploratory_recall_recipe::{run_exploratory_recall, ExploratoryRecallOutput, ExploratoryResult};
 pub use free_association_recipe::{run_free_association, Association};
-pub use grounded_synthesis::{run_grounded_synthesis, run_grounded_synthesis_with_provenance_gate, GroundedOutput};
+pub use grounded_synthesis::{
+    run_grounded_synthesis, run_grounded_synthesis_with_provenance_gate,
+    run_grounded_synthesis_with_provenance_gate_and_scoring, GroundedOutput,
+};
 pub use keystones_recipe::run_keystones;
 pub use latent_themes_recipe::run_latent_themes;
 pub use migration_live::{
@@ -132,6 +139,7 @@ pub use moment_recipe::{run_moment, MomentOutput};
 pub use precedence_recipe::{run_precedence, PrecedenceOutput};
 pub use rhythm_recipe::{run_rhythm, RhythmOutput};
 pub use shaped_recall::{run as run_shaped_recall, ShapedRecallOutput};
+pub use transcript_recall::{run as run_transcript_recall, TranscriptRecallOutput, TRANSCRIPT_HEAD, TRANSCRIPT_POOL, TRANSCRIPT_RRF_K, TRANSCRIPT_SPANS};
 pub use theme_weather_recipe::run_theme_weather;
 pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
 pub use tunnel_successor_recipe::{run_tunnel_successor, Successor};

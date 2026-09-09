@@ -64,6 +64,39 @@
 
 import Foundation
 import LocusKit
+
+/// A selected, already-analyzed candidate with no copied memory body.  ARIA
+/// passes this through unchanged; LocusKit re-reads and verifies its digests
+/// before any proposal is inserted.
+public struct SelectedConflictProposal: Sendable, Equatable {
+    public let sourceDrawerID: String
+    public let targetDrawerID: String
+    public let pairKey: String
+    public let tier: Int
+    public let renewalKey: String
+    public let evidenceID: String
+    public let sourceDigest: String
+    public let targetDigest: String
+    public let evidenceDigest: String
+    public let label: String
+
+    public init(sourceDrawerID: String, targetDrawerID: String, pairKey: String,
+                tier: Int, renewalKey: String, evidenceID: String,
+                sourceDigest: String, targetDigest: String, evidenceDigest: String,
+                label: String) {
+        self.sourceDrawerID = sourceDrawerID
+        self.targetDrawerID = targetDrawerID
+        self.pairKey = pairKey
+        self.tier = tier
+        self.renewalKey = renewalKey
+        self.evidenceID = evidenceID
+        self.sourceDigest = sourceDigest
+        self.targetDigest = targetDigest
+        self.evidenceDigest = evidenceDigest
+        self.label = label
+    }
+}
+import LocusKit
 import SubstrateML
 
 /// One M5/P2.5 pass's outcome.
@@ -97,6 +130,81 @@ public struct ConflictTunnelProposalReport: Sendable {
 }
 
 public extension GeniusLocusKit {
+
+    /// Convert one read-only tier finding into digest-bound proposal metadata.
+    /// Bodies are read only long enough to hash them and are never retained by
+    /// the caller's analysis reference.
+    func selectedConflictProposal(
+        for finding: TierFinding,
+        in handle: EstateHandle
+    ) async throws -> SelectedConflictProposal? {
+        let estate = try estate(for: handle)
+        let drawers = try await estate.hydrateBodies(ids: [finding.drawerA, finding.drawerB])
+        let byID = Dictionary(uniqueKeysWithValues: drawers.map { ($0.id, $0) })
+        guard let source = byID[finding.drawerA], let target = byID[finding.drawerB] else {
+            return nil
+        }
+        let renewalKey: String
+        let evidenceID: String
+        switch finding.tier {
+        case .typedProven:
+            guard let ruleID = finding.ruleID, let ruleVersion = finding.ruleVersion,
+                  let resultID = finding.resultID else { return nil }
+            renewalKey = "\(Self.conflictProposalLabelPrefix)\(ruleID)@\(ruleVersion)"
+            evidenceID = resultID
+        case .lexicalStructural:
+            guard let cue = finding.cueKind else { return nil }
+            renewalKey = "\(Self.tier2ProposalLabelPrefix)\(cue)@\(Self.conflictCueVersion)"
+            evidenceID = cue
+        case .lexicalValue:
+            guard let cue = finding.cueKind else { return nil }
+            renewalKey = "\(Self.tier3ProposalLabelPrefix)\(cue)@\(Self.conflictCueVersion)"
+            evidenceID = cue
+        }
+        let sourceDigest = AtomicConflictProposalRequest.drawerDigest(id: source.id, content: source.content)
+        let targetDigest = AtomicConflictProposalRequest.drawerDigest(id: target.id, content: target.content)
+        let evidenceDigest = AtomicConflictProposalRequest.evidenceDigest(
+            pairKey: finding.pairKey, tier: finding.tier.rawValue,
+            renewalKey: renewalKey, evidenceID: evidenceID,
+            sourceDigest: sourceDigest, targetDigest: targetDigest)
+        return .init(
+            sourceDrawerID: source.id, targetDrawerID: target.id,
+            pairKey: finding.pairKey, tier: finding.tier.rawValue,
+            renewalKey: renewalKey, evidenceID: evidenceID,
+            sourceDigest: sourceDigest, targetDigest: targetDigest,
+            evidenceDigest: evidenceDigest, label: "\(renewalKey) evidence=\(evidenceID)")
+    }
+
+    /// File exactly one selected candidate through LocusKit's serializable
+    /// fresh-read/write seam.  This is intentionally separate from the old
+    /// all-candidate sweep, whose cached state is not safe for ARIA replay.
+    func fileSelectedConflictProposal(
+        _ proposal: SelectedConflictProposal,
+        in handle: EstateHandle,
+        now: Date
+    ) async throws -> AtomicConflictProposalOutcome {
+        let estate = try estate(for: handle)
+        return try await estate.fileAtomicConflictProposal(.init(
+            sourceDrawerID: proposal.sourceDrawerID,
+            targetDrawerID: proposal.targetDrawerID,
+            pairKey: proposal.pairKey,
+            tier: proposal.tier,
+            renewalKey: proposal.renewalKey,
+            evidenceID: proposal.evidenceID,
+            sourceDigest: proposal.sourceDigest,
+            targetDigest: proposal.targetDigest,
+            evidenceDigest: proposal.evidenceDigest,
+            label: proposal.label,
+            addedBy: "conflict-projection",
+            filedAt: now,
+            declinePolicy: { records in
+                GeniusLocusKit.declineMatrixSuppresses(
+                    filingTier: proposal.tier,
+                    renewalKey: proposal.renewalKey,
+                    withdrawnRecords: records)
+            }
+        ))
+    }
 
     /// Label prefix for typed-lane proposals; the rule@version after it
     /// is the F15 renewal key.
