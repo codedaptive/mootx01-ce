@@ -66,18 +66,24 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEstate {
     /// A SQLite estate: the record's `estate.sqlite`, opened as the record
-    /// decides (`SqliteOpening::for_record`), its manifest refreshed after the
+    /// decides (`EstateOpening::for_record`), its manifest refreshed after the
     /// migration chain with the at-rest posture the caller resolved.
     Sqlite {
         record: genius_locus_kit::EstateRecord,
-        opening: crate::estate_registry::SqliteOpening,
+        opening: crate::estate_registry::EstateOpening,
         encryption: genius_locus_kit::EstateManifestEncryption,
     },
-    /// A PostgreSQL estate at the record's connection string.
-    Postgresql { connection_string: String },
-    /// The in-memory backend (`serve --in-memory`): the estate lives and dies
-    /// with the process.
-    InMemory,
+    /// A PostgreSQL estate at the record's connection string, opened as the
+    /// record decides.
+    Postgresql {
+        connection_string: String,
+        opening: crate::estate_registry::EstateOpening,
+    },
+    /// The in-memory backend (`--in-memory`): the estate lives and dies with
+    /// the process. The caller still resolves its catalog record first, so a
+    /// bad `--db` is refused before the backend is chosen; the opening it
+    /// passes is always `EstateOpening::TRANSIENT` (R8, 2026-09-08).
+    InMemory { opening: crate::estate_registry::EstateOpening },
 }
 
 impl ServerConfig {
@@ -86,14 +92,14 @@ impl ServerConfig {
     /// string never appears in that message.
     pub fn for_estate(estate: RuntimeEstate) -> Result<Self, String> {
         let registry = match estate {
-            RuntimeEstate::Postgresql { connection_string } => {
+            RuntimeEstate::Postgresql { connection_string, opening } => {
                 // EstateRegistry::new_postgres reads the estate manifest during
                 // construction, so an unreachable or unusable PostgreSQL estate
                 // fails at startup rather than on first tool call. Redact
                 // userinfo before logging — the string may carry
                 // user:password@host.
                 eprintln!("aria-mcp: opening PostgreSQL estate at {}", redact_postgres_url(&connection_string));
-                let reg = EstateRegistry::new_postgres(&connection_string, "aria-mcp-default")
+                let reg = EstateRegistry::new_postgres_with(&connection_string, "aria-mcp-default", opening)
                     .map_err(|e| format!("{e}").replace(&connection_string, "[REDACTED]"))?;
                 eprintln!("aria-mcp: PostgreSQL estate ready");
                 reg
@@ -126,9 +132,9 @@ impl ServerConfig {
                 eprintln!("aria-mcp: SQLite estate ready at {path_text:?}");
                 reg
             }
-            RuntimeEstate::InMemory => {
+            RuntimeEstate::InMemory { opening } => {
                 eprintln!("aria-mcp: in-memory estate — exists only for this process");
-                EstateRegistry::new_inmemory()
+                EstateRegistry::new_inmemory_with(opening)
             }
         };
         Ok(ServerConfig {
