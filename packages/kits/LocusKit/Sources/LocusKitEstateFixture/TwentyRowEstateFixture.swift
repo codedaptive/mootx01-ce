@@ -94,10 +94,11 @@ public enum TwentyRowEstateFixture {
 
     /// The real configuration directory this fixture must never touch: the
     /// product's Application Support folder, where the estate catalog and the
-    /// default database location live. The folder name is duplicated as a
-    /// literal rather than imported because LocusKit sits below the modules
-    /// that own the product identity, and a test-support target must not drag
-    /// them into the kit graph. No environment value moves it.
+    /// default database location live. The folder name is
+    /// `MootProductIdentity.Storage.applicationSupportFolder`, the one
+    /// spelling the product has; LocusKit takes the identity library as a
+    /// dependency (a constants-only leaf below every kit, so no layering
+    /// inverts). No environment value moves it.
     public static func productionDataDirectory(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> URL {
