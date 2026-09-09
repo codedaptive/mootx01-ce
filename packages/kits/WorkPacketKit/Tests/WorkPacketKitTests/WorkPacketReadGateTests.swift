@@ -94,6 +94,20 @@ struct WorkPacketReadGateTests {
         #expect(elevated?.id == "gate-prov-elevated")
     }
 
+    @Test("unknown provenance is absent from fetch and batch under every ceiling")
+    func unknownProvenanceFailsClosed() async throws {
+        let client = MockEstateClient()
+        try client.plant(makePacket(id: "gate-unknown"), rawProvenanceSensitivity: 63)
+        try client.plant(makePacket(id: "gate-known"))
+        let store = WorkPacketStore(client: client)
+        for ceiling: Filter? in [nil, .sensitivityAtMost(.restricted), .sensitivityAtMost(.secret)] {
+            let fetched = try await store.fetch(drawerID: "gate-unknown", ceiling: ceiling)
+            #expect(fetched == nil)
+            let batch = try await store.fetchAdmissibleDrawers(ids: ["gate-unknown", "gate-known"], ceiling: ceiling)
+            #expect(batch.map(\.id) == ["gate-known"])
+        }
+    }
+
     @Test("batch read omits gated and missing ids, keeps admissible ones")
     func batchReadOmitsGatedIDs() async throws {
         let client = MockEstateClient()

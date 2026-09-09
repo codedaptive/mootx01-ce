@@ -21,6 +21,7 @@ use corpus_kit::encoder::{spanner, EncoderModelSpec, SpanEncoder};
 use locus_kit::estate::Estate;
 use substrate_kernel::int8_vec;
 use synapsekit::vector_store::{SpanVectorInput, VectorStore};
+use crate::span_content_version::span_content_version;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpanEncodeBatchResult {
@@ -122,7 +123,7 @@ pub fn encode_batch_with(
                 // version stamped on the spans; bit 27 stays clear, so a
                 // rewritten drawer is re-encoded on the next pump from its
                 // current content. Mirrors the Swift `_encodeBatch` guard.
-                let encoded_version = content_version(content);
+                let encoded_version = span_content_version(content);
                 let live = match context.live_span_encode_content(drawer_id) {
                     Ok(live) => live,
                     Err(_) => {
@@ -131,7 +132,7 @@ pub fn encode_batch_with(
                     }
                 };
                 match live {
-                    Some(live_content) if content_version(&live_content) == encoded_version => {}
+                    Some(live_content) if span_content_version(&live_content) == encoded_version => {}
                     _ => {
                         skipped += 1;
                         continue;
@@ -193,7 +194,7 @@ fn build_span_inputs(
         ));
     }
 
-    let cv = content_version(content);
+    let cv = span_content_version(content);
     let inputs: Vec<SpanVectorInput> = bounds
         .iter()
         .zip(float_vecs.iter())
@@ -212,17 +213,6 @@ fn build_span_inputs(
         .collect();
 
     Ok(inputs)
-}
-
-/// FNV-1a 64-bit content version proxy. Mirrors Swift `contentVersion(_:)`.
-/// Content version stamped on each span row: the duty's staleness key.
-fn content_version(content: &str) -> String {
-    let mut hash: u64 = 14_695_981_039_346_656_037;
-    for byte in content.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(1_099_511_628_211);
-    }
-    format!("{:016x}", hash)
 }
 
 // MARK: - Unit tests (Rust-side; Swift-side tests are the contract's three-test spec)
