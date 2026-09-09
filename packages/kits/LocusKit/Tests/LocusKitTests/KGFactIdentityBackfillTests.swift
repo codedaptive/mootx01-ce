@@ -58,14 +58,20 @@ struct KGFactIdentityBackfillTests {
     /// identical to the live declaration except `kg_facts` lacks the
     /// identity trio and the ladder is empty (so opening records exactly
     /// version 10, the way a CE 1.0.x estate on disk is recorded). The
-    /// single v10 → v19 hop is what adds the trio.
+    /// v10 → v19 → v20 ladder is what adds the missing columns.
     private func v10Schema() -> SchemaDeclaration {
         let live = LocusKitSchema.schema
-        let identityTrio: Set<String> = ["addedBy", "foreignSourceKey", "foreignRecordID"]
+        let postV10KGFactColumns: Set<String> = [
+            "addedBy", "foreignSourceKey", "foreignRecordID", "evidenceQuote",
+            "evidenceStart", "evidenceEnd", "evidenceStartUTF8Byte",
+            "evidenceEndUTF8Byte", "sourceDigest", "extractorProviderID",
+            "extractorModelID", "extractorModelVersion", "extractionSchemaVersion",
+            "searchProjection", "searchProjectionVersion",
+        ]
         let v10KGFacts = TableDeclaration(
             name: "kg_facts",
             columns: LocusKitSchema.kgFactsTable.columns.filter {
-                !identityTrio.contains($0.name)
+                !postV10KGFactColumns.contains($0.name)
             },
             primaryKey: LocusKitSchema.kgFactsTable.primaryKey,
             generatedColumns: LocusKitSchema.kgFactsTable.generatedColumns
@@ -73,7 +79,10 @@ struct KGFactIdentityBackfillTests {
         return SchemaDeclaration(
             kitID: LocusKitSchema.kitID,
             version: LocusKitSchema.supportedUpgradeFloor,
-            tables: live.tables.map { $0.name == "kg_facts" ? v10KGFacts : $0 },
+            tables: live.tables.compactMap {
+                if $0.name == "fact_extractor_models" { return nil }
+                return $0.name == "kg_facts" ? v10KGFacts : $0
+            },
             indices: live.indices,
             migrations: []
         )
@@ -97,7 +106,7 @@ struct KGFactIdentityBackfillTests {
         ]
     }
 
-    // MARK: - Leg 1: the v10 → v19 hop adds the identity columns
+    // MARK: - Leg 1: the schema ladder adds the identity columns
 
     @Test("a schema-10 estate gains the identity columns and its rows migrate")
     func v12EstateGainsColumnsAndMigrates() async throws {
