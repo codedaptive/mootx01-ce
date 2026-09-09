@@ -32,11 +32,13 @@ struct MootProductIdentityTests {
         (["productRoot"], MootProductIdentity.productRoot),
         (["vendorRoot"], MootProductIdentity.vendorRoot),
         (["storage", "applicationSupportFolder"], MootProductIdentity.Storage.applicationSupportFolder),
+        (["storage", "unixDataFolder"], MootProductIdentity.Storage.unixDataFolder),
         (["storage", "latticeFolder"], MootProductIdentity.Storage.latticeFolder),
         (["storage", "catalogFile"], MootProductIdentity.Storage.catalogFile),
         (["storage", "databasesFolder"], MootProductIdentity.Storage.databasesFolder),
         (["storage", "defaultEstateName"], MootProductIdentity.Storage.defaultEstateName),
         (["storage", "estateDatabaseFile"], MootProductIdentity.Storage.estateDatabaseFile),
+        (["storage", "communityDaemonFolder"], MootProductIdentity.Storage.communityDaemonFolder),
         (["logging", "subsystem"], MootProductIdentity.Logging.subsystem),
         (["services", "daemonLabel"], MootProductIdentity.Services.daemonLabel),
         (["services", "managerLabel"], MootProductIdentity.Services.managerLabel),
@@ -100,6 +102,32 @@ struct MootProductIdentityTests {
         let fixtureLeaves = Set(leaves(try fixture(), []).map { $0.joined(separator: ".") })
         let constantPaths = Set(Self.constants.map { $0.path.joined(separator: ".") })
         #expect(fixtureLeaves == constantPaths, "fixture leaves and constants differ: \(fixtureLeaves.symmetricDifference(constantPaths).sorted())")
+    }
+
+    /// The list above is hand-maintained, so a constant added to the source
+    /// without a fixture leaf would escape `everyFixtureLeafIsAConstant`. This
+    /// reads the library source and refuses any `public static let` whose name
+    /// is not the last component of a fixture path. Keyed on the NAME, not the
+    /// value: two constants may share a value (`urlScheme` and `unixDataFolder`
+    /// both read "mootx01"). Twin of the Rust `every_pub_const_is_listed`.
+    @Test func everySourceConstantIsAFixtureLeaf() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/MootProductIdentity/MootProductIdentity.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let leafNames = Set(Self.constants.map { $0.path.last! })
+        var seen: Set<String> = []
+        for line in source.split(separator: "\n") {
+            let trimmed = line.drop(while: { $0 == " " })
+            guard trimmed.hasPrefix("public static let ") else { continue }
+            let name = String(trimmed.dropFirst("public static let ".count).prefix(while: { $0.isLetter || $0.isNumber || $0 == "_" }))
+            #expect(leafNames.contains(name), "source `public static let \(name)` is not a fixture leaf, so the fixture does not pin it")
+            seen.insert(name)
+        }
+        // Every leaf that is a stored constant is in the source; the one
+        // function-backed leaf (`syncTierServicePrefix`) is not a `let`.
+        #expect(leafNames.subtracting(seen) == ["syncTierServicePrefix"],
+                "fixture leaves with no `public static let`: \(leafNames.subtracting(seen).sorted())")
     }
 
     @Test func everyValueIsNormalisedUnderARoot() {

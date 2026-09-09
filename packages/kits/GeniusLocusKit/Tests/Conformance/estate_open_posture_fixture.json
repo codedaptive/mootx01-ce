@@ -1,0 +1,23 @@
+{
+  "description": "The estate open posture decision table, one row per combination of inputs, read by both ports' posture tests (Swift EstateOpenPostureTests.postureTableMatchesTheSharedFixture, Rust estate_open_posture::tests::posture_table_matches_the_shared_fixture). Inputs: registered (the record is a catalog record), declaresPlaintext (the manifest declares plaintext), file (absent, plaintext or ciphertext), key (a custody key exists for the path: a Keychain item in Swift, db.key beside the database in Rust). Rows with harness true apply only to a build compiled with the harness key file (Swift MOOTX01_HARNESS_KEYFILE, Rust feature harness-keyfile); there, key means the harness key file beside the database. Expected is a posture name or an error name; both ports spell them as written here.",
+  "rows": [
+    {"id": "registered-absent-mints",            "registered": true,  "declaresPlaintext": false, "file": "absent",     "key": false, "harness": false, "expected": "newEncrypted"},
+    {"id": "registered-absent-declared",         "registered": true,  "declaresPlaintext": true,  "file": "absent",     "key": false, "harness": false, "expected": "newPlaintextDeclared"},
+    {"id": "registered-plaintext-stays",         "registered": true,  "declaresPlaintext": false, "file": "plaintext",  "key": false, "harness": false, "expected": "existingPlaintext"},
+    {"id": "registered-plaintext-declared",      "registered": true,  "declaresPlaintext": true,  "file": "plaintext",  "key": false, "harness": false, "expected": "existingPlaintext"},
+    {"id": "registered-ciphertext-existing-key", "registered": true,  "declaresPlaintext": false, "file": "ciphertext", "key": true,  "harness": false, "expected": "existingEncrypted"},
+    {"id": "registered-ciphertext-declared-key", "registered": true,  "declaresPlaintext": true,  "file": "ciphertext", "key": true,  "harness": false, "expected": "existingEncrypted"},
+    {"id": "registered-ciphertext-no-key",       "registered": true,  "declaresPlaintext": false, "file": "ciphertext", "key": false, "harness": false, "expected": "encryptedEstateKeyMissing"},
+    {"id": "transient-absent",                   "registered": false, "declaresPlaintext": false, "file": "absent",     "key": false, "harness": false, "expected": "newPlaintextDeclared"},
+    {"id": "transient-absent-declared",          "registered": false, "declaresPlaintext": true,  "file": "absent",     "key": false, "harness": false, "expected": "newPlaintextDeclared"},
+    {"id": "transient-plaintext",                "registered": false, "declaresPlaintext": false, "file": "plaintext",  "key": false, "harness": false, "expected": "existingPlaintext"},
+    {"id": "transient-ciphertext-no-key",        "registered": false, "declaresPlaintext": false, "file": "ciphertext", "key": false, "harness": false, "expected": "encryptedEstateKeyMissing"},
+    {"id": "transient-ciphertext-key-refused",   "registered": false, "declaresPlaintext": false, "file": "ciphertext", "key": true,  "harness": false, "expected": "encryptedEstateKeyMissing"},
+    {"id": "harness-transient-ciphertext-key",   "registered": false, "declaresPlaintext": false, "file": "ciphertext", "key": true,  "harness": true,  "expected": "existingEncrypted"},
+    {"id": "harness-transient-absent-key",       "registered": false, "declaresPlaintext": false, "file": "absent",     "key": true,  "harness": true,  "expected": "newEncrypted"},
+    {"id": "harness-transient-absent-declared",  "registered": false, "declaresPlaintext": true,  "file": "absent",     "key": true,  "harness": true,  "expected": "newPlaintextDeclared"},
+    {"id": "harness-registered-absent-key",      "registered": true,  "declaresPlaintext": false, "file": "absent",     "key": true,  "harness": true,  "expected": "newEncrypted"},
+    {"id": "harness-plaintext-key",              "registered": false, "declaresPlaintext": false, "file": "plaintext",  "key": true,  "harness": true,  "expected": "existingPlaintext"},
+    {"id": "harness-transient-ciphertext-no-key","registered": false, "declaresPlaintext": false, "file": "ciphertext", "key": false, "harness": true,  "expected": "encryptedEstateKeyMissing"}
+  ]
+}
