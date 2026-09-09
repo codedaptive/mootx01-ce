@@ -13,6 +13,16 @@
 //   2. Application Support/com.mootx01.lattice/pool/ on Apple platforms.
 //   3. XDG_DATA_HOME/mootx01/lattice/pool/ (or ~/.local/share/...) elsewhere.
 //
+// PARITY, exactly: the Rust port agrees on Apple and only on Apple. A Mac runs
+// both ports, so both must reduce into one writable WordClassTable.json or
+// learned word-class rows diverge while the bundled artifacts and input bytes
+// match. Swift ships no Linux or Windows target, so on those platforms Rust
+// resolves the pool inside the install's own base directory instead
+// (<configuration>/lattice/pool) and there is no Swift path to compare. The
+// two rules are `applePoolDirectory` and `configuredPoolDirectory` below,
+// pinned by NovelPoolSubmitterTests against the Rust twins
+// `apple_pool_directory` and `configured_pool_directory`.
+//
 // Terminal state: token drained → JSON file written to pool directory →
 // file observable at endpoint → future pool-reducer consumes files and
 // merges novel tokens back into the WordClassTable.
@@ -160,6 +170,48 @@ public enum NovelPoolSubmitter {
         }
     }
 
+    /// The folder that holds the pool and the merged table inside an
+    /// install's own base directory, on the platforms that resolve it that
+    /// way. Distinct from `MootProductIdentity.Storage.latticeFolder`
+    /// (`com.mootx01.lattice`): that one sits BESIDE the install's folder
+    /// under Application Support, because on Apple the pool is machine-wide,
+    /// shared across installs. Twin of Rust
+    /// `CONFIGURATION_LATTICE_FOLDER`.
+    static let configurationLatticeFolder = "lattice"
+
+    /// The pool folder inside whichever lattice folder applies. Twin of Rust
+    /// `POOL_FOLDER`.
+    static let poolFolder = "pool"
+
+    /// The Apple rule: `<Application Support>/com.mootx01.lattice/pool`. Pure
+    /// path arithmetic; touches nothing. Twin of Rust
+    /// `apple_pool_directory(application_support)`, which both ports resolve
+    /// to the same bytes on a Mac.
+    static func applePoolDirectory(applicationSupport: URL) -> URL {
+        applicationSupport
+            .appendingPathComponent(MootProductIdentity.Storage.latticeFolder, isDirectory: true)
+            .appendingPathComponent(poolFolder, isDirectory: true)
+    }
+
+    /// The rule for a platform that keeps the pool inside the install's own
+    /// base directory: `<configuration>/lattice/pool`. Pure path arithmetic.
+    /// Twin of Rust `configured_pool_directory(configuration_directory)`,
+    /// which is what the Rust port resolves on Linux and Windows.
+    static func configuredPoolDirectory(configurationDirectory: URL) -> URL {
+        configurationDirectory
+            .appendingPathComponent(configurationLatticeFolder, isDirectory: true)
+            .appendingPathComponent(poolFolder, isDirectory: true)
+    }
+
+    /// The non-Apple base directory: `${XDG_DATA_HOME:-<home>/.local/share}/
+    /// mootx01`. The folder name is the product identity's `unixDataFolder`,
+    /// the same value the Rust port's configuration directory uses on Linux,
+    /// so the two ports name one directory rather than two spellings of it.
+    static func unixConfigurationDirectory(dataHome: URL) -> URL {
+        dataHome.appendingPathComponent(
+            MootProductIdentity.Storage.unixDataFolder, isDirectory: true)
+    }
+
     /// Resolves the pool directory from environment or platform default.
     static func resolvePoolDirectory() -> URL {
         if let envDir = ProcessInfo.processInfo.environment["LATTICE_POOL_DIR"],
@@ -173,9 +225,7 @@ public enum NovelPoolSubmitter {
             in: .userDomainMask
         ).first ?? URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Application Support")
-        return appSupport
-            .appendingPathComponent(MootProductIdentity.Storage.latticeFolder, isDirectory: true)
-            .appendingPathComponent("pool", isDirectory: true)
+        return applePoolDirectory(applicationSupport: appSupport)
         #else
         // Non-Apple: XDG_DATA_HOME or ~/.local/share
         let dataHome: String
@@ -184,8 +234,9 @@ public enum NovelPoolSubmitter {
         } else {
             dataHome = "\(NSHomeDirectory())/.local/share"
         }
-        return URL(fileURLWithPath: dataHome)
-            .appendingPathComponent("mootx01/lattice/pool", isDirectory: true)
+        return configuredPoolDirectory(
+            configurationDirectory: unixConfigurationDirectory(
+                dataHome: URL(fileURLWithPath: dataHome, isDirectory: true)))
         #endif
     }
 }
