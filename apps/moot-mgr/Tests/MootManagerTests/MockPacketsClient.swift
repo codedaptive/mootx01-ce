@@ -106,7 +106,9 @@ final class MockPacketsClient: WorkPacketEstateClient, @unchecked Sendable {
     /// `.inWing`, and `.inRoom`. A drawer that passes all active predicates is
     /// returned; one that fails any predicate is absent from the result —
     /// indistinguishable from a drawer that does not exist.
-    func getDrawers(ids: [String], matchingFrame frame: RecallFrame) async throws -> [Drawer] {
+    func getDrawers(
+        ids: [String], matchingFrame frame: RecallFrame, preservePhysicalUUIDSpellings: Bool
+    ) async throws -> [Drawer] {
         let wantCurrentlyBelieve = frame.filterChain.contains {
             if case .currentlyBelieve = $0 { return true }
             return false
