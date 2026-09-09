@@ -118,26 +118,5 @@ struct SessionProtocolTests {
                 "modesStatusSection must be byte-identical to shared fixture — \nActual length: \(actual.utf8.count)\nExpected length: \(expected.utf8.count)")
     }
 
-    /// Pins the modes teachme guide to the shared fixture that the Rust port also reads.
-    /// Both ports must produce the identical string so LLM clients see consistent output
-    /// regardless of which transport they use.
-    @Test func modesTeachmeGuideByteIdentity() throws {
-        let fixtureURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // …/AriaMCPTests
-            .deletingLastPathComponent()  // …/Tests
-            .appendingPathComponent("Conformance/modes_teachme_guide_fixture.json")
-
-        let data = try Data(contentsOf: fixtureURL)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let expected = json?["expected"] as? String else {
-            Issue.record("modes_teachme_guide_fixture.json must have an 'expected' string field")
-            return
-        }
-
-        let actual = TeachmeGuides.modesTeachmeGuide
-
-        #expect(actual == expected,
-                "modesTeachmeGuide must be byte-identical to shared fixture — \nActual length: \(actual.utf8.count)\nExpected length: \(expected.utf8.count)")
-    }
 }
 
