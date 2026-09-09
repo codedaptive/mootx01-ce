@@ -535,6 +535,24 @@ pub trait Storage: Send + Sync {
     fn audit_log(&self) -> Arc<dyn AuditLog>;
     fn observer(&self) -> Arc<dyn StorageObserver>;
 
+    /// Capture one bounded, backend-consistent copy of the Locus `drawers`
+    /// and `nodes` tables. This is deliberately separate from the general
+    /// RowStore API because the two tables must share one read snapshot and no
+    /// partial result may escape an over-limit capture.
+    fn capture_inventory_snapshot(
+        &self,
+        limits: crate::inventory_snapshot::InventorySnapshotLimits,
+    ) -> crate::inventory_snapshot::InventorySnapshotResult<
+        crate::inventory_snapshot::InventorySnapshot,
+    > {
+        let _ = limits;
+        Err(crate::inventory_snapshot::InventorySnapshotError::from(
+            StorageError::FeatureGated {
+                feature: "inventorySnapshot".to_owned(),
+            },
+        ))
+    }
+
     /// Dataset store for user-defined tabular data (MX-TAB-1).
     ///
     /// Returns `Err(StorageError::FeatureGated { feature: "datasetStore" })` by
