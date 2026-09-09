@@ -57,6 +57,7 @@ public actor WorkPacketStore {
     private let wing: String
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let preservePhysicalUUIDSpellings: Bool
 
     // MARK: Init
 
@@ -64,13 +65,46 @@ public actor WorkPacketStore {
     ///   - client: estate operation surface (use `EstateAdapter` in production).
     ///   - wing: wing within the estate to file packets into. Defaults to
     ///     `LocusKit.defaultWingName` ("Agentic Memory").
-    public init(client: any WorkPacketEstateClient, wing: String = LocusKit.defaultWingName) {
+    /// - Parameter allowsFractionalSeconds: Opt in only at a portable packet
+    ///   boundary that must read Rust's millisecond RFC 3339 timestamps. The
+    ///   default retains the established v1 whole-second ISO-8601 decoding.
+    public init(
+        client: any WorkPacketEstateClient,
+        wing: String = LocusKit.defaultWingName,
+        allowsFractionalSeconds: Bool = false,
+        preservePhysicalUUIDSpellings: Bool = false
+    ) {
         self.client = client
         self.wing = wing
+        self.preservePhysicalUUIDSpellings = preservePhysicalUUIDSpellings
         self.encoder = JSONEncoder()
         self.encoder.dateEncodingStrategy = .iso8601
-        self.decoder = JSONDecoder()
-        self.decoder.dateDecodingStrategy = .iso8601
+        if allowsFractionalSeconds {
+            self.decoder = Self.portableJSONDecoder()
+        } else {
+            self.decoder = JSONDecoder()
+            self.decoder.dateDecodingStrategy = .iso8601
+        }
+    }
+
+    /// A decoder for packets written by either runtime. Rust persists RFC 3339
+    /// timestamps with fractional seconds; the established Swift decoder only
+    /// accepts whole seconds. This factory is opt-in so legacy callers retain
+    /// their existing decode boundary.
+    public static func portableJSONDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let raw = try container.decode(String.self)
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container, debugDescription: "Expected an ISO-8601 timestamp.")
+        }
+        return decoder
     }
 
     // MARK: - store
@@ -178,16 +212,17 @@ public actor WorkPacketStore {
         var chain: [Filter] = [.currentlyBelieve, .inWing(wing), .inRoom(WorkPacketStore.room)]
         if let ceiling { chain.append(ceiling) }
         let frame = RecallFrame(filterChain: chain, hydrationLevel: .full)
-        let admissible = try await client.getDrawers(ids: ids, matchingFrame: frame)
-        // SECURITY: provenance sensitivity (bits 30-35, `Drawer.sensitivity`) is
-        // the capture-time access posture; Restricted/Secret bodies are never
+        let admissible = try await client.getDrawers(
+            ids: ids, matchingFrame: frame,
+            preservePhysicalUUIDSpellings: preservePhysicalUUIDSpellings)
+        // SECURITY: provenance sensitivity (bits 30-35) is the capture-time
+        // access posture; restricted, secret, and unknown bodies are never
         // returned verbatim regardless of the adjective ceiling — the grant
         // ledger lifts the adjective axis only. Mirrors moot_memory_get.
         return admissible.filter { drawer in
-            switch drawer.sensitivity {
-            case .restricted, .secret: return false
-            case .normal, .elevated: return true
-            }
+            // The enum accessor defaults unknown values to normal; reads must fail closed.
+            let rawSensitivity = (drawer.provenance >> 30) & 0x3f
+            return rawSensitivity == 0 || rawSensitivity == 16
         }
     }
 

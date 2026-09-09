@@ -65,7 +65,7 @@ public typealias Drawer = LocusKit.Drawer
 /// either knob on a per-call basis.
 ///
 /// The scored second lane of hybrid recall: a `GLKRecallRequest` in
-/// `.unionBest`/`.raw` mode (BM25 + vector fusion — the same lane
+/// `.unionBest` mode (BM25 + vector fusion — the same lane
 /// `moot_memory_search` and PreciseRecall's coarse grab use). When
 /// supplied, `hybridRecall` unions this lane's relevance-ordered hits
 /// with the frame lane's rows (scored hits first, frame-only extras
@@ -85,10 +85,21 @@ public struct ScoredLane: Sendable {
     /// (same rationale as PreciseRecall's traceLimit).
     public let traceLimit: Int
 
-    public init(frame: RecallFrame, queryText: String, traceLimit: Int) {
+    /// Scoring strategy for the GLK query lane. Existing recipe callers keep
+    /// the historical `.raw` merge; selected ARIA v2 synthesis opts into the
+    /// same query-aware matrix scoring used by `moot_memory_search`.
+    public let scoring: GLKRecallScoring
+
+    public init(
+        frame: RecallFrame,
+        queryText: String,
+        traceLimit: Int,
+        scoring: GLKRecallScoring = .raw
+    ) {
         self.frame = frame
         self.queryText = queryText
         self.traceLimit = traceLimit
+        self.scoring = scoring
     }
 }
 
@@ -171,7 +182,7 @@ public func hybridRecall(
         let request = GLKRecallRequest(
             frame: scoredLane.frame,
             mode: .unionBest,
-            scoring: .raw,
+            scoring: scoredLane.scoring,
             limit: scoredLane.frame.limit ?? resolvedTuning.pageSize,
             fallback: .allowDegraded,
             queryText: scoredLane.queryText,

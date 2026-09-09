@@ -53,7 +53,9 @@ use locus_kit::adjectives::{AdjectiveSensitivity, Trust};
 use locus_kit::drawer::Drawer;
 use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
 use locus_kit::filter::RecallFrame;
-use substrate_ml::formal_concept_analysis::{BoundedConceptMiner, FormalAttribute, FormalContext};
+use substrate_ml::formal_concept_analysis::{
+    BoundedConceptMiner, FormalAttribute, FormalConcept, FormalContext,
+};
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
 use crate::error::{RecipeRunError, SubstrateError};
@@ -84,6 +86,15 @@ pub struct FormalConceptsOutput {
     pub drawer_count: usize,
 }
 
+/// Typed structural receipt retained for callers that need to derive
+/// cover deltas or implications from the same mined context.  The ordinary
+/// recipe output remains unchanged for existing callers.
+pub struct FormalConceptsReceipt {
+    pub raw_concepts: Vec<FormalConcept>,
+    pub context: FormalContext,
+    pub drawer_ids: Vec<String>,
+}
+
 // MARK: - Recipe entry point
 
 /// Maximum number of mined concepts fed to the O(N²) cover-delta step.
@@ -110,6 +121,45 @@ pub fn run_formal_concepts(
     miner: BoundedConceptMiner,
     now: i64,
 ) -> Result<FormalConceptsOutput, RecipeRunError> {
+    let receipt = run_formal_concepts_receipt(coord, handle, frame, miner, now)?;
+    let concepts = receipt
+        .raw_concepts
+        .into_iter()
+        .map(|concept| {
+            let intent = concept
+                .intent
+                .iter()
+                .map(|attr| format!("{}.{}={}", attr.namespace, attr.key, attr.value))
+                .collect();
+            let extent_drawer_ids = concept
+                .extent
+                .iter()
+                .filter_map(|&row_id| receipt.drawer_ids.get(row_id as usize).cloned())
+                .collect();
+            FormalConceptResult {
+                intent,
+                extent_drawer_ids,
+                support: concept.support,
+            }
+        })
+        .collect();
+    Ok(FormalConceptsOutput {
+        concepts,
+        drawer_count: receipt.drawer_ids.len(),
+    })
+}
+
+/// Run the same bounded recipe while retaining the engine-native context and
+/// concepts.  This is the source-faithful seam for typed structural lenses;
+/// it performs the same capability gate and one estate recall as the public
+/// summarized recipe.
+pub fn run_formal_concepts_receipt(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    frame: RecallFrame,
+    miner: BoundedConceptMiner,
+    now: i64,
+) -> Result<FormalConceptsReceipt, RecipeRunError> {
     // B-5: verify capability before any estate touch.
     verify_capabilities(
         &[NeuronKitCapability::FormalConceptAnalysis],
@@ -121,14 +171,7 @@ pub fn run_formal_concepts(
     let drawers = coord
         .recall(handle, frame, now)
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
-    let drawer_count = drawers.len();
-
-    if drawer_count == 0 {
-        return Ok(FormalConceptsOutput {
-            concepts: vec![],
-            drawer_count: 0,
-        });
-    }
+    let drawer_ids = drawers.iter().map(|drawer| drawer.id.clone()).collect();
 
     // 2. Build FormalContext: one row per drawer.
     let rows: Vec<Vec<FormalAttribute>> =
@@ -138,34 +181,10 @@ pub fn run_formal_concepts(
     // 3. Mine bounded concepts.
     let raw_concepts = miner.mine(&context);
 
-    // 4. Relabel: row index → drawer ID; attribute → "{ns}.{key}={value}".
-    let concepts: Vec<FormalConceptResult> = raw_concepts
-        .into_iter()
-        .map(|concept| {
-            let intent: Vec<String> = concept
-                .intent
-                .iter()
-                .map(|attr| format!("{}.{}={}", attr.namespace, attr.key, attr.value))
-                .collect();
-            let extent_drawer_ids: Vec<String> = concept
-                .extent
-                .iter()
-                .filter_map(|&row_id| {
-                    let idx = row_id as usize;
-                    drawers.get(idx).map(|d| d.id.clone())
-                })
-                .collect();
-            FormalConceptResult {
-                intent,
-                extent_drawer_ids,
-                support: concept.support,
-            }
-        })
-        .collect();
-
-    Ok(FormalConceptsOutput {
-        concepts,
-        drawer_count,
+    Ok(FormalConceptsReceipt {
+        raw_concepts,
+        context,
+        drawer_ids,
     })
 }
 

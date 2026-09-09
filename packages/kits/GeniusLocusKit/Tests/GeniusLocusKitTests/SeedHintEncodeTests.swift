@@ -27,6 +27,26 @@ import SubstrateTypes
 @Suite("Seeded hint encode routing", .serialized)
 struct SeedHintEncodeTests {
 
+    private struct DrainSpanEncoder: SpanEncoder {
+        let spec = EncoderModelSpec(
+            modelID: "drain-span-model",
+            modelVersion: "v1",
+            dim: 4,
+            queryPrefix: "Q:",
+            docPrefix: "D:",
+            pooling: .mean,
+            tokenizerHash: "fixture",
+            windowWords: 3,
+            overlapDivisor: 2,
+            maxSpans: 4,
+            maxSequence: 512)
+
+        func encodeQuery(_ text: String) async throws -> [Float] { [1, 0, 0, 0] }
+        func encodeSpans(_ spans: [String]) async throws -> [[Float]] {
+            spans.map { _ in [1, 0, 0, 0] }
+        }
+    }
+
     /// Provision a GLK estate (mounts Corpus + VectorStore + drain workers).
     private func provisionGLKEstate() async throws -> (GeniusLocusKit, EstateHandle) {
         let kit = GeniusLocusKit()
@@ -78,6 +98,27 @@ struct SeedHintEncodeTests {
         #expect(DrainStatus.encodeSettled(statuses))
         #expect(statuses.allSatisfy { !$0.isDraining },
                 "every drain lane settles on a fresh drained estate: \(statuses)")
+    }
+
+    @Test("a registered span encoder exposes true row debt without changing the corpus finisher gate")
+    func spanEncodeDebtIsObservable() async throws {
+        let (kit, handle) = try await provisionGLKEstate()
+        defer { Task { try? await kit.close(handle) } }
+        let before = try await kit.drainStatuses(handle)
+        #expect(!before.contains { $0.name == DrainStatus.spanEncodeName })
+
+        let estate = try await kit.estate(for: handle)
+        let expectedDebt = try await estate.countSpanIndexDebt()
+        #expect(expectedDebt > 0)
+        await kit.registerSpanEncoder(DrainSpanEncoder(), for: handle)
+
+        let statuses = try await kit.drainStatuses(handle)
+        let span = try #require(statuses.first { $0.name == DrainStatus.spanEncodeName })
+        #expect(span.pending == expectedDebt)
+        #expect(span.inFlight == 0)
+        #expect(span.detail == "model: drain-span-model")
+        #expect(DrainStatus.encodeSettled(statuses),
+                "span row debt must not extend the corpus-only detached finisher")
     }
 
     @Test("re-running seedDefaultWings on a converged estate enqueues nothing (idempotent open)")
