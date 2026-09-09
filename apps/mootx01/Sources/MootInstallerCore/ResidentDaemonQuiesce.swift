@@ -1,7 +1,7 @@
 // ResidentDaemonQuiesce.swift
 //
 // The one place `mootx01 upgrade` stops and restarts the resident daemon
-// around a data-directory step. Every step routes through `run`, so the
+// around an estate migration step. Every step routes through `run`, so the
 // rule "quiesce only when the estate being upgraded is the resident one"
 // is decided once, and the stop → work → restart shape cannot drift
 // between steps.
