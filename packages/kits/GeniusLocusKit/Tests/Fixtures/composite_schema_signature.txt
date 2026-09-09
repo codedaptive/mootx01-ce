@@ -182,6 +182,19 @@ table=erasure_ledger
   col=erased_hlc type=hlc null=0 default=- role=-
   pk=drawer_id
   appendOnly=1 hashable=0
+table=fact_extractor_models
+  col=recipe_id type=text null=0 default=- role=-
+  col=provider_id type=text null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=schema_version type=text null=0 default=- role=-
+  col=extractor_kind type=text null=0 default=- role=-
+  col=maximum_input_characters type=int null=0 default=- role=-
+  col=maximum_facts_per_source type=int null=0 default=- role=-
+  col=is_active type=int null=0 default=int role=-
+  col=ext type=json null=1 default=- role=-
+  pk=recipe_id
+  appendOnly=0 hashable=0
 table=glk_estate_format
   col=id type=text null=0 default=- role=-
   col=major type=int null=0 default=- role=-
@@ -244,6 +257,18 @@ table=kg_facts
   col=addedBy type=text null=0 default=- role=-
   col=foreignSourceKey type=text null=0 default=- role=-
   col=foreignRecordID type=text null=0 default=- role=-
+  col=evidenceQuote type=text null=0 default=- role=-
+  col=evidenceStart type=int null=0 default=int role=-
+  col=evidenceEnd type=int null=0 default=int role=-
+  col=evidenceStartUTF8Byte type=int null=0 default=int role=-
+  col=evidenceEndUTF8Byte type=int null=0 default=int role=-
+  col=sourceDigest type=text null=0 default=- role=-
+  col=extractorProviderID type=text null=0 default=- role=-
+  col=extractorModelID type=text null=0 default=- role=-
+  col=extractorModelVersion type=text null=0 default=- role=-
+  col=extractionSchemaVersion type=text null=0 default=- role=-
+  col=searchProjection type=text null=0 default=- role=-
+  col=searchProjectionVersion type=text null=0 default=- role=-
   col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
   col=operationalBitmap type=bitmap null=0 default=bitmap role=-
   col=provenanceBitmap type=bitmap null=0 default=bitmap role=-
