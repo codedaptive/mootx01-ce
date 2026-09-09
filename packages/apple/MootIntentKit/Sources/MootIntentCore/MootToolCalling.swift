@@ -24,9 +24,12 @@ public struct IntentCallResult: Sendable {
     public let text: String
     /// The tools/call result's `structuredContent` block, verbatim, when the
     /// tool emitted one. The recall family does (an object carrying a
-    /// `results` array of `{id, room, content, subject}` rows); most tools do
-    /// not, and transport failures produce no result at all — both leave this
-    /// nil. Entity construction reads THIS field, never `text`.
+    /// `results` array of search rows; see `ResultComposer.structuredRowObject`
+    /// and ARIA_MCP_SPEC § 8.3 for the current shape: `id` always, `subject`,
+    /// `bestSpan`, `sscFacts`, `eventTime`, `score`, `room` optional, `content`
+    /// only at memory-get depths); most tools do not, and transport failures
+    /// produce no result at all — both leave this nil. Entity construction reads
+    /// THIS field, never `text`.
     public let structured: JSONValue?
     /// True when the substrate (or the ARIA surface) refused the operation.
     public let isError: Bool
@@ -55,8 +58,9 @@ public protocol MootToolCalling: Actor, Sendable {
 
 extension MootToolCalling {
     /// Recall drawers as App-Intents-free values from `moot_memory_search`'s
-    /// `structuredContent` block — typed `{id, room, content, subject}` rows
-    /// built server-side from the drawer rows themselves.
+    /// `structuredContent` block — search rows built server-side (see
+    /// `ResultComposer.structuredRowObject` for the shape); `content` is absent
+    /// on search rows and present only at memory-get depths.
     ///
     /// - Parameters:
     ///   - query: The free-text query sent to moot_memory_search.
@@ -135,20 +139,28 @@ public struct RecalledDrawer: Sendable, Equatable, Identifiable {
 public enum StructuredRecallResults {
     /// Decode `structuredContent.results` rows into recalled-drawer values.
     ///
-    /// A row is admissible when it carries text of its own: a `subject` (every
-    /// rendered search row) or a `content` (the memory-get depths). Gated rows,
-    /// which the server emits as opaque id-only stubs, and anything malformed
-    /// are skipped, never guessed at. Restricted/secret rows arrive with the
-    /// server's redaction markers already in the subject and content slots, so
-    /// no body needs re-gating here. Optional fields are absent, never null,
-    /// when the text column rendered the placeholder (spec § 8 invariants).
+    /// A row is admissible when it carries usable text: a `subject` that is not
+    /// the server's absence marker (every normal search row), or a `content`
+    /// (memory-get depths). Gated rows arrive with `subject` set to the server's
+    /// `noSubjectMarker` string — they are skipped here so callers never see an
+    /// unexplained "(no subject)" entry for a memory they are not allowed to
+    /// acknowledge. Anything malformed is skipped too. Restricted/secret rows
+    /// carry the server's redaction markers and are admitted normally; the
+    /// markers are meaningful text. Optional fields are absent, never null, when
+    /// the text column rendered the placeholder (spec § 8 invariants).
     public static func drawers(from structured: JSONValue?) -> [RecalledDrawer] {
+        // The server's absence marker — opaque (gated/unhydrated) rows carry
+        // this in subject; they must not appear in search results because the
+        // caller cannot see the content.
+        let noSubjectMarker = ResultComposer.noSubjectMarker
         guard let results = structured?.objectValue?["results"]?.arrayValue else { return [] }
         return results.compactMap { row -> RecalledDrawer? in
             guard let object = row.objectValue,
                   let id = object["id"]?.stringValue else { return nil }
             let subject = object["subject"]?.stringValue
             let content = object["content"]?.stringValue
+            // Opaque rows (gated or unhydrated) carry noSubjectMarker — skip them.
+            guard subject != noSubjectMarker else { return nil }
             guard subject != nil || content != nil else { return nil }
             return RecalledDrawer(
                 id: id,

@@ -84,9 +84,8 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
     /// settles, so a failed open can be retried by an explicit call.
     private var opening: Task<EstateReadyProof, Error>?
 
-    /// The open handle and its storage, kept until `closeEstate()`.
+    /// The open handle, kept until `closeEstate()`.
     private var openHandle: EstateHandle?
-    private var storage_: SQLiteStorage?
 
     // MARK: - Init
 
@@ -181,9 +180,9 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
         //    the Corpus, VectorStore and encode queue on this storage, rebuild
         //    the derived matrix tier, and make the manifest say what is on disk.
         let preparation = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+        try EstateManifestRefresh.afterPrepare(preparation, estate: record, encryption: resolved.encryption, now: Date())
         try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         try await kit.rebuildDerivedAccelerators(for: handle)
-        try EstateManifestRefresh.afterPrepare(preparation, estate: record, encryption: resolved.encryption, now: Date())
 
         // 5. The proof: the estate's UUID and the highest migration version
         //    applied across the kits sharing this storage.
@@ -192,7 +191,6 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
         let proof = EstateReadyProof(estateIdentifier: handle.estateUUID, schemaVersion: UInt64(version))
 
         openHandle = handle
-        storage_ = storage
         cachedProof = proof
         log.debug("estate opened: record=\(self.record.name, privacy: .public) uuid=\(proof.estateIdentifier) schema=\(proof.schemaVersion)")
         return proof
@@ -229,7 +227,6 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
         guard let handle = openHandle else { return }
         try await kit.close(handle)
         openHandle = nil
-        storage_ = nil
         cachedProof = nil
         log.debug("estate closed: record=\(self.record.name, privacy: .public)")
     }

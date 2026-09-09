@@ -39,13 +39,17 @@
 //
 // ## Normalization rules (§11.1)
 //
-//   normalizeValue(_:) applies to EVERY S1/S2/S4/S5 field value:
+//   normalizeValue(_:) applies to S1/S2/S5 AND S4 field values:
 //     - embedded newlines → single space
 //     - whitespace runs → one space (trim leading/trailing)
 //     - literal U+00B7 middle-dot → '-'
-//   S6 values are EXEMPT from normalization — they use lossless quoting.
-//   The separator is ' · ' (space U+00B7 space); never occurs in values
-//   after normalization.
+//   S4 rows are normalised so one fact can never split a row and an
+//   embedded separator can never add ghost columns. The dual-ended S4
+//   parser in MinerEngine and ReviewLineParsing is retained as defence in
+//   depth against unnormalized producers. S6 values are EXEMPT from
+//   normalization — they use lossless quoting.
+//   The separator is ' · ' (space U+00B7 space); never occurs in S1/S2/S5/S4
+//   values after normalization.
 //
 // ## Absent-field contract (fixed columns)
 //
@@ -69,6 +73,7 @@
 //   outputs proven by ComposerConformanceTests ∥ composer_conformance.rs
 //   over Tests/Conformance/composer_fixtures.json.
 
+import AriaMCPWire
 import Foundation
 
 // MARK: - Candidate Row Data (S1 / S2 typed intermediate)
@@ -547,8 +552,12 @@ public enum ResultComposer {
     /// Subject-column redaction marker for provenance-secret content.
     public static let secretMarker = "[sensitivity: secret — content access requires explicit grant]"
 
-    /// Absence marker when a drawer carries no subject.
-    public static let noSubjectMarker = "(no subject)"
+    /// Absence marker when a drawer carries no subject. Forwards to the
+    /// single stored declaration in `ARIAServerConstants` (AriaMCPWire) so
+    /// both the producer side (this file) and consumer-only targets that link
+    /// only AriaMCPWire resolve one value; a copy-edit to `ARIAServerConstants`
+    /// propagates automatically and the compiler enforces parity.
+    public static var noSubjectMarker: String { ARIAServerConstants.noSubjectMarker }
 
     // MARK: - ISO-8601 UTC date formatter
 
@@ -620,7 +629,7 @@ public enum ResultComposer {
     public static func renderS1Row(_ row: CandidateRowData) -> String {
         let subjectText = normalizedSubject(row)
         let spanText = normalizedBestSpan(row, subjectNormalized: subjectText)
-        let sscText = row.sscFacts ?? "-"
+        let sscText = normalizeValue(row.sscFacts ?? "-")
         let scoreText = String(format: "%.4f", row.score ?? 0.0)
         return [row.id, subjectText, spanText, sscText,
                 row.eventTime, scoreText].joined(separator: sep)
@@ -632,7 +641,7 @@ public enum ResultComposer {
     public static func renderS2Row(_ row: CandidateRowData) -> String {
         let subjectText = normalizedSubject(row)
         let spanText = normalizedBestSpan(row, subjectNormalized: subjectText)
-        let sscText = row.sscFacts ?? "-"
+        let sscText = normalizeValue(row.sscFacts ?? "-")
         return [row.id, subjectText, spanText, sscText,
                 row.eventTime].joined(separator: sep)
     }
@@ -775,8 +784,15 @@ public enum ResultComposer {
         var lines = [header]
         for fact in facts {
             let source = fact.sourceDrawerID ?? "-"
-            let row = [fact.factID, fact.subject, fact.predicate,
-                       fact.object, source, fact.filedAt].joined(separator: sep)
+            // Normalize S4 fields so embedded newlines cannot split the row
+            // and embedded separators cannot add ghost columns (S4 parser
+            // comment in MinerEngine explains the defence strategy).
+            let row = [normalizeValue(fact.factID),
+                       normalizeValue(fact.subject),
+                       normalizeValue(fact.predicate),
+                       normalizeValue(fact.object),
+                       normalizeValue(source),
+                       normalizeValue(fact.filedAt)].joined(separator: sep)
             lines.append(row)
         }
         return ComposedResult(text: lines.joined(separator: "\n"))
@@ -820,7 +836,9 @@ public enum ResultComposer {
             }
             // Far endpoint: S2 pick fields (six columns without a score prefix)
             let far = renderS2Row(edge.farEndpoint)
-            let row = [edge.tunnelID, kindField, far].joined(separator: sep)
+            // Normalize tunnelID and kindField so embedded separators or
+            // newlines (e.g. free-text tunnel labels) cannot split the row.
+            let row = [normalizeValue(edge.tunnelID), normalizeValue(kindField), far].joined(separator: sep)
             lines.append(row)
         }
         return ComposedResult(text: lines.joined(separator: "\n"))
