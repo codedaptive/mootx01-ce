@@ -342,7 +342,7 @@ impl Dispatcher {
             .unwrap_or_else(|| JsonValue::Object(Default::default()));
         let mut args_map = match arguments.as_object() {
             Some(args) => args.clone(),
-            None if cfg!(feature = "aria-v2") => {
+            None => {
                 let message =
                     "tools/call arguments must be an object for the active ARIA v2 surface";
                 return Err(JSONRPCError {
@@ -356,13 +356,11 @@ impl Dispatcher {
                     })),
                 });
             }
-            None => Default::default(),
         };
 
-        // Selected-surface admission belongs before frozen policy, teachme
-        // interception, mode parsing, and legacy dispatch. A v2-only name
-        // therefore cannot reach any v1 runner, even with teachme:true.
-        #[cfg(feature = "aria-v2")]
+        // Surface admission: decode the typed v2 request before frozen policy,
+        // teachme interception, or mode parsing. A name absent from the v2
+        // catalog is rejected here before any legacy runner can fire.
         if let Some(request) = self.surface.decode(name, &args_map)? {
             // Stable typed effect drives posture before the request clock or
             // any session/estate state changes.
@@ -399,8 +397,6 @@ impl Dispatcher {
             );
         }
 
-        #[cfg(not(feature = "aria-v2"))]
-        let _ = self.surface.decode(name, &args_map)?;
 
         // Frozen posture: refuse every writing, mutating, or deleting tool
         // before any runner fires and before the session state records the
@@ -569,7 +565,6 @@ mod frozen_command_tests {
         assert_eq!(frozen.mode_session_state.snapshot().total_calls, 1);
     }
 
-    #[cfg(feature = "aria-v2")]
     #[test]
     fn v2_rejects_inactive_teachme_before_the_session_records_it() {
         let dispatcher = frozen_dispatcher();

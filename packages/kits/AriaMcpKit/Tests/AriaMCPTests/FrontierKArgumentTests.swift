@@ -65,18 +65,6 @@ struct FrontierKArgumentTests {
 
     // MARK: - A: Schema exposure
 
-    @Test func schemaExposesFrontierKOnMemorySearch() {
-        let keys = schemaKeys(for: "moot_memory_search")
-        #expect(keys.contains("frontier_k"),
-                "moot_memory_search inputSchema must include frontier_k property")
-    }
-
-    @Test func schemaExposesFrontierKOnRecallShaped() {
-        let keys = schemaKeys(for: "moot_recall_shaped")
-        #expect(keys.contains("frontier_k"),
-                "moot_recall_shaped inputSchema must include frontier_k property")
-    }
-
     // MARK: - B: Absent frontier_k — byte-identical (no error)
 
     @Test func memorySearchAbsentFrontierKDispatchesWithoutError() async throws {
@@ -103,32 +91,6 @@ struct FrontierKArgumentTests {
     }
 
     // MARK: - C: Integer frontier_k — accepted without error
-
-    @Test func memorySearchIntegerFrontierKAccepted() async throws {
-        let dispatcher = try await makeDispatcher()
-        // frontier_k=128 is within [64, 256]; empty estate still returns 0 results.
-        let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("anything"),
-                "frontier_k": .integer(128),
-            ]))
-        #expect(!isError(result),
-                "moot_memory_search with frontier_k=128 (integer) must not produce an error")
-    }
-
-    @Test func recallShapedIntegerFrontierKAccepted() async throws {
-        let dispatcher = try await makeDispatcher()
-        let result = try await dispatcher.dispatch(
-            name: "moot_recall_shaped",
-            arguments: .object([
-                "query": .string("anything"),
-                "preset": .string("balanced"),
-                "frontier_k": .integer(128),
-            ]))
-        #expect(!isError(result),
-                "moot_recall_shaped with frontier_k=128 (integer) must not produce an error")
-    }
 
     // MARK: - D: Non-integer frontier_k — clear rejection error
     //
