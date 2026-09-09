@@ -1,0 +1,135 @@
+{
+  "purpose": "Shared ARIA v2 Mission01 cross-port conformance vectors for the selected monitoring inspection surface.",
+  "schema_version": "1.0",
+  "catalog": {
+    "expected_tool_count": 1,
+    "tools": [
+      {
+        "name": "moot_monitoring_status",
+        "description": "Inspect the current daemon telemetry monitoring state. This is the only implemented operation in the incomplete ARIA v2 catalog; it is read-only and accepts no arguments.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "surface_version": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "data": {
+              "type": "object"
+            },
+            "meta": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "surface_version",
+            "tool",
+            "data",
+            "meta"
+          ]
+        }
+      }
+    ]
+  },
+  "vectors": [
+    {
+      "name": "enabled_monitoring_inspection",
+      "request": {
+        "name": "moot_monitoring_status",
+        "arguments": {}
+      },
+      "monitoring_control": "enabled",
+      "expected_mcp_result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "monitoring: enabled\nsurface: v2 (incomplete)"
+          }
+        ],
+        "structuredContent": {
+          "surface_version": "v2",
+          "tool": "moot_monitoring_status",
+          "data": {
+            "monitoring": "enabled"
+          },
+          "meta": {
+            "completeness": "incomplete",
+          "effect": "read"
+          }
+        },
+        "isError": false
+      }
+    },
+    {
+      "name": "unavailable_monitoring_inspection",
+      "request": {
+        "name": "moot_monitoring_status",
+        "arguments": {}
+      },
+      "monitoring_control": "absent",
+      "expected_mcp_result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "monitoring: unavailable\nsurface: v2 (incomplete)"
+          }
+        ],
+        "structuredContent": {
+          "surface_version": "v2",
+          "tool": "moot_monitoring_status",
+          "data": {
+            "monitoring": "unavailable"
+          },
+          "meta": {
+            "completeness": "incomplete",
+          "effect": "read"
+          }
+        },
+        "isError": false
+      }
+    },
+    {
+      "name": "non_object_arguments_are_invalid",
+      "request": {
+        "name": "moot_monitoring_status",
+        "arguments": []
+      },
+      "expected_jsonrpc_error": {
+        "code": -32602,
+        "message": "tools/call arguments must be an object for the active ARIA v2 surface",
+        "data": {
+          "code": "invalid_argument",
+          "path": "arguments",
+          "message": "tools/call arguments must be an object for the active ARIA v2 surface",
+          "correction": "Call moot_monitoring_status with an empty arguments object."
+        }
+      }
+    },
+    {
+      "name": "enabled_argument_is_invalid_for_inspection",
+      "request": {
+        "name": "moot_monitoring_status",
+        "arguments": {
+          "enabled": false
+        }
+      },
+      "expected_jsonrpc_error": {
+        "code": -32602,
+        "message": "moot_monitoring_status is inspection-only in ARIA v2 and accepts no arguments",
+        "data": {
+          "code": "invalid_argument",
+          "path": "enabled",
+          "message": "moot_monitoring_status is inspection-only in ARIA v2 and accepts no arguments",
+          "correction": "Call moot_monitoring_status with an empty arguments object."
+        }
+      }
+    }
+  ]
+}

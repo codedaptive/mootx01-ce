@@ -1,0 +1,457 @@
+//! Direct Rust lower adapter for the M02 data-mobility surface.
+//!
+//! This adapter has no v1 dispatch dependency. It uses the typed VaultKit
+//! snapshots exposed by `vault_tools` and deliberately refuses the operations
+//! whose only current Rust implementation remains a private v1 runner.
+
+use std::path::Path;
+
+use crate::estate_registry::{EstateRegistry, OpenEstate};
+
+use super::data_mobility::{
+    V2DataMobilityAdmission, V2DataMobilityLower, V2DatasetFiled,
+    V2DatasetQueryRequest, V2DatasetQueryResult, V2DatasetStatsRequest,
+    V2DatasetStatsResult, V2DatasetSensitivity, V2FileDatasetRequest, V2JsonImportReport,
+    V2ImportMode, V2JsonImportRequest, V2PalaceImportReport, V2PalaceImportRequest,
+    V2ReclassifyFdcReport, V2ReclassifyFdcRequest, V2ReindexRequest,
+    V2ReindexState, V2VaultCandidate, V2VaultExportRequest,
+    V2VaultExportResult, V2VaultImportRequest, V2VaultImportResult,
+    V2VaultJobRequest, V2VaultJobResult, V2VaultReconcileRequest,
+    V2VaultReconcileResult, V2VaultStatusRequest, V2VaultStatusResult,
+};
+
+/// Direct selected-estate adapter for the lower operations that already expose
+/// typed Rust receipts. The selected surface retains admission and revalidation;
+/// this type only uses the estate admitted for the current request.
+pub struct DirectDataMobilityLower<'a> {
+    registry: &'a EstateRegistry,
+}
+
+impl<'a> DirectDataMobilityLower<'a> {
+    pub const fn new(registry: &'a EstateRegistry) -> Self {
+        Self { registry }
+    }
+
+    fn selected_open(&self, admission: &V2DataMobilityAdmission) -> Result<&OpenEstate, ()> {
+        let open = &self.registry.default;
+        (open.estate_id == admission.estate_id).then_some(open).ok_or(())
+    }
+}
+
+impl V2DataMobilityLower for DirectDataMobilityLower<'_> {
+    fn reindex(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        _: &V2ReindexRequest,
+    ) -> Result<V2ReindexState, ()> {
+        let open = self.selected_open(admission)?;
+        match crate::interface_tools::start_reindex(open, admission.now_millis).map_err(|_| ())? {
+            crate::interface_tools::ReindexLaunch::Running => Ok(V2ReindexState::Running),
+        }
+    }
+
+    fn reclassify_fdc(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        _: &V2ReclassifyFdcRequest,
+    ) -> Result<V2ReclassifyFdcReport, ()> {
+        let open = self.selected_open(admission)?;
+        let snapshot = crate::interface_tools::reclassify_fdc_snapshot(open).map_err(|_| ())?;
+        Ok(V2ReclassifyFdcReport {
+            applied: snapshot.applied,
+            mode: snapshot.mode,
+            scanned: u64::try_from(snapshot.scanned).map_err(|_| ())?,
+            unchanged: u64::try_from(snapshot.unchanged).map_err(|_| ())?,
+            candidates: u64::try_from(snapshot.candidates).map_err(|_| ())?,
+            updated: u64::try_from(snapshot.updated).map_err(|_| ())?,
+            unclassified_after: u64::try_from(snapshot.unclassified_after).map_err(|_| ())?,
+        })
+    }
+
+    fn palace_import(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        request: &V2PalaceImportRequest,
+    ) -> Result<V2PalaceImportReport, ()> {
+        let open = self.selected_open(admission)?;
+        let mode = match request.mode.unwrap_or(V2ImportMode::Foreground) {
+            V2ImportMode::Foreground => genius_locus_kit::EncodeSpeed::Foreground,
+            V2ImportMode::Background => genius_locus_kit::EncodeSpeed::Background,
+        };
+        let receipt = crate::interface_tools::import_palace(
+            open,
+            Path::new(&request.palace_path),
+            mode,
+            admission.now_millis,
+        ).map_err(|_| ())?;
+        Ok(V2PalaceImportReport {
+            drawers_written: u64::try_from(receipt.drawers_written).map_err(|_| ())?,
+            drawers_updated: u64::try_from(receipt.drawers_updated).map_err(|_| ())?,
+            drawers_skipped_unchanged: u64::try_from(receipt.drawers_skipped_unchanged).map_err(|_| ())?,
+            drawers_skipped_tombstoned: u64::try_from(receipt.drawers_skipped_tombstoned).map_err(|_| ())?,
+            drawers_skipped_partial_write: u64::try_from(receipt.drawers_skipped_partial_write).map_err(|_| ())?,
+            tunnels_created: u64::try_from(receipt.tunnels_created).map_err(|_| ())?,
+            items_skipped: u64::try_from(receipt.items_skipped).map_err(|_| ())?,
+            fdc_classified: u64::try_from(receipt.fdc_classified).map_err(|_| ())?,
+            fdc_unclassified: u64::try_from(receipt.fdc_unclassified).map_err(|_| ())?,
+            fields_dropped: receipt.fields_dropped.into_iter()
+                .map(|(field, count)| u64::try_from(count).map(|count| (field, count)))
+                .collect::<Result<_, _>>().map_err(|_| ())?,
+            enqueued_for_encode: u64::try_from(receipt.enqueued_for_encode).map_err(|_| ())?,
+        })
+    }
+
+    fn json_import(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        request: &V2JsonImportRequest,
+    ) -> Result<V2JsonImportReport, ()> {
+        let open = self.selected_open(admission)?;
+        let receipt = crate::interface_tools::import_json_seed(
+            open,
+            Path::new(&request.path),
+            None,
+            genius_locus_kit::EncodeSpeed::Foreground,
+            admission.now_millis,
+        ).map_err(|_| ())?;
+        let id_map = receipt.drawer_id_by_record_id.into_iter()
+            .map(|(record_id, drawer_id)| {
+                uuid::Uuid::parse_str(&drawer_id).map(|drawer_id| (record_id, drawer_id))
+            })
+            .collect::<Result<_, _>>().map_err(|_| ())?;
+        Ok(V2JsonImportReport {
+            seed_name: receipt.seed_name,
+            drawers_written: u64::try_from(receipt.drawers_written).map_err(|_| ())?,
+            facts_written: u64::try_from(receipt.facts_written).map_err(|_| ())?,
+            tunnels_created: u64::try_from(receipt.tunnels_created).map_err(|_| ())?,
+            enqueued_for_encode: u64::try_from(receipt.enqueued_for_encode).map_err(|_| ())?,
+            subjects_provided: u64::try_from(receipt.subjects_provided).map_err(|_| ())?,
+            subjects_debt: u64::try_from(receipt.subjects_debt).map_err(|_| ())?,
+            seed_sha256: receipt.seed_sha256,
+            id_map: Some(id_map),
+        })
+    }
+
+    fn file_dataset(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        request: &V2FileDatasetRequest,
+    ) -> Result<V2DatasetFiled, ()> {
+        let open = self.selected_open(admission)?;
+        let sensitivity_raw = match request.sensitivity.unwrap_or(V2DatasetSensitivity::Normal) {
+            V2DatasetSensitivity::Normal => 0,
+            V2DatasetSensitivity::Elevated => 16,
+            V2DatasetSensitivity::Restricted => 32,
+            V2DatasetSensitivity::Secret => 48,
+        };
+        let snapshot = crate::dataset_tools::file_dataset_snapshot(open, crate::dataset_tools::DatasetFileInput {
+            name: &request.name,
+            location: &request.location,
+            columns: request.columns.as_deref(),
+            rows: request.rows.as_deref(),
+            csv_path: request.csv_path.as_deref(),
+            wing: request.wing.as_deref(),
+            sensitivity_raw,
+            now_millis: admission.now_millis,
+        }).map_err(|_| ())?;
+        Ok(V2DatasetFiled {
+            dataset_id: snapshot.dataset_id,
+            handle_memory_id: uuid::Uuid::parse_str(&snapshot.handle_memory_id).map_err(|_| ())?,
+            name: snapshot.name,
+            location: snapshot.location,
+            wing: snapshot.wing,
+            columns: u64::try_from(snapshot.columns).map_err(|_| ())?,
+            rows: u64::try_from(snapshot.rows).map_err(|_| ())?,
+            source: snapshot.source,
+            sensitivity: snapshot.sensitivity,
+            signatures: snapshot.signatures,
+        })
+    }
+
+    fn dataset_query(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        request: &V2DatasetQueryRequest,
+    ) -> Result<V2DatasetQueryResult, ()> {
+        let open = self.selected_open(admission)?;
+        let snapshot = crate::dataset_tools::dataset_query_snapshot(
+            open,
+            request.dataset_id,
+            request.where_clause.as_ref(),
+            request.order_by.as_deref(),
+            request.limit,
+            request.columns.as_deref(),
+        ).map_err(|_| ())?;
+        Ok(V2DatasetQueryResult {
+            dataset_id: snapshot.dataset_id,
+            handle_memory_id: uuid::Uuid::parse_str(&snapshot.handle_memory_id).map_err(|_| ())?,
+            state: snapshot.state,
+            sensitivity: snapshot.sensitivity,
+            rows_returned: u64::try_from(snapshot.rows_returned).map_err(|_| ())?,
+            limit: u64::try_from(snapshot.limit).map_err(|_| ())?,
+            rows: snapshot.rows,
+            columns: snapshot.columns,
+            handle_row_count: snapshot.handle_row_count.map(u64::try_from).transpose().map_err(|_| ())?,
+        })
+    }
+
+    fn dataset_stats(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        request: &V2DatasetStatsRequest,
+    ) -> Result<V2DatasetStatsResult, ()> {
+        let open = self.selected_open(admission)?;
+        let snapshot = crate::dataset_tools::dataset_stats_snapshot(
+            open, request.dataset_id, request.column.as_deref(),
+        ).map_err(|_| ())?;
+        Ok(V2DatasetStatsResult {
+            dataset_id: snapshot.dataset_id,
+            handle_memory_id: uuid::Uuid::parse_str(&snapshot.handle_memory_id).map_err(|_| ())?,
+            stats: snapshot.stats.into_iter().map(|(column, stat)| Ok((column, super::data_mobility::V2DatasetColumnStats {
+                count: u64::try_from(stat.count).map_err(|_| ())?,
+                distinct_count: u64::try_from(stat.distinct_count).map_err(|_| ())?,
+                null_count: u64::try_from(stat.null_count).map_err(|_| ())?,
+                min: stat.min,
+                max: stat.max,
+            }))).collect::<Result<_, ()>>()?,
+        })
+    }
+
+    fn vault_export(
+        &self,
+        _: &V2DataMobilityAdmission,
+        _: &V2VaultExportRequest,
+    ) -> Result<V2VaultExportResult, ()> {
+        Err(())
+    }
+
+    fn vault_import(
+        &self,
+        _: &V2DataMobilityAdmission,
+        _: &V2VaultImportRequest,
+    ) -> Result<V2VaultImportResult, ()> {
+        Err(())
+    }
+
+    fn vault_status(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        request: &V2VaultStatusRequest,
+    ) -> Result<V2VaultStatusResult, ()> {
+        self.selected_open(admission)?;
+        let snapshot = crate::vault_tools::vault_status_snapshot(Path::new(&request.vault_path))
+            .map_err(|_| ())?;
+        Ok(V2VaultStatusResult {
+            manifest_present: snapshot.manifest_present,
+            path: snapshot.path,
+            last_export: snapshot.last_export,
+            note_count: snapshot.note_count,
+        })
+    }
+
+    fn vault_reconcile(
+        &self,
+        admission: &V2DataMobilityAdmission,
+        request: &V2VaultReconcileRequest,
+    ) -> Result<V2VaultReconcileResult, ()> {
+        let open = self.selected_open(admission)?;
+        let snapshot = crate::vault_tools::vault_reconcile_snapshot(
+            open,
+            Path::new(&request.vault_path),
+            request.apply.unwrap_or(false),
+        ).map_err(|_| ())?;
+        Ok(V2VaultReconcileResult {
+            added: snapshot.added,
+            modified: snapshot.modified,
+            deleted: snapshot.deleted,
+            missing: snapshot.missing,
+            import_set_count: snapshot.import_set_count,
+            candidate_count: snapshot.candidate_count,
+            missing_count: snapshot.missing_count,
+            applied: snapshot.applied,
+            candidates: snapshot.candidates.map(|candidates| candidates.into_iter().map(|candidate| {
+                V2VaultCandidate {
+                    stable_source_key: candidate.stable_source_key,
+                    vault_path: candidate.vault_path,
+                    sha256: candidate.sha256,
+                }
+            }).collect()),
+        })
+    }
+
+    fn vault_job(
+        &self,
+        _: &V2DataMobilityAdmission,
+        _: &V2VaultJobRequest,
+    ) -> Result<V2VaultJobResult, ()> {
+        Err(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jsonrpc::JsonValue;
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    fn admission(registry: &EstateRegistry) -> V2DataMobilityAdmission {
+        V2DataMobilityAdmission {
+            estate_id: registry.default.estate_id,
+            estate_handle: registry.default.handle,
+            caller_binding: "test".to_owned(),
+            authorization_generation: "test".to_owned(),
+            now_millis: 0,
+        }
+    }
+
+    #[test]
+    fn reclassify_uses_the_direct_fixed_dry_run_seam() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        let report =
+            lower.reclassify_fdc(
+                &admission(&registry),
+                &V2ReclassifyFdcRequest { estate_id: None },
+            ).expect("empty estate has a valid typed dry-run report");
+        assert!(!report.applied);
+        assert_eq!(report.mode, "suspectOnly");
+        assert_eq!(report.scanned, 0);
+        assert_eq!(report.updated, 0);
+    }
+
+    #[test]
+    fn reindex_starts_through_the_direct_selected_estate_seam() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        assert_eq!(
+            lower.reindex(&admission(&registry), &V2ReindexRequest { estate_id: None }),
+            Ok(V2ReindexState::Running),
+        );
+    }
+
+    #[test]
+    fn dataset_file_query_and_stats_use_direct_typed_seams() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        let admitted = admission(&registry);
+        let filed = lower.file_dataset(
+            &admitted,
+            &V2FileDatasetRequest {
+                name: "fruit-scores".to_owned(),
+                location: "lab/produce".to_owned(),
+                columns: Some(vec![
+                    JsonValue::from(serde_json::json!({"name":"label","type":"text"})),
+                    JsonValue::from(serde_json::json!({"name":"score","type":"int"})),
+                ]),
+                rows: Some(vec![
+                    JsonValue::from(serde_json::json!({"label":"apple","score":95})),
+                    JsonValue::from(serde_json::json!({"label":"banana","score":80})),
+                ]),
+                csv_path: None,
+                wing: None,
+                sensitivity: None,
+                estate_id: None,
+            },
+        ).expect("typed file_dataset");
+        assert_eq!(filed.columns, 2);
+        assert_eq!(filed.rows, 2);
+
+        let query = lower.dataset_query(
+            &admitted,
+            &V2DatasetQueryRequest {
+                dataset_id: filed.dataset_id,
+                where_clause: Some(BTreeMap::from([
+                    ("col".to_owned(), JsonValue::String("score".to_owned())),
+                    ("op".to_owned(), JsonValue::String("gte".to_owned())),
+                    ("val".to_owned(), JsonValue::Integer(90)),
+                ])),
+                order_by: None,
+                limit: Some(1000),
+                columns: Some(vec![JsonValue::String("label".to_owned())]),
+                estate_id: None,
+            },
+        ).expect("typed dataset_query");
+        assert_eq!(query.rows_returned, 1);
+        assert_eq!(query.rows[0].get("label"), Some(&JsonValue::String("apple".to_owned())));
+
+        let stats = lower.dataset_stats(
+            &admitted,
+            &V2DatasetStatsRequest {
+                dataset_id: filed.dataset_id,
+                column: Some("score".to_owned()),
+                estate_id: None,
+            },
+        ).expect("typed dataset_stats");
+        assert_eq!(stats.stats["score"].count, 2);
+    }
+
+    #[test]
+    fn direct_imports_preserve_source_missing_path_behavior() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        let missing = std::env::temp_dir().join(format!("aria-v2-missing-{}", Uuid::new_v4()));
+        let palace = lower.palace_import(
+            &admission(&registry),
+            &V2PalaceImportRequest {
+                palace_path: missing.display().to_string(),
+                mode: Some(V2ImportMode::Foreground),
+                estate_id: None,
+            },
+        ).expect("PalaceBridge treats a missing root as an empty import");
+        assert_eq!(palace.drawers_written, 0);
+        assert_eq!(palace.enqueued_for_encode, 0);
+        assert_eq!(
+            lower.json_import(
+                &admission(&registry),
+                &V2JsonImportRequest {
+                    path: missing.display().to_string(),
+                    estate_id: None,
+                },
+            ),
+            Err(()),
+        );
+    }
+
+    #[test]
+    fn json_import_malformed_source_then_corrected_retry_writes_once() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        let path = std::env::temp_dir().join(format!("aria-v2-json-retry-{}.json", Uuid::new_v4()));
+        std::fs::write(&path, "{not-json").expect("write malformed seed");
+        let request = V2JsonImportRequest { path: path.display().to_string(), estate_id: None };
+        assert_eq!(lower.json_import(&admission(&registry), &request), Err(()));
+        std::fs::write(&path, r#"{"format_version":1,"name":"retry","records":[{"id":"once","content":"corrected retry","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"}]}"#)
+            .expect("write corrected seed");
+        let report = lower.json_import(&admission(&registry), &request);
+        let _ = std::fs::remove_file(&path);
+        let report = report.expect("corrected retry imports");
+        assert_eq!(report.drawers_written, 1);
+        let id_map = report.id_map.expect("direct import retains record-to-drawer receipt");
+        assert_eq!(id_map.len(), 1);
+        assert!(id_map.contains_key("once"));
+    }
+
+    #[test]
+    fn vault_status_projects_the_direct_manifest_snapshot() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        let path = std::env::temp_dir().join(format!("aria-v2-missing-{}", Uuid::new_v4()));
+        let result = lower.vault_status(
+            &admission(&registry),
+            &V2VaultStatusRequest { vault_path: path.display().to_string() },
+        ).expect("missing manifest is a typed status, not a refusal");
+        assert!(!result.manifest_present);
+        assert_eq!(result.note_count, None);
+        assert_eq!(result.last_export, None);
+    }
+
+    #[test]
+    fn selected_estate_must_match_admission() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        let mut rejected = admission(&registry);
+        rejected.estate_id = Uuid::new_v4();
+        assert!(matches!(lower.selected_open(&rejected), Err(())));
+    }
+}
