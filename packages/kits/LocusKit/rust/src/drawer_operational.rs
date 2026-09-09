@@ -268,12 +268,17 @@ impl DrawerFeatureFlags {
     /// Mirrors Swift `DrawerFeatureFlags.spanIndexed`.
     pub const SPAN_INDEXED: i64 = 1 << 27;
 
+    /// Bit 28 — distilled fact extraction settled for the current content
+    /// under the active recipe. Zero extracted facts is a settled result.
+    pub const FACTS_EXTRACTED: i64 = 1 << 28;
+
     /// The bits every content write clears in the same UPDATE that changes
     /// `content`: bit 19 (retained, always cleared) and bit 27 (the span
     /// rows describe the previous content). Applied as
     /// `operational_bitmap & !CLEARED_ON_CONTENT_WRITE`. Mirrors Swift
     /// `DrawerFeatureFlags.clearedOnContentWrite`.
-    pub const CLEARED_ON_CONTENT_WRITE: i64 = Self::HAS_CURRENT_REPRESENTATION | Self::SPAN_INDEXED;
+    pub const CLEARED_ON_CONTENT_WRITE: i64 =
+        Self::HAS_CURRENT_REPRESENTATION | Self::SPAN_INDEXED | Self::FACTS_EXTRACTED;
 }
 
 // MARK: - Drawer accessors
@@ -349,6 +354,11 @@ impl Drawer {
     /// Mirrors Swift `Drawer.isSpanIndexed`.
     pub fn is_span_indexed(&self) -> bool {
         (self.operational_bitmap & DrawerFeatureFlags::SPAN_INDEXED) != 0
+    }
+
+    /// True when bit 28 is set for the current content and active extractor.
+    pub fn are_facts_extracted(&self) -> bool {
+        (self.operational_bitmap & DrawerFeatureFlags::FACTS_EXTRACTED) != 0
     }
 
     // ── Wave-2 vague tier accessors (cookbook §2.4.2) ─────────────────────

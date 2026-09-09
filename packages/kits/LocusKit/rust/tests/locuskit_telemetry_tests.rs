@@ -238,20 +238,14 @@ fn sample_tunnel(source_label: &str, target_label: &str) -> Tunnel {
 /// A minimal valid KGFact for testing.
 /// `label` and `drawer_label` are short names converted via `tid()`.
 fn sample_kgfact(label: &str, drawer_label: &str) -> KGFact {
-    KGFact {
-        id: tid(label),
-        subject: "SubjectA".to_string(),
-        predicate: "relatesTo".to_string(),
-        object: "ObjectB".to_string(),
-        source_drawer_id: tid(drawer_label),
-        added_by: String::new(),
-        foreign_source_key: String::new(),
-        foreign_record_id: String::new(),
-        adjective_bitmap: 0,
-        operational_bitmap: 0,
-        provenance_bitmap: 0,
-        filed_at: 1_000_000,
-    }
+    KGFact::new(
+        tid(label),
+        "SubjectA".to_string(),
+        "relatesTo".to_string(),
+        "ObjectB".to_string(),
+        tid(drawer_label),
+        1_000_000,
+    )
 }
 
 /// Restore Intellectus to the default disabled+NoOpSink state.

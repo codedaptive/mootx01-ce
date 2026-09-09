@@ -389,6 +389,24 @@ impl DrawerStore for SqliteDrawerStore {
     fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
         self.0.count_span_index_debt()
     }
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.0.set_facts_extracted(drawer_id)
+    }
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.0.set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+    fn fact_extraction_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.0.count_fact_extraction_debt()
+    }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.0.set_anomalous_flag(drawer_id, anomalous)
     }
