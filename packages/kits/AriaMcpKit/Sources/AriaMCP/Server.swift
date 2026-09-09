@@ -177,17 +177,15 @@ public struct ARIA_MCPDispatcher: Sendable {
     }
 
     /// Community-only initializer (Wave A1b): no GeniusLocusKit actor required.
-    /// `tooling` is nil; all tool dispatch goes through `communityHandler` on
-    /// the v1 surface. The v2 selected surface has no community-only contract,
-    /// so it advertises no tools and rejects every call before either handler is
-    /// consulted.
+    /// The v2 selected surface has no community-only contract, so it advertises
+    /// no tools and rejects every call before either handler is consulted.
     public init(
         info: ServerInfo,
         communityHandler: any CommunityToolHandler,
         firstPartyHandler: (any FirstPartyToolHandler)? = nil
     ) {
         self.info = info
-        self.tools = AriaSurface.isV2 ? [] : communityHandler.communityToolList
+        self.tools = []
         self.tooling = nil
         self.communityHandler = communityHandler
         self.firstPartyHandler = firstPartyHandler
@@ -412,39 +410,9 @@ public struct ARIA_MCPDispatcher: Sendable {
     // MARK: - tools/list
 
     private func toolsList() async -> JSONValue {
-        if AriaSurface.isV2 {
-            // The Mission01 v2 catalog is the complete visible surface while
-            // incomplete.  Product/community additions stay unavailable until
-            // their selected-surface contracts exist.
-            return toolsListEntries(tools)
-        }
-
-        // Lane separation for community tools is enforced upstream in publicLane,
-        // which strips communityHandler (and filters tools) before HTTP plain-lane
-        // dispatch reaches here. No firstPartyIdentity check is needed at this level:
-        //   - Plain lane:         communityHandler == nil → no community entries added.
-        //   - First-party lane:   communityHandler != nil → community entries appear.
-        //   - Unit test callers:  communityHandler set by caller → entries appear as
-        //                         caller intended. publicLane is never called in tests.
-        let allTools: [ProjectedTool]
-        if let handler = communityHandler, tooling != nil {
-            // Full mode on the first-party lane: GeniusLocusKit tools AND community tools.
-            // tools = ToolProjection.tools(); handler.communityToolList supplies the rest.
-            allTools = tools + handler.communityToolList
-        } else {
-            // Three cases all collapse to the same answer:
-            //   a) Community-only mode (tooling == nil): tools = handler.communityToolList.
-            //   b) Full mode, no community handler: tools = GLK tools only.
-            //   c) Plain lane after publicLane stripping: communityHandler == nil,
-            //      tools = GLK tools (or empty after moot_community_ filter in
-            //      community-only mode).
-            allTools = tools
-        }
-        var effectiveTools = allTools
-        if firstPartyIdentity != nil, let firstPartyHandler {
-            effectiveTools.append(contentsOf: await firstPartyHandler.firstPartyToolList)
-        }
-        return toolsListEntries(effectiveTools)
+        // The v2 catalog is the complete visible surface. Community additions
+        // are not advertised on this surface; the dispatcher rejects them.
+        return toolsListEntries(tools)
     }
 
     private func toolsListEntries(_ effectiveTools: [ProjectedTool]) -> JSONValue {
@@ -491,33 +459,7 @@ public struct ARIA_MCPDispatcher: Sendable {
             }
         }
         let arguments = object["arguments"] ?? .object([:])
-        if AriaSurface.isV2 {
-            guard let tooling else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.methodNotFound,
-                    message: "Method not found: \(name)"
-                )
-            }
-            return try await tooling.dispatch(name: name, arguments: arguments)
-        }
-        // Community tool dispatch. communityHandler is non-nil ONLY when the
-        // dispatcher is on the first-party lane or in a direct unit-test context;
-        // publicLane (called by HTTPServer.route for plain HTTP) strips the handler
-        // before any request reaches here. No firstPartyIdentity guard is needed:
-        //   - Plain lane:       communityHandler == nil → branch skipped → falls
-        //                       through to GLK dispatcher or methodNotFound below.
-        //   - First-party lane: communityHandler != nil → dispatch community tool.
-        //   - Unit test:        communityHandler set by test → dispatch as expected.
-        if let handler = communityHandler, handler.isCommunityTool(name) {
-            return try await handler.dispatch(name: name, arguments: arguments)
-        }
-        if firstPartyIdentity != nil,
-           let firstPartyHandler,
-           await firstPartyHandler.isFirstPartyTool(name) {
-            return try await firstPartyHandler.dispatch(name: name, arguments: arguments)
-        }
         guard let tooling else {
-            // Community-only mode: no ToolDispatcher present; non-community tool is unknown.
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
                 message: "Method not found: \(name)"

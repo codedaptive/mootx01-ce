@@ -1,4 +1,3 @@
-#if MOOTX01_ARIA_V2
 import Foundation
 import CognitionKit
 import GeniusLocusKit
@@ -1039,20 +1038,4 @@ struct AriaSurfaceV2Tests {
         #expect(firstPartyCounts.dispatches == 0)
     }
 }
-#endif
 
-#if !MOOTX01_ARIA_V2
-import Testing
-@testable import AriaMCP
-
-@Suite("ARIA v1 selected surface")
-struct AriaSurfaceV1Tests {
-    @Test func defaultCatalogRemainsTheV1Catalog() {
-        let tools = ToolProjection.tools(environment: [:])
-        #expect(tools.count == 80)
-        #expect(tools.contains(where: { $0.name == "moot_memory_search" }))
-        #expect(tools.contains(where: { $0.name == "moot_monitoring_status" }))
-        #expect(!tools.contains(where: { $0.name == "moot_help" }))
-    }
-}
-#endif
