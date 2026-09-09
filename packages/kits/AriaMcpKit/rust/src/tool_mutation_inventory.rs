@@ -31,14 +31,15 @@
 /// opt-in `memory` adapter's create, str_replace and insert file at the
 /// ceiling without an argument (`memory_adapter`).
 pub const ADDITIVE_WRITE_TOOLS: &[&str] =
-    &["moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories"];
+    &["moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories",
+      "moot_file_packet"];
 
 /// Mutations of existing state: something already committed changes shape,
 /// is superseded, moves, or a background process alters estate-wide
 /// indexes/consolidation state. The installer prompts for these (Ask tier).
 pub const MUTATION_TOOLS: &[&str] = &[
     "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
-    "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
+    "moot_retire_fact", "moot_migration_confirm", "moot_migration_run",
     "moot_reindex", "moot_reclassify_fdc", "moot_dream",
     "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
     // Seed-file JSON import: reads a seed file from the filesystem and
@@ -47,14 +48,14 @@ pub const MUTATION_TOOLS: &[&str] = &[
     // Dataset import: creates a backend table and can read a csv_path from
     // the filesystem — same Ask posture as palace/vault import.
     "moot_file_dataset",
-    // Monitoring flag mutation: sets daemon telemetry state when `enabled`
-    // is supplied. Ask tier because it changes daemon behaviour.
-    "moot_monitoring_status",
-    // Contradiction hunter: estate-wide sweep that persists PROPOSED
-    // contradicts tunnels (same sweep runs inside moot_dream, already ask
-    // tier). Review settles a proposed tunnel's lifecycle — a mutation of
-    // committed state, and rejection is durable (never re-proposed).
-    "moot_hunt_contradictions", "moot_review_tunnel",
+    // Monitoring set: mutates daemon telemetry state. Ask tier because it
+    // changes daemon behaviour (moot_monitoring_status is a read-only report).
+    "moot_monitoring_set",
+    // Contradiction tools: hunt runs an estate-wide sweep persisting PROPOSED
+    // contradiction tunnels; propose files explicit proposed contradictions.
+    // Review settles a proposed tunnel's lifecycle — a mutation of committed
+    // state, and rejection is durable (never re-proposed).
+    "moot_hunt_contradictions", "moot_propose_contradictions", "moot_review_tunnel",
 ];
 
 /// Destructive, irreversible: hard-deletes content from the estate.
@@ -94,13 +95,6 @@ pub fn frozen_read_commands(tool: &str) -> Option<&'static [&'static str]> {
 /// purpose: the completeness test fails, naming the tool, when an advertised
 /// name is in none of the three frozen sets, so the read set is a triage
 /// decision and never a fall-through.
-/// Tools a serve dispatches by name without advertising them: retired names
-/// that answer with a notice so an old client learns the replacement. They
-/// perform no write. The completeness tests count them as reachable, so a
-/// dispatchable name can never sit outside the sets. Twin of Swift
-/// `dispatchableUnadvertisedTools`.
-pub const DISPATCHABLE_UNADVERTISED_TOOLS: &[&str] = &["moot_recollect"];
-
 pub const FROZEN_READ_TOOLS: &[&str] = &[
     // Tier 1-5 interface reads.
     "moot_memory_search", "moot_memory_list", "moot_memory_get",
@@ -110,8 +104,16 @@ pub const FROZEN_READ_TOOLS: &[&str] = &[
     "moot_estate_status", "moot_estate_map", "moot_estate_ping",
     // Maintenance and diagnostics that only report.
     "moot_drain_status", "moot_rebuild_status", "moot_timing_report",
-    // Grant-authorized federated read.
-    "moot_federated_search",
+    // Grant-authorized federated read (v2 name).
+    "moot_federated_recall",
+    // Help (read-only information tool).
+    "moot_help",
+    // Transcript recall (reads session transcript, no estate writes).
+    "moot_memory_recall_transcript",
+    // Work packet reads (no estate mutation).
+    "moot_packet_get", "moot_packet_lineage", "moot_packet_list",
+    // Monitoring status: read-only telemetry report (moot_monitoring_set is a mutation).
+    "moot_monitoring_status",
     // Recipe reads: catalogs and the recall family.
     "moot_list_lenses", "moot_list_recipes",
     "moot_recall_precise", "moot_recall_temporal", "moot_recall_shaped",
@@ -121,7 +123,6 @@ pub const FROZEN_READ_TOOLS: &[&str] = &[
     // writes no drawer, packet, journal, meta, trace, or reward — pure read.
     // Moved from MUTATION_TOOLS (FRZ-3): a frozen serve must answer it.
     "moot_synthesize",
-    "moot_recollect",
     // The 23 reasoning lenses.
     "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",
     "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity",
@@ -142,30 +143,32 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every tool name a serve launched with these flags can dispatch: the
-    /// advertised list.
-    fn reachable(vault_on: bool, memory_on: bool) -> HashSet<String> {
-        let list = crate::tool_list::build_tool_list_with_flags(vault_on, memory_on);
-        list.as_array()
-            .expect("tool list is an array")
-            .iter()
-            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-            .map(String::from)
-            .collect()
+    /// Every tool name dispatchable by a live serve: the 84 v2 catalog tools
+    /// (vault-on) plus the command-classified adapters that are not in the
+    /// catalog but are reachable through the dispatch layer's command routing.
+    fn reachable() -> HashSet<String> {
+        let mut names: HashSet<String> = crate::v2::catalog::selected_tools_for_registry(
+            &crate::v2::catalog::selected_registry_with_vault(true),
+        )
+        .as_array()
+        .expect("v2 catalog must return an array")
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .map(String::from)
+        .collect();
+        // Command-classified tools (e.g. the Anthropic memory_20250818 adapter)
+        // are not in the v2 catalog but are dispatchable when the optional
+        // adapter is enabled. Include them so the completeness test accepts them.
+        names.extend(FROZEN_READ_COMMANDS.iter().map(|(name, _)| name.to_string()));
+        names
     }
-
-    /// Every flag combination a serve can be launched with.
-    const FLAG_COMBINATIONS: [(bool, bool); 4] = [
-        (true, false), (false, false), (true, true), (false, true),
-    ];
 
     /// Every name in the inventory must be a tool a serve can really
     /// dispatch; a renamed or retired tool must fail here, not silently stop
     /// being refused (or stop being allowed).
     #[test]
     fn inventory_names_only_reachable_tools() {
-        let mut real = reachable(true, true);
-        real.extend(DISPATCHABLE_UNADVERTISED_TOOLS.iter().map(|s| s.to_string()));
+        let real = reachable();
         let stale: Vec<&&str> = ADDITIVE_WRITE_TOOLS
             .iter()
             .chain(MUTATION_TOOLS.iter())
@@ -179,28 +182,25 @@ mod tests {
 
     /// The structural guarantee: a tool a frozen serve can dispatch is in
     /// exactly one of the read set, the refused set, or the command-classified
-    /// set, under every opt-in flag combination. A new tool in none of them
-    /// fails here with its name.
+    /// set. A new v2 tool in none of them fails here with its name.
     #[test]
     fn every_reachable_tool_is_in_exactly_one_frozen_set() {
-        for (vault_on, memory_on) in FLAG_COMBINATIONS {
-            let mut names: Vec<String> = reachable(vault_on, memory_on).into_iter().collect();
-            names.sort();
-            for name in names {
-                let buckets = [
-                    FROZEN_READ_TOOLS.contains(&name.as_str()),
-                    is_frozen_refused(&name),
-                    frozen_read_commands(&name).is_some(),
-                ]
-                .iter()
-                .filter(|hit| **hit)
-                .count();
-                assert_eq!(
-                    buckets, 1,
-                    "{name} is in {buckets} frozen sets (vault_on={vault_on}, memory_on={memory_on});\
-                     every reachable tool must be in exactly one of FROZEN_READ_TOOLS / the refused inventory / FROZEN_READ_COMMANDS"
-                );
-            }
+        let mut names: Vec<String> = reachable().into_iter().collect();
+        names.sort();
+        for name in names {
+            let buckets = [
+                FROZEN_READ_TOOLS.contains(&name.as_str()),
+                is_frozen_refused(&name),
+                frozen_read_commands(&name).is_some(),
+            ]
+            .iter()
+            .filter(|hit| **hit)
+            .count();
+            assert_eq!(
+                buckets, 1,
+                "{name} is in {buckets} frozen sets; \
+                 every reachable tool must be in exactly one of FROZEN_READ_TOOLS / the refused inventory / FROZEN_READ_COMMANDS"
+            );
         }
     }
 

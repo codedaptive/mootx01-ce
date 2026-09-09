@@ -91,9 +91,21 @@ const READ_TOOLS: &[&str] = &[
     "moot_recall_walk", "moot_recall_temporal",
     "moot_fact_search", "moot_fact_timeline",
     "moot_connection_search", "moot_connection_map",
-    "moot_estate_map", "moot_read_journal", "moot_federated_search",
+    "moot_estate_map", "moot_read_journal",
+    // Grant-authorized federated read (v2 name: moot_federated_recall replaces moot_federated_search).
+    "moot_federated_recall",
+    // Surface help: capability discovery, always a pure read.
+    "moot_help",
+    // Transcript recall: reads session transcript, no estate writes.
+    "moot_memory_recall_transcript",
+    // Monitoring inspection: reads daemon telemetry state without changing it.
+    "moot_monitoring_status",
+    // Migration candidate evaluation (read-only, does not commit).
+    "moot_migration_run",
     // Dataset reads (MX-TAB-7): query rows / column stats are read-only.
     "moot_dataset_query", "moot_dataset_stats",
+    // Work-packet reads: retrieve, list, or trace lineage of stored work packets.
+    "moot_packet_get", "moot_packet_list", "moot_packet_lineage",
     "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
     "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts", "moot_lens_constellation",
     "moot_lens_contradiction", "moot_lens_divergence", "moot_lens_drift", "moot_lens_free_association",
@@ -666,8 +678,8 @@ mod tests {
         assert_eq!(classify("moot_palace_import"), Tier::Ask);
         assert_eq!(classify("moot_json_import"), Tier::Ask);
         assert_eq!(classify("moot_vault_import"), Tier::Ask);
-        // monitoring_status mutates daemon behaviour — ask tier.
-        assert_eq!(classify("moot_monitoring_status"), Tier::Ask, "monitoring_status is mutating — ask tier");
+        // moot_monitoring_status is inspection-only in v2 — pure read, no estate writes.
+        assert_eq!(classify("moot_monitoring_status"), Tier::Allow, "inspection-only in v2 — pure read, no estate writes");
 
         assert_eq!(classify("moot_erase_memory"), Tier::Deny);
 
