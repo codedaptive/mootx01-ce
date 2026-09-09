@@ -177,16 +177,17 @@ public struct ARIA_MCPDispatcher: Sendable {
     }
 
     /// Community-only initializer (Wave A1b): no GeniusLocusKit actor required.
-    /// `tooling` is nil; all tool dispatch goes through `communityHandler`.
-    /// Non-community tool names return methodNotFound. The `tools` list is
-    /// populated from `communityHandler.communityToolList` only.
+    /// `tooling` is nil; all tool dispatch goes through `communityHandler` on
+    /// the v1 surface. The v2 selected surface has no community-only contract,
+    /// so it advertises no tools and rejects every call before either handler is
+    /// consulted.
     public init(
         info: ServerInfo,
         communityHandler: any CommunityToolHandler,
         firstPartyHandler: (any FirstPartyToolHandler)? = nil
     ) {
         self.info = info
-        self.tools = communityHandler.communityToolList
+        self.tools = AriaSurface.isV2 ? [] : communityHandler.communityToolList
         self.tooling = nil
         self.communityHandler = communityHandler
         self.firstPartyHandler = firstPartyHandler
@@ -411,6 +412,13 @@ public struct ARIA_MCPDispatcher: Sendable {
     // MARK: - tools/list
 
     private func toolsList() async -> JSONValue {
+        if AriaSurface.isV2 {
+            // The Mission01 v2 catalog is the complete visible surface while
+            // incomplete.  Product/community additions stay unavailable until
+            // their selected-surface contracts exist.
+            return toolsListEntries(tools)
+        }
+
         // Lane separation for community tools is enforced upstream in publicLane,
         // which strips communityHandler (and filters tools) before HTTP plain-lane
         // dispatch reaches here. No firstPartyIdentity check is needed at this level:
@@ -436,6 +444,10 @@ public struct ARIA_MCPDispatcher: Sendable {
         if firstPartyIdentity != nil, let firstPartyHandler {
             effectiveTools.append(contentsOf: await firstPartyHandler.firstPartyToolList)
         }
+        return toolsListEntries(effectiveTools)
+    }
+
+    private func toolsListEntries(_ effectiveTools: [ProjectedTool]) -> JSONValue {
         let entries: [JSONValue] = effectiveTools.map { tool in
             var entry: [String: JSONValue] = [
                 "name": .string(tool.name),
@@ -446,6 +458,9 @@ public struct ARIA_MCPDispatcher: Sendable {
             // the key — text-only tool entries stay byte-identical.
             if let outputSchema = tool.outputSchema {
                 entry["outputSchema"] = outputSchema
+            }
+            if let annotations = tool.annotations {
+                entry["annotations"] = annotations
             }
             return .object(entry)
         }
@@ -476,6 +491,15 @@ public struct ARIA_MCPDispatcher: Sendable {
             }
         }
         let arguments = object["arguments"] ?? .object([:])
+        if AriaSurface.isV2 {
+            guard let tooling else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.methodNotFound,
+                    message: "Method not found: \(name)"
+                )
+            }
+            return try await tooling.dispatch(name: name, arguments: arguments)
+        }
         // Community tool dispatch. communityHandler is non-nil ONLY when the
         // dispatcher is on the first-party lane or in a direct unit-test context;
         // publicLane (called by HTTPServer.route for plain HTTP) strips the handler

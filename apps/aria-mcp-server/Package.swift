@@ -23,8 +23,18 @@ let package = Package(
     products: [
         .executable(name: "aria-mcp", targets: ["aria-mcp"]),
     ],
+    traits: [
+        .trait(
+            name: "AriaV2",
+            description: "Forward the off-by-default AriaMcpKit v2 surface selection into this reference server."
+        ),
+    ],
     dependencies: [
-        .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
+        .package(
+            name: "AriaMcpKit",
+            path: "../../packages/kits/AriaMcpKit",
+            traits: [.trait(name: "AriaV2", condition: .when(traits: ["AriaV2"]))]
+        ),
         .package(
             name: "GeniusLocusKit",
             path: "../../packages/kits/GeniusLocusKit",

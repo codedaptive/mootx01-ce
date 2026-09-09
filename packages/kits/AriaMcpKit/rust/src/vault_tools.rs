@@ -127,6 +127,39 @@ pub struct ExportManifest {
     pub files: BTreeMap<String, ManifestEntry>,
 }
 
+/// Direct, typed status for a vault export manifest. This is shared by the
+/// v2 mobility lower adapter without asking it to inspect a v1 text result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultStatusSnapshot {
+    pub manifest_present: bool,
+    pub path: String,
+    pub last_export: Option<String>,
+    pub note_count: Option<u64>,
+}
+
+/// One candidate surfaced by a vault reconciliation dry run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultReconcileCandidate {
+    pub stable_source_key: String,
+    pub vault_path: String,
+    pub sha256: String,
+}
+
+/// Direct, typed reconciliation receipt. It deliberately retains only the
+/// values that are authoritative for v2; legacy prose remains a v1 concern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultReconcileSnapshot {
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+    pub missing: Vec<String>,
+    pub import_set_count: u64,
+    pub candidate_count: u64,
+    pub missing_count: u64,
+    pub applied: bool,
+    pub candidates: Option<Vec<VaultReconcileCandidate>>,
+}
+
 // ---------------------------------------------------------------------------
 // Vault job ledger — synchronous parity for moot_vault_job
 // (Bob's ruling 2026-06-12: tool surface parity matters even when the backend
@@ -205,6 +238,32 @@ pub struct VaultJobRecord {
     pub result: VaultJobResult,
 }
 
+/// Typed terminal snapshot for a locally minted vault job.  The synchronous
+/// Rust backend records jobs only after work completes, so this never claims a
+/// running state that did not occur.
+#[derive(Debug, Clone)]
+pub struct VaultJobSnapshot {
+    pub job_id: uuid::Uuid,
+    pub kind: VaultJobKind,
+    pub vault_path: String,
+    pub result: VaultJobResult,
+}
+
+/// Immediate typed receipt returned by the shared export/import cores.  V1
+/// renders it as text and the dormant v2 mobility layer can project it without
+/// reading that text back.
+#[derive(Debug, Clone)]
+pub struct VaultJobLaunch {
+    pub job_id: uuid::Uuid,
+    pub kind: VaultJobKind,
+    pub vault_path: String,
+    pub scope: Option<String>,
+    pub note_count: Option<usize>,
+    pub datasets_processed: usize,
+    pub warnings: Vec<String>,
+    pub result: VaultJobResult,
+}
+
 /// Bounded in-process ledger of completed vault jobs.
 ///
 /// Bounded to `MAX_JOBS` entries (insertion order, oldest evicted first) to
@@ -239,6 +298,18 @@ impl VaultJobLedger {
     pub fn get(&self, job_id: &str) -> Option<VaultJobRecord> {
         let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.iter().find(|r| r.job_id == job_id).cloned()
+    }
+
+    /// Read a completed job as direct typed data.  The v1 renderer and v2
+    /// adapter share this exact lookup rather than parsing rendered job text.
+    pub fn snapshot(&self, job_id: uuid::Uuid) -> Option<VaultJobSnapshot> {
+        let record = self.get(&job_id.to_string())?;
+        Some(VaultJobSnapshot {
+            job_id,
+            kind: record.kind,
+            vault_path: record.vault_path,
+            result: record.result,
+        })
     }
 }
 
@@ -371,6 +442,19 @@ fn run_export(
     scope: VaultExportScope,
     ledger: &VaultJobLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    let launch = launch_export(args, registry, vault_path, scope, ledger)?;
+    Ok(text_result(&render_export_launch(&launch)))
+}
+
+/// Shared direct export core.  This performs the v1 work, records the job,
+/// and returns the typed receipt consumed by both renderers.
+pub fn launch_export(
+    args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
+    registry: &EstateRegistry,
+    vault_path: &Path,
+    scope: VaultExportScope,
+    ledger: &VaultJobLedger,
+) -> Result<VaultJobLaunch, JSONRPCError> {
     let open = registry.resolve_direct(args)?;
     // mut: VaultBridge::new requires &mut EstateCoordinator (dual-path intake fix
     // — import routes through capture_with_mode which needs mutable coord access).
@@ -427,42 +511,42 @@ fn run_export(
     // The Rust backend completes synchronously, so the job is already done.
     // Including job_id in the response lets callers that poll with moot_vault_job
     // receive the completed record immediately on lookup.
-    let job_id = uuid::Uuid::new_v4().to_string();
+    let job_id = uuid::Uuid::new_v4();
+    let export_result = ExportJobResult {
+        note_count: manifest.note_count,
+        exported_at: manifest.exported_at.clone(),
+    };
     ledger.record(VaultJobRecord {
-        job_id: job_id.clone(),
+        job_id: job_id.to_string(),
         kind: VaultJobKind::Export,
         vault_path: vault_path.to_string_lossy().into_owned(),
-        result: VaultJobResult::Exported(ExportJobResult {
-            note_count: manifest.note_count,
-            exported_at: manifest.exported_at.clone(),
-        }),
+        result: VaultJobResult::Exported(export_result.clone()),
     });
+    Ok(VaultJobLaunch {
+        job_id,
+        kind: VaultJobKind::Export,
+        vault_path: vault_path.to_string_lossy().into_owned(),
+        scope: Some(scope.as_str().to_owned()),
+        note_count: None,
+        datasets_processed: dataset_csv_count,
+        warnings: csv_warnings,
+        result: VaultJobResult::Exported(export_result),
+    })
+}
 
-    // Response shape mirrors Swift VaultTools.runExport (async job model):
-    //   job_id: <UUID>
-    //   vault: <path>
-    //   scope: <scope>
-    //   datasetsExported: N (when N > 0)
-    //   poll: moot_vault_job to check status
-    //
-    // The Rust backend completes synchronously and records the completed job in
-    // `ledger` before returning. `moot_vault_job(id)` returns the completed record
-    // immediately. The caller sees the same job_id/poll shape as Swift regardless
-    // of backend execution model — output parity is maintained.
+fn render_export_launch(launch: &VaultJobLaunch) -> String {
     let mut response_lines = format!(
         "job_id: {}\nvault: {}\nscope: {}\n",
-        job_id,
-        vault_path.display(),
-        scope.as_str(),
+        launch.job_id,
+        launch.vault_path,
+        launch.scope.as_deref().unwrap_or("exportable"),
     );
-    if dataset_csv_count > 0 {
-        response_lines.push_str(&format!("datasetsExported: {}\n", dataset_csv_count));
+    if launch.datasets_processed > 0 {
+        response_lines.push_str(&format!("datasetsExported: {}\n", launch.datasets_processed));
     }
-    for w in &csv_warnings {
-        response_lines.push_str(&format!("warning: {}\n", w));
-    }
+    for warning in &launch.warnings { response_lines.push_str(&format!("warning: {warning}\n")); }
     response_lines.push_str("poll: moot_vault_job to check status");
-    Ok(text_result(&response_lines))
+    response_lines
 }
 
 /// Parse the optional `scope` argument from the MCP tool input.
@@ -529,6 +613,23 @@ fn run_import(
     vault_path: &Path,
     ledger: &VaultJobLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    if matches!(args.get("mode").and_then(|value| value.as_str()), Some(mode) if !matches!(mode.to_lowercase().as_str(), "foreground" | "background")) {
+        return Ok(error_result(
+            "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)",
+        ));
+    }
+    let launch = launch_import(args, registry, vault_path, ledger)?;
+    Ok(text_result(&render_import_launch(&launch)))
+}
+
+/// Shared direct import core.  It retains the synchronous Rust completion
+/// semantics and returns the terminal receipt without text reconstruction.
+pub fn launch_import(
+    args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
+    registry: &EstateRegistry,
+    vault_path: &Path,
+    ledger: &VaultJobLedger,
+) -> Result<VaultJobLaunch, JSONRPCError> {
     // Step 1: enumerate all .md notes for the note_count response field and
     // for building the non-dataset path set used by the filtered bridge import.
     //
@@ -577,7 +678,8 @@ fn run_import(
         Some(ref s) if s == "foreground" => EncodeSpeed::Foreground,
         Some(ref s) if s == "background" => EncodeSpeed::Background,
         Some(_) => {
-            return Ok(error_result(
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
                 "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)",
             ));
         }
@@ -682,68 +784,87 @@ fn run_import(
     }
 
     // Step 7: record the completed job in the ledger.
-    let job_id = uuid::Uuid::new_v4().to_string();
+    let job_id = uuid::Uuid::new_v4();
+    let import_result = ImportJobResult {
+        drawers_written: report.drawers_written as i64,
+        drawers_updated: report.drawers_updated as i64,
+        items_skipped: report.items_skipped as i64,
+        tunnels_created: report.tunnels_created as i64,
+        fdc_classified: report.fdc_classified as i64,
+        fdc_unclassified: report.fdc_unclassified as i64,
+        drawers_skipped_unchanged: report.drawers_skipped_unchanged as i64,
+        drawers_skipped_tombstoned: report.drawers_skipped_tombstoned as i64,
+    };
     ledger.record(VaultJobRecord {
-        job_id: job_id.clone(),
+        job_id: job_id.to_string(),
         kind: VaultJobKind::Import,
         vault_path: vault_path.to_string_lossy().into_owned(),
-        result: VaultJobResult::Imported(ImportJobResult {
-            drawers_written: report.drawers_written as i64,
-            drawers_updated: report.drawers_updated as i64,
-            items_skipped: report.items_skipped as i64,
-            tunnels_created: report.tunnels_created as i64,
-            fdc_classified: report.fdc_classified as i64,
-            fdc_unclassified: report.fdc_unclassified as i64,
-            drawers_skipped_unchanged: report.drawers_skipped_unchanged as i64,
-            drawers_skipped_tombstoned: report.drawers_skipped_tombstoned as i64,
-        }),
+        result: VaultJobResult::Imported(import_result.clone()),
     });
+    Ok(VaultJobLaunch {
+        job_id,
+        kind: VaultJobKind::Import,
+        vault_path: vault_path.to_string_lossy().into_owned(),
+        scope: None,
+        note_count: Some(note_count),
+        datasets_processed: dataset_imported,
+        warnings: dataset_warnings,
+        result: VaultJobResult::Imported(import_result),
+    })
+}
 
-    // Response shape mirrors Swift VaultTools.runImport (async job model).
-    // Includes datasetsImported count when > 0, and any dataset-level warnings.
-    // The Rust import is synchronous — the bridge and dataset import both
-    // completed above; report COMPLETE with actual stats.
-    let mut resp = format!(
+fn render_import_launch(launch: &VaultJobLaunch) -> String {
+    let VaultJobResult::Imported(report) = &launch.result else {
+        unreachable!("import launch must hold an import receipt");
+    };
+    let mut response = format!(
         "job_id: {}\nvault: {}\nnote_count: {}\nstatus: COMPLETE\n\
          drawersWritten: {}\ndrawersUpdated: {}\nitemsSkipped: {}\n\
          tunnelsCreated: {}\nfdcClassified: {}\nfdcUnclassified: {}",
-        job_id,
-        vault_path.display(),
-        note_count,
-        report.drawers_written,
-        report.drawers_updated,
-        report.items_skipped,
-        report.tunnels_created,
-        report.fdc_classified,
-        report.fdc_unclassified,
+        launch.job_id, launch.vault_path, launch.note_count.unwrap_or(0),
+        report.drawers_written, report.drawers_updated, report.items_skipped,
+        report.tunnels_created, report.fdc_classified, report.fdc_unclassified,
     );
-    if dataset_imported > 0 {
-        resp.push_str(&format!("\ndatasetsImported: {}", dataset_imported));
-    }
-    for w in &dataset_warnings {
-        resp.push_str(&format!("\nwarning: {}", w));
-    }
-    Ok(text_result(&resp))
+    if launch.datasets_processed > 0 { response.push_str(&format!("\ndatasetsImported: {}", launch.datasets_processed)); }
+    for warning in &launch.warnings { response.push_str(&format!("\nwarning: {warning}")); }
+    response
 }
 
 /// `moot_vault_status` — report whether the vault carries a manifest and,
 /// if so, its header. Pure filesystem read; mutates nothing.
 /// Mirrors Swift `VaultTools.runStatus`.
+pub fn vault_status_snapshot(vault_path: &Path) -> Result<VaultStatusSnapshot, String> {
+    let manifest = read_manifest(vault_path)?;
+    Ok(match manifest {
+        None => VaultStatusSnapshot {
+            manifest_present: false,
+            path: vault_path.display().to_string(),
+            last_export: None,
+            note_count: None,
+        },
+        Some(manifest) => VaultStatusSnapshot {
+            manifest_present: true,
+            path: vault_path.display().to_string(),
+            last_export: Some(manifest.exported_at),
+            note_count: Some(u64::try_from(manifest.files.len()).map_err(|_| "vault_status: note count overflow".to_owned())?),
+        },
+    })
+}
+
 fn run_status(vault_path: &Path) -> Result<serde_json::Value, JSONRPCError> {
-    match read_manifest(vault_path) {
+    match vault_status_snapshot(vault_path) {
         Err(e) => Ok(error_result(&format!(
             "vault_status: error reading manifest: {e}"
         ))),
-        Ok(None) => Ok(text_result(&format!(
+        Ok(snapshot) if !snapshot.manifest_present => Ok(text_result(&format!(
             "vault_status: no export manifest at {MANIFEST_RELATIVE_PATH}\npath: {}\n(run moot_vault_export to stamp one)",
-            vault_path.display(),
+            snapshot.path,
         ))),
-        Ok(Some(m)) => Ok(text_result(&format!(
+        Ok(snapshot) => Ok(text_result(&format!(
             "vault_status: manifest present\npath: {}\nnoteCount: {}\nlastExport: {}",
-            vault_path.display(),
-            // note_count is skip_serializing so deserialized manifests have 0; use files.len().
-            m.files.len(),
-            m.exported_at,
+            snapshot.path,
+            snapshot.note_count.expect("present manifest has count"),
+            snapshot.last_export.expect("present manifest has export time"),
         ))),
     }
 }
@@ -1025,6 +1146,127 @@ fn run_reconcile(
     Ok(text_result(&lines.join("\n")))
 }
 
+/// Reconcile a vault through the direct VaultKit path and return the typed
+/// receipt used by the v2 mobility surface. This never enters a v1 dispatcher
+/// or reconstructs fields from v1 text.
+pub fn vault_reconcile_snapshot(
+    open: &OpenEstate,
+    vault_path: &Path,
+    apply: bool,
+) -> Result<VaultReconcileSnapshot, String> {
+    let manifest = read_manifest(vault_path)
+        .map_err(|error| format!("vault_reconcile: error reading manifest: {error}"))?
+        .ok_or_else(|| format!(
+            "vault_reconcile: no export manifest at {MANIFEST_RELATIVE_PATH}. Run moot_vault_export first."
+        ))?;
+    let current = hash_all_notes(vault_path)
+        .map_err(|error| format!("vault_reconcile: hashing failed: {error}"))?;
+    let manifest_certifies = manifest.version.unwrap_or(0) >= MANIFEST_SCHEMA_VERSION;
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    for (path, entry) in &current {
+        match manifest.files.get(path) {
+            Some(stamped) if stamped.sha256 != entry.sha256 => modified.push(path.clone()),
+            None => added.push(path.clone()),
+            _ => {}
+        }
+    }
+    let mut deleted: Vec<String> = manifest.files.keys()
+        .filter(|path| !current.contains_key(*path))
+        .cloned()
+        .collect();
+    added.sort();
+    modified.sort();
+    deleted.sort();
+
+    let candidate_paths: HashSet<String> = if manifest_certifies {
+        added.iter().chain(modified.iter()).cloned().collect()
+    } else {
+        current.keys().cloned().collect()
+    };
+    let all_paths: HashSet<String> = current.keys().cloned().collect();
+    let mut coord = open.coord.lock()
+        .map_err(|_| "vault_reconcile: estate coordinator lock poisoned".to_owned())?;
+    let mut bridge = VaultBridge::new(
+        &mut coord,
+        Box::new(ObsidianAdapter::new()),
+        DrawerMapping::default(),
+    );
+    let now_ms = wall_now_ms();
+    let (selected, report): (HashSet<String>, Option<ImportReport>) = if apply {
+        bridge.import_vault_reconciling(
+            vault_path,
+            &all_paths,
+            &candidate_paths,
+            &open.handle,
+            now_ms,
+            None,
+            EncodeSpeed::Foreground,
+        ).map(|(report, selected)| (selected, Some(report))).map_err(|error| {
+            format!("vault_reconcile: apply import failed: {error}")
+        })?
+    } else {
+        bridge.reconcile_selection(&all_paths, &candidate_paths, &open.handle, now_ms)
+            .map(|selected| (selected, None))
+            .map_err(|error| format!("vault_reconcile: reconcile_selection failed: {error}"))?
+    };
+
+    let mut missing: Vec<String> = selected.difference(&candidate_paths).cloned().collect();
+    missing.sort();
+    let import_set_count = u64::try_from(selected.len())
+        .map_err(|_| "vault_reconcile: import set count overflow".to_owned())?;
+    let candidate_count = u64::try_from(candidate_paths.len())
+        .map_err(|_| "vault_reconcile: candidate count overflow".to_owned())?;
+    let missing_count = u64::try_from(missing.len())
+        .map_err(|_| "vault_reconcile: missing count overflow".to_owned())?;
+
+    if report.is_some() {
+        let mut restamped_files = manifest.files.clone();
+        for path in &selected {
+            if let Some(entry) = current.get(path) {
+                restamped_files.insert(path.clone(), entry.clone());
+            }
+        }
+        let restamped = ExportManifest {
+            version: Some(MANIFEST_SCHEMA_VERSION),
+            exported_at: manifest.exported_at,
+            note_count: restamped_files.len(),
+            files: restamped_files,
+        };
+        write_manifest(&restamped, vault_path)
+            .map_err(|error| format!("vault_reconcile: manifest re-stamp failed: {error}"))?;
+    }
+
+    let candidates = if apply {
+        None
+    } else {
+        let mut paths: Vec<String> = candidate_paths.into_iter().collect();
+        paths.sort();
+        Some(paths.into_iter().map(|vault_path| {
+            let stable_source_key = vault_path.strip_suffix(".md")
+                .unwrap_or(vault_path.as_str())
+                .to_owned();
+            let sha256 = current.get(&vault_path)
+                .map(|entry| entry.sha256.clone())
+                .unwrap_or_default();
+            VaultReconcileCandidate { stable_source_key, vault_path, sha256 }
+        }).collect())
+    };
+
+    Ok(VaultReconcileSnapshot {
+        added,
+        modified,
+        deleted,
+        missing,
+        import_set_count,
+        candidate_count,
+        missing_count,
+        applied: report.is_some(),
+        candidates,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // moot_vault_job handler
 // ---------------------------------------------------------------------------
@@ -1065,25 +1307,33 @@ fn run_reconcile(
 /// - Unknown ID (mirrors Swift `ToolDispatcher.errorResult("unknown job_id: \(jobID)")`):
 ///   `isError: true`, text = `"unknown job_id: <id>"`
 fn run_job(job_id: &str, ledger: &VaultJobLedger) -> serde_json::Value {
-    let Some(record) = ledger.get(job_id) else {
+    let Ok(job_id) = uuid::Uuid::parse_str(job_id) else {
+        return error_result(&format!("unknown job_id: {job_id}"));
+    };
+    let Some(snapshot) = ledger.snapshot(job_id) else {
         // Swift: `return ToolDispatcher.errorResult("unknown job_id: \(jobID)")`
         // Rust mirrors this exact phrase so clients get the same not-found shape.
         return error_result(&format!("unknown job_id: {job_id}"));
     };
 
-    // The Rust backend completes synchronously, so elapsed_s is always 0.0.
+    text_result(&render_job_snapshot(&snapshot))
+}
+
+/// V1 presentation over the same terminal receipt used by the dormant v2
+/// mobility adapter.  The Rust backend is synchronous, so elapsed_s is 0.0.
+pub fn render_job_snapshot(snapshot: &VaultJobSnapshot) -> String {
     // Swift computes `Date().timeIntervalSince(job.startedAt)` for a real
     // async job; here the job was done before the caller could poll, so 0.0
     // is the truthful value (not a stub — it reflects the real elapsed time
     // of a synchronous operation measured at millisecond resolution).
     let elapsed_s = "0.0";
 
-    match &record.result {
-        VaultJobResult::Imported(r) => text_result(&format!(
+    match &snapshot.result {
+        VaultJobResult::Imported(r) => format!(
             "job_id: {}\nkind: {}\nvault: {}\nstatus: complete\nelapsed_s: {}\ndrawersWritten: {}\ndrawersUpdated: {}\nitemsSkipped: {}\ntunnelsCreated: {}\nfdcClassified: {}\nfdcUnclassified: {}\ndrawersSkippedUnchanged: {}\ndrawersSkippedTombstoned: {}",
-            record.job_id,
-            record.kind.as_str(),
-            record.vault_path,
+            snapshot.job_id,
+            snapshot.kind.as_str(),
+            snapshot.vault_path,
             elapsed_s,
             r.drawers_written,
             r.drawers_updated,
@@ -1093,16 +1343,16 @@ fn run_job(job_id: &str, ledger: &VaultJobLedger) -> serde_json::Value {
             r.fdc_unclassified,
             r.drawers_skipped_unchanged,
             r.drawers_skipped_tombstoned,
-        )),
-        VaultJobResult::Exported(r) => text_result(&format!(
+        ),
+        VaultJobResult::Exported(r) => format!(
             "job_id: {}\nkind: {}\nvault: {}\nstatus: complete\nelapsed_s: {}\nnoteCount: {}\nexportedAt: {}",
-            record.job_id,
-            record.kind.as_str(),
-            record.vault_path,
+            snapshot.job_id,
+            snapshot.kind.as_str(),
+            snapshot.vault_path,
             elapsed_s,
             r.note_count,
             r.exported_at,
-        )),
+        ),
     }
 }
 

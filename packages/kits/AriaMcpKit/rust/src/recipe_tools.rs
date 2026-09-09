@@ -95,6 +95,125 @@ use crate::interface_tools::{
 };
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
+/// Direct typed core for the PreciseRecall recipe.
+///
+/// Both the v1 renderer below and a future selected v2 adapter call this one
+/// lower-kit execution seam.  It returns CognitionKit matches rather than a
+/// rendered ARIA result, so no v2 route needs to parse a legacy text/JSON
+/// response to recover rank, room, body, or precision evidence.
+pub fn execute_precise_recall_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    query: &str,
+    filter: Filter,
+    limit: usize,
+    pool: usize,
+    composition: Option<&str>,
+    now_millis: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+) -> Result<Vec<cognition_kit::PreciseMatch>, cognition_kit::RecipeRunError> {
+    run_precise_recall(
+        coordinator, handle, query, filter, limit, pool, composition, now_millis, node_names,
+    )
+}
+
+/// Direct typed core for the graph-diffusion connected-recall recipe.
+/// The v1 renderer and a later v2 projection share this lower call.
+pub fn execute_connected_recall_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    query: &str,
+    wing: &str,
+    filter: Filter,
+    limit: usize,
+    now_millis: i64,
+) -> Result<Vec<cognition_kit::connected_recall::ConnectedMatch>, cognition_kit::RecipeRunError> {
+    cognition_kit::connected_recall::run_connected_recall(
+        coordinator, handle, query, wing, filter, limit, now_millis,
+    )
+}
+
+/// Direct typed core for temporal recall.  The caller supplies the decoded
+/// window/grab selectors so the recipe outcome retains its temporal evidence.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_temporal_recall_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    query: &str,
+    filter: Filter,
+    limit: usize,
+    pool: usize,
+    mode: cognition_kit::TemporalWindowMode,
+    grab: cognition_kit::TemporalGrab,
+    from: Option<&str>,
+    to: Option<&str>,
+    now_millis: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+) -> Result<cognition_kit::TemporalRecallOutcome, cognition_kit::RecipeRunError> {
+    cognition_kit::run_temporal_recall(
+        coordinator, handle, query, filter, limit, pool, mode, grab, from, to, now_millis,
+        node_names,
+    )
+}
+
+/// Direct typed core for the two-hop vague-recall seam.  The v1 renderer keeps
+/// its summary/original presentation but no longer owns the estate call.
+pub fn execute_vague_recall_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    query: &str,
+    hit_limit: usize,
+    constituents_per_hit: usize,
+    total_constituents: usize,
+) -> Result<genius_locus_kit::brain::consolidation_cycle::VagueRecallResult, genius_locus_kit::VerbDispatchError> {
+    coordinator.vague_recall(handle, query, hit_limit, constituents_per_hit, total_constituents)
+}
+
+/// Direct typed core for the named-shape recipe.  It carries the exact
+/// frontier override and room-name map that the v1 renderer currently uses.
+pub fn execute_shaped_recall_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    query: &str,
+    preset: &str,
+    filter: Filter,
+    limit: usize,
+    now_millis: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+    frontier_k: Option<usize>,
+) -> Result<cognition_kit::ShapedRecallOutput, cognition_kit::RecipeRunError> {
+    run_shaped_recall(
+        coordinator, handle, query, preset, filter, limit, now_millis, node_names, frontier_k,
+    )
+}
+
+/// Direct typed core for the walk ladder.  Its result preserves both the
+/// winning rows and stage evidence; renderers do not reconstruct it from text.
+pub fn execute_walk_recall_typed(
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    query: &str,
+    filter: Filter,
+    limit: usize,
+    now_millis: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+) -> Result<cognition_kit::WalkRecallOutcome, cognition_kit::RecipeRunError> {
+    cognition_kit::run_walk_recall(
+        coordinator, handle, query, filter, limit, now_millis, node_names,
+    )
+}
+
+/// Direct typed core for distilled recall.  The caller owns its typed input,
+/// including filter and limit, so neither public surface parses rendered rows.
+pub fn execute_distilled_recall_typed(
+    input: &cognition_kit::DistilledRecallInput,
+    coordinator: &genius_locus_kit::EstateCoordinator,
+    handle: &genius_locus_kit::EstateHandle,
+    now_millis: i64,
+) -> Result<cognition_kit::DistilledRecallOutput, genius_locus_kit::VerbDispatchError> {
+    cognition_kit::run_distilled_recall(input, coordinator, handle, now_millis)
+}
+
 /// Render the typed conflict-projection sweep as the ADDITIVE report
 /// section every contradiction surface appends (DCP M4, M0 §7):
 /// moot_hunt_contradictions, moot_dream, and moot_lens_contradiction
@@ -917,7 +1036,7 @@ fn run_connected_recall_tool(
 
     let now = crate::dispatch::wall_now();
     let coord = estate.coord.lock().unwrap();
-    let matches = cognition_kit::connected_recall::run_connected_recall(
+    let matches = execute_connected_recall_typed(
         &coord,
         &estate.handle,
         &query,
@@ -997,8 +1116,7 @@ fn run_vague_recall_tool(
         "total_constituents", 32, crate::dispatch::LIMIT_HARD_CEILING)?;
 
     let coord = estate.coord.lock().unwrap();
-    let out = coord
-        .vague_recall(&estate.handle, &query, hit_limit, per_hit, total)
+    let out = execute_vague_recall_typed(&coord, &estate.handle, &query, hit_limit, per_hit, total)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,
@@ -1078,7 +1196,7 @@ fn run_temporal_recall_tool(
             .collect()
     };
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
-    let outcome = match cognition_kit::run_temporal_recall(
+    let outcome = match execute_temporal_recall_typed(
         &coord,
         &estate.handle,
         &query,
@@ -1212,7 +1330,7 @@ fn run_precise_recall_tool(
             .collect()
     };
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
-    let matches = run_precise_recall(
+    let matches = execute_precise_recall_typed(
         &coord,
         &estate.handle,
         &query,
@@ -1437,7 +1555,7 @@ fn run_shaped_recall_tool(
             .collect()
     };
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
-    let out = run_shaped_recall(&coord, &estate.handle, &query, &preset, filter, limit, now, &node_names, frontier_k)
+    let out = execute_shaped_recall_typed(&coord, &estate.handle, &query, &preset, filter, limit, now, &node_names, frontier_k)
         .map_err(error_from_recipe)?;
 
     // Compute discrimination over the full ordered list before the display prefix.
@@ -2210,7 +2328,7 @@ fn run_walk_recall_tool(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use locus_kit::filter::Filter;
-    use cognition_kit::{run_walk_recall, WalkStage};
+    use cognition_kit::WalkStage;
 
     let estate = registry.resolve_direct(args)?;
     let query = require_string(args, "query")?;
@@ -2248,7 +2366,7 @@ fn run_walk_recall_tool(
     };
     let node_names = coord.resolve_drawer_node_names(&estate.handle, &parent_ids);
 
-    let outcome = run_walk_recall(&coord, &estate.handle, query, filter, limit, now, &node_names)
+    let outcome = execute_walk_recall_typed(&coord, &estate.handle, query, filter, limit, now, &node_names)
         .map_err(error_from_recipe)?;
 
     // Dense-row reply (house shape): same row shape as moot_memory_search.
@@ -2437,7 +2555,7 @@ fn run_recall_distilled_tool(
     // DistilledRecall.run(input:estate:kit:) call chain.
     let mut input = cognition_kit::DistilledRecallInput::with_limit(query, limit);
     input.filter = filter;
-    let out = cognition_kit::run_distilled_recall(&input, &coord, &estate.handle, now)
+    let out = execute_distilled_recall_typed(&input, &coord, &estate.handle, now)
         .map_err(|e| {
             JSONRPCError::new(
                 JSONRPCErrorCode::TOOL_DISPATCH_FAILURE,

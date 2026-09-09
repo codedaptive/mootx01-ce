@@ -95,6 +95,9 @@ convergence-kit  = { path = "../../ConvergenceKit/rust" }
 rusqlite         = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [features]
+# Select the bounded ARIA v2 development surface. Off by default so released
+# artifacts retain the complete v1 catalog and behavior.
+aria-v2 = []
 # whole-record-dense: compiles the resident adapter's float index duties
 # (THETA rebuild, BETA compaction) and turns on the same feature in
 # neuron-kit, genius-locus-kit and corpus-kit. Off by default (ruling
