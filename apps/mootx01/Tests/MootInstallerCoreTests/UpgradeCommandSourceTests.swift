@@ -210,6 +210,21 @@ struct UpgradeCommandSourceTests {
         #expect(provisionAt < wireAt, "the key is written before the wire so the same open activates the encoder")
     }
 
+    @Test("span backfill repairs indexed legacy versions and writes the canonical shared version")
+    func spanBackfillRepairsLegacyContentVersions() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/mootx01/Commands/SpanEncodeBackfill.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        #expect(source.contains("activeDrawersAfterStrict(id: repairCursor, limit: repairPageSize)"))
+        #expect(source.contains("strictSpanVectorSnapshot("))
+        #expect(source.contains("SpanContentVersion.requiresRepair("))
+        #expect(source.contains("SpanContentVersion.fnv1a64(drawer.content)"))
+        #expect(!source.contains("columns: [\"content_hash\"]"))
+    }
+
     @Test("runSpanEncodeBackfill and runVectorReclaim open through the migration catalog before touching the vector tier")
     func spanEncodeAndReclaimRunTheCatalogFirst() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
