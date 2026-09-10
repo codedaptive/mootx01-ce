@@ -149,10 +149,16 @@ impl Dispatcher {
     ///
     /// `Dispatcher` does not take a version-skew advisory: it does not read
     /// one anywhere in the v2 request path (`self.surface.execute` never
-    /// receives it). The version-skew advisory that `moot_estate_ping`/
-    /// `moot_estate_status` actually render comes from the `version_skew:
-    /// &str` argument threaded separately through `interface_tools::dispatch`
-    /// (see `runtime.rs`).
+    /// receives it, and `surface::execute` itself takes no `version_skew`
+    /// parameter). The Rust v2 surface renders no version-skew advisory at
+    /// all: `interface_tools::dispatch`, the only function that reads a
+    /// `version_skew: &str` argument, has exactly one caller
+    /// (`dispatch_tool_with_vault_ledger_and_flag` in `dispatch.rs`), which
+    /// is the v1 test-helper path this module documents as unreached by the
+    /// running server. The Swift twin does render the advisory: `ToolProjection`'s
+    /// dispatcher in `Sources/AriaMCP/ToolDispatch.swift` appends
+    /// `"version_skew: \(versionSkewAdvisory)"` in both `runEstateStatus`
+    /// and `runEstatePing` when a skew is present.
     pub fn new(
         registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
         monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
