@@ -155,8 +155,10 @@ private actor FakeMemoryBackend: AriaV2MemoryBackend {
         return records[0]
     }
 
-    func search(_ request: AriaV2MemorySearchRequest, context: AriaV2MemoryOperationContext) async throws -> [(record: AriaV2MemoryRecord, score: Double)] {
-        records.map { ($0, 0.75) }
+    func search(_ request: AriaV2MemorySearchRequest, context: AriaV2MemoryOperationContext) async throws -> AriaV2SearchResult {
+        // Test fake skips synthesis and packager; no answer block is produced.
+        let pairs = records.map { ($0, 0.75) }
+        return AriaV2SearchResult(records: pairs, answerBlock: nil, totalCount: pairs.count)
     }
 
     func get(_ request: AriaV2MemoryGetRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2MemoryRecord] {

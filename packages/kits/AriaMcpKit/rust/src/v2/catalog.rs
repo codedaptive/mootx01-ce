@@ -162,6 +162,10 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                         // Absent uses the engine default formula min(max(limit × 4, 64), 256).
                         "frontier_k":{"type":"integer","minimum":1},
                         "explain":{"type":"boolean"},
+                        // answer: response-shape adjective. Never (default) → dense rows only.
+                        // Always → compose answer block + rows. Auto → confidence gate decides.
+                        // Unknown values produce -32602 at decode (Swift parity).
+                        "answer":{"type":"string","enum":["never","always","auto"],"description":"Response shape adjective. \"never\" (default) returns dense rows only. \"always\" composes an answer block and rows (requires estate content). \"auto\" lets the server choose the response level by confidence gate (L0 answer-only, L1 answer+rows, or rowsOnly)."},
                         "estate_id":{"type":"string","format":"uuid"}},
                         "oneOf":[
                             {"required":["query"],"not":{"required":["near"]}},
@@ -559,10 +563,22 @@ fn remaining_data_schema(name: &str) -> Option<Value> {
             json!({"memory_id":uuid(),"placement":placement_schema(),"fetch":fetch_schema()}),
             json!(["memory_id", "placement", "fetch"]),
         )),
-        "moot_memory_search" => Some(exact(
-            json!({"results":{"type":"array","items":compact_memory_schema()}}),
-            json!(["results"]),
-        )),
+        "moot_memory_search" => {
+            // `answer` is optional: absent when answer:never or confidence is WEAK.
+            // Presence signals a non-empty answer block from GroundedSynthesis + packager.
+            let signals = exact(
+                json!({"margin":{"type":"number"},"lane_agreement":{"type":"number"},"dense_spread":{"type":"number"},"containment":{"type":"boolean"}}),
+                json!(["margin","lane_agreement","dense_spread","containment"]),
+            );
+            let answer_block = exact(
+                json!({"text":{"type":"string"},"confidence":{"type":"string","enum":["confident","intermediate"]},"citations":{"type":"array","items":uuid()},"signals":signals}),
+                json!(["text","confidence","citations","signals"]),
+            );
+            Some(exact(
+                json!({"results":{"type":"array","items":compact_memory_schema()},"answer":answer_block}),
+                json!(["results"]),
+            ))
+        }
         "moot_memory_get" => {
             let memory = exact(
                 json!({"memory_id":uuid(),"subject":{"type":"string"},"distilled":{"type":"string"},"content":{"type":"string"},"placement":placement_schema(),"filed_at":{"type":"string","format":"date-time"},"event_time":{"type":"string","format":"date-time"},"state":{"type":"string"},"trust":{"type":"string"},"sensitivity":{"type":"string"},"exportability":{"type":"string"},"confirmation":{"type":"string"},"lineage_id":uuid(),"fetch":fetch_schema()}),
