@@ -143,6 +143,14 @@ pub fn required_bool(object: &BTreeMap<String, JsonValue>, key: &str) -> V2Decod
     }
 }
 
+pub fn optional_bool(object: &BTreeMap<String, JsonValue>, key: &str) -> V2DecodeResult<Option<bool>> {
+    match object.get(key) {
+        None => Ok(None),
+        Some(JsonValue::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(V2InvalidArgument::new(format!("$.{key}"), "must be a boolean")),
+    }
+}
+
 pub fn optional_integer(
     object: &BTreeMap<String, JsonValue>,
     key: &str,
