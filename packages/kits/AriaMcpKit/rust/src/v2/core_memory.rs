@@ -227,18 +227,54 @@ impl V2FileMemoryRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum V2SearchTarget { Query(String), Near(Uuid) }
 
+/// Validated filter values for `moot_memory_search`. Unknown spellings are
+/// rejected at decode with `V2InvalidArgument`, producing a -32602 INVALID_PARAMS
+/// error rather than a success-shaped refusal envelope. Mirrors Swift decodeFilterChain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2SearchFilter { Unconfirmed, UserConfirmed, Exportable, Contained, Pinned }
+
+/// Validated media_type values for `moot_memory_search`. Only "voice" and "image"
+/// are accepted. Unknown spellings are rejected at decode with -32602.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2SearchMediaType { Voice, Image }
+
+/// Validated door values for `moot_memory_search`. "guess" is a legal spelling at
+/// decode; the service resolves it against the provisioned DoorManifest because that
+/// requires the estate handle. "hedge" and "thorough" are reserved at the recipe
+/// layer and unknown here; they are rejected at decode with -32602.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2SearchDoor { Guess, Raw, Rrf, MatrixAware, Discriminative }
+
+/// Validated scoring values for `moot_memory_search`. Applied when door is absent.
+/// Unknown spellings are rejected at decode with -32602.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2SearchScoring { Raw, Rrf, MatrixAware, Discriminative }
+
+/// Validated ordering values for `moot_memory_search`. "byRelevanceDesc" is accepted
+/// as a distinct input spelling; the service maps it to ByCaptureTimeDesc because the
+/// scored unionBest path already owns final relevance ordering. Unknown spellings are
+/// rejected at decode with -32602.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2SearchOrdering { ByCaptureTimeDesc, ByCaptureTimeAsc, ByRoomAsc, ByRelevanceDesc }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2MemorySearchRequest {
     pub estate_id: Option<Uuid>,
     pub target: V2SearchTarget,
     pub limit: usize,
-    pub filter: Option<String>,
+    /// Validated at decode; unknown values return -32602 INVALID_PARAMS.
+    pub filter: Option<V2SearchFilter>,
+    /// Every string including empty is valid; no validation at decode.
     pub wing: Option<String>,
-    pub media_type: Option<String>,
+    /// Validated at decode; only "voice" and "image" are accepted.
+    pub media_type: Option<V2SearchMediaType>,
     pub explain: Option<bool>,
-    pub door: Option<String>,
-    pub scoring: Option<String>,
-    pub ordering: Option<String>,
+    /// Validated at decode; "guess" resolves to provisioned config in the service.
+    pub door: Option<V2SearchDoor>,
+    /// Validated at decode; applied when door is absent.
+    pub scoring: Option<V2SearchScoring>,
+    /// Validated at decode; "byRelevanceDesc" maps to ByCaptureTimeDesc in the service.
+    pub ordering: Option<V2SearchOrdering>,
     pub frontier_k: Option<i64>,
     pub answer: Option<String>,
 }
@@ -258,15 +294,63 @@ impl V2MemorySearchRequest {
         if !(1..=MAX_SEARCH_LIMIT as i64).contains(&limit) {
             return Err(V2InvalidArgument::new("$.limit", "must be from 1 through 500"));
         }
+        // Five validated fields: unknown values produce -32602 INVALID_PARAMS, matching
+        // Swift which throws JSONRPCError(code: .invalidParams) for the same inputs.
+        // The exact message text is preserved so callers see identical errors across ports.
+        let filter = match optional_string(object, "filter")? {
+            None                  => None,
+            Some("unconfirmed")   => Some(V2SearchFilter::Unconfirmed),
+            Some("userConfirmed") => Some(V2SearchFilter::UserConfirmed),
+            Some("exportable")    => Some(V2SearchFilter::Exportable),
+            Some("contained")     => Some(V2SearchFilter::Contained),
+            Some("pinned")        => Some(V2SearchFilter::Pinned),
+            Some(unknown) => return Err(V2InvalidArgument::new("$.filter",
+                format!("Unknown filter: {unknown}"))),
+        };
+        let media_type = match optional_string(object, "media_type")? {
+            None          => None,
+            Some("voice") => Some(V2SearchMediaType::Voice),
+            Some("image") => Some(V2SearchMediaType::Image),
+            Some(unknown) => return Err(V2InvalidArgument::new("$.media_type",
+                format!("Unknown media_type: {unknown}. Valid: voice, image"))),
+        };
+        // "guess" is valid at decode; the service resolves it against the provisioned
+        // DoorManifest because that requires the estate handle.
+        let door = match optional_string(object, "door")? {
+            None                   => None,
+            Some("guess")          => Some(V2SearchDoor::Guess),
+            Some("raw")            => Some(V2SearchDoor::Raw),
+            Some("rrf")            => Some(V2SearchDoor::Rrf),
+            Some("matrixAware")    => Some(V2SearchDoor::MatrixAware),
+            Some("discriminative") => Some(V2SearchDoor::Discriminative),
+            Some(unknown) => return Err(V2InvalidArgument::new("$.door",
+                format!("Unknown door: {unknown}. Valid: guess, raw, rrf, matrixAware, discriminative"))),
+        };
+        let scoring = match optional_string(object, "scoring")? {
+            None                   => None,
+            Some("raw")            => Some(V2SearchScoring::Raw),
+            Some("rrf")            => Some(V2SearchScoring::Rrf),
+            Some("matrixAware")    => Some(V2SearchScoring::MatrixAware),
+            Some("discriminative") => Some(V2SearchScoring::Discriminative),
+            Some(unknown) => return Err(V2InvalidArgument::new("$.scoring",
+                format!("Unknown scoring: {unknown}. Valid: raw, rrf, matrixAware, discriminative"))),
+        };
+        // "byRelevanceDesc" is a compatibility spelling that decodes to its own
+        // variant; the service maps it to ByCaptureTimeDesc as a tie-break.
+        let ordering = match optional_string(object, "ordering")? {
+            None                      => None,
+            Some("byCaptureTimeDesc") => Some(V2SearchOrdering::ByCaptureTimeDesc),
+            Some("byCaptureTimeAsc")  => Some(V2SearchOrdering::ByCaptureTimeAsc),
+            Some("byRoomAsc")         => Some(V2SearchOrdering::ByRoomAsc),
+            Some("byRelevanceDesc")   => Some(V2SearchOrdering::ByRelevanceDesc),
+            Some(unknown) => return Err(V2InvalidArgument::new("$.ordering",
+                format!("Unknown ordering: {unknown}. Valid: byCaptureTimeDesc, byCaptureTimeAsc, byRoomAsc, byRelevanceDesc"))),
+        };
         Ok(Self {
             estate_id: optional_uuid(object, "estate_id")?, target, limit: limit as usize,
-            filter: optional_string(object, "filter")?.map(str::to_owned),
-            wing: optional_string(object, "wing")?.map(str::to_owned),
-            media_type: optional_string(object, "media_type")?.map(str::to_owned),
-            explain: optional_bool(object, "explain")?,
-            door: optional_string(object, "door")?.map(str::to_owned),
-            scoring: optional_string(object, "scoring")?.map(str::to_owned),
-            ordering: optional_string(object, "ordering")?.map(str::to_owned),
+            filter, wing: optional_string(object, "wing")?.map(str::to_owned),
+            media_type, explain: optional_bool(object, "explain")?,
+            door, scoring, ordering,
             frontier_k: optional_integer(object, "frontier_k")?,
             answer: optional_string(object, "answer")?.map(str::to_owned),
         })
