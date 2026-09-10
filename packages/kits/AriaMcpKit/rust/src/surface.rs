@@ -1605,7 +1605,16 @@ fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry
         _ => return Err(JSONRPCError::new(JSONRPCErrorCode::INTERNAL_ERROR, "unsupported selected recall operation")),
     };
     match result {
-        Ok(data) => crate::v2::render::success(tool, &data, meta, &format!("Returned {} typed recall result(s).", data.results.len())).map_err(jsonrpc_internal),
+        Ok(data) => {
+            // moot_recall_distilled appends its savings display line after the
+            // count; no other recall operation carries a distillation object.
+            let mut text = format!("Returned {} typed recall result(s).", data.results.len());
+            if let Some(display) = data.metadata.as_ref().and_then(|capabilities| capabilities["distillation"]["display"].as_str()) {
+                text.push('\n');
+                text.push_str(display);
+            }
+            crate::v2::render::success(tool, &data, meta, &text).map_err(jsonrpc_internal)
+        }
         Err(V2PreciseRecallFailure::Invalid(error)) => Err(error.into_jsonrpc_error()),
         Err(V2PreciseRecallFailure::Unavailable) => Ok(crate::v2::render::refusal(tool, &crate::v2::render::V2OperationalRefusal { code: "recall_unavailable".into(), message: "Recall is unavailable for the selected estate.".into(), retryable: true, recovery: None }, meta)),
     }
