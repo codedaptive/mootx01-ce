@@ -481,6 +481,8 @@ fn output_schema(name: &str, effect: V2OperationEffect) -> Value {
         synthesis_data_schema()
     } else if let Some(schema) = remaining_data_schema(name) {
         schema
+    } else if name == "moot_recall_distilled" {
+        distilled_recall_data_schema()
     } else if recall_input_schema(name).is_some() {
         recall_data_schema()
     } else if let Some(schema) = estate_diagnostics_data_schema(name) {
@@ -509,6 +511,24 @@ fn compact_memory_schema() -> Value {
 }
 fn recall_data_schema() -> Value {
     json!({"type":"object","properties":{"results":{"type":"array","items":lens_memory_row_schema()},"capabilities":lens_capabilities_schema()},"required":["results"],"additionalProperties":false})
+}
+
+// moot_recall_distilled declares its own data schema: the shared memory row plus
+// a required capabilities object that always carries the distillation savings
+// (ARIA_V2_CONTRACT.md, "Distilled recall savings"). Mirrors the Swift
+// distilledRecallDataSchema key for key so both ports digest identically.
+fn distilled_recall_data_schema() -> Value {
+    json!({"type":"object","properties":{"results":{"type":"array","items":lens_memory_row_schema()},"capabilities":distilled_capabilities_schema()},"required":["results","capabilities"],"additionalProperties":false})
+}
+
+fn distilled_capabilities_schema() -> Value {
+    json!({"type":"object","properties":{"discrimination":{"type":"string","enum":["low","medium"]},"distillation":distillation_schema()},"required":["distillation"],"additionalProperties":false})
+}
+
+// The skim object is declared now so schema consumers do not change when skim
+// is wired; it is absent until then.
+fn distillation_schema() -> Value {
+    json!({"type":"object","properties":{"returnedTokens":{"type":"integer","minimum":0},"originalTokens":{"type":"integer","minimum":0},"savedTokens":{"type":"integer"},"savedPercent":{"type":"integer"},"estimated":{"type":"boolean"},"estimator":{"type":"string"},"skim":{"type":"object","properties":{"omittedTokens":{"type":"integer","minimum":0}},"required":["omittedTokens"],"additionalProperties":false},"display":{"type":"string"}},"required":["returnedTokens","originalTokens","savedTokens","savedPercent","estimated","estimator","display"],"additionalProperties":false})
 }
 
 fn remaining_data_schema(name: &str) -> Option<Value> {
