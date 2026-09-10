@@ -168,7 +168,8 @@ struct AriaV2DataMobilityDirectTests {
                 kit: kit,
                 handle: handle,
                 selectedEstateID: handle.estateUUID,
-                now: Date(timeIntervalSince1970: 1_788_912_000)))
+                now: Date(timeIntervalSince1970: 1_788_912_000),
+                serverIdentity: "test-server"))
             .execute(tool: "moot_json_import", arguments: .object(["path": .string(seed.path)]))
         let map = try #require(result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["id_map"]?.objectValue)
         let projected = try #require(map["source-record"]?.stringValue)
@@ -186,7 +187,7 @@ struct AriaV2DataMobilityDirectTests {
         let seed = FileManager.default.temporaryDirectory.appendingPathComponent("aria-v2-import-retry-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: seed) }
         try Data("{not-json".utf8).write(to: seed)
-        let mobility = AriaV2DataMobility(authority: AriaV2GeniusLocusDataMobilityAuthority(kit: kit, handle: handle, selectedEstateID: handle.estateUUID, now: Date(timeIntervalSince1970: 1_788_912_000)))
+        let mobility = AriaV2DataMobility(authority: AriaV2GeniusLocusDataMobilityAuthority(kit: kit, handle: handle, selectedEstateID: handle.estateUUID, now: Date(timeIntervalSince1970: 1_788_912_000), serverIdentity: "test-server"))
         let refused = try await mobility.execute(tool: "moot_json_import", arguments: .object(["path": .string(seed.path)]))
         #expect(refused.objectValue?["isError"] == .bool(true))
         try Data("{\"format_version\":1,\"name\":\"retry\",\"records\":[{\"id\":\"once\",\"content\":\"corrected retry\",\"event_time\":\"2026-09-09T00:00:00Z\",\"room\":\"handoff/room\",\"exportability\":\"public\"}]}".utf8).write(to: seed)
