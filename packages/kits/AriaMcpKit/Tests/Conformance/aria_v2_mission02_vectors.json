@@ -3112,7 +3112,8 @@
               "type": "string"
             },
             "filter": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter kind: unconfirmed, userConfirmed, exportable, contained, hasLinks. 'hasLinks' scopes synthesis to drawers with links/citations. Composable with query. null is invalid."
             },
             "limit": {
               "type": "integer",
@@ -3694,6 +3695,7 @@
           "limit",
           "filter",
           "wing",
+          "frontier_k",
           "estate_id"
         ],
         "inputSchema": {
@@ -3714,6 +3716,10 @@
             },
             "wing": {
               "type": "string"
+            },
+            "frontier_k": {
+              "type": "integer",
+              "minimum": 1
             },
             "estate_id": {
               "type": "string",
