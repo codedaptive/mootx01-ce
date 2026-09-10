@@ -385,6 +385,10 @@ pub struct V2ReclassifyFdcReport {
     pub mode: String,
     /// UUID of the estate scanned.
     pub estate_id: uuid::Uuid,
+    /// Human-readable estate name (from OpenEstate.estate_name).
+    /// Mirrors Swift's EstateHandle.estateName; used by the compact-text builder
+    /// to emit "estate: {name} [{uuid}]" matching the Swift canonical output.
+    pub estate_name: String,
     /// FDC classifier data version string (non-empty).
     pub fdc_data_version: String,
     /// FDC recalculation version string (non-empty).
