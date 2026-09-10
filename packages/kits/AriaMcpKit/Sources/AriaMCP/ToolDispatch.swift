@@ -597,7 +597,7 @@ public struct ToolDispatcher: Sendable {
             )
         }
         let request = try AriaSurfaceDecoder.decode(name: name, arguments: args)
-        return await dispatchV2(request)
+        return await dispatchV2(request, rawArguments: args)
     }
 }
 
@@ -608,9 +608,18 @@ private extension ToolDispatcher {
     /// §12.5 coaching session counter, dispatches to `executeV2Core`, and applies
     /// any coaching hint and periodic coaching block before returning.
     ///
-    /// FACT C choke point: `recordCall` + coaching injection are here, once,
-    /// covering every v2 operation. Do not inject per-arm inside `executeV2Core`.
-    private func dispatchV2(_ request: AriaSurfaceRequest) async -> JSONValue {
+    /// FACT C choke point: the call chain's ingress hook calls `recordCall` and
+    /// its egress hook injects coaching, both here, covering every v2 operation.
+    /// Do not inject per-arm inside `executeV2Core`.
+    ///
+    /// `rawArguments` is the decoded `[String: JSONValue]` map from the outer
+    /// `dispatch(name:arguments:)` call, forwarded so the ingress chain receives
+    /// a well-formed value. Argument mutations the ingress chain returns are not
+    /// consumed at this call site because decode has already run.
+    private func dispatchV2(
+        _ request: AriaSurfaceRequest,
+        rawArguments: [String: JSONValue]
+    ) async -> JSONValue {
         // Load estate-provisioned modes preferences on the first v2 call of
         // this session. The outer guard prevents the async estate read from
         // firing on every call — only the first call of the session reaches
@@ -644,30 +653,47 @@ private extension ToolDispatcher {
             }
         }
 
-        // §12.5 coaching: advance the session counter BEFORE execute so
-        // shouldCoach() reflects this call. recordCall must precede shouldCoach
-        // (ModeSessionState ordering contract). mode: nil because v2 catalog
-        // carries no `mode` property (OBSTACLE 4).
-        // ModeSessionState is an actor — await required.
-        await modeSessionState.recordCall(toolName: request.toolName, mode: nil)
+        // Build the per-call chain from the production factory. Construction
+        // fails only on a duplicate name or position, both programmer errors in
+        // a hard-coded list — `try!` follows the precedent at executeV2Core's
+        // `try! AriaV2CapabilityDigest.digest`.
+        //
+        // The ingress chain runs AFTER argument decode and AFTER the frozen
+        // guard above. That placement is intentional: the session counter must
+        // not advance when a frozen estate refuses a v2 mutation (the refusal
+        // returns above) and must not advance when argument decode fails (decode
+        // runs before dispatchV2 in dispatch(name:arguments:)). Moving the
+        // ingress invocation above the frozen guard would advance the counter
+        // on frozen refusals, changing when the periodic coaching block fires.
+        // This mission changes no behaviour, so the ingress chain runs where
+        // `recordCall` ran before — same position, now delegated to the hook.
+        let chain = try! AriaV2CallChain(
+            registrations: ariaV2ProductionRegistrations(
+                request: request,
+                modeSessionState: modeSessionState
+            )
+        )
+        // Ingress: the coaching hook calls recordCall and returns arguments
+        // unchanged (see AriaV2ChainRegistry.swift for the placement invariant).
+        let ingressOutcome = await chain.runIngress(
+            toolName: request.toolName,
+            arguments: .object(rawArguments)
+        )
 
         // Execute the v2 operation — all business logic lives in executeV2Core.
         let coreResult = await executeV2Core(request)
 
-        // §12.5 hint injection: first matching trigger attaches to the result.
-        // AriaV2Coach.coachingHint returns nil for error results (RULING 3).
-        var result = coreResult
-        if let hint = AriaV2Coach.coachingHint(request: request, result: result) {
-            result = AriaV2Envelope.applyHint(hint, to: result)
-        }
-        // Periodic coaching block: render and append when the cadence fires.
-        // shouldCoach is called AFTER recordCall (ordering contract).
-        if await modeSessionState.shouldCoach() {
-            let snap = await modeSessionState.snapshot
-            result = AriaV2Envelope.applyCoachingBlock(
-                PeriodicCoach.renderBlock(for: snap), to: result)
-        }
-        return result
+        // Egress: the coaching hook applies hint and periodic block. A halt
+        // payload from any future gate registered at egress position 1 is
+        // already the result, so it is honoured without additional code here.
+        // The `failures` field is not consumed: no concern registered today
+        // can throw.
+        let egressOutcome = await chain.runEgress(
+            toolName: request.toolName,
+            result: coreResult,
+            ingressOutcome: ingressOutcome
+        )
+        return egressOutcome.result
     }
 
     /// All v2 business logic: service setup, the tool dispatch switch, and
