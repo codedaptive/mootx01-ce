@@ -611,16 +611,20 @@ private extension ToolDispatcher {
     /// FACT C choke point: `recordCall` + coaching injection are here, once,
     /// covering every v2 operation. Do not inject per-arm inside `executeV2Core`.
     private func dispatchV2(_ request: AriaSurfaceRequest) async -> JSONValue {
-        // Load estate-provisioned modes preferences on the first call of the
-        // session. Subsequent calls are no-ops (guarded by `configuredFromEstate`
-        // inside `applyPreferences`). Falls back silently when the estate has no
-        // stored manifest — spec defaults (stickyEnabled=true, coachingCalls=25)
-        // remain in effect. This is the wiring gate for P2 and P3.
-        if let manifest = try? await kit.provisionedModesConfig(for: handle) {
-            await modeSessionState.applyPreferences(
-                stickyEnabled: manifest.stickyEnabled,
-                coachingCalls: manifest.coachingCalls
-            )
+        // Load estate-provisioned modes preferences on the first v2 call of
+        // this session. The outer guard prevents the async estate read from
+        // firing on every call — only the first call of the session reaches
+        // the coordinator. Falls back silently when the estate has no stored
+        // manifest; spec defaults (stickyEnabled=true, coachingCalls=25)
+        // remain in effect. Rust twin: dispatcher.rs guards the same block
+        // with `if !mode_session_state.is_configured_from_estate()`.
+        if await !modeSessionState.configuredFromEstate {
+            if let manifest = try? await kit.provisionedModesConfig(for: handle) {
+                await modeSessionState.applyPreferences(
+                    stickyEnabled: manifest.stickyEnabled,
+                    coachingCalls: manifest.coachingCalls
+                )
+            }
         }
 
         switch request.operation.effect {
