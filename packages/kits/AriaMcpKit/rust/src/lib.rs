@@ -85,6 +85,10 @@ pub mod tool_list;
 pub mod tool_mutation_inventory;
 pub mod vault_tools;
 pub mod v2;
+// periodic_coach: deterministic coaching block renderer for the v2 periodic
+// coaching system. Exposes `render_block` for the v2 dispatcher wiring and
+// is pinned by the golden-pin fixture tests in both ports.
+pub mod periodic_coach;
 
 /// Re-export the shared whole-file key entry point so the `mootx01` binary can
 /// ensure the estate-encryption key exists at serve startup without a direct
