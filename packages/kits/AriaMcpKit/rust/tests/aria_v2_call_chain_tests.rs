@@ -362,6 +362,8 @@ fn a_failing_gate_halts_the_chain_fail_closed() {
     let ingress = chain.run_ingress("t", jobj([]));
     let egress = chain.run_egress("t", SjValue::String("base".to_owned()), &ingress);
 
+    // Gate error halts fail-closed — payload is unmodified and late marker is absent.
+    assert_eq!(egress.result, SjValue::String("base".to_owned()));
     assert_eq!(egress.halt, V2HaltReason::GateFailed("erroring-gate".to_owned()));
     // Late marker must be absent — chain halted.
     if let SjValue::String(ref s) = egress.result {
@@ -466,7 +468,8 @@ fn a_failing_ingress_hook_of_a_gating_concern_halts_fail_closed() {
     let ingress = chain.run_ingress("t", jobj([]));
     let egress = chain.run_egress("t", SjValue::String("base".to_owned()), &ingress);
 
-    // Rule 4: failed ingress on a gating concern halts fail-closed.
+    // Rule 4: failed ingress on a gating concern halts fail-closed. Payload is unmodified.
+    assert_eq!(egress.result, SjValue::String("base".to_owned()));
     assert_eq!(egress.halt, V2HaltReason::GateFailed("lost-gate".to_owned()));
     if let SjValue::String(ref s) = egress.result {
         assert!(!s.contains("|after-gate-ran"), "after-gate marker must not appear");
