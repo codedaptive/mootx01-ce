@@ -111,6 +111,12 @@ struct OrderingDispatchTests {
         )
         let isError = result.objectValue?["isError"]?.boolValue ?? true
         #expect(!isError, "byRelevanceDesc on an empty estate must succeed with zero hits")
+        let text = result.objectValue?["content"]?
+            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        #expect(
+            text.contains("found 0 candidate memories"),
+            "byRelevanceDesc on an empty estate must report zero hits; got: \(text)"
+        )
     }
 
     // MARK: - B. byRelevanceDesc is documented in the schema
