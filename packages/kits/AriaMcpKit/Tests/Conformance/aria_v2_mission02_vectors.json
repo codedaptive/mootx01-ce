@@ -251,7 +251,8 @@
               "minimum": 1
             },
             "explain": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Opt-in flag. When true, appends a discrimination: control line when recall confidence is low or medium, surfacing how clearly the top result separates from the field. Absent or false suppresses the line."
             },
             "answer": {
               "type": "string",
