@@ -1,4 +1,4 @@
-// EmbeddedArtifacts.swift
+// EmbeddedArtifactsV2.swift
 //
 // .generated — DO NOT EDIT BY HAND. Byte-sourced from
 // tools/moot-packager/.out (canonical SKILL.md + install-map.json +

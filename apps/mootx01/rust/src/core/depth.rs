@@ -12,7 +12,7 @@
 //! fallback reported. This is the non-Apple installer vertical; the Swift
 //! vertical (MootInstallerCore/InstallDepth.swift) implements the identical
 //! behaviour independently. No FFI — both read the same embedded install
-//! bundle (`src/embedded/install-bundle.json`), the shared agreement substrate.
+//! bundle (`src/embedded/install-bundle-v2.json`), the shared agreement substrate.
 //!
 //! The installer consumes pre-generated elements; it NEVER generates them
 //! (spec §4 / Decision 3). The bundle is byte-sourced from tools/moot-packager.
@@ -389,11 +389,9 @@ pub struct InstallBundle {
 
 impl InstallBundle {
     fn selected_aria_version() -> &'static str {
-        {
-            // The Rust vertical reads the public selected-surface authority,
-            // enabled only by the explicit Cargo feature forwarding.
-            aria_mcp::v2::render::V2_SURFACE_VERSION
-        }
+        // The Rust vertical reads the public selected-surface authority directly.
+        // V2 is the unconditional surface; no Cargo feature gate is required.
+        aria_mcp::v2::render::V2_SURFACE_VERSION
     }
 
     fn from_json(json: &str) -> Result<Self, String> {
@@ -431,7 +429,7 @@ impl InstallBundle {
         static BUNDLE: OnceLock<InstallBundle> = OnceLock::new();
         BUNDLE.get_or_init(|| {
             Self::from_json(INSTALL_BUNDLE_JSON)
-                .expect("embedded install-bundle.json failed to parse (build defect)")
+                .expect("embedded install-bundle-v2.json failed to parse (build defect)")
         })
     }
 
