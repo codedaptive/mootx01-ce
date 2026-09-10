@@ -358,3 +358,71 @@ fn catalog_declares_answer_argument() {
     assert!(val_strs.contains(&"always"), "answer enum must include 'always'");
     assert!(val_strs.contains(&"auto"),   "answer enum must include 'auto'");
 }
+
+// ---------------------------------------------------------------------------
+// explain gate: discrimination line appears iff explain:true is passed
+// ---------------------------------------------------------------------------
+
+/// With explain:true and a populated estate that produces a non-trivial score
+/// distribution, the moot_memory_search compact text MUST contain a
+/// "discrimination:" line. Three closely-related memories produce a low or
+/// medium signal — both are emitted in v2 compact text.
+///
+/// Both filing and searching go through the v2 Dispatcher — file_memory is a
+/// v2 tool and the same Dispatcher handles both calls.
+#[test]
+fn explain_true_appends_discrimination_line() {
+    let registry = EstateRegistry::new_inmemory();
+    let disp = Dispatcher::new(registry, "test", "test", "test", None);
+
+    // Three closely-related memories to produce a non-trivial score spread.
+    for suffix in &["alpha", "beta", "gamma"] {
+        let subject = format!("discrimination-gate-test content {suffix}");
+        let r = call(&disp, "moot_file_memory", json!({
+            "content": subject.as_str(),
+            "subject": subject.as_str(),
+            "location": "lab",
+            "impatient": true
+        }));
+        assert!(is_success(&r), "file_memory must succeed; got: {r:?}");
+    }
+
+    let r = call(&disp, "moot_memory_search", json!({
+        "query": "discrimination-gate-test",
+        "explain": true
+    }));
+    assert!(is_success(&r), "explain:true must succeed; got: {r:?}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("discrimination:"),
+        "explain:true must append a discrimination line; got: {text}"
+    );
+}
+
+/// Without explain, the moot_memory_search compact text must NOT contain a
+/// "discrimination:" line — the gate is strictly opt-in.
+#[test]
+fn explain_omitted_suppresses_discrimination_line() {
+    let registry = EstateRegistry::new_inmemory();
+    let disp = Dispatcher::new(registry, "test", "test", "test", None);
+
+    for suffix in &["alpha", "beta", "gamma"] {
+        let subject = format!("discrimination-gate-test content {suffix}");
+        let r = call(&disp, "moot_file_memory", json!({
+            "content": subject.as_str(),
+            "subject": subject.as_str(),
+            "location": "lab",
+            "impatient": true
+        }));
+        assert!(is_success(&r), "file_memory must succeed; got: {r:?}");
+    }
+
+    // explain omitted — default is false, no discrimination line expected.
+    let r = call(&disp, "moot_memory_search", json!({"query": "discrimination-gate-test"}));
+    assert!(is_success(&r), "omitted explain must succeed; got: {r:?}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !text.contains("discrimination:"),
+        "explain omitted must NOT produce a discrimination line; got: {text}"
+    );
+}
