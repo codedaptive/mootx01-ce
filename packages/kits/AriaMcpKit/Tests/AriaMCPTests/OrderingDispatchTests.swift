@@ -75,20 +75,27 @@ struct OrderingDispatchTests {
     /// the feature-removal Bob ruled against.
     @Test func byRelevanceDescSucceedsAndFindsMemory() async throws {
         let dispatcher = try await makeDispatcher()
-        try await fileMemory(content: "byRelevanceDesc-finds-this-memory", location: "test", dispatcher: dispatcher)
+        try await fileMemory(
+            content: "relevance-ordering-test-content",
+            location: "test/room",
+            dispatcher: dispatcher
+        )
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("byRelevanceDesc-finds-this-memory"),
+                "query": .string("relevance-ordering-test-content"),
                 "ordering": .string("byRelevanceDesc"),
             ])
         )
-        // v2 dispatch formats the response as "Found N authorized memories." — just
-        // verify the call succeeded without error; the exact text format is the v2
-        // engine's rendering concern, not the ordering argument's contract.
         let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError,
-                "byRelevanceDesc must succeed and find the filed memory without error")
+        #expect(!isError, "ordering=byRelevanceDesc must not produce an error result")
+        let text = result.objectValue?["content"]?
+            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        // S1 header: "found 1 candidate memory, one per line" (COMPOSER-02B §11.1)
+        #expect(
+            text.contains("found 1 candidate memory"),
+            "byRelevanceDesc must find the filed memory; got: \(text)"
+        )
     }
 
     /// moot_memory_search with ordering="byRelevanceDesc" on an empty estate
