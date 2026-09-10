@@ -24,8 +24,9 @@ use super::core_memory::{
     V2CompactMemory, V2ContentKind, V2CoreMemoryService, V2Exportability,
     V2FetchArguments, V2FetchReference, V2FiledMemory, V2FileMemoryRequest,
     V2Memory, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext,
-    V2MemorySearchRequest, V2Placement, V2SearchTarget, V2Sensitivity,
-    MEMORY_GET_TOOL,
+    V2MemorySearchRequest, V2Placement, V2SearchDoor, V2SearchFilter,
+    V2SearchMediaType, V2SearchOrdering, V2SearchScoring, V2SearchTarget,
+    V2Sensitivity, MEMORY_GET_TOOL,
 };
 
 pub struct EstateV2MemoryService<'a> {
@@ -118,17 +119,16 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             .map(|v| vec![Filter::SensitivityAtMost(sensitivity(v))])
             .unwrap_or_default();
 
-        // Decode the optional `filter` argument. Accepted values map to
-        // LocusKit Filter variants. Unknown values fail closed. Mirrors
-        // Swift ToolDispatch.decodeFilterChain and dispatch::decode_filter_chain.
-        if let Some(f) = request.filter.as_deref() {
+        // Map typed filter to LocusKit Filter. All values have been validated at
+        // decode; no unknown-value errors are possible here. Mirrors Swift
+        // ToolDispatch.decodeFilterChain and dispatch::decode_filter_chain.
+        if let Some(f) = request.filter {
             let filter = match f {
-                "unconfirmed"    => Filter::Unconfirmed,
-                "userConfirmed"  => Filter::UserConfirmed,
-                "exportable"     => Filter::Exportable,
-                "contained"      => Filter::Contained,
-                "pinned"         => Filter::HasFeatureFlag(DrawerFeatureFlags::IS_PINNED),
-                unknown => return Err(failure("invalid_argument", &format!("Unknown filter: {unknown}"))),
+                V2SearchFilter::Unconfirmed   => Filter::Unconfirmed,
+                V2SearchFilter::UserConfirmed => Filter::UserConfirmed,
+                V2SearchFilter::Exportable    => Filter::Exportable,
+                V2SearchFilter::Contained     => Filter::Contained,
+                V2SearchFilter::Pinned        => Filter::HasFeatureFlag(DrawerFeatureFlags::IS_PINNED),
             };
             filters.push(filter);
         }
@@ -139,16 +139,12 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             filters.push(Filter::InWing(wing.to_string()));
         }
 
-        // Optional `media_type` argument: constrains to drawers with a
-        // specific media capture type. "voice" and "image" are the only
-        // accepted values. Unknown values fail closed. Mirrors Swift
-        // runMemorySearch media_type decode.
-        if let Some(mt) = request.media_type.as_deref() {
+        // Map typed media_type to DrawerFeatureFlag. Values validated at decode.
+        // Mirrors Swift runMemorySearch media_type decode.
+        if let Some(mt) = request.media_type {
             let flag = match mt {
-                "voice" => DrawerFeatureFlags::HAS_VOICE,
-                "image" => DrawerFeatureFlags::HAS_IMAGE,
-                unknown => return Err(failure("invalid_argument",
-                    &format!("Unknown media_type: {unknown}. Valid: voice, image"))),
+                V2SearchMediaType::Voice => DrawerFeatureFlags::HAS_VOICE,
+                V2SearchMediaType::Image => DrawerFeatureFlags::HAS_IMAGE,
             };
             filters.push(Filter::HasFeatureFlag(flag));
         }
@@ -157,51 +153,41 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
         frame.hydration_level = HydrationLevel::Full;
         frame.limit = Some(request.limit);
 
-        // Optional `ordering` argument. "byRelevanceDesc" is a compatibility
-        // spelling that decodes to ByCaptureTimeDesc as a tie-break; the
-        // scored unionBest path already owns the final relevance ordering.
-        // Unknown values fail closed. Mirrors Swift decodeOrdering.
-        if let Some(ord) = request.ordering.as_deref() {
+        // Map typed ordering to LocusKit Ordering. Values validated at decode.
+        // "byRelevanceDesc" maps to ByCaptureTimeDesc: the scored unionBest path
+        // already owns final relevance ordering. Mirrors Swift decodeOrdering.
+        if let Some(ord) = request.ordering {
             frame.ordering = match ord {
-                "byCaptureTimeDesc" | "byRelevanceDesc" => Ordering::ByCaptureTimeDesc,
-                "byCaptureTimeAsc"  => Ordering::ByCaptureTimeAsc,
-                "byRoomAsc"         => Ordering::ByRoomAsc,
-                unknown => return Err(failure("invalid_argument",
-                    &format!("Unknown ordering: {unknown}. Valid: byCaptureTimeDesc, byCaptureTimeAsc, byRoomAsc, byRelevanceDesc"))),
+                V2SearchOrdering::ByCaptureTimeDesc | V2SearchOrdering::ByRelevanceDesc => Ordering::ByCaptureTimeDesc,
+                V2SearchOrdering::ByCaptureTimeAsc  => Ordering::ByCaptureTimeAsc,
+                V2SearchOrdering::ByRoomAsc         => Ordering::ByRoomAsc,
             };
         }
 
         // Resolve the scoring via the front-door precedence chain:
         //   explicit door arg > explicit scoring arg > MatrixAware default.
-        // `door:"guess"` reads the provisioned DoorManifest. Any other door
-        // value parses as a GLKRecallScoring rawValue. Unknown values fail
-        // closed (including reserved "hedge"/"thorough"). Mirrors Swift
-        // runMemorySearch door/scoring decode.
-        let scoring: GLKRecallScoring = match request.door.as_deref() {
-            Some("guess") => {
+        // All door and scoring values have been validated at decode.
+        // `door:Guess` reads the provisioned DoorManifest because that requires
+        // the estate handle and cannot run at decode time.
+        let scoring: GLKRecallScoring = match request.door {
+            Some(V2SearchDoor::Guess) => {
                 estate.coord.lock()
                     .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
                     .provisioned_door_config(&estate.handle)
                     .unwrap_or_default()
                     .scoring
             }
-            Some(door_str) => match door_str {
-                "raw"            => GLKRecallScoring::Raw,
-                "rrf"            => GLKRecallScoring::Rrf,
-                "matrixAware"    => GLKRecallScoring::MatrixAware,
-                "discriminative" => GLKRecallScoring::Discriminative,
-                unknown => return Err(failure("invalid_argument",
-                    &format!("Unknown door: {unknown}. Valid: guess, raw, rrf, matrixAware, discriminative"))),
-            },
-            None => match request.scoring.as_deref() {
-                Some("raw")            => GLKRecallScoring::Raw,
-                Some("rrf")            => GLKRecallScoring::Rrf,
-                Some("matrixAware")    => GLKRecallScoring::MatrixAware,
-                Some("discriminative") => GLKRecallScoring::Discriminative,
-                Some(unknown) => return Err(failure("invalid_argument",
-                    &format!("Unknown scoring: {unknown}. Valid: raw, rrf, matrixAware, discriminative"))),
+            Some(V2SearchDoor::Raw)            => GLKRecallScoring::Raw,
+            Some(V2SearchDoor::Rrf)            => GLKRecallScoring::Rrf,
+            Some(V2SearchDoor::MatrixAware)    => GLKRecallScoring::MatrixAware,
+            Some(V2SearchDoor::Discriminative) => GLKRecallScoring::Discriminative,
+            None => match request.scoring {
+                Some(V2SearchScoring::Raw)            => GLKRecallScoring::Raw,
+                Some(V2SearchScoring::Rrf)            => GLKRecallScoring::Rrf,
+                Some(V2SearchScoring::MatrixAware)    => GLKRecallScoring::MatrixAware,
+                Some(V2SearchScoring::Discriminative) => GLKRecallScoring::Discriminative,
                 None => {
-                    // Neither door nor scoring supplied: A1 per-corpus manifest,
+                    // Neither door nor scoring supplied: read per-corpus manifest,
                     // falls back to MatrixAware when no config is provisioned.
                     estate.coord.lock()
                         .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
