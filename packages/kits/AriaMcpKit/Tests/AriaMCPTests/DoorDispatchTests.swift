@@ -212,31 +212,31 @@ struct DoorDispatchTests {
 
     // MARK: - D. door overrides scoring when both present
     //
-    // When door=rrf and scoring=matrixAware are both present, `door` wins.
-    // On the v2 dispatch path the compact text is always "Found N authorized
-    // memories." — degradation signals are internal to the recall engine and
-    // are not surfaced in the v2 response format. The contract tested here is
-    // that both arguments are accepted and the call completes without error.
     @Test func doorOverridesScoringWhenBothPresent() async throws {
         let (dispatcher, _, _) = try await makeDispatcher()
-        _ = try await fileMemory(
-            content: "door-scoring-precedence-test door overrides scoring rrf",
-            location: "test",
-            dispatcher: dispatcher
-        )
+        try await fileMemory(content: "door-overrides-scoring-test", location: "test", dispatcher: dispatcher)
+        // door=rrf wins; scoring=matrixAware is superseded. The rrf path on
+        // unionBest records "unionBest.rrf" in degraded_stages, proving the
+        // door arg was applied (not the scoring arg).
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("door-scoring-precedence-test"),
+                "query": .string("door-overrides-scoring-test"),
                 "door": .string("rrf"),
                 "scoring": .string("matrixAware"),
             ])
         )
-        // v2 compact text is "Found N authorized memories." — no degradation line.
-        // The gate here: both door and scoring must be accepted (no invalidParams),
-        // and the call must complete without error.
         let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "door=rrf with scoring=matrixAware must succeed without error; got: \(result)")
+        #expect(!isError, "door=rrf + scoring=matrixAware must succeed (door takes precedence)")
+        // Discriminating assertion: degraded retrieval in the response text proves
+        // door=rrf won over scoring=matrixAware. If scoring won instead, the
+        // matrixAware full-pipeline path runs cleanly with no degradation signal.
+        // COMPOSER-02B §11 control lines: "retrieval: degraded — ..." replaces the
+        // old "degraded_stages:[...]" format.
+        let text = result.objectValue?["content"]?
+            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        #expect(text.contains("retrieval: degraded"),
+                "door=rrf must win over scoring=matrixAware: response must show degraded retrieval; got: \(text.prefix(200))")
     }
 
     // MARK: - E. Schema exposes door
