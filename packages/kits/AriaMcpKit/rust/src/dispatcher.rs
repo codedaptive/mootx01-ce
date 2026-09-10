@@ -513,7 +513,9 @@ impl Dispatcher {
             // inside ModeSessionState::apply_preferences. Falls back to spec
             // defaults (sticky_enabled=true, coaching_calls=25) when the
             // estate carries no manifest key or the coordinator lock fails.
-            // Mirrors Swift ToolDispatcher.applyPreferencesIfNeeded().
+            // Swift twin: ToolDispatch.swift `dispatchV2` inlines the same
+            // guard (`if !modeSessionState.configuredFromEstate`) at the call
+            // site rather than extracting it as a named method.
             if !self.mode_session_state.is_configured_from_estate() {
                 let manifest = self.registry.coord
                     .lock()
