@@ -565,14 +565,14 @@ public struct ToolDispatcher: Sendable {
         // outside the v2 registry. When the flag is off, we return a soft isError
         // refusal rather than a -32601 throw: Anthropic tool-use clients expect a
         // content result from a named tool call, not a protocol-level error.
-        // (ARIA_MCP_INTERFACE.md §18, §26). Frozen posture is evaluated per command,
+        // Frozen posture is evaluated per command,
         // not by tool name, using ToolMutationInventory.frozenReadCommands: `view`
         // proceeds; every other command (and a missing or unknown command) is refused
         // before the adapter runs and before session state records the call.
         if name == "memory" {
             let now = benchClock.now()
             guard ToolProjection.memoryToolEnabled(environment: environment) else {
-                return Self.errorResult("memory tool is disabled (set MOOTX01_MEMORY_TOOL=1 to enable)")
+                return Self.errorResult("memory tool is disabled; run `mootx01 enable memory-tool` to activate it")
             }
             if posture == .frozen {
                 let command: String?

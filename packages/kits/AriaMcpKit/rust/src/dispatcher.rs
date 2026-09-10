@@ -409,7 +409,7 @@ impl Dispatcher {
         // `memory` is intercepted here — after args parsing, before the typed
         // v2 decoder — because `memory` stays out of the v2 registry. The v2
         // envelope would break Anthropic's reply-text contract and move the
-        // capability digest. (ARIA_MCP_INTERFACE.md §18, §26).
+        // capability digest.
         // Frozen posture is evaluated per command using frozen_read_commands:
         // `view` proceeds, every other value (and missing or unknown command)
         // is refused before the adapter runs and before session state records
@@ -428,6 +428,22 @@ impl Dispatcher {
                     }));
                 }
             }
+            // Disabled-flag refusal returns before session state is recorded,
+            // mirroring Swift's placement of the memoryToolEnabled guard ahead
+            // of recordCall. An admitted call is counted below so the session
+            // counter reflects every dispatched memory command.
+            if !self.memory_tool_enabled {
+                return crate::memory_adapter::dispatch_memory(
+                    &args_map,
+                    &self.registry,
+                    self.memory_tool_enabled,
+                    &self.sensitivity_ledger,
+                );
+            }
+            // Record the admitted call before running the adapter so the session
+            // counter reflects every dispatched memory command. Frozen-refused and
+            // flag-off calls return above and are not counted.
+            self.mode_session_state.record_call("memory", None);
             return crate::memory_adapter::dispatch_memory(
                 &args_map,
                 &self.registry,
@@ -529,20 +545,17 @@ mod frozen_command_tests {
             frozen.mode_session_state.snapshot().total_calls, 0,
             "a refused memory command must not be recorded in session state"
         );
-        // Control: the Rust Dispatcher does not wire record_call to the live
-        // dispatch path yet (the method is defined but not yet called from
-        // surface::execute or tools_call). Admitted calls such as
-        // moot_estate_ping therefore also leave total_calls at 0. The
-        // meaningful contract — that refused memory commands do not call
-        // record_call before the adapter runs — is satisfied above: the
-        // commands were refused and total_calls is still 0. The Swift port's
-        // corresponding assertion checks that total_calls reaches 1 after an
-        // admitted call because Swift does wire recordCall; Rust parity for
-        // that half belongs in a separate tracking item.
-        let ping = call(&frozen, "moot_estate_ping", serde_json::json!({}));
-        assert_ne!(ping["result"]["isError"], serde_json::json!(true), "moot_estate_ping is a read; got {ping}");
-        assert_eq!(frozen.mode_session_state.snapshot().total_calls, 0,
-            "Rust: record_call is not yet wired, so total_calls stays 0 for admitted calls too");
+        // Control: an admitted `memory view` through the same intercept must
+        // increment total_calls to 1, proving the zero above is the refusal's
+        // doing and that record_call is wired. A separate dispatcher is used so
+        // the refusal loop's zero is not contaminated.
+        let control = Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", None)
+            .with_posture(EstatePosture::Frozen)
+            .with_memory_tool_enabled(true);
+        let view = call(&control, "memory", serde_json::json!({"command": "view", "path": "/memories"}));
+        assert_ne!(view["result"]["isError"], serde_json::json!(true), "memory view must be admitted under frozen; got {view}");
+        assert_eq!(control.mode_session_state.snapshot().total_calls, 1,
+            "an admitted memory command must be recorded in session state");
     }
 
     #[test]
