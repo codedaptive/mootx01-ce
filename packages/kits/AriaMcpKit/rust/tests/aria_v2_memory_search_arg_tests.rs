@@ -52,7 +52,7 @@ fn is_success(r: &serde_json::Value) -> bool {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn catalog_declares_all_eight_arguments() {
+fn catalog_declares_all_nine_arguments() {
     let tools = aria_mcp::v2::catalog::selected_tools();
     let descriptor = tools
         .as_array()
@@ -62,18 +62,20 @@ fn catalog_declares_all_eight_arguments() {
         .expect("moot_memory_search must be in the catalog");
 
     let props = &descriptor["inputSchema"]["properties"];
-    for arg in &["filter", "wing", "media_type", "door", "scoring", "ordering", "frontier_k", "explain"] {
+    for arg in &["filter", "wing", "media_type", "door", "scoring", "ordering", "frontier_k", "explain", "answer"] {
         assert!(
             !props[arg].is_null(),
             "catalog missing property: {arg}"
         );
     }
 
-    // Type assertions for the two corrected fields.
+    // Type assertions for the corrected fields.
     assert_eq!(props["frontier_k"]["type"], "integer",
         "frontier_k must be declared as integer in catalog");
     assert_eq!(props["explain"]["type"], "boolean",
         "explain must be declared as boolean in catalog");
+    assert_eq!(props["answer"]["type"], "string",
+        "answer must be declared as string in catalog");
 }
 
 // ---------------------------------------------------------------------------
@@ -301,4 +303,58 @@ fn explain_string_is_a_decode_error() {
         json!(-32602),
         "explain string must produce a -32602 decode error; got: {r}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// answer — string enum: never, always, auto; unknown fails closed at decode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn answer_accepted_values_succeed() {
+    let d = dispatcher();
+    for value in &["never", "always", "auto"] {
+        let r = search(&d, json!({"answer": value}));
+        assert!(is_success(&r), "answer={value} must succeed; got: {r}");
+    }
+}
+
+#[test]
+fn answer_unknown_fails_closed_with_exact_message() {
+    // Validation at decode: returns -32602 INVALID_PARAMS (matching Swift parity).
+    let d = dispatcher();
+    let r = search(&d, json!({"answer": "somehow"}));
+    assert_eq!(
+        r["error"]["code"],
+        json!(-32602),
+        "unknown answer must produce a -32602 decode error; got: {r}"
+    );
+    assert_eq!(
+        r["error"]["data"]["message"],
+        json!("Unknown answer: somehow. Valid: never, always, auto"),
+        "error message must match exactly; got: {r}"
+    );
+}
+
+#[test]
+fn catalog_declares_answer_argument() {
+    // The answer argument must be declared in the moot_memory_search catalog entry.
+    let tools = aria_mcp::v2::catalog::selected_tools();
+    let descriptor = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "moot_memory_search")
+        .expect("moot_memory_search must be in the catalog");
+
+    let props = &descriptor["inputSchema"]["properties"];
+    assert!(
+        !props["answer"].is_null(),
+        "catalog must declare the 'answer' property for moot_memory_search"
+    );
+    // Enum must name all three accepted values.
+    let enum_vals = props["answer"]["enum"].as_array().expect("answer must have enum");
+    let val_strs: Vec<&str> = enum_vals.iter().filter_map(|v| v.as_str()).collect();
+    assert!(val_strs.contains(&"never"),  "answer enum must include 'never'");
+    assert!(val_strs.contains(&"always"), "answer enum must include 'always'");
+    assert!(val_strs.contains(&"auto"),   "answer enum must include 'auto'");
 }

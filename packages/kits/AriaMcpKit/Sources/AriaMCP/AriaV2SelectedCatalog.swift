@@ -161,6 +161,16 @@ enum AriaV2SelectedCatalog {
                 // the field. Absent means a clear, nominal result; opt-in because the
                 // discrimination line adds tokens the caller may not want.
                 "explain": booleanSchema(),
+                // answer: selects the response shape adjective (packager mode):
+                //   "never"  (default) — dense rows only, byte-identical to pre-packager path
+                //   "always"           — compose answer block + rows (L1-full shape)
+                //   "auto"             — server picks level by confidence gate (L0/L1/rowsOnly)
+                // Unknown values fail closed with invalidParams (-32602).
+                "answer": .object([
+                    "type": .string("string"),
+                    "enum": .array(["never", "always", "auto"].map(JSONValue.string)),
+                    "description": .string("Response shape adjective. \"never\" (default) returns dense rows only. \"always\" composes an answer block and rows (requires estate content). \"auto\" lets the server choose the response level by confidence gate (L0 answer-only, L1 answer+rows, or rowsOnly)."),
+                ]),
                 "estate_id": uuidSchema(),
             ], inputSchemaAdditions: ["oneOf": exactlyOneOf("query", "near")],
             dataSchema: memorySearchDataSchema()
@@ -1664,8 +1674,24 @@ enum AriaV2SelectedCatalog {
     }
 
     private static func memorySearchDataSchema() -> JSONValue {
-        orderedExactObjectSchema([
+        // `results` is always present (even empty array for L0 answer-only mode).
+        // `answer` is optional: absent for answer:never or when confidence is WEAK
+        // or composedAnswer is unavailable. Its presence signals a non-empty answer block.
+        let signalsSchema = orderedExactObjectSchema([
+            "margin": numberSchema(),
+            "lane_agreement": numberSchema(),
+            "dense_spread": numberSchema(),
+            "containment": booleanSchema(),
+        ], required: ["margin", "lane_agreement", "dense_spread", "containment"])
+        let answerSchema = orderedExactObjectSchema([
+            "text": stringSchema(),
+            "confidence": enumSchema(["confident", "intermediate"]),
+            "citations": .object(["type": .string("array"), "items": uuidSchema()]),
+            "signals": signalsSchema,
+        ], required: ["text", "confidence", "citations", "signals"])
+        return orderedExactObjectSchema([
             "results": .object(["type": .string("array"), "items": compactMemorySchema()]),
+            "answer": answerSchema,
         ], required: ["results"])
     }
 
