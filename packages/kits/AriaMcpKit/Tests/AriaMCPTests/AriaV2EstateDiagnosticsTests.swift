@@ -38,7 +38,7 @@ struct AriaV2EstateDiagnosticsTests {
         #expect((data(ping).map { Set($0.keys) } ?? Set<String>()) == Set(["estate_id", "estate_name", "state", "build_serial"]))
         #expect(data(ping)?["state"] == .string("mounted"))
         #expect(data(ping)?["build_serial"] == .string("fixture-build"))
-        #expect((data(status).map { Set($0.keys) } ?? Set<String>()) == Set(["estate_id", "estate_name", "memory_count", "fact_count", "drains"]))
+        #expect((data(status).map { Set($0.keys) } ?? Set<String>()) == Set(["estate_id", "estate_name", "memory_count", "fact_count", "drains", "fdc_recalculation"]))
         #expect(data(status)?["memory_count"] == .integer(2))
         #expect(data(map)?["wings"]?.arrayValue?.first?.objectValue?["rooms"]?.arrayValue?.count == 1)
         #expect((data(drains).map { Set($0.keys) } ?? Set<String>()) == Set(["drains"]))
@@ -146,7 +146,8 @@ private actor FakeEstateDiagnosticsProvider: AriaV2EstateDiagnosticsProvider {
             estateName: context.estateName,
             memoryCount: 2,
             factCount: 4,
-            drains: [.init(name: "corpus_encode", state: "draining", pending: 3)])
+            drains: [.init(name: "corpus_encode", state: "draining", pending: 3)],
+            fdcRecalculation: "missing")
     }
 
     func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData {
