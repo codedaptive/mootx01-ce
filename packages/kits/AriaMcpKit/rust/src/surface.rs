@@ -1263,16 +1263,23 @@ fn vault_lifecycle_text(result: &crate::v2::data_mobility::V2DataMobilityResult)
     use crate::v2::data_mobility::V2DataMobilityResult;
     match result {
         V2DataMobilityResult::ReclassifyFdc(r) => {
+            // Swift emits \(handle.estateUUID) which calls UUID.description — always uppercase.
+            // r.estate_id.to_string() is lowercase; .to_uppercase() matches Swift exactly.
+            let estate_uuid_upper = r.estate_id.to_string().to_uppercase();
+            // Mirrors Swift AriaV2DataMobility.swift:588:
+            //   let limitSuffix = limit.map { " (limit \($0))" } ?? ""
+            // One space before '(', word 'limit', one space, the number, ')'.
+            let limit_suffix = r.limit.map(|n| format!(" (limit {n})")).unwrap_or_default();
             let mut lines = vec![
                 format!("fdc_reclassify: {}", if r.applied { "applied" } else { "dry-run" }),
                 format!("mode: {}", r.mode),
-                // Swift emits "estate: {name} [{uuid}]"; v1 Rust omitted the name.
-                // The v2 builder carries estate_name in the report so we match Swift exactly.
-                format!("estate: {} [{}]", r.estate_name, r.estate_id.hyphenated()),
+                // Swift emits "estate: {name} [{uuid}]" with UUID.description (uppercase).
+                // The v2 builder carries estate_name and uses uppercase UUID to match Swift exactly.
+                format!("estate: {} [{}]", r.estate_name, estate_uuid_upper),
                 format!("fdc_data_version: {}", r.fdc_data_version),
                 format!("fdc_recalculation_version: {}", r.fdc_recalculation_version),
                 format!("estate_recalced_data_version_before: {}", r.estate_recalced_data_version_before.as_deref().unwrap_or("none")),
-                format!("scanned: {} active drawer(s)", r.scanned),
+                format!("scanned: {} active drawer(s){}", r.scanned, limit_suffix),
                 format!("unchanged: {}", r.unchanged),
                 format!("empty_content: {}", r.empty_content),
                 format!("candidates: {}", r.candidates),
