@@ -1,4 +1,5 @@
 import Foundation
+import CognitionKit
 import GeniusLocusKit
 import LocusKit
 import AriaMCPWire
@@ -157,6 +158,8 @@ public struct AriaV2MemorySearchRequest: Sendable, Equatable {
     public let ordering: String
     public let frontierK: Int64?
     public let explain: Bool
+    /// Validated at decode; unknown values return -32602 INVALID_PARAMS.
+    public let answer: PackagerAnswerMode
     public let estateID: UUID?
 
     public init(arguments: JSONValue) throws {
@@ -180,12 +183,16 @@ public struct AriaV2MemorySearchRequest: Sendable, Equatable {
         } else {
             limit = Self.defaultLimit
         }
-        // 'answer' remains deferred; its unit owns the declaration.
-        for key in ["answer"] {
-            guard !decoder.has(key) else {
-                throw AriaV2FileMemoryRequest.invalid(path: key, message: "Argument '\(key)' is not available in the incomplete v2 memory service.")
-            }
+        // answer: validate at decode; unknown values fail closed — never silently coerce
+        // a typo to "never". PackagerAnswerMode.init(rawValue:) returns nil on unknown strings.
+        let rawAnswer = try decoder.optionalString("answer") ?? PackagerAnswerMode.never.rawValue
+        guard let answerMode = PackagerAnswerMode(rawValue: rawAnswer) else {
+            throw AriaV2FileMemoryRequest.invalid(
+                path: "answer",
+                message: "Unknown answer: \(rawAnswer). Valid: never, always, auto"
+            )
         }
+        answer = answerMode
         // filter: validate against known values; fail closed on unknown strings.
         let rawFilter = try decoder.optionalString("filter")
         if let f = rawFilter {
@@ -333,11 +340,39 @@ public struct AriaV2MemoryRecord: Sendable, Equatable {
     }
 }
 
+/// The result of a backend memory search: typed records alongside the optional
+/// packager answer block and the post-anchor-exclusion hit count for the
+/// "found N candidate memory(ies)" compact text header.
+///
+/// `FakeMemoryBackend` in tests returns `answerBlock: nil` and uses
+/// `records.count` as `totalCount`.
+public struct AriaV2SearchResult: Sendable {
+    /// Authorized-filterable records for the v2 data response.
+    public let records: [(record: AriaV2MemoryRecord, score: Double)]
+    /// Optional answer block from the packager (nil when answer:never or when
+    /// confidence is WEAK / composedAnswer is unavailable).
+    public let answerBlock: GLKAnswerBlock?
+    /// Total post-anchor-exclusion hit count for the compact text header.
+    /// Equals `packaged.totalCount` from the packager, or `records.count` for
+    /// test fakes that skip the packager.
+    public let totalCount: Int
+
+    public init(
+        records: [(record: AriaV2MemoryRecord, score: Double)],
+        answerBlock: GLKAnswerBlock?,
+        totalCount: Int
+    ) {
+        self.records = records
+        self.answerBlock = answerBlock
+        self.totalCount = totalCount
+    }
+}
+
 /// A typed estate seam. It only exchanges request and record values; no JSON
 /// runner, text renderer, or legacy dispatch result crosses it.
 public protocol AriaV2MemoryBackend: Sendable {
     func file(_ request: AriaV2FileMemoryRequest, context: AriaV2MemoryOperationContext) async throws -> AriaV2MemoryRecord
-    func search(_ request: AriaV2MemorySearchRequest, context: AriaV2MemoryOperationContext) async throws -> [(record: AriaV2MemoryRecord, score: Double)]
+    func search(_ request: AriaV2MemorySearchRequest, context: AriaV2MemoryOperationContext) async throws -> AriaV2SearchResult
     func get(_ request: AriaV2MemoryGetRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2MemoryRecord]
 }
 
@@ -376,17 +411,21 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         return try await record(for: drawer, authorized: true)
     }
 
-    public func search(_ request: AriaV2MemorySearchRequest, context: AriaV2MemoryOperationContext) async throws -> [(record: AriaV2MemoryRecord, score: Double)] {
+    public func search(_ request: AriaV2MemorySearchRequest, context: AriaV2MemoryOperationContext) async throws -> AriaV2SearchResult {
         try validateEstate(request.estateID, context: context)
+        // For near: queries, store the anchor UUID so it can be excluded from the
+        // hit list before it reaches the packager. The anchor self-matches as rank-0
+        // and would corrupt the m1 (margin) signal if included.
+        let anchorID: UUID? = request.near
         let query: String
         if let requestQuery = request.query {
             query = requestQuery
         } else if let near = request.near {
             let source = try await get(AriaV2MemoryGetRequest(memoryIDs: [near], depth: .full, estateID: request.estateID), context: context)
-            guard let anchor = source.first else { return [] }
+            guard let anchor = source.first else { return AriaV2SearchResult(records: [], answerBlock: nil, totalCount: 0) }
             query = anchor.content
         } else {
-            return []
+            return AriaV2SearchResult(records: [], answerBlock: nil, totalCount: 0)
         }
         // Build filter chain: sensitivity ceiling first (always present), then
         // caller's filter/wing/media_type arguments in composition order.
@@ -472,12 +511,68 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             frontierK: request.frontierK.map { Int($0) },
             subSpanScoring: .off
         ))
+        // Exclude the near: anchor from the hit list before the packager so that
+        // gate signals (m1 top-margin, m3 span cosine spread) are computed on the
+        // same ranked set the caller receives. Mirrors ToolDispatch.runMemorySearch.
+        // RecallHit.id is RowID (String); UUID storage may use upper-case or lower-case
+        // spellings, so compare against both canonical forms.
+        let anchorIDStrings: Set<String> = anchorID.map {
+            Set(AriaV2ArgumentDecoder.storageIdentitySpellings($0))
+        } ?? []
+        let filteredHits: [RecallHit] = anchorIDStrings.isEmpty
+            ? result.hits
+            : result.hits.filter { !anchorIDStrings.contains($0.id) }
+
+        // answer:always|auto — compose an answer via GroundedSynthesis, then route
+        // through GLKResultsPackager. answer:never is the fast path (no gate math).
+        // Mirrors the composition chain in ToolDispatch.runMemorySearch.
+        let composedAnswer: String?
+        if request.answer != .never {
+            let synthFrame = LocusKit.RecallFrame(
+                filterChain: filterChain,
+                hydrationLevel: .structured,
+                limit: request.limit,
+                ordering: ordering
+            )
+            let synthOut = try await GroundedSynthesis().run(
+                input: .init(
+                    frame: synthFrame,
+                    cueTerms: [],
+                    cap: request.limit,
+                    query: query,
+                    excludeProvenanceSensitive: true
+                ),
+                estate: handle,
+                kit: kit
+            )
+            composedAnswer = synthOut.context.summary
+        } else {
+            composedAnswer = nil
+        }
+        // Build the packager result on the anchor-excluded hit list so gate math
+        // uses the same ranked set the caller sees. The tuning manifest supplies
+        // thresholds; .default fills absent keys.
+        let tuning = try await kit.provisionedRecallTuning(for: handle)
+        let packagerResult = anchorID != nil
+            ? result.replacing(hits: filteredHits)
+            : result
+        let packaged = GLKResultsPackager().package(
+            result: packagerResult,
+            mode: request.answer,
+            composedAnswer: composedAnswer,
+            thresholds: tuning.packagerThresholds
+        )
+
         var records: [(record: AriaV2MemoryRecord, score: Double)] = []
-        for hit in result.hits {
+        for hit in filteredHits {
             guard let drawer = hit.drawer else { continue }
             records.append((try await record(for: drawer, authorized: Self.provenanceVisible(drawer.provenance)), Double(hit.score.final)))
         }
-        return records
+        return AriaV2SearchResult(
+            records: records,
+            answerBlock: packaged.answerBlock,
+            totalCount: packaged.totalCount
+        )
     }
 
     public func get(_ request: AriaV2MemoryGetRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2MemoryRecord] {
@@ -545,7 +640,7 @@ public struct AriaV2MemoryOperations: Sendable {
             "placement": .object(["wing": .string(record.wing), "room": .string(record.room)]),
             "fetch": Self.fetch(record.memoryID),
         ])
-        return AriaV2Envelope.success(tool: "moot_file_memory", effect: .write, data: data, meta: Self.meta(), compactText: "Filed memory \(Self.id(record.memoryID)).")
+        return AriaV2Envelope.success(tool: "moot_file_memory", effect: .write, data: data, meta: Self.meta(), compactText: "filed memory \(Self.id(record.memoryID))")
     }
 
     public func search(arguments: JSONValue) async throws -> JSONValue {
@@ -553,14 +648,74 @@ public struct AriaV2MemoryOperations: Sendable {
     }
 
     public func search(_ request: AriaV2MemorySearchRequest) async throws -> JSONValue {
-        let matches = try await backend.search(request, context: context)
+        let result = try await backend.search(request, context: context)
         // Lower recall may return a broader candidate pool than the public
         // request limit. Authorization happens first, then the selected v2
         // boundary enforces the caller-visible ceiling.
-        let visible = Array(matches.lazy.filter { $0.record.isAuthorized }.prefix(request.limit))
+        let visible = Array(result.records.lazy.filter { $0.record.isAuthorized }.prefix(request.limit))
         await context.usageLedger.recordSurfaced(visible.map { $0.record.memoryID }, estateID: context.estateID, callerID: context.callerID, at: context.now())
-        let data: JSONValue = .object(["results": .array(visible.map { Self.compact($0.record, score: $0.score) })])
-        return AriaV2Envelope.success(tool: "moot_memory_search", effect: .read, data: data, meta: Self.meta(), compactText: "Found \(visible.count) authorized memories.")
+
+        // Build the data object. The answer block is included in `data` when present,
+        // as a typed structured object (not text lines) per the v2 response contract.
+        var dataFields: [String: JSONValue] = [
+            "results": .array(visible.map { Self.compact($0.record, score: $0.score) }),
+        ]
+        if let block = result.answerBlock {
+            // citationIDs are RowID (String) storage identifiers. Canonicalize
+            // to lowercase UUID format matching the v2 memory_id convention.
+            let canonicalCitations = block.citationIDs.compactMap { rowID -> String? in
+                UUID(uuidString: rowID).map { AriaV2ArgumentDecoder.canonicalUUID($0) } ?? rowID.lowercased()
+            }
+            dataFields["answer"] = .object([
+                "text": .string(block.text),
+                "confidence": .string(block.confidence.rawValue),
+                "citations": .array(canonicalCitations.map { .string($0) }),
+                "signals": .object([
+                    "margin": .double(block.signals.margin),
+                    "lane_agreement": .double(block.signals.laneAgreement),
+                    "dense_spread": .double(block.signals.denseSpread),
+                    "containment": .bool(block.signals.containment),
+                ]),
+            ])
+        }
+
+        // Build compact text. For answer:never, "found N candidate memory(ies)".
+        // For answer:always|auto when an answer block is present, prepend the
+        // answer block header lines before the found-N row, matching the v1 wire
+        // format. The compact text is clamped to 512 Unicode scalars by the envelope.
+        let countWord = result.totalCount == 1 ? "memory" : "memories"
+        let foundHeader = "found \(result.totalCount) candidate \(countWord)"
+        let compactText: String
+        if let block = result.answerBlock {
+            var headerLines = [
+                "answer: \(block.text)",
+                "confidence: \(block.confidence.rawValue)",
+            ]
+            if !block.citationIDs.isEmpty {
+                // citationIDs are RowID (String); canonicalize to lowercase UUID format.
+                let citStr = block.citationIDs.prefix(5).map { rowID -> String in
+                    UUID(uuidString: rowID).map { AriaV2ArgumentDecoder.canonicalUUID($0) } ?? rowID.lowercased()
+                }.joined(separator: ", ")
+                headerLines.append("citations: \(citStr)")
+            }
+            headerLines.append(
+                "signals: margin=\(block.signals.margin) "
+                + "lane_agreement=\(block.signals.laneAgreement) "
+                + "dense_spread=\(block.signals.denseSpread) "
+                + "containment=\(block.signals.containment)"
+            )
+            compactText = headerLines.joined(separator: "\n") + "\n" + foundHeader
+        } else {
+            compactText = foundHeader
+        }
+
+        return AriaV2Envelope.success(
+            tool: "moot_memory_search",
+            effect: .read,
+            data: .object(dataFields),
+            meta: Self.meta(),
+            compactText: compactText
+        )
     }
 
     public func get(arguments: JSONValue) async throws -> JSONValue {

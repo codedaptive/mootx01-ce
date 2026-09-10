@@ -85,8 +85,7 @@ struct ModesDispatchTests {
 
     // MARK: - C. Regression: answer:"never" shape unchanged when no mode declared
 
-    @Test("answer:never with no mode declared produces same shape as pre-modes default",
-          .disabled("BLOCKED: v2 decode rejects the answer argument (AriaV2MemoryOperations.swift: answer not available in incomplete v2 memory service). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("answer:never with no mode declared produces same shape as pre-modes default")
     func answerNeverWithNoModeIsUnchanged() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         // Call with explicit answer:"never" — no mode arg.
