@@ -11058,6 +11058,82 @@ fn memory_search_door_overrides_scoring_when_both_present() {
     );
 }
 
+/// When both the discrimination line (explain:true) and the degradation line
+/// (door=rrf → unionBest.rrf) appear in the same response, "discrimination:"
+/// MUST appear before "retrieval: degraded".
+///
+/// Index comparison on the two substrings, not two independent contains() checks.
+/// Two contains() checks cannot detect a swap; comparing the two byte offsets can.
+///
+/// Emission sites: AriaV2MemoryOperations.swift:738 (discrimination, under
+/// explain:true) and :744 (retrieval: degraded), in that order; Rust twin at
+/// core_memory.rs:619-628.
+///
+/// Mirrors Swift: DoorDispatchTests.controlLineOrderDiscriminationBeforeDegraded
+#[test]
+fn memory_search_control_line_order_discrimination_before_degraded() {
+    use aria_mcp::dispatcher::Dispatcher;
+    use aria_mcp::jsonrpc::JSONRPCRequest;
+    use serde_json::json;
+
+    let registry = EstateRegistry::new_inmemory();
+    // Six memories are needed so the locus-rank slope is narrow enough to fire
+    // discrimination with door:rrf's raw scoring path.
+    //
+    // Mechanics: without a registered corpus, only the locus lane fires.
+    // Locus rank scores are (K-idx)/K (linearly decreasing). normalize_finals
+    // min-max scales them to [0, 1]; with N hits the normalized step is
+    // 1/(N-1) and top_gap = 1/(N-1). RecallDiscrimination::classify emits
+    // Medium/Low only when top_gap < HIGH_MARGIN (0.25), i.e. N-1 > 4,
+    // i.e. N ≥ 6. With N=3 the normalized top_gap is 0.5 → High → silent.
+    let seed = "ctrl-order-test seed equal";
+    for _ in 0..6 {
+        file_one_memory(&registry, seed, "lab/notes");
+    }
+
+    // Move registry into the v2 Dispatcher after seeding.
+    let dispatcher = Dispatcher::new(registry, "test", "test", "test", None);
+    let request = JSONRPCRequest::decode(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "name": "moot_memory_search",
+            "arguments": {
+                "query": "ctrl-order-test",
+                "explain": true,
+                "door": "rrf"
+            }
+        }
+    }))
+    .expect("request decode must succeed");
+    let response = serde_json::to_value(dispatcher.handle(&request))
+        .expect("response serialize must succeed");
+
+    assert!(
+        response["result"]["isError"] == json!(false),
+        "explain:true + door=rrf on a seeded estate must succeed; got: {response:?}"
+    );
+    let text = response["result"]["content"][0]["text"].as_str().unwrap_or("");
+
+    // Both control lines must be present; if either is missing the underlying
+    // emission logic regressed independently of ordering.
+    let disc_pos = text.find("discrimination:").unwrap_or_else(|| {
+        panic!("discrimination: must appear in compact text; got: {text}")
+    });
+    let degrad_pos = text.find("retrieval: degraded").unwrap_or_else(|| {
+        panic!("retrieval: degraded must appear in compact text; got: {text}")
+    });
+
+    // Index comparison: discrimination: must precede retrieval: degraded.
+    // A swap of the two emission blocks passes both contains() checks but
+    // fails this comparison.
+    assert!(
+        disc_pos < degrad_pos,
+        "discrimination: must appear before retrieval: degraded — \
+         emission order must match core_memory.rs:619-628; \
+         disc_pos={disc_pos}, degrad_pos={degrad_pos}; text: {text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // moot_file_memory under a live sensitivity grant: the write side shares the
 // read side's ceiling. An omitted `sensitivity` files at the grant's tier, an
