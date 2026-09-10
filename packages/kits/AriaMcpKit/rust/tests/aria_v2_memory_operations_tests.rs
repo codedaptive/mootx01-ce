@@ -10,7 +10,7 @@ use aria_mcp::{
     sensitivity_grant_ledger::SensitivityGrantLedger,
     surfaced_recall_ledger::SurfacedRecallLedger,
     v2::{
-        core_memory::{run_file_memory, run_memory_get, run_memory_search, V2CompactMemory, V2CoreMemoryDependencies, V2CoreMemoryOperation, V2CoreMemoryService, V2Exportability, V2FiledMemory, V2FileMemoryRequest, V2FetchArguments, V2FetchReference, V2Memory, V2MemoryAuthorization, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext, V2MemorySearchRequest, V2MemoryClock, V2Placement, FILE_MEMORY_TOOL, MEMORY_GET_TOOL},
+        core_memory::{run_file_memory, run_memory_get, run_memory_search, V2CompactMemory, V2CoreMemoryDependencies, V2CoreMemoryOperation, V2CoreMemoryService, V2Exportability, V2FiledMemory, V2FileMemoryRequest, V2FetchArguments, V2FetchReference, V2Memory, V2MemoryAuthorization, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext, V2MemorySearchRequest, V2MemoryClock, V2MemorySearchResult, V2Placement, FILE_MEMORY_TOOL, MEMORY_GET_TOOL},
         operation::V2OperationEffect,
         render::V2ResultMeta,
     },
@@ -28,7 +28,7 @@ impl V2MemoryAuthorization for Allow { fn authorize(&self, _: V2CoreMemoryOperat
 #[derive(Default)] struct Fake { files: Mutex<Vec<V2FileMemoryRequest>>, searches: Mutex<Vec<V2MemorySearchRequest>>, gets: Mutex<Vec<V2MemoryGetRequest>> }
 impl V2CoreMemoryService for Fake {
     fn file_memory(&self, _: &V2MemoryOperationContext, request: &V2FileMemoryRequest) -> Result<V2FiledMemory, V2MemoryFailure> { self.files.lock().unwrap().push(request.clone()); Ok(V2FiledMemory { memory_id: Uuid::parse_str("A0B1C2D3-E4F5-4678-9012-3456789ABCDE").unwrap(), placement: V2Placement { wing: "Agentic Memory".into(), room: request.location.clone() } }) }
-    fn search_memories(&self, _: &V2MemoryOperationContext, request: &V2MemorySearchRequest) -> Result<Vec<V2CompactMemory>, V2MemoryFailure> { self.searches.lock().unwrap().push(request.clone()); Ok((0..3).map(|_| V2CompactMemory { memory_id: Uuid::parse_str("A0B1C2D3-E4F5-4678-9012-3456789ABCDE").unwrap(), subject: Some("retrieved".into()), score: Some(0.8), provenance: None, context: Some("😀".repeat(513)), excerpt: Some("🦀".repeat(513)), fetch: V2FetchReference { tool: MEMORY_GET_TOOL, arguments: V2FetchArguments { memory_id: "ignored".into() } } }).collect()) }
+    fn search_memories(&self, _: &V2MemoryOperationContext, request: &V2MemorySearchRequest) -> Result<V2MemorySearchResult, V2MemoryFailure> { self.searches.lock().unwrap().push(request.clone()); Ok(V2MemorySearchResult { rows: (0..3).map(|_| V2CompactMemory { memory_id: Uuid::parse_str("A0B1C2D3-E4F5-4678-9012-3456789ABCDE").unwrap(), subject: Some("retrieved".into()), score: Some(0.8), provenance: None, context: Some("😀".repeat(513)), excerpt: Some("🦀".repeat(513)), fetch: V2FetchReference { tool: MEMORY_GET_TOOL, arguments: V2FetchArguments { memory_id: "ignored".into() } } }).collect(), answer_block: None }) }
     fn get_memories(&self, _: &V2MemoryOperationContext, request: &V2MemoryGetRequest) -> Result<Vec<V2Memory>, V2MemoryFailure> { self.gets.lock().unwrap().push(request.clone()); Ok(Vec::new()) }
 }
 
@@ -76,4 +76,24 @@ fn filing_is_a_typed_call_and_hidden_or_missing_get_refuses_identically() {
     let missing = run_memory_get(&arguments(json!({"memory_id":"00000000-0000-4000-8000-000000000000"})), &dependencies(&fake)).unwrap();
     assert_eq!(hidden["structuredContent"]["error"], missing["structuredContent"]["error"]);
     assert_eq!(hidden["structuredContent"]["error"]["code"], "memory_not_found");
+}
+
+/// Compact text for moot_file_memory must be "filed memory <uuid>" where the
+/// UUID is the canonical lowercase representation of the assigned memory id.
+/// Mirrors Swift AriaV2MemoryOperations.file() compact text format.
+#[test]
+fn file_memory_compact_text_carries_uuid() {
+    let fake = Fake::default();
+    let filed = run_file_memory(
+        &arguments(json!({"content":"test-uuid-compact","subject":"s","location":"r"})),
+        &dependencies(&fake),
+    ).unwrap();
+    let text = filed["content"][0]["text"].as_str()
+        .expect("filed memory must carry content[0].text");
+    let uuid_str = text.strip_prefix("filed memory ")
+        .expect("compact text must start with 'filed memory '");
+    Uuid::parse_str(uuid_str)
+        .expect("compact text after 'filed memory ' must be a valid UUID");
+    // Verify lowercase canonical format.
+    assert_eq!(uuid_str, uuid_str.to_lowercase(), "UUID in compact text must be lowercase canonical");
 }

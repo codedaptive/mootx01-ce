@@ -356,15 +356,23 @@ public struct AriaV2SearchResult: Sendable {
     /// Equals `packaged.totalCount` from the packager, or `records.count` for
     /// test fakes that skip the packager.
     public let totalCount: Int
+    /// True when one or more ranking stages were unavailable during recall,
+    /// mirroring `GLKRecallResult.degradedStages.isEmpty == false`. Drives the
+    /// "retrieval: degraded" compact text control line — the same control line
+    /// the v1 S1 surface emits via ResultComposer.controlLines. Fakes default
+    /// to false (no degradation on empty-estate test estates).
+    public let degraded: Bool
 
     public init(
         records: [(record: AriaV2MemoryRecord, score: Double)],
         answerBlock: GLKAnswerBlock?,
-        totalCount: Int
+        totalCount: Int,
+        degraded: Bool = false
     ) {
         self.records = records
         self.answerBlock = answerBlock
         self.totalCount = totalCount
+        self.degraded = degraded
     }
 }
 
@@ -571,7 +579,11 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         return AriaV2SearchResult(
             records: records,
             answerBlock: packaged.answerBlock,
-            totalCount: packaged.totalCount
+            totalCount: packaged.totalCount,
+            // Propagate degradation signal from the recall director so the
+            // operations layer can emit the "retrieval: degraded" compact text
+            // control line. Mirrors ToolDispatch.runMemorySearch's degraded flag.
+            degraded: !result.degradedStages.isEmpty
         )
     }
 
@@ -685,7 +697,7 @@ public struct AriaV2MemoryOperations: Sendable {
         // format. The compact text is clamped to 512 Unicode scalars by the envelope.
         let countWord = result.totalCount == 1 ? "memory" : "memories"
         let foundHeader = "found \(result.totalCount) candidate \(countWord)"
-        let compactText: String
+        var compactText: String
         if let block = result.answerBlock {
             var headerLines = [
                 "answer: \(block.text)",
@@ -707,6 +719,27 @@ public struct AriaV2MemoryOperations: Sendable {
             compactText = headerLines.joined(separator: "\n") + "\n" + foundHeader
         } else {
             compactText = foundHeader
+        }
+        // Degradation: append control line when one or more ranking stages were
+        // unavailable, matching the v1 S1 surface (ResultComposer.controlLines §3).
+        // rrf on unionBest mode records "unionBest.rrf" in degradedStages; matrixAware
+        // runs cleanly with no degradation — the difference discriminates door=rrf
+        // from door=matrixAware in the DoorDispatchTests discriminating assertion.
+        if result.degraded {
+            compactText += "\nretrieval: degraded — one or more ranking stages unavailable"
+        }
+        // explain: append discrimination line when signal warrants it. Only low and
+        // medium are surfaced in v2 compact text (high/single/not_found are silent).
+        // Mirrors the Rust v2 execute_memory_search explain branch.
+        if request.explain {
+            let scores = visible.map { $0.score }
+            let disc = RecallDiscrimination.classify(scores)
+            switch disc {
+            case .low, .medium:
+                compactText += "\n" + RecallDiscrimination.resultLine(for: disc)
+            default:
+                break
+            }
         }
 
         return AriaV2Envelope.success(

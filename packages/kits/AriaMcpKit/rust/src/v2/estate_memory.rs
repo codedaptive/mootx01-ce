@@ -4,7 +4,7 @@ use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
     RecallOrigin,
 };
-use genius_locus_kit::WriteMode;
+use genius_locus_kit::{GLKResultsPackager, PackagerAnswerMode, WriteMode};
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     default_wings::DEFAULT_WING_NAME,
@@ -21,12 +21,12 @@ use uuid::Uuid;
 use crate::estate_registry::{EstateRegistry, OpenEstate};
 
 use super::core_memory::{
-    V2CompactMemory, V2ContentKind, V2CoreMemoryService, V2Exportability,
+    V2AnswerMode, V2CompactMemory, V2ContentKind, V2CoreMemoryService, V2Exportability,
     V2FetchArguments, V2FetchReference, V2FiledMemory, V2FileMemoryRequest,
     V2Memory, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext,
-    V2MemorySearchRequest, V2Placement, V2SearchDoor, V2SearchFilter,
-    V2SearchMediaType, V2SearchOrdering, V2SearchScoring, V2SearchTarget,
-    V2Sensitivity, MEMORY_GET_TOOL,
+    V2MemorySearchRequest, V2MemorySearchResult, V2Placement, V2SearchAnswerBlock,
+    V2SearchDoor, V2SearchFilter, V2SearchMediaType, V2SearchOrdering,
+    V2SearchScoring, V2SearchTarget, V2Sensitivity, MEMORY_GET_TOOL,
 };
 
 pub struct EstateV2MemoryService<'a> {
@@ -109,7 +109,7 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
         })
     }
 
-    fn search_memories(&self, context: &V2MemoryOperationContext, request: &V2MemorySearchRequest) -> Result<Vec<V2CompactMemory>, V2MemoryFailure> {
+    fn search_memories(&self, context: &V2MemoryOperationContext, request: &V2MemorySearchRequest) -> Result<V2MemorySearchResult, V2MemoryFailure> {
         let estate = self.estate(context)?;
 
         // Build the filter chain: sensitivity ceiling first (from context),
@@ -198,6 +198,13 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             },
         };
 
+        // PR-03: save the anchor UUID before resolving query text. The anchor must be
+        // excluded from recall results after scoring (exclusion BEFORE packager so m1
+        // top-margin and other gate signals are computed on non-anchor hits only).
+        let anchor_id: Option<String> = match &request.target {
+            V2SearchTarget::Near(id) => Some(id.to_string()),
+            V2SearchTarget::Query(_) => None,
+        };
         let query = match &request.target {
             V2SearchTarget::Query(query) => query.clone(),
             V2SearchTarget::Near(id) => {
@@ -226,18 +233,41 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             recall = recall.with_frontier_k(fk as usize);
         }
 
-        // `explain` (field type bool, default false) flows through to the
-        // GLK hit result's explanation field. The recall result carries
-        // Vec<String> explanation lines per hit; explain:true is signaled
-        // by the non-empty explanation vec. The actual rendering of the
-        // explain block (sources/score/mode/why lines) is handled by the
-        // v2 recall render path. No additional wiring is needed here.
-
-        let result = estate.coord.lock().map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
+        let mut result = estate.coord.lock().map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
             .recall_scored(&estate.handle, recall, context.now_millis)
             .map_err(|error| failure("operation_failed", &format!("memory search failed: {error:?}")))?;
-        result.hits.into_iter().filter_map(|hit| {
-            let drawer = hit.drawer?;
+
+        // PR-03: exclude the anchor from results before packager gate computation so
+        // m1 (top-margin) and other signals reflect non-anchor hits only. Every
+        // consumer downstream (packager, compact rows, discrimination, count) works
+        // from the filtered list. Mirrors Swift AriaV2GeniusLocusMemoryBackend.search()
+        // anchor exclusion via storageIdentitySpellings and the v1 Rust retain call.
+        if let Some(ref anchor) = anchor_id {
+            result.hits.retain(|h| h.id != *anchor);
+        }
+
+        // PACKAGER: run the results packager for non-never modes. The Rust port has
+        // no GroundedSynthesis (Swift-only seam), so composed_answer is always None.
+        // The packager computes m1/m2/m3/m4 gate signals and the cliff cutoff; the
+        // answer block carries an empty answer text (text divergence is the only
+        // asymmetry between Swift and Rust on this path). answer:never fast path →
+        // rows unchanged, no answer block. Mirrors the v1 Rust interface_tools packager call.
+        let answer_mode = match request.answer {
+            Some(V2AnswerMode::Always) => PackagerAnswerMode::Always,
+            Some(V2AnswerMode::Auto)   => PackagerAnswerMode::Auto,
+            _                          => PackagerAnswerMode::Never,
+        };
+        let tuning = estate.coord.lock()
+            .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
+            .provisioned_recall_tuning(&estate.handle)
+            .unwrap_or_default()
+            .packager_thresholds();
+        let packaged = GLKResultsPackager::new().package(&result, answer_mode, None, tuning);
+
+        // Convert packager output rows to V2CompactMemory. For answer:never the rows
+        // equal all hits; for non-never the packager may apply cliff cutoff.
+        let rows: Vec<V2CompactMemory> = packaged.rows.iter().filter_map(|hit| {
+            let drawer = hit.drawer.as_ref()?;
             if !provenance_visible(drawer.provenance) {
                 return None;
             }
@@ -245,7 +275,7 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             let provenance = Some(format!("{:?}", drawer.source_type()).to_lowercase());
             Some(V2CompactMemory {
                 memory_id,
-                subject: drawer.subject,
+                subject: drawer.subject.clone(),
                 score: Some(hit.score.final_score as f64),
                 provenance,
                 context: None,
@@ -253,7 +283,27 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
                     .then(|| crate::v2::render::compact_text(&drawer.content)),
                 fetch: placeholder_fetch(memory_id),
             })
-        }).collect::<Vec<_>>().pipe(Ok)
+        }).collect();
+
+        // Convert GLKAnswerBlock to V2SearchAnswerBlock for non-never modes.
+        let answer_block = packaged.answer_block.map(|block| {
+            let confidence = match block.confidence_level {
+                genius_locus_kit::PackagerConfidenceLevel::Confident   => "confident",
+                genius_locus_kit::PackagerConfidenceLevel::Intermediate => "intermediate",
+                genius_locus_kit::PackagerConfidenceLevel::Weak        => "weak",
+            }.to_owned();
+            V2SearchAnswerBlock {
+                text: block.answer,
+                confidence,
+                citation_ids: block.citation_ids,
+                signals_m1: block.signals.m1,
+                signals_m2: block.signals.m2,
+                signals_m3: block.signals.m3,
+                signals_m4: block.signals.m4,
+            }
+        });
+
+        Ok(V2MemorySearchResult { rows, answer_block })
     }
 
     fn get_memories(&self, context: &V2MemoryOperationContext, request: &V2MemoryGetRequest) -> Result<Vec<V2Memory>, V2MemoryFailure> {
@@ -478,5 +528,3 @@ fn parse_iso8601_ms(value: &str) -> Option<i64> {
     crate::dispatch::bench_clock_parse_iso8601_ms(value)
 }
 
-trait Pipe: Sized { fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T { f(self) } }
-impl<T> Pipe for T {}

@@ -104,7 +104,7 @@ fn filter_unknown_fails_closed_with_exact_message() {
     );
     assert_eq!(
         r["error"]["data"]["message"],
-        json!("Unknown filter: bogusFilter"),
+        json!("Unknown filter: bogusFilter. Valid: unconfirmed, userConfirmed, exportable, contained, pinned"),
         "error message must match exactly; got: {r}"
     );
 }
