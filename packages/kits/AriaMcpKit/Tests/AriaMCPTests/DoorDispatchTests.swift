@@ -244,6 +244,61 @@ struct DoorDispatchTests {
                 "door=rrf must win over scoring=matrixAware: response must show degraded retrieval; got: \(text.prefix(200))")
     }
 
+    // MARK: - D (ordering). discrimination: precedes retrieval: degraded in control-line order.
+
+    /// When both the discrimination line (explain:true) and the degradation line
+    /// (door=rrf → unionBest.rrf) appear in the same response, "discrimination:"
+    /// MUST appear before "retrieval: degraded".
+    ///
+    /// This gate uses index comparison on the two substrings rather than two
+    /// independent contains() checks. Two contains() checks cannot detect a
+    /// swap; comparing the lower bounds of the two substring ranges can.
+    ///
+    /// Emission sites: AriaV2MemoryOperations.swift:738 (discrimination, under
+    /// explain:true) and :744 (retrieval: degraded), in that order.
+    ///
+    /// Mirrors Rust: memory_search_control_line_order_discrimination_before_degraded
+    @Test func controlLineOrderDiscriminationBeforeDegraded() async throws {
+        let (dispatcher, _, _) = try await makeDispatcher()
+        // Six memories are needed so the locus-rank slope is narrow enough to
+        // fire discrimination with door:rrf's .raw scoring path.
+        //
+        // Mechanics: without a registered corpus, only the locus lane fires.
+        // Locus rank scores are (K-idx)/K (linearly decreasing). normalizeFinals
+        // min-max scales them to [0, 1]; with N hits the normalized step is
+        // 1/(N-1) and topGap = 1/(N-1). RecallDiscrimination.classify emits
+        // .medium/.low only when topGap < HIGH_MARGIN (0.25), i.e. N-1 > 4,
+        // i.e. N ≥ 6. With N=3 the normalized topGap is 0.5 → .high → silent.
+        let seed = "ctrl-order-test seed equal"
+        for _ in 0..<6 {
+            try await fileMemory(content: seed, location: "lab", dispatcher: dispatcher)
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("ctrl-order-test"),
+                "explain": .bool(true),
+                "door": .string("rrf"),
+            ])
+        )
+        let text = result.objectValue?["content"]?
+            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+
+        // Both control lines must be present; if either is missing the
+        // underlying emission logic regressed independently of ordering.
+        guard let discRange = text.range(of: "discrimination:"),
+              let degradRange = text.range(of: "retrieval: degraded") else {
+            Issue.record("Both control lines must appear (discrimination: and retrieval: degraded); got: \(text.prefix(400))")
+            return
+        }
+        // Index comparison: discrimination: must precede retrieval: degraded.
+        // A swap of the two emission blocks passes both contains() checks but
+        // fails this comparison.
+        #expect(discRange.lowerBound < degradRange.lowerBound,
+                "discrimination: must appear before retrieval: degraded — emission order must match AriaV2MemoryOperations.swift:738-744; got: \(text.prefix(400))")
+    }
+
     // MARK: - E. Schema exposes door
 
     /// The moot_memory_search inputSchema must expose the `door` property so
