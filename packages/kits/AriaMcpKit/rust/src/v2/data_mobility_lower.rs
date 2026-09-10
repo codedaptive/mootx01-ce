@@ -225,6 +225,9 @@ impl V2DataMobilityLower for DirectDataMobilityLower<'_> {
             estate_name: open.estate_name.clone(),
             fdc_data_version,
             fdc_recalculation_version,
+            // Carry the request limit so the compact-text builder can emit
+            // " (limit N)" on the "scanned:" line, matching Swift:588+596.
+            limit: request.limit.map(|l| l as u64),
             scanned,
             unchanged,
             empty_content,
