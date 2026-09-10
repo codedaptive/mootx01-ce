@@ -571,7 +571,6 @@ fn unknown_mode_wire_text_has_no_double_hint_prefix() {
 /// How it fails if reverted: if the no-arg call path accidentally synthesises
 /// (returning an "answer: ..." block), the second assertion fires.
 #[test]
-#[ignore = "BLOCKED: Rust v2 accepts answer: as allowed field but Swift v2 rejects it (not available in incomplete v2 memory service); response header is v2-format, not v1 found-N-candidate-memories. Parity gap with Swift; awaiting catalog decision. Do not delete."]
 fn answer_never_with_no_mode_is_unchanged() {
     let dispatcher = make_dispatcher();
 
