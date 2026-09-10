@@ -47,14 +47,6 @@ fn is_success(r: &serde_json::Value) -> bool {
     r["result"]["isError"] == json!(false)
 }
 
-fn error_code(r: &serde_json::Value) -> &str {
-    r["result"]["structuredContent"]["error"]["code"].as_str().unwrap_or("")
-}
-
-fn error_message(r: &serde_json::Value) -> &str {
-    r["result"]["structuredContent"]["error"]["message"].as_str().unwrap_or("")
-}
-
 // ---------------------------------------------------------------------------
 // Catalog: every argument must be declared in memory_search properties
 // ---------------------------------------------------------------------------
@@ -99,12 +91,20 @@ fn filter_accepted_values_succeed() {
 
 #[test]
 fn filter_unknown_fails_closed_with_exact_message() {
+    // Validation moved to decode: returns -32602 INVALID_PARAMS (matching Swift
+    // JSONRPCError(code: .invalidParams)), not a success-shaped refusal envelope.
     let d = dispatcher();
     let r = search(&d, json!({"filter": "bogusFilter"}));
-    assert!(!is_success(&r), "unknown filter must fail");
-    assert_eq!(error_code(&r), "invalid_argument");
-    assert_eq!(error_message(&r), "Unknown filter: bogusFilter",
-        "error message must match exactly; got: {}", error_message(&r));
+    assert_eq!(
+        r["error"]["code"],
+        json!(-32602),
+        "unknown filter must produce a -32602 decode error; got: {r}"
+    );
+    assert_eq!(
+        r["error"]["data"]["message"],
+        json!("Unknown filter: bogusFilter"),
+        "error message must match exactly; got: {r}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +140,19 @@ fn media_type_accepted_values_succeed() {
 
 #[test]
 fn media_type_unknown_fails_closed_with_exact_message() {
+    // Validation moved to decode: returns -32602 INVALID_PARAMS, not an envelope refusal.
     let d = dispatcher();
     let r = search(&d, json!({"media_type": "video"}));
-    assert!(!is_success(&r), "unknown media_type must fail");
-    assert_eq!(error_code(&r), "invalid_argument");
-    assert_eq!(error_message(&r), "Unknown media_type: video. Valid: voice, image",
-        "error message must match exactly; got: {}", error_message(&r));
+    assert_eq!(
+        r["error"]["code"],
+        json!(-32602),
+        "unknown media_type must produce a -32602 decode error; got: {r}"
+    );
+    assert_eq!(
+        r["error"]["data"]["message"],
+        json!("Unknown media_type: video. Valid: voice, image"),
+        "error message must match exactly; got: {r}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -164,14 +171,18 @@ fn door_accepted_values_succeed() {
 
 #[test]
 fn door_unknown_fails_closed_with_exact_message() {
+    // Validation moved to decode: returns -32602 INVALID_PARAMS, not an envelope refusal.
     let d = dispatcher();
     let r = search(&d, json!({"door": "hedge"}));
-    assert!(!is_success(&r), "unknown door must fail closed");
-    assert_eq!(error_code(&r), "invalid_argument");
     assert_eq!(
-        error_message(&r),
-        "Unknown door: hedge. Valid: guess, raw, rrf, matrixAware, discriminative",
-        "error message must match exactly; got: {}", error_message(&r)
+        r["error"]["code"],
+        json!(-32602),
+        "unknown door must produce a -32602 decode error; got: {r}"
+    );
+    assert_eq!(
+        r["error"]["data"]["message"],
+        json!("Unknown door: hedge. Valid: guess, raw, rrf, matrixAware, discriminative"),
+        "error message must match exactly; got: {r}"
     );
 }
 
@@ -198,14 +209,18 @@ fn scoring_accepted_values_succeed() {
 
 #[test]
 fn scoring_unknown_fails_closed_with_exact_message() {
+    // Validation moved to decode: returns -32602 INVALID_PARAMS, not an envelope refusal.
     let d = dispatcher();
     let r = search(&d, json!({"scoring": "fuzzy"}));
-    assert!(!is_success(&r), "unknown scoring must fail");
-    assert_eq!(error_code(&r), "invalid_argument");
     assert_eq!(
-        error_message(&r),
-        "Unknown scoring: fuzzy. Valid: raw, rrf, matrixAware, discriminative",
-        "error message must match exactly; got: {}", error_message(&r)
+        r["error"]["code"],
+        json!(-32602),
+        "unknown scoring must produce a -32602 decode error; got: {r}"
+    );
+    assert_eq!(
+        r["error"]["data"]["message"],
+        json!("Unknown scoring: fuzzy. Valid: raw, rrf, matrixAware, discriminative"),
+        "error message must match exactly; got: {r}"
     );
 }
 
@@ -224,13 +239,18 @@ fn ordering_accepted_values_succeed() {
 
 #[test]
 fn ordering_unknown_fails_closed_with_exact_message() {
+    // Validation moved to decode: returns -32602 INVALID_PARAMS, not an envelope refusal.
     let d = dispatcher();
     let r = search(&d, json!({"ordering": "newest"}));
-    assert!(!is_success(&r), "unknown ordering must fail");
-    assert_eq!(error_code(&r), "invalid_argument");
-    assert!(
-        error_message(&r).starts_with("Unknown ordering: newest."),
-        "error message must name the unknown value; got: {}", error_message(&r)
+    assert_eq!(
+        r["error"]["code"],
+        json!(-32602),
+        "unknown ordering must produce a -32602 decode error; got: {r}"
+    );
+    assert_eq!(
+        r["error"]["data"]["message"],
+        json!("Unknown ordering: newest. Valid: byCaptureTimeDesc, byCaptureTimeAsc, byRoomAsc, byRelevanceDesc"),
+        "error message must match exactly; got: {r}"
     );
 }
 
