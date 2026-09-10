@@ -74,6 +74,92 @@ struct FdcReclassifyTests {
         return try await estate.meta(key: Self.fdcFloorKey)
     }
 
+    // Extract content[0].text from a v2 envelope response for compact-text
+    // assertions. The 512-scalar truncation is applied by AriaV2Envelope;
+    // only assert on the prefix and on short substrings near the start.
+    private func compactText(_ result: JSONValue) -> String {
+        result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+    }
+
+    // MARK: — ITEM 1: invalid argument refusals (gate: dispatch must throw)
+
+    // These three cases mirror the Rust twins at
+    // aria_v2_fdc_reclassify_tests.rs:473,484,495. If either guard at
+    // AriaV2DataMobility.swift line 38 (mode) or line 49 (limit range) is
+    // removed, dispatch() no longer throws and `caught` stays nil — the
+    // #require fires, proving the guard is load-bearing.
+
+    @Test func unknownModeIsRefused() async throws {
+        let (_, _, dispatcher) = try await makeDispatcher()
+        var caught: JSONRPCError? = nil
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_reclassify_fdc",
+                arguments: .object(["mode": .string("everything")]))
+        } catch let e as JSONRPCError {
+            caught = e
+        }
+        let error = try #require(caught, "unrecognised mode must produce a JSONRPCError")
+        #expect(error.data?.objectValue?["path"] == .string("mode"),
+            "error path must identify the rejected argument")
+        #expect(error.data?.objectValue?["message"]?.stringValue?.contains("suspectOnly") == true,
+            "error message must name the accepted values")
+    }
+
+    @Test func limitZeroIsRefused() async throws {
+        let (_, _, dispatcher) = try await makeDispatcher()
+        var caught: JSONRPCError? = nil
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_reclassify_fdc",
+                arguments: .object(["limit": .integer(0)]))
+        } catch let e as JSONRPCError {
+            caught = e
+        }
+        let error = try #require(caught, "limit=0 must produce a JSONRPCError")
+        #expect(error.data?.objectValue?["path"] == .string("limit"),
+            "error path must identify the rejected argument")
+        #expect(error.data?.objectValue?["message"]?.stringValue?.contains("50000") == true,
+            "error message must state the accepted range")
+    }
+
+    @Test func limitAboveMaxIsRefused() async throws {
+        let (_, _, dispatcher) = try await makeDispatcher()
+        var caught: JSONRPCError? = nil
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_reclassify_fdc",
+                arguments: .object(["limit": .integer(50001)]))
+        } catch let e as JSONRPCError {
+            caught = e
+        }
+        let error = try #require(caught, "limit=50001 must produce a JSONRPCError")
+        #expect(error.data?.objectValue?["path"] == .string("limit"),
+            "error path must identify the rejected argument")
+        #expect(error.data?.objectValue?["message"]?.stringValue?.contains("50000") == true,
+            "error message must state the accepted range")
+    }
+
+    // MARK: — ITEM 2: compact-text prefix gate
+
+    // The compact text report is built at AriaV2DataMobility.swift:589-620.
+    // If the `lines` construction is neutered, content[0].text becomes an empty
+    // or generic string and this prefix assertion fails. Assert only on the
+    // prefix and on the UUID near the start (both well within the 512-scalar
+    // truncation point).
+    @Test func compactTextPrefixAndEstateArePresent() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        _ = try await capture(kit, handle, content: "sample content", code: "362.4", qid: "Q12131")
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object([:]))
+        let text = compactText(result)
+        #expect(text.hasPrefix("fdc_reclassify: "),
+            "compact text must open with the fdc_reclassify tool-name line")
+        #expect(text.contains("[\(handle.estateUUID)]"),
+            "compact text must identify the estate by UUID")
+    }
+
     @Test func dryRunReportsSuspectButDoesNotMutate() async throws {
         let (kit, handle, dispatcher) = try await makeDispatcher()
         let id = try await capture(
@@ -95,6 +181,10 @@ struct FdcReclassifyTests {
         #expect(changes.first?.objectValue?["id"] == .string(id))
         #expect(changes.first?.objectValue?["old_code"] == .string("362.4"))
         #expect(changes.first?.objectValue?["new_code"] == .string("000"))
+        // old_qid is emitted at AriaV2DataMobility.swift:575 and declared in the
+        // conformance schema. Removing this assertion meant the field could be
+        // silently dropped and no test would catch it.
+        #expect(changes.first?.objectValue?["old_qid"] == .string("Q12131"))
         #expect(try await storedCode(kit, handle, id: id) == "362.4")
         #expect(try await fdcFloor(kit, handle) == nil)
     }
@@ -185,6 +275,24 @@ struct FdcReclassifyTests {
         // so suspectOnly mode produces 0 candidates and skips the change as non-suspect.
         #expect(conservativeData["candidates"] == .integer(0))
         #expect(conservativeData["skipped_non_candidate_changes"] == .integer(1))
+        // The note at AriaV2DataMobility.swift:610 appends "rerun with mode=all"
+        // to compact text, but the fdc_recalculation_version field includes a
+        // 64-char SHA256 hash (~168 chars alone) that pushes the dry-run report
+        // well past the 512-scalar truncation. The note is unreachable from
+        // content[0].text. Gate the triggering condition via the apply=true path
+        // instead: the floor_stamp field in structured data says "mode=all is
+        // required" when suspectOnly mode leaves non-candidate changes unprocessed.
+        let appliedConservative = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true)])
+        )
+        let appliedData = try data(appliedConservative)
+        #expect(appliedData["skipped_non_candidate_changes"] == .integer(1))
+        #expect(
+            appliedData["floor_stamp"] == .string(
+                "skipped: mode=all is required for an estate-wide floor"),
+            "suspectOnly with non-suspect changes skipped must advise mode=all as remedy"
+        )
 
         let reset = try await dispatcher.dispatch(
             name: "moot_reclassify_fdc",

@@ -83,6 +83,28 @@ struct AriaV2MemoryOperationsTests {
         #expect(surfaced == [firstID])
     }
 
+    // ITEM 6: `subject` key must be present in compact search result rows.
+    //
+    // MootMemoryTools.swift:127-129 documents "subject" as part of the live key
+    // set for v2 compact rows, but the claim was held only by a comment rather
+    // than a gate. If AriaV2MemoryOperations.compact renames or removes the
+    // "subject" key, renderRows() silently returns nil for every row and the
+    // recall tool falls back to compact text — the model stops receiving
+    // structured row content. This gate discriminates that regression.
+    //
+    // To prove discrimination: rename "subject" to something else in
+    // AriaV2MemoryOperations.compact (line 778), run this case, watch it go red.
+    @Test func searchCompactRowsIncludeSubjectKey() async throws {
+        let backend = FakeMemoryBackend(records: [record(firstID)])
+        let operations = service(backend: backend)
+        let response = try await operations.search(arguments: .object(["query": .string("find subject")]))
+        let rows = response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue
+        #expect(rows?.count == 1)
+        // `subject` is the only field renderRows() renders for the model. A missing
+        // or renamed key here means every recall row reaches the model as nil.
+        #expect(rows?.first?.objectValue?["subject"] == .string("Subject"))
+    }
+
     @Test func searchEnforcesPublicLimitAfterAuthorizationWhenLowerOverReturns() async throws {
         let ids = (0..<4).map { index in
             UUID(uuidString: String(format: "00000000-0000-4000-8000-%012d", index + 1))!
