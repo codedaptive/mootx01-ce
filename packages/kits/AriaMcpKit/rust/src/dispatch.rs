@@ -1,7 +1,12 @@
 //! Top-level tool dispatch — maps a tool name to its handler.
 //!
+//! This is the v1 dispatch path. The running server does not call it: the
+//! v2 dispatcher routes `tools/call` through `surface::decode` and returns
+//! `METHOD_NOT_FOUND` for anything that path does not recognize. `dispatch_tool`
+//! and `route_tool` survive as a test-helper entry point exercised directly by
+//! `tests/dispatch_tests.rs` and the other integration suites that call them.
+//!
 //! Routing order:
-//!   0. teachme pre-check — intercepts `teachme:true` before any runner fires
 //!   1. Federation tool (moot_federated_search)
 //!   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
 //!   3. Vault tools (backed by vault-kit; Vault drift and candidate handling)
@@ -45,7 +50,6 @@ use crate::vault_tools::VaultJobLedger;
 ///   - `moot_vault_job` can look up completed job records by ID.
 ///
 /// Routing order (mirrors Swift `ToolDispatcher.dispatch(_:_:)`):
-///   0. teachme interception — returns guide before any runner fires
 ///   1. Federation tool (moot_federated_search)
 ///   2. Interface tools (Tier 1–5 plus maintenance/admin tools)
 ///   3. Vault tools (backed by vault-kit; Vault drift and candidate handling)
@@ -201,14 +205,6 @@ fn route_tool(
     update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
     monitoring_control: Option<&dyn crate::monitoring_control::MonitoringControl>,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    // 0. Teachme interception — intercepts BEFORE any runner fires.
-    //    Returns guide text; estate is never touched.
-    match optional_bool(args, "teachme") {
-        Ok(Some(true)) => return Ok(text_result(&crate::teachme_guides::guide(name))),
-        Ok(_) => {}
-        Err(error) => return Err(error),
-    }
-
     // 1. Federation tool — moot_federated_search: grant-authorized federated
     //    read that fans across locally-open estates the caller is entitled to
     //    read, narrows each contribution to its grant's scope, and refuses
@@ -497,15 +493,16 @@ fn inject_hint(
 /// logs unrecognized keys to stderr for daemon log visibility.
 ///
 /// Accepted keys are extracted from `crate::tool_list::accepted_arg_keys`,
-/// which reads the live tool schema (post-`with_estate_id`/`with_teachme`
-/// wrappers). Returns `None` for unknown tool names — no check runs.
+/// which reads the v2 catalog schema directly. Returns `None` for unknown
+/// tool names — no check runs.
 ///
 /// Mirrors Swift `ToolDispatcher.appendUnknownArgsHint`.
-/// Arg names that the legacy v1 dispatch path (`interface_tools`) still reads
-/// under their original names. These are accepted by the tool's handler but
-/// not listed in the v2 catalog schema (which uses the renamed v2 names).
-/// Exempting them here prevents the hint from firing on callers that use the
-/// v1 names while the v2 catalog reflects only the new names.
+/// Arg names that `interface_tools` (reachable here only through this
+/// v1 test-helper dispatch path) still reads under their original names.
+/// These are accepted by the tool's handler but not listed in the v2 catalog
+/// schema (which uses the renamed v2 names). Exempting them here prevents
+/// the hint from firing on callers that use the v1 names while the v2
+/// catalog reflects only the new names.
 fn v1_interface_arg_exemptions(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
         // v1: "id"/"ids" → v2 catalog: "memory_id"/"memory_ids"

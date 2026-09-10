@@ -952,58 +952,6 @@ fn unknown_tool_name_returns_method_not_found() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Teachme interception — before any runner fires
-// ---------------------------------------------------------------------------
-
-#[test]
-fn teachme_true_returns_guide_without_touching_estate() {
-    // teachme:true on any interface tool returns guide text, never touches estate.
-    // Test with moot_file_memory (no content/location required when teachme:true).
-    let registry = EstateRegistry::new_inmemory();
-    let a = args!["teachme" => true];
-    let result = dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
-        .expect("teachme interception must not throw");
-    assert!(is_success(&result), "teachme result must be isError:false");
-    let text = content_text(&result);
-    assert!(
-        text.contains("moot_file_memory"),
-        "guide must name the tool; got: {text}"
-    );
-}
-
-#[test]
-fn teachme_true_on_memory_get_returns_its_guide_without_touching_estate() {
-    // moot_memory_get requires an id; teachme:true must short-circuit before
-    // the missing-id validation ever runs (same interception point as every
-    // other interface tool).
-    let registry = EstateRegistry::new_inmemory();
-    let a = args!["teachme" => true];
-    let result = dispatch_tool("moot_memory_get", &a, &registry, &SurfacedRecallLedger::new())
-        .expect("teachme interception must not throw even without id");
-    assert!(is_success(&result), "teachme result must be isError:false");
-    let text = content_text(&result);
-    assert!(
-        text.contains("moot_memory_get"),
-        "guide must name the tool; got: {text}"
-    );
-}
-
-#[test]
-fn teachme_true_on_unknown_tool_returns_generic_guide() {
-    let registry = EstateRegistry::new_inmemory();
-    let a = args!["teachme" => true];
-    let result = dispatch_tool("moot_nonexistent_tool", &a, &registry, &SurfacedRecallLedger::new())
-        .expect("teachme on unknown tool must return generic guide, not transport fault");
-    assert!(is_success(&result));
-    // Generic guide directs to moot_estate_status teachme.
-    let text = content_text(&result);
-    assert!(
-        text.contains("moot_estate_status"),
-        "generic guide must reference moot_estate_status; got: {text}"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // 4. Tier 1 — Core memory
 // ---------------------------------------------------------------------------
 

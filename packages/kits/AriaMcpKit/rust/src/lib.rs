@@ -81,7 +81,6 @@ pub mod server;
 pub mod session_protocol;
 pub mod surface;
 pub mod surfaced_recall_ledger;
-pub mod teachme_guides;
 pub mod tool_list;
 pub mod tool_mutation_inventory;
 pub mod vault_tools;
