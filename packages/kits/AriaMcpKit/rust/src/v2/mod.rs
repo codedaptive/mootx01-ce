@@ -1,7 +1,8 @@
 //! ARIA v2 contract foundation.
 //!
-//! The selected surface exports this foundation behind the explicit
-//! `aria-v2` crate feature.
+//! The selected surface exports this foundation unconditionally — the v2
+//! path is the only dispatch path the running server takes; there is no
+//! feature flag gating it.
 
 pub mod codec;
 pub mod capability_digest;
