@@ -65,6 +65,22 @@ struct FrontierKArgumentTests {
 
     // MARK: - A: Schema exposure
 
+    /// moot_memory_search must expose frontier_k in its input schema so MCP clients
+    /// can discover the argument. This is a schema-presence gate.
+    @Test func schemaExposesFrontierKOnMemorySearch() throws {
+        let keys = schemaKeys(for: "moot_memory_search")
+        #expect(keys.contains("frontier_k"),
+                "moot_memory_search schema must include frontier_k; got keys: \(keys)")
+    }
+
+    /// moot_recall_shaped must expose frontier_k in its input schema so MCP clients
+    /// can discover the argument. This is a schema-presence gate.
+    @Test func schemaExposesFrontierKOnRecallShaped() throws {
+        let keys = schemaKeys(for: "moot_recall_shaped")
+        #expect(keys.contains("frontier_k"),
+                "moot_recall_shaped schema must include frontier_k; got keys: \(keys)")
+    }
+
     // MARK: - B: Absent frontier_k — byte-identical (no error)
 
     @Test func memorySearchAbsentFrontierKDispatchesWithoutError() async throws {
@@ -91,6 +107,34 @@ struct FrontierKArgumentTests {
     }
 
     // MARK: - C: Integer frontier_k — accepted without error
+
+    /// An integer frontier_k on moot_memory_search must dispatch without error.
+    /// The GLK engine clamps the value internally; the MCP surface passes it through.
+    @Test func memorySearchIntegerFrontierKAccepted() async throws {
+        let dispatcher = try await makeDispatcher()
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("anything"),
+                "frontier_k": .integer(128),
+            ]))
+        #expect(!isError(result),
+                "moot_memory_search with integer frontier_k must not produce an error")
+    }
+
+    /// An integer frontier_k on moot_recall_shaped must dispatch without error.
+    @Test func recallShapedIntegerFrontierKAccepted() async throws {
+        let dispatcher = try await makeDispatcher()
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_shaped",
+            arguments: .object([
+                "query": .string("anything"),
+                "preset": .string("balanced"),
+                "frontier_k": .integer(64),
+            ]))
+        #expect(!isError(result),
+                "moot_recall_shaped with integer frontier_k must not produce an error")
+    }
 
     // MARK: - D: Non-integer frontier_k — clear rejection error
     //
