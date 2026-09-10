@@ -985,12 +985,15 @@ fn execute_vault_lifecycle(
     };
     let meta = packet_meta(meta, effect);
     match result {
-        Ok(result) => crate::v2::render::success(
-            tool,
-            &vault_lifecycle_data(result),
-            &meta,
-            "Returned a direct typed vault lifecycle result.",
-        ).map_err(jsonrpc_internal),
+        Ok(result) => {
+            let text = vault_lifecycle_text(&result);
+            crate::v2::render::success(
+                tool,
+                &vault_lifecycle_data(result),
+                &meta,
+                &text,
+            ).map_err(jsonrpc_internal)
+        },
         Err(V2DataMobilityError::Unavailable) => Ok(crate::v2::render::refusal(
             tool,
             &crate::v2::render::V2OperationalRefusal {
@@ -1245,6 +1248,71 @@ fn vault_lifecycle_data(
             }
             data
         }
+    }
+}
+
+/// Build the compact human report text for a vault lifecycle result.
+///
+/// For `ReclassifyFdc` this mirrors the Swift canonical output at
+/// `AriaV2DataMobility.swift:583-620`: "estate: {name} [{uuid}]" and the
+/// same line sequence. Swift is the primary port and wins all divergence.
+///
+/// All other eleven tools return the generic string unchanged, preserving
+/// byte-identical output for those variants.
+fn vault_lifecycle_text(result: &crate::v2::data_mobility::V2DataMobilityResult) -> String {
+    use crate::v2::data_mobility::V2DataMobilityResult;
+    match result {
+        V2DataMobilityResult::ReclassifyFdc(r) => {
+            let mut lines = vec![
+                format!("fdc_reclassify: {}", if r.applied { "applied" } else { "dry-run" }),
+                format!("mode: {}", r.mode),
+                // Swift emits "estate: {name} [{uuid}]"; v1 Rust omitted the name.
+                // The v2 builder carries estate_name in the report so we match Swift exactly.
+                format!("estate: {} [{}]", r.estate_name, r.estate_id.hyphenated()),
+                format!("fdc_data_version: {}", r.fdc_data_version),
+                format!("fdc_recalculation_version: {}", r.fdc_recalculation_version),
+                format!("estate_recalced_data_version_before: {}", r.estate_recalced_data_version_before.as_deref().unwrap_or("none")),
+                format!("scanned: {} active drawer(s)", r.scanned),
+                format!("unchanged: {}", r.unchanged),
+                format!("empty_content: {}", r.empty_content),
+                format!("candidates: {}", r.candidates),
+                if r.applied { format!("updated: {}", r.updated) } else { format!("would_update: {}", r.would_update) },
+                format!("unclassified_after: {}", r.unclassified_after),
+                format!("skipped_non_candidate_changes: {}", r.skipped_non_candidate_changes),
+                format!("estate_recalced_data_version_after: {}", r.estate_recalced_data_version_after.as_deref().unwrap_or("none")),
+                format!("floor_stamp: {}", r.floor_stamp),
+            ];
+            if !r.applied {
+                lines.push("dry_run: pass apply=true to write candidate anchor changes".to_owned());
+            }
+            if r.mode == "suspectOnly" && r.skipped_non_candidate_changes > 0 {
+                lines.push(format!(
+                    "note: mode=suspectOnly left {} changed non-suspect anchor(s) untouched; rerun with mode=all to reset every changed active drawer from content",
+                    r.skipped_non_candidate_changes
+                ));
+            }
+            if !r.changes.is_empty() {
+                lines.push("changes:".to_owned());
+                for change in &r.changes {
+                    // Label format: "code [qid]" when QID present, "code" when absent.
+                    // Mirrors FdcReclassifyChange::label() used by the v1 text builder.
+                    let old_label = match &change.old_qid {
+                        Some(q) => format!("{} [{}]", change.old_code, q),
+                        None => change.old_code.clone(),
+                    };
+                    let new_label = match &change.new_qid {
+                        Some(q) => format!("{} [{}]", change.new_code, q),
+                        None => change.new_code.clone(),
+                    };
+                    lines.push(format!("  {}: {} -> {}", change.id, old_label, new_label));
+                }
+                if r.changes_omitted > 0 {
+                    lines.push(format!("  ... {} more", r.changes_omitted));
+                }
+            }
+            lines.join("\n")
+        }
+        _ => "Returned a direct typed vault lifecycle result.".to_owned(),
     }
 }
 
