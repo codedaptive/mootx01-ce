@@ -9,9 +9,9 @@ use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     default_wings::DEFAULT_WING_NAME,
     drawer::Drawer,
-    drawer_operational::{CaptureChannel, ContentKind},
+    drawer_operational::{CaptureChannel, ContentKind, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
-    filter::{Filter, HydrationLevel, RecallFrame},
+    filter::{Filter, HydrationLevel, Ordering, RecallFrame},
     frames::CaptureFrame,
     provenance::Channel,
 };
@@ -110,25 +110,143 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
 
     fn search_memories(&self, context: &V2MemoryOperationContext, request: &V2MemorySearchRequest) -> Result<Vec<V2CompactMemory>, V2MemoryFailure> {
         let estate = self.estate(context)?;
+
+        // Build the filter chain: sensitivity ceiling first (from context),
+        // then the explicit filter arg, then wing and media_type appended.
+        // Mirrors Swift runMemorySearch filter chain construction.
+        let mut filters = context.sensitivity_ceiling
+            .map(|v| vec![Filter::SensitivityAtMost(sensitivity(v))])
+            .unwrap_or_default();
+
+        // Decode the optional `filter` argument. Accepted values map to
+        // LocusKit Filter variants. Unknown values fail closed. Mirrors
+        // Swift ToolDispatch.decodeFilterChain and dispatch::decode_filter_chain.
+        if let Some(f) = request.filter.as_deref() {
+            let filter = match f {
+                "unconfirmed"    => Filter::Unconfirmed,
+                "userConfirmed"  => Filter::UserConfirmed,
+                "exportable"     => Filter::Exportable,
+                "contained"      => Filter::Contained,
+                "pinned"         => Filter::HasFeatureFlag(DrawerFeatureFlags::IS_PINNED),
+                unknown => return Err(failure("invalid_argument", &format!("Unknown filter: {unknown}"))),
+            };
+            filters.push(filter);
+        }
+
+        // Optional `wing` argument: scopes recall to a single wing.
+        // Empty string is accepted. Absent means all wings.
+        if let Some(wing) = request.wing.as_deref() {
+            filters.push(Filter::InWing(wing.to_string()));
+        }
+
+        // Optional `media_type` argument: constrains to drawers with a
+        // specific media capture type. "voice" and "image" are the only
+        // accepted values. Unknown values fail closed. Mirrors Swift
+        // runMemorySearch media_type decode.
+        if let Some(mt) = request.media_type.as_deref() {
+            let flag = match mt {
+                "voice" => DrawerFeatureFlags::HAS_VOICE,
+                "image" => DrawerFeatureFlags::HAS_IMAGE,
+                unknown => return Err(failure("invalid_argument",
+                    &format!("Unknown media_type: {unknown}. Valid: voice, image"))),
+            };
+            filters.push(Filter::HasFeatureFlag(flag));
+        }
+
+        let mut frame = RecallFrame::new(filters);
+        frame.hydration_level = HydrationLevel::Full;
+        frame.limit = Some(request.limit);
+
+        // Optional `ordering` argument. "byRelevanceDesc" is a compatibility
+        // spelling that decodes to ByCaptureTimeDesc as a tie-break; the
+        // scored unionBest path already owns the final relevance ordering.
+        // Unknown values fail closed. Mirrors Swift decodeOrdering.
+        if let Some(ord) = request.ordering.as_deref() {
+            frame.ordering = match ord {
+                "byCaptureTimeDesc" | "byRelevanceDesc" => Ordering::ByCaptureTimeDesc,
+                "byCaptureTimeAsc"  => Ordering::ByCaptureTimeAsc,
+                "byRoomAsc"         => Ordering::ByRoomAsc,
+                unknown => return Err(failure("invalid_argument",
+                    &format!("Unknown ordering: {unknown}. Valid: byCaptureTimeDesc, byCaptureTimeAsc, byRoomAsc, byRelevanceDesc"))),
+            };
+        }
+
+        // Resolve the scoring via the front-door precedence chain:
+        //   explicit door arg > explicit scoring arg > MatrixAware default.
+        // `door:"guess"` reads the provisioned DoorManifest. Any other door
+        // value parses as a GLKRecallScoring rawValue. Unknown values fail
+        // closed (including reserved "hedge"/"thorough"). Mirrors Swift
+        // runMemorySearch door/scoring decode.
+        let scoring: GLKRecallScoring = match request.door.as_deref() {
+            Some("guess") => {
+                estate.coord.lock()
+                    .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
+                    .provisioned_door_config(&estate.handle)
+                    .unwrap_or_default()
+                    .scoring
+            }
+            Some(door_str) => match door_str {
+                "raw"            => GLKRecallScoring::Raw,
+                "rrf"            => GLKRecallScoring::Rrf,
+                "matrixAware"    => GLKRecallScoring::MatrixAware,
+                "discriminative" => GLKRecallScoring::Discriminative,
+                unknown => return Err(failure("invalid_argument",
+                    &format!("Unknown door: {unknown}. Valid: guess, raw, rrf, matrixAware, discriminative"))),
+            },
+            None => match request.scoring.as_deref() {
+                Some("raw")            => GLKRecallScoring::Raw,
+                Some("rrf")            => GLKRecallScoring::Rrf,
+                Some("matrixAware")    => GLKRecallScoring::MatrixAware,
+                Some("discriminative") => GLKRecallScoring::Discriminative,
+                Some(unknown) => return Err(failure("invalid_argument",
+                    &format!("Unknown scoring: {unknown}. Valid: raw, rrf, matrixAware, discriminative"))),
+                None => {
+                    // Neither door nor scoring supplied: A1 per-corpus manifest,
+                    // falls back to MatrixAware when no config is provisioned.
+                    estate.coord.lock()
+                        .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
+                        .provisioned_door_config(&estate.handle)
+                        .unwrap_or_default()
+                        .scoring
+                }
+            },
+        };
+
         let query = match &request.target {
             V2SearchTarget::Query(query) => query.clone(),
             V2SearchTarget::Near(id) => {
-                let frame = recall_frame(context, request.limit);
+                let anchor_frame = recall_frame(context, request.limit);
                 let rows = estate.coord.lock().map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
-                    .get_drawers_matching_frame(&estate.handle, &[id.to_string()], &frame)
+                    .get_drawers_matching_frame(&estate.handle, &[id.to_string()], &anchor_frame)
                     .map_err(|error| failure("operation_failed", &format!("anchor lookup failed: {error:?}")))?;
                 rows.into_iter().next().map(|row| row.content).ok_or_else(V2MemoryFailure::not_found)?
             }
         };
+
         let mut recall = GLKRecallRequest::new(
-            recall_frame(context, request.limit),
+            frame,
             GLKRecallMode::UnionBest,
-            GLKRecallScoring::MatrixAware,
+            scoring,
             request.limit,
             RecallFallbackPolicy::AllowDegraded,
             if self.posture.is_frozen() { RecallOrigin::Internal } else { RecallOrigin::External },
         ).with_query_text(query).with_trace_limit(request.limit);
         recall.door = Some("memory_search".to_owned());
+
+        // Optional `frontier_k`: per-call candidate-pool depth override.
+        // The GLK engine clamps to [64, 256]; we do not clamp or reject here.
+        // Absent means the engine default formula. Mirrors Swift frontier_k decode.
+        if let Some(fk) = request.frontier_k {
+            recall = recall.with_frontier_k(fk as usize);
+        }
+
+        // `explain` (field type bool, default false) flows through to the
+        // GLK hit result's explanation field. The recall result carries
+        // Vec<String> explanation lines per hit; explain:true is signaled
+        // by the non-empty explanation vec. The actual rendering of the
+        // explain block (sources/score/mode/why lines) is handled by the
+        // v2 recall render path. No additional wiring is needed here.
+
         let result = estate.coord.lock().map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
             .recall_scored(&estate.handle, recall, context.now_millis)
             .map_err(|error| failure("operation_failed", &format!("memory search failed: {error:?}")))?;
