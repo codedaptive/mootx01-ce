@@ -44,6 +44,7 @@ fn snapshot(mounted: bool) -> EstateDiagnosticsSnapshot {
         drains: vec![EstateDrain { name: "corpus_encode".to_owned(), state: EstateDrainState::Draining, pending: 4 }],
         rebuild: EstateRebuildState::Running,
         timing: EstateTiming { watermark_ms: 1_700_000_123_456, truncated: true },
+        fdc_floor: None,
     }
 }
 
@@ -125,11 +126,13 @@ fn status_and_map_apply_cluster_a_and_public_bulk_ceiling() {
     assert_eq!(status.memory_count, 2);
     assert_eq!(status.fact_count, 1);
     assert_eq!(status.drains.len(), 1);
+    assert_eq!(status.fdc_recalculation, "missing");
     assert_eq!(serde_json::to_value(&status).unwrap(), json!({
         "estate_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         "estate_name": "Test Estate",
         "memory_count": 2,
         "fact_count": 1,
+        "fdc_recalculation": "missing",
         "drains": [{"name": "corpus_encode", "state": "draining", "pending": 4}],
     }));
 
