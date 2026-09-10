@@ -8,9 +8,10 @@
 //   • RecipeCatalog.all.count == 29 (baseline 26 + distilled_recall +
 //     node_motion + walk_recall).
 //
-//   • GeniusLocusKit.defaultStandingSignalNames.count == 12 — 7 baseline
+//   • GeniusLocusKit.defaultStandingSignalNames.count == 13 — 7 baseline
 //     + TrainingSignal + ContradictionScoutSignal (contradiction hunter)
-//     + ConsolidationSignal + AnomalySweepSignal + SpanEncodeSignal.
+//     + ConsolidationSignal + AnomalySweepSignal + SpanEncodeSignal
+//     + FactExtractionSignal.
 //
 // isRecipeTool assertions for the distilled-recall tool live in
 // AriaMcpKit/RecipeToolsTests.swift (they require AriaMcpKit scope).
@@ -35,16 +36,19 @@ struct SprintDXAssertionTests {
             "RecipeCatalog must contain exactly 29 recipes: 26 baseline + distilled_recall + node_motion + walk_recall")
     }
 
-    /// CK-DX-2: defaultStandingSignalNames contains all 12 standing signals.
+    /// CK-DX-2: defaultStandingSignalNames contains all 13 standing signals.
     ///
-    /// Twelve signals: 7 baseline + TrainingSignal
+    /// Thirteen signals: 7 baseline + TrainingSignal
     /// + ContradictionScoutSignal (contradiction hunter) + ConsolidationSignal
     /// + AnomalySweepSignal (signal 11, P3a anomaly-flag sweep)
-    /// + SpanEncodeSignal (signal 12, span-encode drain signal).
-    /// The signal inventory table in GENIUSLOCUSKIT_SPEC.md defines the set.
-    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 12 (includes SpanEncodeSignal)")
-    func defaultStandingSignalNamesCountIsTwelve() {
-        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 12,
-            "defaultStandingSignalNames must contain exactly 12 signals per the GENIUSLOCUSKIT_SPEC inventory (12th: SpanEncodeSignal)")
+    /// + SpanEncodeSignal (signal 12, span-encode drain signal)
+    /// + FactExtractionSignal (signal 13, distilled-fact drain).
+    /// The set is the list in DefaultStandingSignals.swift `defaultStandingSignalNames`
+    /// (thirteen names). The GENIUSLOCUSKIT_SPEC.md inventory table is one row
+    /// short of it (no fact-extraction row); see docs_internal/status/OPEN_ITEMS.md.
+    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 13 (includes FactExtractionSignal)")
+    func defaultStandingSignalNamesCountIsThirteen() {
+        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 13,
+            "defaultStandingSignalNames must contain exactly 13 signals (13th: FactExtractionSignal)")
     }
 }
