@@ -64,11 +64,6 @@ struct MemoryToolAdapterSensitivityTests {
             .first?.objectValue?["text"]?.stringValue ?? ""
     }
 
-    /// Security (Codex b5716d8): the memory tool is opt-in. With the flag
-    /// disabled, a hard-coded tools/call to `memory` must be REFUSED at
-    /// dispatch — not merely hidden from tools/list — mirroring the vault
-    /// disabled-refusal.
-
     @Test("memory view excludes restricted and secret drawers")
     func viewExcludesRestrictedAndSecretDrawers() async throws {
         let (kit, handle, dispatcher) = try await makeHarness()
@@ -118,6 +113,10 @@ struct MemoryToolAdapterSensitivityTests {
                 "str_replace re-capture must carry the source tier, not downgrade to .normal")
     }
 
+    /// Security (Codex b5716d8): the memory tool is opt-in. With the flag
+    /// disabled, a hard-coded tools/call to `memory` must be REFUSED at
+    /// dispatch — not merely hidden from tools/list — mirroring the vault
+    /// disabled-refusal.
     @Test("disabled memory tool refuses dispatch")
     func disabledMemoryToolRefusesDispatch() async throws {
         let kit = GeniusLocusKit()
