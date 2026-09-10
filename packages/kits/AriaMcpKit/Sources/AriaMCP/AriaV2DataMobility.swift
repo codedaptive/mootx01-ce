@@ -2,6 +2,7 @@ import AriaMCPWire
 import Foundation
 import EideticLib
 import GeniusLocusKit
+import LatticeLib
 import LocusKit
 import VaultKit
 
@@ -10,7 +11,7 @@ import VaultKit
 /// crosses that boundary; neither legacy dispatch text nor legacy JSON does.
 public enum AriaV2DataMobilityRequest: Sendable {
     case reindex(estateID: UUID?)
-    case reclassifyFDC(estateID: UUID?)
+    case reclassifyFDC(estateID: UUID?, apply: Bool, mode: String, limit: Int?)
     case palaceImport(path: String, mode: ImportMode, estateID: UUID?)
     case jsonImport(path: String, estateID: UUID?)
     case fileDataset(name: String, location: String, columns: [JSONValue]?, rows: [JSONValue]?, csvPath: String?, wing: String?, sensitivity: String?, estateID: UUID?)
@@ -29,8 +30,34 @@ public enum AriaV2DataMobilityRequest: Sendable {
         case "moot_reindex":
             let d = try decoder(arguments, ["estate_id"]); return .reindex(estateID: try d.optionalUUID("estate_id"))
         case "moot_reclassify_fdc":
-            let d = try decoder(arguments, ["estate_id"])
-            return .reclassifyFDC(estateID: try d.optionalUUID("estate_id"))
+            let d = try decoder(arguments, ["estate_id", "apply", "mode", "limit"])
+            let apply = try d.optionalBoolean("apply") ?? false
+            // mode: only "suspectOnly" or "all" are accepted; unrecognised value
+            // is an invalid-argument refusal, not a silent fallback to default.
+            let modeStr: String
+            if let raw = try d.optionalString("mode") {
+                guard raw == "suspectOnly" || raw == "all" else {
+                    throw invalid("mode", "mode must be \"suspectOnly\" or \"all\".")
+                }
+                modeStr = raw
+            } else {
+                modeStr = "suspectOnly"
+            }
+            // limit: 1...50000. Compare as Int64 to avoid unguarded narrowing trap.
+            let limit: Int?
+            if let rawLimit = try d.optionalInteger("limit") {
+                guard rawLimit >= 1 && rawLimit <= 50_000 else {
+                    throw invalid("limit", "limit must be between 1 and 50000.")
+                }
+                limit = Int(rawLimit)
+            } else {
+                limit = nil
+            }
+            return .reclassifyFDC(
+                estateID: try d.optionalUUID("estate_id"),
+                apply: apply,
+                mode: modeStr,
+                limit: limit)
         case "moot_palace_import":
             let d = try decoder(arguments, ["palace_path", "mode", "estate_id"])
             let raw = try d.optionalString("mode") ?? ImportMode.foreground.rawValue
@@ -248,12 +275,17 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
     public let handle: EstateHandle
     public let selectedEstateID: UUID
     public let now: Date
+    /// Server identity threaded from the dispatcher; stamped in the audit trail
+    /// of every `reanchorAnchor` write so automated FDC repairs are attributed
+    /// to the MCP server, not to the estate owner.
+    public let serverIdentity: String
 
-    public init(kit: GeniusLocusKit, handle: EstateHandle, selectedEstateID: UUID, now: Date) {
+    public init(kit: GeniusLocusKit, handle: EstateHandle, selectedEstateID: UUID, now: Date, serverIdentity: String) {
         self.kit = kit
         self.handle = handle
         self.selectedEstateID = selectedEstateID
         self.now = now
+        self.serverIdentity = serverIdentity
     }
 
     public func execute(_ request: AriaV2DataMobilityRequest) async throws -> AriaV2DataMobilityOutcome {
@@ -279,8 +311,8 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
                     : "Reindexing is already running."
             )
 
-        case .reclassifyFDC:
-            return try await reclassifyFDC()
+        case .reclassifyFDC(_, let apply, let mode, let limit):
+            return try await reclassifyFDC(apply: apply, mode: mode, limit: limit)
 
         case .fileDataset, .datasetQuery, .datasetStats:
             return try await datasetOutcome(request)
@@ -385,58 +417,303 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
         }
     }
 
-    private func reclassifyFDC() async throws -> AriaV2DataMobilityOutcome {
+    // MARK: - FDC reclassification
+
+    /// Full scan-and-apply reclassification. Phase A runs the expensive
+    /// classify pass in parallel across active processors; Phase B applies
+    /// repairs serially in scan order so the audit trail is deterministic.
+    ///
+    /// Apply repairs ONLY the primary udcCode + wikidataQID. udcFacets and
+    /// wikidataQidsSecondary are carried forward unchanged — FDC re-lookup
+    /// has no opinion on secondary classification, and a reclassify that
+    /// wiped facets/secondary QIDs a human or the enrichment daemon attached
+    /// would be a silent data loss. See contract §6.
+    private func reclassifyFDC(apply: Bool, mode: String, limit: Int?) async throws -> AriaV2DataMobilityOutcome {
+        let fdcMode = mode == "all" ? FDCReclassifyMode.all : FDCReclassifyMode.suspectOnly
+        let currentFDCDataVersion = FDC.dataVersion
+        let currentFDCRecalculationVersion = FDC.recalculationVersion
+
         let estate = try await kit.estate(for: handle)
+        let priorFloor = try await estate.meta(key: Self.fdcRecalcedDataVersionMetaKey)
         let drawers = try await estate.allDrawers()
         let active = drawers.filter {
-            $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal && $0.contentKind != .dataset
+            // Dataset handles (contentKind == .dataset) carry structured JSON,
+            // not classifiable free text. The FDC classifier must never reclassify
+            // them — doing so would corrupt the DatasetHandleContent payload.
+            // MX-TAB-4 locked decision: FDC classifier boundary.
+            $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal
+                && $0.contentKind != .dataset
         }
-        let scannedDrawers = active.prefix(50_000)
+        let scannedDrawers = limit.map { Array(active.prefix($0)) } ?? active
+
+        // Phase A — PARALLEL classify. Each drawer's content anchor is a pure
+        // function of its content and stored kind over the pinned FDC artifacts:
+        // the `recordNovel: false` seam skips the shared-mutable novel-token
+        // pool write, and every other artifact on the path is read-only after
+        // init or lock-guarded. Results are indexed parallel to `scannedDrawers`
+        // to preserve scan order for the serial audited write in Phase B.
+        let anchors = await Self.classifyContentsInParallel(
+            scannedDrawers.map {
+                FDCReclassifyInput(
+                    content: $0.content,
+                    contentKind: $0.contentKind == .code ? .code : .text)
+            })
+
+        // Phase B — SERIAL, ORDERED apply. All counting, candidate selection,
+        // example capture, and the audited `reanchorAnchor` write run in scan
+        // order exactly as before the parallel classify was introduced, so
+        // output (counters, ordered changes list, audit sequence) is
+        // byte-identical to the serial version.
         var scanned = 0
+        var emptyContent = 0
         var unchanged = 0
-        var candidates = 0
-        let updated = 0
+        var candidateCount = 0
+        var applied = 0
+        var skippedNonCandidateChanges = 0
         var unclassifiedAfter = 0
-        for drawer in scannedDrawers {
+        var examples: [FDCReclassifyChange] = []
+
+        for (index, drawer) in scannedDrawers.enumerated() {
             scanned += 1
-            let anchor = EideticLib.lookup(
-                drawer.content,
-                contentKind: drawer.contentKind == .code ? .code : .text,
-                recordNovel: false)
-            let oldCode = normalizedFDCCode(drawer.udcCode)
-            let oldQID = normalizedQID(drawer.wikidataQID)
-            let newCode = normalizedFDCCode(anchor.code)
-            let newQID = normalizedQID(anchor.wikidataQID)
+            if drawer.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                emptyContent += 1
+            }
+
+            let oldCode = Self.normalizedFDCCode(drawer.udcCode)
+            let oldQID = Self.normalizedQID(drawer.wikidataQID)
+            let anchor = anchors[index]
+            let newCode = Self.normalizedFDCCode(anchor.code)
+            let newQID = Self.normalizedQID(anchor.wikidataQID)
+
             if oldCode == newCode && oldQID == newQID {
                 unchanged += 1
                 continue
             }
-            let shouldRepair = newCode == "000" || oldCode == "000" || (oldCode == newCode && oldQID != newQID)
-            guard shouldRepair else { continue }
-            candidates += 1
-            if newCode == "000" { unclassifiedAfter += 1 }
+
+            let candidate = Self.shouldRepairFDCAnchor(
+                mode: fdcMode, oldCode: oldCode, oldQID: oldQID,
+                newCode: newCode, newQID: newQID)
+            guard candidate else {
+                skippedNonCandidateChanges += 1
+                continue
+            }
+
+            candidateCount += 1
+            if newCode == Self.fdcSentinelCode { unclassifiedAfter += 1 }
+
+            let change = FDCReclassifyChange(
+                id: drawer.id, oldCode: oldCode, oldQID: oldQID,
+                newCode: newCode, newQID: newQID)
+            if examples.count < 25 { examples.append(change) }
+
+            if apply {
+                // Repair only the primary udcCode + wikidataQID that FDC re-lookup
+                // produced. udcFacets and wikidataQidsSecondary are carried forward
+                // from the existing drawer anchor — FDC re-lookup has no opinion on
+                // secondary classification, so a reclassify apply must not silently
+                // wipe facets/secondary QIDs a human or the enrichment daemon
+                // previously attached. `changedBy: serverIdentity` attributes this
+                // automated repair correctly in the audit trail.
+                try await estate.reanchorAnchor(
+                    rowID: drawer.id,
+                    toLattice: LatticeAnchor(
+                        udcCode: newCode,
+                        udcFacets: drawer.udcFacets,
+                        wikidataQID: newQID,
+                        wikidataQidsSecondary: drawer.wikidataQidsSecondary),
+                    changedBy: serverIdentity,
+                    reason: "FDC reclassified via moot_reclassify_fdc",
+                    now: now)
+                applied += 1
+            }
         }
-        return .init(data: .object([
-            "applied": .bool(false),
-            "mode": .string("suspectOnly"),
+
+        // Floor stamp: write estate-wide floor only on a complete full-mode
+        // no-limit apply with no non-candidate changes left over. Every other
+        // combination leaves the stored floor untouched. See contract §4.
+        var floorAfter = priorFloor
+        let floorStampStatus: String
+        if apply && fdcMode == .all && limit == nil && skippedNonCandidateChanges == 0 {
+            try await estate.setMeta(
+                key: Self.fdcRecalcedDataVersionMetaKey,
+                value: currentFDCRecalculationVersion)
+            floorAfter = currentFDCRecalculationVersion
+            floorStampStatus = "stamped"
+        } else if !apply {
+            floorStampStatus = "dry-run"
+        } else if limit != nil {
+            floorStampStatus = "skipped: limited run cannot update estate-wide floor"
+        } else if fdcMode != .all {
+            floorStampStatus = "skipped: mode=all is required for an estate-wide floor"
+        } else {
+            floorStampStatus = "skipped: changed non-suspect anchors remain"
+        }
+
+        // Build structured data (contract §3: 18 fields, 4 optional).
+        let estateIDStr = AriaV2ArgumentDecoder.canonicalUUID(selectedEstateID)
+        var data: [String: JSONValue] = [
+            "applied": .bool(apply),
+            "mode": .string(mode),
+            "estate_id": .string(estateIDStr),
+            "fdc_data_version": .string(currentFDCDataVersion),
+            "fdc_recalculation_version": .string(currentFDCRecalculationVersion),
             "scanned": .integer(Int64(scanned)),
             "unchanged": .integer(Int64(unchanged)),
-            "candidates": .integer(Int64(candidates)),
-            "updated": .integer(Int64(updated)),
+            "empty_content": .integer(Int64(emptyContent)),
+            "candidates": .integer(Int64(candidateCount)),
+            "updated": .integer(Int64(apply ? applied : 0)),
+            "would_update": .integer(Int64(apply ? 0 : candidateCount)),
             "unclassified_after": .integer(Int64(unclassifiedAfter)),
-        ]), compactText: "FDC reclassification is ready for review.")
+            "skipped_non_candidate_changes": .integer(Int64(skippedNonCandidateChanges)),
+            "floor_stamp": .string(floorStampStatus),
+            "changes": .array(examples.map { change -> JSONValue in
+                var entry: [String: JSONValue] = [
+                    "id": .string(change.id),
+                    "old_code": .string(change.oldCode),
+                    "new_code": .string(change.newCode),
+                ]
+                if let oldQID = change.oldQID { entry["old_qid"] = .string(oldQID) }
+                if let newQID = change.newQID { entry["new_qid"] = .string(newQID) }
+                return .object(entry)
+            }),
+            "changes_omitted": .integer(Int64(max(0, candidateCount - examples.count))),
+        ]
+        // Optional fields: omit the key entirely when there is no value.
+        if let before = priorFloor { data["estate_recalced_data_version_before"] = .string(before) }
+        if let after = floorAfter { data["estate_recalced_data_version_after"] = .string(after) }
+
+        // Compact text report mirrors the v1 text output; content[0].text is
+        // truncated at 512 Unicode scalars by the v2 envelope — the full report
+        // lives in structuredContent.data and is the correct assertion surface.
+        let limitSuffix = limit.map { " (limit \($0))" } ?? ""
+        var lines = [
+            "fdc_reclassify: \(apply ? "applied" : "dry-run")",
+            "mode: \(mode)",
+            "estate: \(handle.estateName) [\(handle.estateUUID)]",
+            "fdc_data_version: \(currentFDCDataVersion)",
+            "fdc_recalculation_version: \(currentFDCRecalculationVersion)",
+            "estate_recalced_data_version_before: \(priorFloor ?? "none")",
+            "scanned: \(scanned) active drawer(s)\(limitSuffix)",
+            "unchanged: \(unchanged)",
+            "empty_content: \(emptyContent)",
+            "candidates: \(candidateCount)",
+            apply ? "updated: \(applied)" : "would_update: \(candidateCount)",
+            "unclassified_after: \(unclassifiedAfter)",
+            "skipped_non_candidate_changes: \(skippedNonCandidateChanges)",
+            "estate_recalced_data_version_after: \(floorAfter ?? "none")",
+            "floor_stamp: \(floorStampStatus)",
+        ]
+        if !apply {
+            lines.append("dry_run: pass apply=true to write candidate anchor changes")
+        }
+        if fdcMode == .suspectOnly && skippedNonCandidateChanges > 0 {
+            lines.append("note: mode=suspectOnly left \(skippedNonCandidateChanges) changed non-suspect anchor(s) untouched; rerun with mode=all to reset every changed active drawer from content")
+        }
+        if !examples.isEmpty {
+            lines.append("changes:")
+            for example in examples {
+                lines.append("  \(example.id): \(example.oldAnchorLabel) -> \(example.newAnchorLabel)")
+            }
+            if candidateCount > examples.count {
+                lines.append("  ... \(candidateCount - examples.count) more")
+            }
+        }
+
+        return .init(data: .object(data), compactText: lines.joined(separator: "\n"))
     }
 
-    private func normalizedFDCCode(_ code: String) -> String {
+    // MARK: - FDC reclassification helpers
+
+    /// The `000` sentinel code that the FDC classifier emits when content
+    /// cannot be mapped to a subject category. Mirrors ToolDispatcher's
+    /// `defaultLatticeAnchor.udcCode`.
+    private static let fdcSentinelCode = "000"
+
+    /// Estate-wide floor meta key: after a successful full-mode no-limit apply
+    /// with no non-candidate changes, this records the composite
+    /// classifier/artifact version against which all active stored anchors have
+    /// been checked or repaired. Also read by `moot_estate_status` to report
+    /// `fdc_recalculation` state.
+    static let fdcRecalcedDataVersionMetaKey = "aria.fdc.recalced_data_version"
+
+    private static func normalizedFDCCode(_ code: String) -> String {
         let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "000" : trimmed
+        return trimmed.isEmpty ? fdcSentinelCode : trimmed
     }
 
-    private func normalizedQID(_ qid: String?) -> String? {
+    private static func normalizedQID(_ qid: String?) -> String? {
         guard let qid else { return nil }
         let trimmed = qid.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+
+    private static func shouldRepairFDCAnchor(
+        mode: FDCReclassifyMode,
+        oldCode: String,
+        oldQID: String?,
+        newCode: String,
+        newQID: String?
+    ) -> Bool {
+        switch mode {
+        case .all:
+            return true
+        case .suspectOnly:
+            return newCode == fdcSentinelCode
+                || oldCode == fdcSentinelCode
+                || (oldCode == newCode && oldQID != newQID)
+        }
+    }
+
+    /// Classify each content/kind pair to its FDC anchor across a bounded
+    /// worker pool, returning anchors in the SAME order as `inputs`.
+    ///
+    /// `EideticLib.lookup(_:recordNovel: false)` is a pure function of its
+    /// argument over the pinned artifacts and is thread-safe for concurrent
+    /// calls — the no-record seam skips the shared novel-token cache write,
+    /// and the reference tables / ranker / Q-ID-closure memo are read-only
+    /// after init or lock-guarded — so classifying in parallel yields the
+    /// exact anchor each content would produce serially, regardless of
+    /// scheduling. Concurrency is bounded to the active core count via a
+    /// sliding TaskGroup window so a large estate does not spawn one task
+    /// per drawer. Order is preserved by scattering results into an
+    /// index-keyed buffer, so the serial audited-write phase sees scan order.
+    private static func classifyContentsInParallel(
+        _ inputs: [FDCReclassifyInput]
+    ) async -> [Anchor] {
+        let count = inputs.count
+        if count == 0 { return [] }
+        let maxConcurrency = max(1, ProcessInfo.processInfo.activeProcessorCount)
+
+        var results = [Anchor?](repeating: nil, count: count)
+        await withTaskGroup(of: (Int, Anchor).self) { group in
+            var next = 0
+            let window = min(maxConcurrency, count)
+            while next < window {
+                let i = next
+                let input = inputs[i]
+                group.addTask {
+                    (i, EideticLib.lookup(
+                        input.content, contentKind: input.contentKind, recordNovel: false))
+                }
+                next += 1
+            }
+            while let (i, anchor) = await group.next() {
+                results[i] = anchor
+                if next < count {
+                    let j = next
+                    let input = inputs[j]
+                    group.addTask {
+                        (j, EideticLib.lookup(
+                            input.content, contentKind: input.contentKind, recordNovel: false))
+                    }
+                    next += 1
+                }
+            }
+        }
+        return results.map { $0! }
+    }
+
+    // MARK: - Palace / JSON / Vault outcomes
 
     private func palaceOutcome(_ report: ImportReport) -> AriaV2DataMobilityOutcome {
         .init(data: .object([
@@ -659,11 +936,42 @@ private enum AriaV2VaultLifecycleError: Error {
     case unsupportedOperation
 }
 
+// MARK: - FDC reclassification types
+
+/// Whether the scan examines only suspect anchors or all active drawers.
+private enum FDCReclassifyMode: Equatable {
+    case suspectOnly
+    case all
+}
+
+/// One candidate change identified during the classify scan.
+private struct FDCReclassifyChange {
+    let id: String
+    let oldCode: String
+    let oldQID: String?
+    let newCode: String
+    let newQID: String?
+
+    var oldAnchorLabel: String { Self.label(code: oldCode, qid: oldQID) }
+    var newAnchorLabel: String { Self.label(code: newCode, qid: newQID) }
+
+    private static func label(code: String, qid: String?) -> String {
+        if let qid { return "\(code) [\(qid)]" }
+        return code
+    }
+}
+
+/// Input to the parallel classify pass — content and kind only, no mutable state.
+private struct FDCReclassifyInput: Sendable {
+    let content: String
+    let contentKind: EideticContentKind
+}
+
 private extension AriaV2DataMobilityRequest {
     var estateID: UUID? {
         switch self {
         case .reindex(let estateID): return estateID
-        case .reclassifyFDC(let estateID): return estateID
+        case .reclassifyFDC(let estateID, _, _, _): return estateID
         case .palaceImport(_, _, let estateID), .jsonImport(_, let estateID): return estateID
         case .fileDataset(_, _, _, _, _, _, _, let estateID): return estateID
         case .datasetQuery(_, _, _, _, _, let estateID), .datasetStats(_, _, let estateID): return estateID

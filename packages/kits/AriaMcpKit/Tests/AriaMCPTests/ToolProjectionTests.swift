@@ -198,13 +198,14 @@ struct ToolProjectionTests {
         )
     }
 
-    /// `moot_reclassify_fdc` must pass the `InterfaceTools.isInterfaceTool`
-    /// membership gate so the serve host routes it to `runReclassifyFDC`
-    /// instead of throwing "Unknown tool" (-32601).
-    @Test func testMootReclassifyFDCPassesMembershipGate() {
+    /// `moot_reclassify_fdc` is handled exclusively by the v2 data-mobility
+    /// authority and must NOT be in the v1 InterfaceTools membership gate.
+    /// The serve host routes v2 tools through AriaV2SelectedCatalog, not
+    /// InterfaceTools.dispatch(), so it must not be dual-registered.
+    @Test func testMootReclassifyFDCIsV2OnlyNotInterfaceTool() {
         #expect(
-            InterfaceTools.isInterfaceTool("moot_reclassify_fdc"),
-            "moot_reclassify_fdc must be in the InterfaceTools membership gate"
+            !InterfaceTools.isInterfaceTool("moot_reclassify_fdc"),
+            "moot_reclassify_fdc is a v2-only tool and must not be in the InterfaceTools gate"
         )
     }
 
@@ -223,8 +224,9 @@ struct ToolProjectionTests {
     /// of bug where a case is added to the switch but omitted from `names`.
     ///
     /// The expected set is the canonical 21 Tier 1–5 tools plus maintenance
-    /// tools (`moot_reindex`, `moot_drain_status`, `moot_reclassify_fdc`,
-    /// `moot_palace_import`). If a new tool is added to the switch, add it here too.
+    /// tools (`moot_reindex`, `moot_drain_status`, `moot_palace_import`).
+    /// `moot_reclassify_fdc` was migrated to the v2 data-mobility authority
+    /// and is no longer in the v1 InterfaceTools switch.
     @Test func testMembershipGateCoversAllDispatchCases() {
         // All tools that appear in the InterfaceTools dispatch switch.
         let dispatchCases: [String] = [
@@ -242,8 +244,8 @@ struct ToolProjectionTests {
             "moot_write_journal", "moot_read_journal",
             // Tier 5
             "moot_estate_status", "moot_estate_map", "moot_estate_ping",
-            // Maintenance / admin
-            "moot_reindex", "moot_drain_status", "moot_reclassify_fdc", "moot_palace_import",
+            // Maintenance / admin (moot_reclassify_fdc is v2-only; not listed here)
+            "moot_reindex", "moot_drain_status", "moot_palace_import",
         ]
         for name in dispatchCases {
             #expect(

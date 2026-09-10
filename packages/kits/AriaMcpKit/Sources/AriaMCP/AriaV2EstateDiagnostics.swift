@@ -1,6 +1,7 @@
 import AriaMCPWire
 import Foundation
 import GeniusLocusKit
+import LatticeLib
 import LocusKit
 import NeuronKit
 import SubstrateTypes
@@ -95,6 +96,10 @@ public struct AriaV2EstateStatusData: Sendable, Equatable {
     public let memoryCount: Int
     public let factCount: Int
     public let drains: [AriaV2DrainStatusEntry]
+    /// FDC floor state: `current`, `missing`, or `stale`.
+    /// Computed from `aria.fdc.recalced_data_version` meta against the
+    /// current `FDC.recalculationVersion`. See contract §5.
+    public let fdcRecalculation: String
 }
 
 public struct AriaV2EstateMapRoom: Sendable, Equatable {
@@ -194,12 +199,25 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
         }
         let facts = try await kit.recallKGFacts(handle)
         let drains = try await typedDrains()
+        // FDC recalculation state: compare the stored floor meta key against
+        // the current recalculation version. Reuses the same computation as
+        // the v1 runEstateStatus in ToolDispatch.swift. See contract §5.
+        let fdcFloor = try await estate.meta(key: AriaV2GeniusLocusDataMobilityAuthority.fdcRecalcedDataVersionMetaKey)
+        let fdcRecalculation: String
+        if fdcFloor == FDC.recalculationVersion {
+            fdcRecalculation = "current"
+        } else if fdcFloor == nil {
+            fdcRecalculation = "missing"
+        } else {
+            fdcRecalculation = "stale"
+        }
         return AriaV2EstateStatusData(
             estateID: handle.estateUUID,
             estateName: handle.estateName,
             memoryCount: active.count,
             factCount: facts.count,
-            drains: drains)
+            drains: drains,
+            fdcRecalculation: fdcRecalculation)
     }
 
     public func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData {
@@ -408,6 +426,7 @@ private extension AriaV2EstateStatusData {
             "memory_count": .integer(Int64(memoryCount)),
             "fact_count": .integer(Int64(factCount)),
             "drains": .array(drains.map { $0.json }),
+            "fdc_recalculation": .string(fdcRecalculation),
         ])
     }
 }
