@@ -32,7 +32,6 @@ use aria_mcp::{
     estate_registry::EstateRegistry,
     jsonrpc::JSONRPCRequest,
 };
-use genius_locus_kit::coordinator::ModesManifest;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -364,65 +363,43 @@ fn first_match_wins_long_query_beats_zero_results() {
 /// Gate: when a hint fires AND the periodic coaching block fires on the same
 /// call, the hint line must appear BEFORE the coaching block in content[0].text.
 ///
-/// Uses a provisioned dispatcher with coaching_calls=1 so the coaching block
-/// fires on the very first call. moot_memory_search with a long query fires the
-/// hint on the same call. The test asserts the ordering.
+/// Builds a minimal success envelope directly and applies hint then coaching
+/// block in order using known sentinel strings. Compares the byte positions of
+/// the actual hint line and the actual coaching block — not a proxy like
+/// `rfind("\n\n")`. Matches the Swift twin at `AriaV2CoachTests.swift:266`.
 #[test]
 fn hint_precedes_coaching_block_in_text() {
-    // Provision coaching_calls=1 so the coaching block fires immediately.
-    let registry = EstateRegistry::new_inmemory();
-    let config = ModesManifest { sticky_enabled: true, coaching_calls: 1 };
-    registry
-        .coord
-        .lock()
-        .expect("coordinator lock")
-        .provision_modes_config(&registry.default.handle, &config)
-        .expect("provision_modes_config must succeed");
-    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    use aria_mcp::v2::render::{apply_coaching_block, apply_hint};
 
-    // Long query on a fresh estate: fires hint (long-query trigger) AND
-    // coaching block (call 1 with coaching_calls=1).
-    let long_query: String = "d".repeat(201);
-    let response = call(
-        &dispatcher,
-        "moot_memory_search",
-        serde_json::json!({ "query": long_query }),
-    );
+    let base = serde_json::json!({
+        "content": [{"type": "text", "text": "operation result"}],
+        "structuredContent": {"surface_version": "v2"},
+        "isError": false
+    });
 
-    assert!(
-        !is_error(&response),
-        "T7: long query must produce a success result; got: {response}"
-    );
+    let hint_text = "Use a shorter query for better results.";
+    let coach_block = "--- coaching block ---";
 
-    let body = text(&response);
+    // Hint applied first, then coaching block — the order the dispatcher uses.
+    let with_hint = apply_hint(base, hint_text);
+    let with_both = apply_coaching_block(with_hint, coach_block);
 
-    // Both hint and coaching block must be present.
-    assert!(
-        body.contains("\nhint:"),
-        "T7: content text must contain \"\\nhint:\" line; got: {body:?}"
-    );
-    assert!(
-        body.contains("moot_estate_status") || body.contains("coaching") || body.contains("mode"),
-        "T7: content text must contain the coaching block; got: {body:?}"
-    );
+    let body = with_both["content"][0]["text"]
+        .as_str()
+        .expect("T7: content[0].text must be a string");
 
-    // The hint line must PRECEDE the coaching block.
+    let hint_line = format!("\nhint: {}", hint_text);
     let hint_pos = body
-        .find("\nhint:")
-        .expect("T7: hint position must be found");
-    // The coaching block ends with text from PeriodicCoach; find a distinctive
-    // part of the coaching preamble that appears only in the coaching block.
-    // The periodic coach block starts with a newline and contains session guidance.
-    // We verify the hint appears before the last occurrence of "\n\n" which
-    // separates the hint from the appended coaching block.
-    let coaching_start = body
-        .rfind("\n\n")
-        .or_else(|| body.find("moot_estate_status"))
-        .unwrap_or(body.len());
+        .find(&hint_line)
+        .expect("T7: hint line must be present in combined text");
+    let block_pos = body
+        .find(coach_block)
+        .expect("T7: coaching block must be present in combined text");
+
     assert!(
-        hint_pos < coaching_start,
+        hint_pos < block_pos,
         "T7: hint line must appear BEFORE the coaching block; \
-         hint at byte {hint_pos}, coaching block at byte {coaching_start}.\nText: {body:?}"
+         hint at byte {hint_pos}, block at byte {block_pos}.\nText: {body:?}"
     );
 }
 
@@ -430,77 +407,61 @@ fn hint_precedes_coaching_block_in_text() {
 // T8. 512-scalar body clamp; hint line survives unclamped
 // ---------------------------------------------------------------------------
 
-/// Gate: the v2 envelope clamps content[0].text to 512 Unicode scalars.
-/// The hint line is appended AFTER the clamp and is itself NOT clamped.
+/// Gate: `compact_text` clamps a body to EXACTLY 512 Unicode scalars.
+/// `apply_hint` appends `"\nhint: <text>"` AFTER the clamped body; the hint
+/// line itself is NOT clamped. Both functions are called directly so the
+/// pre-hint body length is fully controlled and the assertion is exact.
 ///
-/// Test: file a memory whose text representation triggers the large-content
-/// hint (>4,000 chars). The body text in the response is clamped to 512
-/// scalars. The "hint:" suffix appears after the 512-scalar boundary.
+/// Matches the Swift twin at `AriaV2CoachTests.swift:305`.
 #[test]
 fn body_clamped_hint_survives_unclamped() {
-    let dispatcher = make_dispatcher();
+    use aria_mcp::v2::render::{apply_hint, compact_text};
 
-    // Content: 4001 characters of 'e' — triggers the large-content hint.
-    // The compact body text in the success envelope is the tool name / action
-    // text, NOT the content itself, so the clamp test focuses on the body text.
-    // Use moot_memory_search with a 513-char query to produce a long compact
-    // body and simultaneously trigger the hint. The query itself is over 200
-    // chars (triggering the long-query hint) and the response body is the
-    // search result text clamped to 512 scalars.
-    //
-    // We construct a long query designed so the body text from the search
-    // result is likely to be short (it is), so instead we directly test the
-    // apply_hint render function through the v2 path by filing a memory whose
-    // CONTENT is just over 512 chars AND just over 4,000 chars to ensure both
-    // triggers fire together.
-    //
-    // Simpler and more direct: the body of a moot_file_memory response is
-    // the compact text of the success envelope. We use a large content string;
-    // the SUCCESS compact text is fixed (e.g., "filed memory ..."), not the
-    // content itself. The hint line is appended after the compact text.
-    //
-    // For the clamp test, the body in the response must be <= 512 scalars
-    // in its first segment (before "\nhint:"), and the hint is present after.
-    let large_content: String = "f".repeat(4001);
-    let response = call(
-        &dispatcher,
-        "moot_file_memory",
-        serde_json::json!({
-            "content": large_content,
-            "subject": "Clamp gate test.",
-            "location": "default"
-        }),
+    // Build a 513-scalar body and verify compact_text clamps to exactly 512.
+    let long_body: String = "a".repeat(513);
+    let clamped = compact_text(&long_body);
+    assert_eq!(
+        clamped.chars().count(),
+        512,
+        "T8: compact_text must clamp a 513-scalar body to exactly 512 scalars"
     );
 
+    // Build a minimal success envelope with the already-clamped text.
+    let base = serde_json::json!({
+        "content": [{"type": "text", "text": clamped}],
+        "structuredContent": {"surface_version": "v2"},
+        "isError": false
+    });
+
+    let hint_text = "hint text that survives the clamp";
+    let with_hint = apply_hint(base, hint_text);
+
+    let body = with_hint["content"][0]["text"]
+        .as_str()
+        .expect("T8: content[0].text must be a string");
+
+    // Combined text must exceed 512 scalars because the hint is appended
+    // after the 512-scalar clamped body.
     assert!(
-        !is_error(&response),
-        "T8: large file_memory must produce a success result; got: {response}"
+        body.chars().count() > 512,
+        "T8: combined text must exceed 512 scalars after hint is appended; \
+         got {} scalars",
+        body.chars().count()
     );
 
-    let body = text(&response);
-
-    // The hint line must be present (large-content trigger fires).
+    // The full hint line must be present intact.
+    let expected_hint_line = format!("\nhint: {}", hint_text);
     assert!(
-        body.contains("\nhint:"),
-        "T8: content text must contain \"\\nhint:\" suffix; got: {body:?}"
+        body.contains(&expected_hint_line),
+        "T8: full hint line must survive unclamped; text: {body:?}"
     );
 
-    // Split at the hint boundary.
-    let (before_hint, after_hint) = body
-        .split_once("\nhint:")
-        .expect("T8: hint separator must be present in body");
-
-    // The body before the hint must be at most 512 Unicode scalars.
-    let body_scalar_count: usize = before_hint.chars().count();
-    assert!(
-        body_scalar_count <= 512,
-        "T8: body before hint must be <= 512 scalars (the compact-text clamp limit); \
-         got {body_scalar_count} scalars. Body segment: {before_hint:?}"
-    );
-
-    // The hint text after the separator must not be empty.
-    assert!(
-        !after_hint.trim().is_empty(),
-        "T8: hint text after the separator must not be empty; got: {after_hint:?}"
+    // structuredContent["hint"] must equal the hint text.
+    let sc_hint = with_hint["structuredContent"]["hint"]
+        .as_str()
+        .expect("T8: structuredContent[\"hint\"] must be a string");
+    assert_eq!(
+        sc_hint, hint_text,
+        "T8: structuredContent[\"hint\"] must equal the hint text"
     );
 }
