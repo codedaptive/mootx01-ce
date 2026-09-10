@@ -56,6 +56,9 @@ impl<'a> SelectedEstateDiagnosticsAuthority<'a> {
             drains: Vec::new(),
             rebuild: EstateRebuildState::Idle,
             timing: EstateTiming { watermark_ms: 0, truncated: false },
+            // Populated by the Status arm via get_meta; left None for all
+            // other operations (Ping, Map) which do not need the FDC floor.
+            fdc_floor: None,
         }
     }
 
@@ -190,6 +193,13 @@ impl EstateDiagnosticsAuthority for SelectedEstateDiagnosticsAuthority<'_> {
                     })
                     .collect();
                 snapshot.drains = Self::drains(&coord, handle)?;
+                // Read the FDC floor from the estate meta table. The coord
+                // lock is already held; go through the store directly to
+                // avoid a double-lock. None means the key has never been set.
+                snapshot.fdc_floor = self.registry.default.store
+                    .get_meta(crate::interface_tools::FDC_RECALCED_DATA_VERSION_META_KEY)
+                    .ok()
+                    .flatten();
             }
             EstateDiagnosticsOperation::Map => {
                 let drawers = coord
