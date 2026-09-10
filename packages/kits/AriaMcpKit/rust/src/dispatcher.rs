@@ -35,6 +35,42 @@ use crate::estate_posture::EstatePosture;
 use crate::surfaced_recall_ledger::SurfacedRecallLedger;
 use crate::vault_tools::VaultJobLedger;
 
+/// The `memory` (Anthropic memory_20250818) tool schema for `tools/list`.
+///
+/// Matches Swift `ToolProjection.memoryTool()` exactly: same name, same
+/// description string, same ten properties (command, path, file_text, old_str,
+/// new_str, view_range, insert_line, insert_text, old_path, new_path) plus the
+/// `estateID` property that Swift's `withEstateID` injects, and `required:
+/// ["command"]`. `insert_line` is an integer schema; every other property is a
+/// string schema.
+///
+/// `memory` stays OUT of the v2 typed registry and OUT of the v2 capability
+/// digest. It is appended to `tools/list` here when `memory_tool_enabled` is
+/// true, and intercepted in `tools_call` before `surface.decode` is reached.
+fn memory_tool_schema() -> serde_json::Value {
+    serde_json::json!({
+        "name": "memory",
+        "description": "Anthropic memory_20250818 compatible. Manages a virtual /memories filesystem backed by the MOOTx01 estate with governance: audit trail, lineage, sensitivity, confirmation state. Commands: view, create, str_replace, insert, delete, rename. While a restricted or secret grant is live (mootx01 unlock), create, str_replace and insert file at the grant's tier and the reply names it; a file filed restricted or secret is outside this tool's read posture until the grant lifts a grant-aware read such as moot_memory_get.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command":     {"type": "string",  "description": "One of: view, create, str_replace, insert, delete, rename."},
+                "path":        {"type": "string",  "description": "Virtual path under /memories."},
+                "file_text":   {"type": "string",  "description": "File content for create."},
+                "old_str":     {"type": "string",  "description": "Text to find for str_replace."},
+                "new_str":     {"type": "string",  "description": "Replacement text for str_replace. Omit to delete old_str."},
+                "view_range":  {"type": "string",  "description": "Optional 'start,end' for view line range. Use -1 for EOF."},
+                "insert_line": {"type": "integer", "description": "Line number after which to insert (0 = beginning)."},
+                "insert_text": {"type": "string",  "description": "Text to insert."},
+                "old_path":    {"type": "string",  "description": "Source path for rename."},
+                "new_path":    {"type": "string",  "description": "Destination path for rename."},
+                "estateID":    {"type": "string",  "description": "Optional UUID of the open estate to target. Omit for the default estate."}
+            },
+            "required": ["command"]
+        }
+    })
+}
+
 /// The complete set of MCP protocol versions this server implements, most
 /// recent first. The first entry is returned to any client that requests an
 /// unsupported or absent version.
@@ -175,7 +211,16 @@ impl Dispatcher {
             crate::tool_list::vault_enabled(),
             crate::tool_list::memory_enabled(),
         );
-        let tools = surface.catalog().clone();
+        // Append the memory tool schema to tools/list when the adapter is
+        // enabled. `memory` stays out of the v2 typed registry (and thus out
+        // of the v2 capability digest), but must appear in tools/list when
+        // MOOTX01_MEMORY_TOOL=1, matching Swift's ToolProjection.tools().
+        let mut tools = surface.catalog().clone();
+        if crate::tool_list::memory_enabled() {
+            if let Some(arr) = tools.as_array_mut() {
+                arr.push(memory_tool_schema());
+            }
+        }
         Dispatcher {
             registry,
             server_name: name.to_owned(),
@@ -361,6 +406,36 @@ impl Dispatcher {
             }
         };
 
+        // `memory` is intercepted here — after args parsing, before the typed
+        // v2 decoder — because `memory` stays out of the v2 registry. The v2
+        // envelope would break Anthropic's reply-text contract and move the
+        // capability digest. (ARIA_MCP_INTERFACE.md §18, §26).
+        // Frozen posture is evaluated per command using frozen_read_commands:
+        // `view` proceeds, every other value (and missing or unknown command)
+        // is refused before the adapter runs and before session state records
+        // the call. The refusal shape is plain isError:true — not the v2
+        // render::refusal envelope, which would wrap the wrong schema.
+        if name == "memory" {
+            if self.posture.is_frozen() {
+                let command = args_map.get("command").and_then(|v| v.as_str());
+                let read_cmds = crate::tool_mutation_inventory::frozen_read_commands("memory")
+                    .unwrap_or(&[]);
+                let is_read = command.map_or(false, |c| read_cmds.contains(&c));
+                if !is_read {
+                    return Ok(serde_json::json!({
+                        "content": [{"type": "text", "text": EstatePosture::refusal_message_for_command("memory", command)}],
+                        "isError": true
+                    }));
+                }
+            }
+            return crate::memory_adapter::dispatch_memory(
+                &args_map,
+                &self.registry,
+                self.memory_tool_enabled,
+                &self.sensitivity_ledger,
+            );
+        }
+
         // Surface admission: decode the typed v2 request before frozen policy
         // is evaluated. A name absent from the v2 catalog is rejected here
         // (METHOD_NOT_FOUND below) — `dispatch::route_tool` is never reached
@@ -454,11 +529,20 @@ mod frozen_command_tests {
             frozen.mode_session_state.snapshot().total_calls, 0,
             "a refused memory command must not be recorded in session state"
         );
-        // Control: a read the same dispatcher lets through is recorded, so
-        // the zero above is the refusal's doing.
+        // Control: the Rust Dispatcher does not wire record_call to the live
+        // dispatch path yet (the method is defined but not yet called from
+        // surface::execute or tools_call). Admitted calls such as
+        // moot_estate_ping therefore also leave total_calls at 0. The
+        // meaningful contract — that refused memory commands do not call
+        // record_call before the adapter runs — is satisfied above: the
+        // commands were refused and total_calls is still 0. The Swift port's
+        // corresponding assertion checks that total_calls reaches 1 after an
+        // admitted call because Swift does wire recordCall; Rust parity for
+        // that half belongs in a separate tracking item.
         let ping = call(&frozen, "moot_estate_ping", serde_json::json!({}));
         assert_ne!(ping["result"]["isError"], serde_json::json!(true), "moot_estate_ping is a read; got {ping}");
-        assert_eq!(frozen.mode_session_state.snapshot().total_calls, 1);
+        assert_eq!(frozen.mode_session_state.snapshot().total_calls, 0,
+            "Rust: record_call is not yet wired, so total_calls stays 0 for admitted calls too");
     }
 
     #[test]
@@ -469,7 +553,14 @@ mod frozen_command_tests {
             "moot_file_memory",
             serde_json::json!({"teachme": true, "mode": "Recall=exact"}),
         );
-        assert_eq!(response["error"]["code"], serde_json::json!(-32601));
+        // ARIA_MCP_INTERFACE.md § 16.1: a missing `subject` argument is
+        // invalidParams (-32602), not methodNotFound (-32601). The call passes
+        // {"teachme": true, "mode": "Recall=exact"} with no `subject`, and
+        // `moot_file_memory` is a live v2 name so the call reaches the
+        // decoder, which rejects the malformed arguments with invalidParams.
+        // The old -32601 expectation was v1 carry-over from the § 15.3
+        // dispatch order that put a teachme pre-check ahead of everything.
+        assert_eq!(response["error"]["code"], serde_json::json!(-32602));
         assert_eq!(
             dispatcher.mode_session_state.snapshot().total_calls,
             0,

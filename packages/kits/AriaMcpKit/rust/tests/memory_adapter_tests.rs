@@ -21,7 +21,6 @@ use aria_mcp::{
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
     surfaced_recall_ledger::SurfacedRecallLedger,
-    tool_list::vault_enabled,
 };
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
