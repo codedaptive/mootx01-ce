@@ -37,7 +37,8 @@ use aria_mcp::{
 use genius_locus_kit::coordinator::ModesManifest;
 
 fn make_dispatcher() -> Dispatcher {
-    Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", "", None)
+    // OBSTACLE 3: build_advisory (6th arg) was removed in v2A; pass 5 args only.
+    Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", None)
 }
 
 /// Build a `Dispatcher` with a provisioned `ModesManifest` applied to the default
@@ -55,7 +56,8 @@ fn make_provisioned_dispatcher(sticky_enabled: bool, coaching_calls: usize) -> D
         .expect("coordinator lock")
         .provision_modes_config(&registry.default.handle, &config)
         .expect("provision_modes_config must succeed on in-memory estate");
-    Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", "", None)
+    // OBSTACLE 3: build_advisory (6th arg) was removed in v2A; pass 5 args only.
+    Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None)
 }
 
 fn tools_call_response(dispatcher: &Dispatcher, tool_name: &str, args_json: serde_json::Value) -> serde_json::Value {
@@ -630,12 +632,12 @@ fn answer_never_with_no_mode_is_unchanged() {
 /// Mirrors Swift test D2 `recallAutoE2eDispatcherPath`.
 #[test]
 fn sticky_recall_auto_e2e_dispatcher() {
+    // OBSTACLE 3: build_advisory (6th arg) was removed in v2A; pass 5 args only.
     let dispatcher = Dispatcher::new(
         EstateRegistry::new_inmemory_bare(),
         "ARIA_MCP_Rust",
         "test",
         "test-serial",
-        "",
         None,
     );
 
@@ -852,10 +854,14 @@ fn provisioned_coaching_calls_two_fires_on_call_two() {
     );
 }
 
-/// Byte-identity gate: `modes_teachme_guide()` must produce the same string as
-/// `TeachmeGuides.modesTeachmeGuide` in the Swift port. Both ports read the
-/// same `Tests/Conformance/modes_teachme_guide_fixture.json` file and assert
-/// against its `expected` field so any drift is caught in either port.
+/// OBSTACLE 2 / BLOCKED: `aria_mcp::teachme_guides` is a v1-only surface with no
+/// v2 equivalent (moot_help is the v2 help surface but does not expose a static
+/// guide string). The function `modes_teachme_guide()` does not exist in v2.
+/// Excluded from compilation with `#[cfg(any())]` to keep the test body in the
+/// file; it is BLOCKED in the V2COACH_CONVERT conversion table with reason
+/// "nothing replaced it — teachme_guides module is v1-only and absent from v2."
+/// Do NOT delete or stub this function.
+#[cfg(any())]
 #[test]
 fn modes_teachme_guide_byte_identity() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
