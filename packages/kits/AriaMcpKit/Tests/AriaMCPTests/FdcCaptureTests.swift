@@ -152,6 +152,52 @@ struct FdcCaptureTests {
     /// The Swift port surfaces the error via `LocusKitError.localizedDescription`
     /// or a structured catch — verify neither form leaks type names.
 
+    /// Filing a memory with an empty `location` string must produce a tool-level
+    /// error whose message contains the failing reason and does NOT contain
+    /// internal Swift or LocusKit type-chain names.
+    ///
+    /// Before B-6 the Rust port used `format!("{e:?}")` at the capture error
+    /// site, leaking `VerbDispatchError::Verb(UnderlyingEstateFailure { ... })`.
+    /// The Swift port surfaces the error via `LocusKitError.localizedDescription`
+    /// or a structured catch — verify neither form leaks type names.
+    @Test func emptyLocationProducesActionableError() async throws {
+        let (dispatcher, _, _) = try await makeDispatcher()
+
+        // In v2 the decoder validates location before dispatch and throws JSONRPCError
+        // for an empty value. The message must be actionable without leaking type-chains.
+        do {
+            let result = try await dispatcher.dispatch(
+                name: "moot_file_memory",
+                arguments: .object([
+                    "content":  .string("some content"),
+                    "subject":  .string("some content"),
+                    "location": .string(""),  // empty room — validator rejects this
+                ])
+            )
+            #expect(isError(result), "empty location must produce a tool-level error; got: \(result)")
+            let msg = text(of: result)
+            #expect(!msg.contains("UnderlyingEstateFailure"),
+                "error message must not leak 'UnderlyingEstateFailure'; got: \(msg)")
+            #expect(!msg.contains("VerbDispatchError"),
+                "error message must not leak 'VerbDispatchError'; got: \(msg)")
+            #expect(!msg.contains("LocusKitError"),
+                "error message must not leak 'LocusKitError'; got: \(msg)")
+            #expect(msg.contains("must not be empty") || msg.contains("empty"),
+                "error message must describe the failing condition; got: \(msg)")
+        } catch let error as JSONRPCError {
+            // v2 decoder threw before dispatch — still actionable English.
+            let msg = error.message
+            #expect(!msg.contains("UnderlyingEstateFailure"),
+                "thrown error must not leak 'UnderlyingEstateFailure'; got: \(msg)")
+            #expect(!msg.contains("VerbDispatchError"),
+                "thrown error must not leak 'VerbDispatchError'; got: \(msg)")
+            #expect(!msg.contains("LocusKitError"),
+                "thrown error must not leak 'LocusKitError'; got: \(msg)")
+            #expect(msg.contains("must not be empty") || msg.contains("empty"),
+                "thrown error must describe the failing condition; got: \(msg)")
+        }
+    }
+
     // MARK: - Reviewed relative-index aliases
 
     /// Reviewed computing aliases must survive the capture seam instead of
