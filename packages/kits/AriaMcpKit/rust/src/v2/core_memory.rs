@@ -60,7 +60,7 @@ pub trait V2CoreMemoryService: Send + Sync {
         &self,
         context: &V2MemoryOperationContext,
         request: &V2MemorySearchRequest,
-    ) -> Result<Vec<V2CompactMemory>, V2MemoryFailure>;
+    ) -> Result<V2MemorySearchResult, V2MemoryFailure>;
 
     /// This service is responsible for applying the same authorization and
     /// provenance/redaction gate to an absent and an inaccessible id.  The
@@ -71,6 +71,34 @@ pub trait V2CoreMemoryService: Send + Sync {
         context: &V2MemoryOperationContext,
         request: &V2MemoryGetRequest,
     ) -> Result<Vec<V2Memory>, V2MemoryFailure>;
+}
+
+/// The packaged answer block returned by the GLK results packager.
+/// Mirrors the Swift `GLKAnswerBlock` projected type in `AriaV2SearchResult`.
+pub struct V2SearchAnswerBlock {
+    /// Answer text (may be empty on the Rust path — no GroundedSynthesis).
+    pub text: String,
+    /// Packager confidence level name: "confident", "intermediate", or "weak".
+    pub confidence: String,
+    /// Canonical UUID strings of cited drawers.
+    pub citation_ids: Vec<String>,
+    /// m1 top-margin signal.
+    pub signals_m1: f64,
+    /// m2 lane-agreement signal.
+    pub signals_m2: f64,
+    /// m3 dense-spread signal.
+    pub signals_m3: f64,
+    /// m4 containment signal.
+    pub signals_m4: bool,
+}
+
+/// Packaged search result returned by the estate adapter. Wraps the compact
+/// memory rows and an optional answer block for `answer:always|auto` modes.
+/// The estate adapter runs GLKResultsPackager and anchor exclusion; the caller
+/// in `execute_memory_search` renders the compact text header.
+pub struct V2MemorySearchResult {
+    pub rows: Vec<V2CompactMemory>,
+    pub answer_block: Option<V2SearchAnswerBlock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,7 +359,7 @@ impl V2MemorySearchRequest {
             Some("contained")     => Some(V2SearchFilter::Contained),
             Some("pinned")        => Some(V2SearchFilter::Pinned),
             Some(unknown) => return Err(V2InvalidArgument::new("$.filter",
-                format!("Unknown filter: {unknown}"))),
+                format!("Unknown filter: {unknown}. Valid: unconfirmed, userConfirmed, exportable, contained, pinned"))),
         };
         let media_type = match optional_string(object, "media_type")? {
             None          => None,
@@ -479,7 +507,13 @@ pub struct V2Memory {
 pub struct V2FiledMemory { pub memory_id: Uuid, pub placement: V2Placement }
 
 #[derive(Serialize)] struct FileData { memory_id: String, placement: V2Placement, fetch: V2FetchReference }
-#[derive(Serialize)] struct SearchData { results: Vec<V2CompactMemory> }
+#[derive(Serialize)] struct SearchSignalsData { margin: f64, lane_agreement: f64, dense_spread: f64, containment: bool }
+#[derive(Serialize)] struct SearchAnswerData { text: String, confidence: String, citations: Vec<String>, signals: SearchSignalsData }
+#[derive(Serialize)] struct SearchData {
+    results: Vec<V2CompactMemory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answer: Option<SearchAnswerData>,
+}
 #[derive(Serialize)] struct GetData { memories: Vec<V2Memory> }
 
 pub fn run_file_memory(arguments: &JsonValue, dependencies: &V2CoreMemoryDependencies<'_>) -> Result<Value, JSONRPCError> {
@@ -499,7 +533,7 @@ pub fn execute_file_memory(request: V2FileMemoryRequest, dependencies: &V2CoreMe
         return Ok(failure.render(FILE_MEMORY_TOOL, &meta));
     }
     match dependencies.service.file_memory(&context, &request) {
-        Ok(filed) => success(FILE_MEMORY_TOOL, &FileData { memory_id: canonical_uuid(filed.memory_id), placement: filed.placement, fetch: fetch(filed.memory_id) }, &meta, "filed memory").map_err(jsonrpc_internal),
+        Ok(filed) => success(FILE_MEMORY_TOOL, &FileData { memory_id: canonical_uuid(filed.memory_id), placement: filed.placement, fetch: fetch(filed.memory_id) }, &meta, &format!("filed memory {}", canonical_uuid(filed.memory_id))).map_err(jsonrpc_internal),
         Err(failure) => Ok(failure.render(FILE_MEMORY_TOOL, &meta)),
     }
 }
@@ -516,21 +550,79 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
         return Ok(failure.render(MEMORY_SEARCH_TOOL, &meta));
     }
     match dependencies.service.search_memories(&context, &request) {
-        Ok(mut results) => {
-            results.truncate(request.limit);
-            for row in &mut results {
+        Ok(mut result) => {
+            // Safety clamp: the estate adapter should already respect limit but
+            // we enforce it here to protect callers from an over-returning adapter.
+            result.rows.truncate(request.limit);
+            for row in &mut result.rows {
                 row.fetch = fetch(row.memory_id);
-                if let Some(context) = &row.context {
-                    row.context = Some(context.chars().take(512).collect());
+                if let Some(ctx) = &row.context {
+                    row.context = Some(ctx.chars().take(512).collect());
                 }
                 if let Some(excerpt) = &row.excerpt {
                     row.excerpt = Some(excerpt.chars().take(512).collect());
                 }
             }
-            dependencies.surfaced_recall_ledger.record_surfaced(&results.iter().map(|row| canonical_uuid(row.memory_id)).collect::<Vec<_>>(), context.now_millis / 1_000);
-            let count = results.len();
-            let compact = format!("found {} candidate {}", count, if count == 1 { "memory" } else { "memories" });
-            success(MEMORY_SEARCH_TOOL, &SearchData { results }, &meta, &compact).map_err(jsonrpc_internal)
+            dependencies.surfaced_recall_ledger.record_surfaced(
+                &result.rows.iter().map(|row| canonical_uuid(row.memory_id)).collect::<Vec<_>>(),
+                context.now_millis / 1_000,
+            );
+            let count = result.rows.len();
+            let found_part = format!("found {} candidate {}", count, if count == 1 { "memory" } else { "memories" });
+
+            // Build compact text. For answer:never the header is just found_part.
+            // For answer:always|auto, prepend the packager block header lines before
+            // found_part, matching the Swift v2 AriaV2MemoryOperations.search format.
+            let mut compact = if let Some(ref block) = result.answer_block {
+                let mut lines: Vec<String> = Vec::new();
+                if !block.text.is_empty() {
+                    lines.push(format!("answer: {}", block.text));
+                }
+                lines.push(format!("confidence: {}", block.confidence));
+                if !block.citation_ids.is_empty() {
+                    let cit = block.citation_ids.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+                    lines.push(format!("citations: {cit}"));
+                }
+                lines.push(format!(
+                    "signals: margin={} lane_agreement={} dense_spread={} containment={}",
+                    block.signals_m1, block.signals_m2, block.signals_m3, block.signals_m4,
+                ));
+                format!("{}\n{}", lines.join("\n"), found_part)
+            } else {
+                found_part
+            };
+
+            // explain: append discrimination line when signal level warrants it.
+            // Mirrors Swift AriaV2MemoryOperations.search() explain branch: compute
+            // RecallDiscrimination over visible hit scores, add result_line for
+            // low and medium only (high/single/not_found are silent in v2 compact).
+            if request.explain.unwrap_or(false) {
+                let scores: Vec<f64> = result.rows.iter().filter_map(|r| r.score).collect();
+                let disc = crate::recall_discrimination::classify(&scores);
+                match disc {
+                    crate::recall_discrimination::DiscriminationLevel::Low
+                    | crate::recall_discrimination::DiscriminationLevel::Medium => {
+                        compact.push('\n');
+                        compact.push_str(crate::recall_discrimination::result_line(disc));
+                    }
+                    _ => {}
+                }
+            }
+
+            // Build answer data for the structured response field.
+            let answer_data = result.answer_block.map(|block| SearchAnswerData {
+                text: block.text,
+                confidence: block.confidence,
+                citations: block.citation_ids,
+                signals: SearchSignalsData {
+                    margin: block.signals_m1,
+                    lane_agreement: block.signals_m2,
+                    dense_spread: block.signals_m3,
+                    containment: block.signals_m4,
+                },
+            });
+
+            success(MEMORY_SEARCH_TOOL, &SearchData { results: result.rows, answer: answer_data }, &meta, &compact).map_err(jsonrpc_internal)
         }
         Err(failure) => Ok(failure.render(MEMORY_SEARCH_TOOL, &meta)),
     }
