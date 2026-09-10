@@ -188,7 +188,7 @@ struct PluginPackageShapeTests {
     /// materializes), and the Rust twin in core/depth.rs
     /// (`embedded_codex_hook_commands_never_resolve_via_bare_path`) covers
     /// the include_str! bundle. Asserted against the decoded bundle (never a
-    /// substring scan of the EmbeddedArtifacts literal), at the same
+    /// substring scan of the EmbeddedArtifactsV2 literal), at the same
     /// generation boundary as the rest of this suite. A stale or hand-edited
     /// embed that reintroduces a bare invocation fails here even when every
     /// checked-in wiring file is clean — this repo has shipped stale embeds
