@@ -1370,10 +1370,12 @@ fn data_mobility_data_schema(name: &str) -> Option<Value> {
             Some(exact(
                 json!({
                     "applied": {"type":"boolean"},
-                    "mode": string(),
+                    // Wire-value enum matches the FdcReclassifyMode Swift enum: suspectOnly or all.
+                    // minLength on version strings: non-empty string enforced at schema level.
+                    "mode": {"type":"string","enum":["suspectOnly","all"]},
                     "estate_id": {"type":"string","format":"uuid"},
-                    "fdc_data_version": string(),
-                    "fdc_recalculation_version": string(),
+                    "fdc_data_version": {"type":"string","minLength":1},
+                    "fdc_recalculation_version": {"type":"string","minLength":1},
                     "scanned": count(),
                     "unchanged": count(),
                     "empty_content": count(),
