@@ -397,19 +397,32 @@ fn apply_repairs_primary_code_but_retains_facets_and_secondary_qids() {
 // ---------------------------------------------------------------------------
 // Twin 10 of 10 — Swift: parallelClassifyIsDeterministicAndMatchesSerialAnchors
 // ---------------------------------------------------------------------------
-/// Repeated dry runs over 30 drawers produce identical output.
+/// Repeated dry runs over a HETEROGENEOUS estate produce identical output.
 /// Parallel classify is deterministic — same input → same output every run.
+///
+/// Mirrors Swift's parallelClassifyIsDeterministicAndMatchesSerialAnchors:
+///  - 20 git-command drawers → classify to the "000" sentinel
+///  - 10 biology-prose drawers → classify to a real subject code (≠ "000", ≠ "362.4")
+///  - 30 total candidates with mode=all, saturating the 25-example cap so the
+///    order of the emitted change list is observable: a racing write or
+///    order-dependent classify would perturb counters across repeated runs.
+///
+/// Asserts the 25-example cap and changes_omitted=5, both contract fields
+/// that the prior homogeneous test did not exercise.
 #[test]
 fn parallel_classify_is_deterministic_over_large_estate() {
-    // bare: only the 30 seeded drawers exist; pre-seeded suspect drawers would inflate candidate count.
+    // bare: only the seeded drawers exist; pre-seeded suspects would inflate candidates.
     let registry = EstateRegistry::new_inmemory_bare();
     let mut sentinel_ids = Vec::new();
+    let mut subject_ids = Vec::new();
     {
         let coord = registry.default.coord.lock().unwrap();
         let handle = &registry.default.handle;
-        for i in 0_i64..30 {
+
+        // 20 git-command drawers — FDC classifier maps git content to the "000" sentinel.
+        for i in 0_i64..20 {
             let frame = CaptureFrame::new(
-                format!("git update-index --refresh iteration {i}"),
+                format!("git update-index --refresh && rm .git/index.lock iteration {i}"),
                 CaptureChannel::Typed,
                 "test-room",
                 LatticeAnchor::new("362.4", None, Some("Q12131".to_owned()), None),
@@ -420,41 +433,123 @@ fn parallel_classify_is_deterministic_over_large_estate() {
                 .expect("capture must succeed");
             sentinel_ids.push(d.id.clone());
         }
+
+        // 10 biology-prose drawers — FDC classifier maps biology content to a real
+        // subject code that is neither "000" nor the stale "362.4", exercising a
+        // second distinct classify outcome so the heterogeneous batch proves order
+        // independence.
+        for i in 0_i64..10 {
+            let frame = CaptureFrame::new(
+                "Biology is the scientific study of life and living organisms \
+                 including their physical structure chemical processes molecular \
+                 interactions physiological mechanisms and evolution",
+                CaptureChannel::Typed,
+                "test-room",
+                LatticeAnchor::new("362.4", None, None, None),
+                "fdc-reclassify-tests",
+                "minilm-v6",
+            );
+            let d = coord.capture(handle, frame, 1_700_000_000_100 + i)
+                .expect("capture must succeed");
+            subject_ids.push(d.id.clone());
+        }
     }
     let store = registry.default.store.clone();
     let dispatcher = Dispatcher::new(registry, "test", "test", "test", None);
 
-    // Repeated dry runs must produce identical results.
-    let first = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({}));
+    // (1) Invariance — repeated dry runs with mode=all must produce identical
+    //     structured data, including the capped 25-entry change list order.
+    let first = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({"mode": "all"}));
     assert!(is_success(&first), "first dry run must succeed, got: {first}");
     let first_d = data(&first).clone();
+    assert_eq!(first_d["scanned"], serde_json::json!(30), "scanned must be 30, got: {first_d}");
     assert_eq!(first_d["candidates"], serde_json::json!(30),
-        "suspectOnly must see all 30 git-sentinel candidates, got: {first_d}");
+        "all 30 drawers must be candidates with mode=all, got: {first_d}");
+    assert_eq!(first_d["would_update"], serde_json::json!(30),
+        "would_update must equal candidates on dry run, got: {first_d}");
+    // 30 candidates with a 25-example cap: changes list must be capped, omitted must be 5.
+    assert_eq!(
+        first_d["changes"].as_array().map(|a| a.len()).unwrap_or(0),
+        25,
+        "changes must be capped at 25 entries, got: {first_d}"
+    );
+    assert_eq!(first_d["changes_omitted"], serde_json::json!(5),
+        "changes_omitted must be 5 (30 candidates − 25 examples), got: {first_d}");
 
     for _ in 0..4 {
-        let repeat = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({}));
-        assert!(is_success(&repeat));
+        let repeat = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({"mode": "all"}));
+        assert!(is_success(&repeat), "repeat dry run must succeed");
         let repeat_d = data(&repeat);
         assert_eq!(repeat_d["candidates"], first_d["candidates"],
-            "candidate count must be deterministic");
+            "candidate count must be deterministic across runs");
         assert_eq!(repeat_d["changes"], first_d["changes"],
-            "changes list must be deterministic and stable");
+            "changes list must be deterministic and stable across parallel runs");
+        assert_eq!(repeat_d["changes_omitted"], first_d["changes_omitted"],
+            "changes_omitted must be stable across runs");
     }
 
-    // Apply — all 30 must be updated.
+    // (2) Golden values — apply through the parallel path, then read back anchors.
     let applied = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({
         "apply": true, "mode": "all"
     }));
     assert!(is_success(&applied), "apply must succeed, got: {applied}");
-    assert_eq!(data(&applied)["updated"], serde_json::json!(30));
+    assert_eq!(data(&applied)["updated"], serde_json::json!(30),
+        "all 30 must be updated on apply, got: {}", data(&applied));
 
     use locus_kit::drawer_store::DrawerStore;
+    // Git-content drawers must have been reclassified to the "000" sentinel.
     for id in &sentinel_ids {
         let row = store.get_drawer(id).expect("get_drawer must succeed")
             .expect("drawer must exist");
         assert_eq!(row.udc_code, "000",
-            "drawer {id} must be reclassified to sentinel 000, got {}", row.udc_code);
+            "git-content drawer {id} must be reclassified to sentinel 000, got {}", row.udc_code);
     }
+    // Biology-prose drawers must have been reclassified to a real subject code —
+    // neither the sentinel "000" nor the stale seed code "362.4".
+    for id in &subject_ids {
+        let row = store.get_drawer(id).expect("get_drawer must succeed")
+            .expect("drawer must exist");
+        assert_ne!(row.udc_code, "000",
+            "biology drawer {id} must NOT be reclassified to sentinel 000, got {}", row.udc_code);
+        assert_ne!(row.udc_code, "362.4",
+            "biology drawer {id} must NOT retain the stale seed code 362.4, got {}", row.udc_code);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Gate: v2 compact text report (ITEM 1 gate)
+// ---------------------------------------------------------------------------
+
+/// The v2 compact text in content[0].text must start with "fdc_reclassify: "
+/// and must contain the estate name, matching Swift's canonical output at
+/// AriaV2DataMobility.swift:590-592. This test drives the assertion red on
+/// the pre-fix code (which emits a generic string) and green after the fix.
+///
+/// A second assertion defends the specific estate: {name} [{uuid}] divergence
+/// that was the only delta between Rust v1 and Swift: the text must contain
+/// the estate name seeded into the registry.
+#[test]
+fn reclassify_compact_text_starts_with_fdc_reclassify_and_contains_estate_name() {
+    let registry = EstateRegistry::new_inmemory();
+    // Capture the estate name before moving the registry into the dispatcher.
+    let estate_name = registry.default.estate_name.clone();
+    let dispatcher = Dispatcher::new(registry, "test", "test", "test", None);
+
+    let result = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({}));
+    assert!(is_success(&result), "dry run must succeed, got: {result}");
+
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text must be a string");
+
+    assert!(
+        text.starts_with("fdc_reclassify: "),
+        "compact text must start with 'fdc_reclassify: ', got: {text}"
+    );
+    assert!(
+        text.contains(&estate_name),
+        "compact text must contain estate name '{estate_name}' in the 'estate:' line, got: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +559,8 @@ fn parallel_classify_is_deterministic_over_large_estate() {
 /// Unknown mode value is refused with a JSONRPC invalid-params error (code -32602).
 /// Per ARIA_MCP_INTERFACE.md §16.1: invalid arguments at the v2 decode stage
 /// become JSONRPCErrorCode::INVALID_PARAMS, visible at result["error"]["code"].
+/// The refusal payload also carries path="$.mode" and a message naming the
+/// accepted values, discriminating this refusal from an unrelated -32602.
 #[test]
 fn unknown_mode_is_refused() {
     let registry = EstateRegistry::new_inmemory();
@@ -472,9 +569,15 @@ fn unknown_mode_is_refused() {
     let result = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({"mode": "everything"}));
     assert_eq!(result["error"]["code"], serde_json::json!(-32602),
         "unknown mode must be refused with -32602, got: {result}");
+    assert_eq!(result["error"]["data"]["path"], serde_json::json!("$.mode"),
+        "refusal path must be '$.mode', got: {result}");
+    assert!(result["error"]["data"]["message"].as_str().unwrap_or("")
+        .contains("must be \"suspectOnly\" or \"all\""),
+        "refusal message must name accepted values, got: {result}");
 }
 
 /// limit = 0 is refused with a JSONRPC invalid-params error (code -32602).
+/// The refusal payload carries path="$.limit" and a message naming the accepted range.
 #[test]
 fn limit_zero_is_refused() {
     let registry = EstateRegistry::new_inmemory();
@@ -483,9 +586,16 @@ fn limit_zero_is_refused() {
     let result = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({"limit": 0}));
     assert_eq!(result["error"]["code"], serde_json::json!(-32602),
         "limit 0 must be refused with -32602, got: {result}");
+    assert_eq!(result["error"]["data"]["path"], serde_json::json!("$.limit"),
+        "refusal path must be '$.limit', got: {result}");
+    assert!(result["error"]["data"]["message"].as_str().unwrap_or("")
+        // EN DASH (U+2013) between 1 and 50000, matching data_mobility.rs:194
+        .contains("must be 1\u{2013}50000"),
+        "refusal message must name the accepted range, got: {result}");
 }
 
 /// limit above 50000 is refused with a JSONRPC invalid-params error (code -32602).
+/// The refusal payload carries path="$.limit" and a message naming the accepted range.
 #[test]
 fn limit_above_max_is_refused() {
     let registry = EstateRegistry::new_inmemory();
@@ -494,4 +604,10 @@ fn limit_above_max_is_refused() {
     let result = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({"limit": 50001}));
     assert_eq!(result["error"]["code"], serde_json::json!(-32602),
         "limit above max must be refused with -32602, got: {result}");
+    assert_eq!(result["error"]["data"]["path"], serde_json::json!("$.limit"),
+        "refusal path must be '$.limit', got: {result}");
+    assert!(result["error"]["data"]["message"].as_str().unwrap_or("")
+        // EN DASH (U+2013) between 1 and 50000, matching data_mobility.rs:194
+        .contains("must be 1\u{2013}50000"),
+        "refusal message must name the accepted range, got: {result}");
 }
