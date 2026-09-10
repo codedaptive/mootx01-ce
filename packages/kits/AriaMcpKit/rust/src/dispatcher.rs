@@ -695,18 +695,17 @@ mod frozen_command_tests {
 
 #[cfg(test)]
 mod catalog_sync_tests {
-    //! Regression gate for the defect this stream fixes: the `tools/list` append
-    //! in `Dispatcher::new` and the `retain`/`push` branches in
-    //! `with_memory_tool_enabled` had no test covering them.  Deleting the append
-    //! at dispatcher.rs and running `cargo test` produced 796 passed, 0 failed —
-    //! the defect was invisible.  Swift catches the equivalent mutation via
-    //! `FrozenPostureTests.swift:98 inventoryNamesOnlyReachableTools`, but Rust
-    //! could not, because `tool_mutation_inventory::reachable()` synthesises
-    //! `memory` from `FROZEN_READ_COMMANDS` rather than reading the dispatcher's
-    //! real `tools` field.
+    //! Regression gate for the `retain`/`push` branches in
+    //! `with_memory_tool_enabled`.  This module reads the dispatcher's actual
+    //! `tools/list` response — the same bytes a client sees — not the inventory
+    //! or the surface catalog.
     //!
-    //! This module reads the dispatcher's actual `tools/list` response — the same
-    //! bytes a client sees — not the inventory or the surface catalog.
+    //! It does NOT cover the `Dispatcher::new` env-var path: calling
+    //! `with_memory_tool_enabled` bypasses the env-var read, so commenting out
+    //! the append at dispatcher.rs:229-233 leaves this test green.  The
+    //! production path is gated by
+    //! `tests/memory_tool_env_gate_tests.rs`, which constructs via
+    //! `Dispatcher::new` only and fails when that append is absent.
     use super::*;
 
     /// Make a `tools/list` request against the dispatcher and return the array.
@@ -734,9 +733,9 @@ mod catalog_sync_tests {
     /// enabled and absent when disabled.  The absolute counts (85 / 84) pin the
     /// full roster so any addition or removal shows up here.
     ///
-    /// This covers both the `tools/list` append in `Dispatcher::new` (the
-    /// defect vector) and the `retain`/`push` branches in
-    /// `with_memory_tool_enabled` (added in a34b8d652).
+    /// This pins the `retain`/`push` branches in `with_memory_tool_enabled`.
+    /// It does NOT cover the `Dispatcher::new` env-var append: see
+    /// `tests/memory_tool_env_gate_tests.rs` for that gate.
     #[test]
     fn dispatcher_catalog_includes_memory_tool_when_enabled_and_excludes_it_when_disabled() {
         let enabled = Dispatcher::new(
