@@ -196,25 +196,59 @@
               "maximum": 500
             },
             "filter": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "unconfirmed",
+                "userConfirmed",
+                "exportable",
+                "contained",
+                "pinned"
+              ],
+              "description": "Scope recall by confirmation state or feature flag. 'pinned' constrains to user-pinned memories. Composable with wing and media_type."
             },
             "wing": {
               "type": "string"
             },
             "media_type": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "voice",
+                "image"
+              ]
             },
             "door": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "guess",
+                "raw",
+                "rrf",
+                "matrixAware",
+                "discriminative"
+              ],
+              "description": "Scoring strategy adjective. 'guess' reads the optimizer-provisioned A1 per-corpus config. Direct values (rrf, matrixAware, raw, discriminative) override it. Absent falls through to scoring, then A1 manifest, then matrixAware."
             },
             "scoring": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "raw",
+                "rrf",
+                "matrixAware",
+                "discriminative"
+              ]
             },
             "ordering": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "byCaptureTimeDesc",
+                "byCaptureTimeAsc",
+                "byRoomAsc",
+                "byRelevanceDesc"
+              ],
+              "description": "Result ordering. 'byRelevanceDesc' routes through the scored recall pipeline (results are relevance-ordered by score). 'byCaptureTimeDesc' (default), 'byCaptureTimeAsc', 'byRoomAsc' use the LocusKit ordering field."
             },
             "frontier_k": {
-              "type": "integer"
+              "type": "integer",
+              "minimum": 1
             },
             "explain": {
               "type": "boolean"
