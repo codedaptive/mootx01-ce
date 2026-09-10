@@ -7,7 +7,7 @@ use aria_mcp::v2::capability_digest::{
 #[test]
 fn selected_catalog_digest_shared_vector() {
     let digest = aria_mcp::v2::catalog::selected_capability_digest();
-    assert_eq!(digest, "b64fb90039d80b7bb7d18ca4028ea64c023f29d2b10d956ecf1ce3dd219b994b");
+    assert_eq!(digest, "50306d5965365b1810fa596500b82d74073f4e03098d2e16a7b4ba998501ff23");
     let artifact_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().unwrap()
         .join("Registry/aria-v2-selected-release.json");
@@ -136,4 +136,46 @@ fn stable_vectors_retain_array_order_and_change_for_schema_effect_and_availabili
     assert_ne!(capability_digest(&[base.clone()]), capability_digest(&[reordered_array]));
     assert_ne!(capability_digest(&[base.clone()]), capability_digest(&[write]));
     assert_ne!(capability_digest(&[base]), capability_digest(&[unavailable]));
+}
+
+
+
+/// Cross-port conformance: Rust catalog's moot_memory_search inputSchema must match
+/// the frozen schema recorded in Tests/Conformance/aria_v2_mission02_vectors.json.
+///
+/// The fixture is the authoritative cross-port reference. If this test fails the
+/// Rust catalog has drifted from the Swift port's declared schema. Fix the Rust
+/// catalog — do not update the fixture without also updating the Swift catalog.
+#[test]
+fn memory_search_input_schema_matches_conformance_fixture() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("Tests/Conformance/aria_v2_mission02_vectors.json");
+    let fixture: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture_path).unwrap()).unwrap();
+
+    // Extract memory_search inputSchema from the fixture.
+    let fixture_schema = fixture["catalog"]["operations"]
+        .as_array()
+        .expect("fixture must have operations array")
+        .iter()
+        .find(|op| op["name"] == "moot_memory_search")
+        .expect("fixture must contain moot_memory_search")["inputSchema"]
+        .clone();
+
+    // Extract memory_search inputSchema from the live Rust catalog.
+    let tools = aria_mcp::v2::catalog::selected_tools();
+    let catalog_schema = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "moot_memory_search")
+        .expect("catalog must contain moot_memory_search")["inputSchema"]
+        .clone();
+
+    assert_eq!(
+        catalog_schema, fixture_schema,
+        "moot_memory_search inputSchema must match the cross-port conformance fixture"
+    );
 }
