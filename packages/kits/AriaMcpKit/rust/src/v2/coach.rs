@@ -205,3 +205,343 @@ fn result_text_contains(result: &Value, substring: &str) -> bool {
         .map(|text| text.contains(substring))
         .unwrap_or(false)
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+//
+// These tests call `coaching_hint` directly with synthetic request and result
+// values, covering triggers that cannot fire through the v2 dispatcher because
+// the decoder rejects the arguments before they reach the coaching path:
+//
+//   * moot_erase_memory: decoder rejects confirmation:false with invalidParams.
+//   * moot_link_memories: a partial-success result with "unresolved" text cannot
+//     be produced by the in-memory lower adapter (failure → refusal, not hint).
+//   * moot_migration_confirm: "disqualified" text in a success envelope requires
+//     live migration state not available in the in-memory estate.
+//
+// Integration tests in rust/tests/v2_coach_tests.rs cover the full dispatcher
+// path for the triggers that ARE reachable there.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use crate::surface::MemoryMutationRequest;
+    use crate::v2::core_memory::{V2MemorySearchRequest, V2SearchTarget, V2FileMemoryRequest};
+    use crate::v2::memory_mutations::{V2EraseMemoryRequest, V2LinkMemoriesRequest};
+    use crate::v2::orchestration::V2ConfirmMigrationRequest;
+    use crate::v2::recall_lens::{V2RecallLensRequest, V2RecallLensOperation};
+    use uuid::Uuid;
+    use std::collections::BTreeMap;
+
+    // -----------------------------------------------------------------------
+    // Shared helpers
+    // -----------------------------------------------------------------------
+
+    /// Construct a minimal non-error v2 success result envelope.
+    fn success_result(text: &str) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": { "data": {}, "meta": {} },
+            "isError": false
+        })
+    }
+
+    /// Construct a v2 success result envelope with an empty "results" array.
+    fn empty_results_result() -> Value {
+        json!({
+            "content": [{ "type": "text", "text": "no results" }],
+            "structuredContent": { "data": { "results": [] }, "meta": {} },
+            "isError": false
+        })
+    }
+
+    /// Construct a v2 error result envelope (isError:true).
+    fn error_result(msg: &str) -> Value {
+        json!({
+            "content": [{ "type": "text", "text": msg }],
+            "structuredContent": { "error": { "code": "test", "message": msg } },
+            "isError": true
+        })
+    }
+
+    /// Build a minimal V2MemorySearchRequest with the given target and limit.
+    fn search_request(target: V2SearchTarget) -> V2MemorySearchRequest {
+        V2MemorySearchRequest {
+            estate_id: None,
+            target,
+            limit: 10,
+            filter: None,
+            wing: None,
+            media_type: None,
+            explain: None,
+            door: None,
+            scoring: None,
+            ordering: None,
+            frontier_k: None,
+            answer: None,
+        }
+    }
+
+    /// Build a minimal V2FileMemoryRequest with the given content.
+    fn file_request(content: &str) -> V2FileMemoryRequest {
+        V2FileMemoryRequest {
+            estate_id: None,
+            content: content.to_owned(),
+            subject: "Test subject.".to_owned(),
+            location: "default".to_owned(),
+            wing: None,
+            sensitivity: Some(crate::v2::core_memory::V2Sensitivity::Normal),
+            exportability: Some(crate::v2::core_memory::V2Exportability::Private),
+            kind: Some(crate::v2::core_memory::V2ContentKind::Prose),
+            event_time: None,
+            impatient: false,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // isError guard
+    // -----------------------------------------------------------------------
+
+    /// A coaching hint must never attach to an isError:true result.
+    /// The guard fires before any trigger check so the request type is irrelevant.
+    #[test]
+    fn is_error_guard_returns_none_regardless_of_trigger() {
+        // Long-query request would trigger a hint on a success result.
+        let long_query: String = "a".repeat(201);
+        let request = SurfaceRequest::MemorySearch(search_request(
+            V2SearchTarget::Query(long_query),
+        ));
+        let result = error_result("deliberate test error");
+        assert!(
+            coaching_hint(&request, &result).is_none(),
+            "coaching_hint must return None for isError:true regardless of the trigger"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // moot_memory_search — long-query trigger
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memory_search_long_query_hint_fires() {
+        let long_query: String = "x".repeat(201);
+        let request = SurfaceRequest::MemorySearch(search_request(
+            V2SearchTarget::Query(long_query),
+        ));
+        let result = success_result("memory search");
+        let hint = coaching_hint(&request, &result)
+            .expect("long-query must produce a hint");
+        assert!(
+            hint.contains("200 characters") || hint.contains("shorter"),
+            "long-query hint must mention the 200-character threshold; got: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn memory_search_short_query_no_results_no_long_query_hint() {
+        // Short query — zero results are what trigger the hint, not the query length.
+        let request = SurfaceRequest::MemorySearch(search_request(
+            V2SearchTarget::Query("short".to_owned()),
+        ));
+        let result = empty_results_result();
+        let hint = coaching_hint(&request, &result)
+            .expect("zero-results must produce a hint");
+        assert!(
+            hint.contains("No memories matched") || hint.contains("moot_file_memory"),
+            "zero-results hint must guide toward filing content; got: {hint:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // moot_file_memory — large-content trigger
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_memory_large_content_hint_fires() {
+        let large: String = "y".repeat(4001);
+        let request = SurfaceRequest::FileMemory(file_request(&large));
+        let result = success_result("filed memory");
+        let hint = coaching_hint(&request, &result)
+            .expect("large-content must produce a hint");
+        assert!(
+            hint.contains("4,000") || hint.contains("splitting"),
+            "large-content hint must mention 4,000 characters or splitting; got: {hint:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // moot_erase_memory — confirmation:false trigger
+    //
+    // In the v2 dispatcher the decoder rejects confirmation:false before reaching
+    // this path. The check is present for spec completeness; this unit test
+    // exercises it directly.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erase_memory_confirmation_false_triggers_hint() {
+        let request = SurfaceRequest::MemoryMutation(MemoryMutationRequest::Erase(
+            V2EraseMemoryRequest {
+                memory_id: Uuid::nil(),
+                confirmation: false, // decoder blocks this in practice; spec-completeness path
+                reason: None,
+                estate_id: None,
+            },
+        ));
+        let result = success_result("hypothetical success");
+        let hint = coaching_hint(&request, &result)
+            .expect("confirmation:false must produce a hint");
+        assert!(
+            hint.contains("confirmation") && hint.contains("true"),
+            "erase hint must explain the confirmation requirement; got: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn erase_memory_confirmation_true_no_hint() {
+        let request = SurfaceRequest::MemoryMutation(MemoryMutationRequest::Erase(
+            V2EraseMemoryRequest {
+                memory_id: Uuid::nil(),
+                confirmation: true,
+                reason: None,
+                estate_id: None,
+            },
+        ));
+        let result = success_result("erased");
+        assert!(
+            coaching_hint(&request, &result).is_none(),
+            "confirmation:true must NOT produce a hint"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // moot_migration_confirm — disqualified trigger
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migration_confirm_disqualified_text_triggers_hint() {
+        let id = Uuid::nil();
+        let request = SurfaceRequest::MigrationConfirm(V2ConfirmMigrationRequest {
+            winner_branch_id: id,
+            discard_branch_ids: vec![],
+            estate_id: None,
+        });
+        // Synthetic result containing "disqualified" in the text.
+        let result = json!({
+            "content": [{ "type": "text", "text": "one branch was disqualified during the migration" }],
+            "structuredContent": { "data": {}, "meta": {} },
+            "isError": false
+        });
+        let hint = coaching_hint(&request, &result)
+            .expect("disqualified text must trigger a hint");
+        assert!(
+            hint.contains("disqualified") || hint.contains("moot_estate_status"),
+            "migration hint must mention disqualified branches or estate status; got: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn migration_confirm_disqualified_structured_content_triggers_hint() {
+        let id = Uuid::nil();
+        let request = SurfaceRequest::MigrationConfirm(V2ConfirmMigrationRequest {
+            winner_branch_id: id,
+            discard_branch_ids: vec![],
+            estate_id: None,
+        });
+        // Synthetic result with non-empty disqualified array in structuredContent.
+        let result = json!({
+            "content": [{ "type": "text", "text": "migration result" }],
+            "structuredContent": { "data": { "disqualified": [{ "id": "some-branch" }] }, "meta": {} },
+            "isError": false
+        });
+        let hint = coaching_hint(&request, &result)
+            .expect("disqualified array in structuredContent must trigger a hint");
+        assert!(
+            hint.contains("disqualified") || hint.contains("moot_estate_status"),
+            "migration hint must mention disqualified branches or estate status; got: {hint:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // moot_link_memories — unresolved-IDs trigger
+    //
+    // The v2 dispatcher returns a refusal (isError:true) when memory IDs cannot
+    // be resolved via the lower adapter. The hint checks text content; this unit
+    // test exercises that path directly with a synthetic success result.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn link_memories_unresolved_text_triggers_hint() {
+        let from_id = Uuid::new_v4();
+        let to_id = Uuid::new_v4();
+        let request = SurfaceRequest::MemoryMutation(MemoryMutationRequest::Link(
+            V2LinkMemoriesRequest {
+                from_id,
+                to_id,
+                relationship: "relates".to_owned(),
+                confidence: None,
+                evidence: None,
+                estate_id: None,
+            },
+        ));
+        let result = json!({
+            "content": [{ "type": "text", "text": "unresolved: one or more memory IDs could not be found" }],
+            "structuredContent": { "data": {}, "meta": {} },
+            "isError": false
+        });
+        let hint = coaching_hint(&request, &result)
+            .expect("unresolved text must trigger a hint for moot_link_memories");
+        assert!(
+            hint.contains("IDs") || hint.contains("moot_memory_search"),
+            "link hint must mention IDs or searching; got: {hint:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Any lens — zero-results trigger
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn recall_lens_zero_results_triggers_hint() {
+        let request = SurfaceRequest::Recall(V2RecallLensRequest {
+            operation: V2RecallLensOperation::RecallPrecise,
+            estate_id: None,
+            values: BTreeMap::new(),
+        });
+        let result = empty_results_result();
+        let hint = coaching_hint(&request, &result)
+            .expect("lens zero-results must produce a hint");
+        assert!(
+            hint.contains("zero results") || hint.contains("moot_list_lenses"),
+            "lens hint must mention zero results or moot_list_lenses; got: {hint:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // First-match-wins
+    // -----------------------------------------------------------------------
+
+    /// Long query with zero results: the long-query trigger is listed first in
+    /// the match and must fire. The zero-results trigger must not fire.
+    #[test]
+    fn first_match_wins_long_query_over_zero_results() {
+        let long_query: String = "z".repeat(201);
+        let request = SurfaceRequest::MemorySearch(search_request(
+            V2SearchTarget::Query(long_query),
+        ));
+        // Empty results — would trigger zero-results if long-query didn't fire first.
+        let result = empty_results_result();
+        let hint = coaching_hint(&request, &result)
+            .expect("a hint must fire (long-query trigger first)");
+        // Must be the long-query hint, not zero-results.
+        assert!(
+            hint.contains("200 characters") || hint.contains("shorter"),
+            "first-match must be the long-query hint; got: {hint:?}"
+        );
+        assert!(
+            !hint.contains("No memories matched"),
+            "zero-results hint must NOT fire when long-query fires first; got: {hint:?}"
+        );
+    }
+}
