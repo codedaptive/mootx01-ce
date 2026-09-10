@@ -155,8 +155,77 @@ struct RecallDiscriminationTests {
         #expect(RecallDiscrimination.denseLaneDark(spanRerankRegistered: true) == false)
     }
 
-    // MARK: - Surface integration: low-discrimination result carries the signal
+    // MARK: - Surface integration: explain gate drives discrimination line
 
-    /// An estate with near-identical memories produces a moot_memory_search
-    /// result that always contains the discrimination line.
+    /// Helper: create a fresh dispatcher backed by an in-memory estate.
+    private func makeDispatcher() async throws -> ToolDispatcher {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "recall-discrimination-explain-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        return ToolDispatcher(kit: kit, handle: handle)
+    }
+
+    private func fileMemory(content: String, location: String, dispatcher: ToolDispatcher) async throws -> Void {
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string(content),
+                "subject": .string(String(content.prefix(120))),
+                "location": .string(location),
+            ])
+        )
+    }
+
+    /// With explain:true on an estate seeded with near-identical memories, the
+    /// moot_memory_search response MUST contain a "discrimination:" line. Three
+    /// memories with closely-spaced content produce a low or medium
+    /// discrimination signal — both are emitted in v2 compact text.
+    @Test func explainTrueAppendsDiscriminationLine() async throws {
+        let dispatcher = try await makeDispatcher()
+        // Three memories with closely-related content produce a low or medium
+        // signal; the discrimination line is emitted for both levels.
+        try await fileMemory(content: "discrimination-gate-test content alpha", location: "lab", dispatcher: dispatcher)
+        try await fileMemory(content: "discrimination-gate-test content beta", location: "lab", dispatcher: dispatcher)
+        try await fileMemory(content: "discrimination-gate-test content gamma", location: "lab", dispatcher: dispatcher)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("discrimination-gate-test"),
+                "explain": .bool(true),
+            ])
+        )
+        let text = result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        #expect(
+            text.contains("discrimination:"),
+            "explain:true must append a discrimination line; got: \(text.prefix(400))"
+        )
+    }
+
+    /// Without explain, the moot_memory_search response must NOT contain a
+    /// "discrimination:" line — the gate is strictly opt-in so callers that do
+    /// not ask for it receive no extra tokens.
+    @Test func explainOmittedSuppressesDiscriminationLine() async throws {
+        let dispatcher = try await makeDispatcher()
+        try await fileMemory(content: "discrimination-gate-test content alpha", location: "lab", dispatcher: dispatcher)
+        try await fileMemory(content: "discrimination-gate-test content beta", location: "lab", dispatcher: dispatcher)
+        try await fileMemory(content: "discrimination-gate-test content gamma", location: "lab", dispatcher: dispatcher)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("discrimination-gate-test"),
+                // explain omitted — default is false
+            ])
+        )
+        let text = result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        #expect(
+            !text.contains("discrimination:"),
+            "explain omitted must NOT produce a discrimination line; got: \(text.prefix(400))"
+        )
+    }
 }
