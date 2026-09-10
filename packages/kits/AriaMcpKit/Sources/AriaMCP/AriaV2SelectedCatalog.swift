@@ -917,7 +917,12 @@ enum AriaV2SelectedCatalog {
             effect: .write,
             description: "Reclassify stored field-density categories.",
             intents: ["Reclassify stored field-density categories."],
-            properties: ["estate_id": uuidSchema()],
+            properties: [
+                "estate_id": uuidSchema(),
+                "apply": booleanSchema(),
+                "mode": enumSchema(["suspectOnly", "all"]),
+                "limit": .object(["type": .string("integer"), "minimum": .integer(1), "maximum": .integer(50000)]),
+            ],
             includeEmptyRequired: true,
             dataSchema: reclassifyFDCDataSchema()
         ),
@@ -1829,6 +1834,7 @@ enum AriaV2SelectedCatalog {
             "memory_count": .object(["type": .string("integer"), "minimum": .integer(0)]),
             "fact_count": .object(["type": .string("integer"), "minimum": .integer(0)]),
             "drains": .object(["type": .string("array"), "items": drainEntrySchema()]),
+            "fdc_recalculation": enumSchema(["current", "missing", "stale"]),
         ])
     }
 
@@ -1921,14 +1927,42 @@ enum AriaV2SelectedCatalog {
     }
 
     private static func reclassifyFDCDataSchema() -> JSONValue {
+        // 18 properties per contract §3. 14 are always required; 4 are optional
+        // (estate_recalced_data_version_before/after may be absent) so declared
+        // but not in the required list. Uses orderedExactObjectSchema so the
+        // optional keys can appear without being required.
         let count = nonnegativeIntegerSchema()
+        let changeEntry = orderedExactObjectSchema([
+            "id": nonEmptyStringSchema(),
+            "old_code": nonEmptyStringSchema(),
+            "new_code": nonEmptyStringSchema(),
+            "old_qid": stringSchema(),
+            "new_qid": stringSchema(),
+        ], required: ["id", "old_code", "new_code"])
         return orderedExactObjectSchema([
-            "applied": booleanSchema(), "mode": stringSchema(), "scanned": count,
-            "unchanged": count, "candidates": count, "updated": count,
+            "applied": booleanSchema(),
+            "mode": enumSchema(["suspectOnly", "all"]),
+            "estate_id": uuidSchema(),
+            "fdc_data_version": nonEmptyStringSchema(),
+            "fdc_recalculation_version": nonEmptyStringSchema(),
+            "scanned": count,
+            "unchanged": count,
+            "empty_content": count,
+            "candidates": count,
+            "updated": count,
+            "would_update": count,
             "unclassified_after": count,
+            "skipped_non_candidate_changes": count,
+            "floor_stamp": stringSchema(),
+            "estate_recalced_data_version_before": stringSchema(),
+            "estate_recalced_data_version_after": stringSchema(),
+            "changes": .object(["type": .string("array"), "items": changeEntry]),
+            "changes_omitted": count,
         ], required: [
-            "applied", "mode", "scanned", "unchanged", "candidates", "updated",
-            "unclassified_after",
+            "applied", "mode", "estate_id", "fdc_data_version",
+            "fdc_recalculation_version", "scanned", "unchanged", "empty_content",
+            "candidates", "updated", "would_update", "unclassified_after",
+            "skipped_non_candidate_changes", "floor_stamp", "changes", "changes_omitted",
         ])
     }
 
