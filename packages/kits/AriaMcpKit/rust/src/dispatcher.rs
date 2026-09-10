@@ -29,6 +29,7 @@
 
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JSONRPCRequest, JSONRPCResponse, JsonValue};
+use std::sync::Arc;
 use crate::mode_session_state::ModeSessionState;
 use crate::sensitivity_grant_ledger::SensitivityGrantLedger;
 use crate::estate_posture::EstatePosture;
@@ -156,7 +157,7 @@ pub struct Dispatcher {
     /// One instance per `Dispatcher` (= one per `mootx01 serve` process for stdio,
     /// or one per HTTP dispatcher for HTTP). Uses `Mutex` for interior mutability
     /// so `Dispatcher::handle` stays `&self`. Mirrors Swift `ToolDispatcher.modeSessionState`.
-    mode_session_state: ModeSessionState,
+    mode_session_state: Arc<ModeSessionState>,
     /// Live or frozen. A frozen dispatcher refuses every tool in
     /// `tool_mutation_inventory`, runs `moot_memory_search` with internal
     /// origin (no recall-trace rows, no dreaming enqueue), and skips the
@@ -250,7 +251,7 @@ impl Dispatcher {
             // Spec defaults: sticky_enabled = true, coaching_calls_x = 25.
             // Overridden on the first tool call by provisioned_modes_config
             // read from the default estate's manifest (apply_preferences).
-            mode_session_state: ModeSessionState::new(),
+            mode_session_state: Arc::new(ModeSessionState::new()),
             posture: EstatePosture::from_process_environment(),
             // Set from the same resolved value used to build tools/list above,
             // so the catalog and the intercept gate start in agreement.
@@ -527,15 +528,45 @@ impl Dispatcher {
                 self.mode_session_state
                     .apply_preferences(manifest.sticky_enabled, manifest.coaching_calls);
             }
-            // §12.5 coaching: advance the session counter BEFORE execute so
-            // should_coach reflects this call. record_call must precede
-            // should_coach (mode_session_state.rs ordering contract).
-            self.mode_session_state.record_call(name, None);
-            // Clone request for post-execute coaching-hint inspection. The
-            // executed request is moved into surface::execute; the clone carries
-            // the decoded argument data the coaching engine needs to check
-            // triggers (e.g. query length for moot_memory_search).
-            let coaching_request = request.clone();
+
+            // Build the per-call chain from the production factory.
+            //
+            // Construction fails only on a duplicate concern name or position —
+            // both programmer errors in this hard-coded list. `expect` follows
+            // the same infallible-programmer-error convention used elsewhere in
+            // this codebase (e.g. capability_digest construction).
+            //
+            // The ingress chain runs AFTER argument decode and AFTER the frozen
+            // guard above. That placement is intentional: the session counter
+            // must not advance when a frozen estate refuses a v2 mutation (the
+            // refusal returns above) and must not advance when argument decode
+            // fails (decode runs before this branch in tools_call). Moving the
+            // ingress invocation above the frozen guard would advance the counter
+            // on frozen refusals, changing when the periodic coaching block fires.
+            // This adoption changes no behaviour — the ingress hook calls
+            // record_call at the same point it was called inline before.
+            //
+            // The request is cloned for the egress closure capture. The original
+            // is moved into surface::execute below; the clone carries the decoded
+            // argument data the coaching engine needs to check triggers (e.g.
+            // query length for moot_memory_search). This is the same clone that
+            // existed as `coaching_request` before the adoption.
+            let chain = crate::v2::call_chain::V2CallChain::new(
+                crate::v2::chain_registry::aria_v2_production_registrations(
+                    request.clone(),
+                    Arc::clone(&self.mode_session_state),
+                )
+            ).expect("chain construction fails only on programmer error in hard-coded registrations");
+
+            // Ingress: the coaching hook calls record_call so the session
+            // counter advances exactly here — after preferences apply and after
+            // the frozen guard, before execute. Arguments are returned unchanged
+            // by the coaching concern; the return value is not consumed here
+            // because surface::execute takes the decoded typed request, not the
+            // JsonValue args. The ingress outcome is threaded to run_egress so
+            // each concern's optional ingress-state is delivered to its egress.
+            let ingress_outcome = chain.run_ingress(name, JsonValue::Object(args_map.clone()));
+
             let now_millis = crate::dispatch::bench_clock_now();
             let result = crate::surface::execute(
                 &self.surface,
@@ -549,23 +580,12 @@ impl Dispatcher {
                 &self.build_serial,
                 now_millis,
             )?;
-            // §12.5 hint injection: check the six §12.5 triggers and, if one
-            // fires, attach the hint to the result (structuredContent["hint"]
-            // + "\nhint: …" appended to content[0].text). Never on isError:true.
-            let result = if let Some(hint) = crate::v2::coach::coaching_hint(&coaching_request, &result) {
-                crate::v2::render::apply_hint(result, &hint)
-            } else {
-                result
-            };
-            // Periodic coaching block: render and append when the cadence fires.
-            // should_coach is called AFTER record_call (ordering contract).
-            let result = if self.mode_session_state.should_coach() {
-                let snap = self.mode_session_state.snapshot();
-                crate::v2::render::apply_coaching_block(result, &crate::periodic_coach::render_block(&snap))
-            } else {
-                result
-            };
-            return Ok(result);
+
+            // Egress: hint injection and periodic coaching block run inside the
+            // coaching egress transform (see chain_registry.rs). The chain halts
+            // at the first gate that fires; no gate registers in this mission.
+            let egress_outcome = chain.run_egress(name, result, &ingress_outcome);
+            return Ok(egress_outcome.result);
         }
 
         // No tool matched the v2 catalog — surface.decode() already returns
@@ -689,6 +709,56 @@ mod frozen_command_tests {
             dispatcher.mode_session_state.snapshot().total_calls,
             0,
             "a malformed call on a live v2 name must reject before v2 session handling",
+        );
+    }
+
+    // MARK: - GATE 2: Ingress placement (v2 choke point)
+
+    /// A frozen-estate v2 MUTATION refusal returns before the ingress chain
+    /// runs.  The session call counter must remain at zero.
+    ///
+    /// `moot_file_memory` is the Rust twin of the Swift GATE 2 case.  It is a
+    /// v2 mutation — the frozen guard fires inside the `if let Some(request)`
+    /// branch, above the chain build and ingress invocation.  The session
+    /// counter must not advance.
+    ///
+    /// This test fails if the chain build or `chain.run_ingress` is moved above
+    /// the `is_frozen()` guard in `tools_call` (the counter would advance to 1
+    /// on the refused call).
+    #[test]
+    fn gate2_frozen_v2_mutation_refusal_leaves_session_counter_at_zero() {
+        // Live estate, frozen posture — moot_file_memory is a mutation.
+        let frozen = Dispatcher::new(
+            EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", None,
+        ).with_posture(EstatePosture::Frozen);
+
+        let response = call(
+            &frozen,
+            "moot_file_memory",
+            serde_json::json!({
+                "content": "must not land",
+                "subject": "gate2-frozen-test",
+                "location": "gate2",
+            }),
+        );
+
+        // The call must be refused with estate_frozen.
+        assert_eq!(
+            response["result"]["isError"],
+            serde_json::json!(true),
+            "frozen v2 mutation must return isError:true; got {response}"
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["error"]["code"],
+            serde_json::json!("estate_frozen"),
+            "frozen v2 mutation must carry code estate_frozen; got {response}"
+        );
+
+        // The ingress hook (record_call) must not have run.
+        assert_eq!(
+            frozen.mode_session_state.snapshot().total_calls,
+            0,
+            "frozen v2 mutation refusal must not advance the session counter"
         );
     }
 }
