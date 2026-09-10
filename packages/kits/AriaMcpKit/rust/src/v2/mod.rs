@@ -4,6 +4,7 @@
 //! path is the only dispatch path the running server takes; there is no
 //! feature flag gating it.
 
+pub mod call_chain;
 pub mod coach;
 pub mod codec;
 pub mod capability_digest;
