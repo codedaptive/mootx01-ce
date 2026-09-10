@@ -142,10 +142,11 @@ struct DoorDispatchTests {
     /// today's behaviour. Must succeed (not error).
     @Test func guessDoorWithNoConfigFallsBackToMatrixAware() async throws {
         let (dispatcher, _, _) = try await makeDispatcher()
+        try await fileMemory(content: "door-guess-no-config-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("test"),
+                "query": .string("door-guess-no-config-test"),
                 "door": .string("guess"),
             ])
         )
@@ -158,10 +159,11 @@ struct DoorDispatchTests {
     @Test func guessDoorWithProvisionedConfigUsesManifestScoring() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         try await kit.provisionDoorConfig(DoorManifest(scoring: .rrf), for: handle)
+        try await fileMemory(content: "door-guess-provisioned-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("test"),
+                "query": .string("door-guess-provisioned-test"),
                 "door": .string("guess"),
             ])
         )
@@ -173,10 +175,11 @@ struct DoorDispatchTests {
 
     @Test func doorRrfSucceeds() async throws {
         let (dispatcher, _, _) = try await makeDispatcher()
+        try await fileMemory(content: "door-rrf-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("test"),
+                "query": .string("door-rrf-test"),
                 "door": .string("rrf"),
             ])
         )
@@ -186,10 +189,11 @@ struct DoorDispatchTests {
 
     @Test func doorMatrixAwareSucceeds() async throws {
         let (dispatcher, _, _) = try await makeDispatcher()
+        try await fileMemory(content: "door-matrixAware-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("test"),
+                "query": .string("door-matrixAware-test"),
                 "door": .string("matrixAware"),
             ])
         )
@@ -199,10 +203,11 @@ struct DoorDispatchTests {
 
     @Test func doorRawSucceeds() async throws {
         let (dispatcher, _, _) = try await makeDispatcher()
+        try await fileMemory(content: "door-raw-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("test"),
+                "query": .string("door-raw-test"),
                 "door": .string("raw"),
             ])
         )
