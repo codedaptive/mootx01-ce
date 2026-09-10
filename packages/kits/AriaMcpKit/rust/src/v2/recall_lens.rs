@@ -280,10 +280,12 @@ const CONNECTED: Grammar = Grammar {
     bools: &[],
 };
 const SHAPED: Grammar = Grammar {
-    allowed: &["query", "preset", "limit", "filter", "wing", "estate_id"],
+    // frontier_k: candidate-pool depth override added to match Swift AriaV2SelectedCatalog.
+    // The shaped-recall engine clamps the value to [64, 256]; absent uses the default formula.
+    allowed: &["query", "preset", "limit", "filter", "wing", "frontier_k", "estate_id"],
     required: &["query"],
     strings: &["query", "preset", "filter", "wing"],
-    positive_integers: &["limit"],
+    positive_integers: &["limit", "frontier_k"],
     uuids: &[],
     arrays: &[],
     bools: &[],
@@ -988,6 +990,9 @@ pub fn execute_shaped_recall(
             "is not a known shaped-recall preset",
         )));
     }
+    // frontier_k: thread candidate-pool depth override through to the engine when supplied.
+    // Absent means the engine default formula; the engine clamps to [64, 256] regardless.
+    let frontier_k = request_positive_integer(request, "frontier_k");
     let output = crate::recipe_tools::execute_shaped_recall_typed(
         coordinator,
         handle,
@@ -997,7 +1002,7 @@ pub fn execute_shaped_recall(
         request_positive_integer(request, "limit").unwrap_or(20),
         now_millis,
         &nodes,
-        None,
+        frontier_k,
     )
     .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
     let results = output
