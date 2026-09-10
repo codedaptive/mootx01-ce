@@ -19,7 +19,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 fn dispatcher() -> Dispatcher {
-    Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA", "test", "test-build", "", None)
+    Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA", "test", "test-build", None)
 }
 
 #[test]
