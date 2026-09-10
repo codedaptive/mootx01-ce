@@ -393,6 +393,10 @@ pub struct V2ReclassifyFdcReport {
     pub fdc_data_version: String,
     /// FDC recalculation version string (non-empty).
     pub fdc_recalculation_version: String,
+    /// Scan cap from the request, if any. Carried here so the compact-text
+    /// builder can reproduce Swift's " (limit N)" suffix on the "scanned:" line,
+    /// matching AriaV2DataMobility.swift:588+596.
+    pub limit: Option<u64>,
     /// Active drawers examined.
     pub scanned: u64,
     /// Anchors that re-derived identically (code and QID both unchanged).
