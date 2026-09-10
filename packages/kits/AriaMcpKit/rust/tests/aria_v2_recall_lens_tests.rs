@@ -337,3 +337,159 @@ fn execute_distilled_recall_does_not_restore_filtered_raw_body() {
     assert!(row.get("distilled").is_none(), "result leaked distilled body: {row}");
     assert!(row.get("representation").is_none(), "result leaked representation: {row}");
 }
+
+fn call(dispatcher: &aria_mcp::dispatcher::Dispatcher, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+    let request = aria_mcp::jsonrpc::JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments}
+    }))
+    .unwrap();
+    serde_json::to_value(dispatcher.handle(&request)).unwrap()
+}
+
+/// Five distinct bodies on the registry's default estate; the fourth carries
+/// secret provenance, so the v2 projection withholds its body and it must
+/// count on neither side of the savings figure. Charters are not seeded, so
+/// every row the probe query returns is one of these captured records.
+fn savings_probe_estate() -> (aria_mcp::estate_registry::EstateRegistry, BTreeMap<String, &'static str>, String) {
+    const NOW: i64 = 1_700_000_000;
+    let registry = aria_mcp::estate_registry::EstateRegistry::new_inmemory_with(
+        aria_mcp::estate_registry::EstateOpening { federate: false, seed_charters: false },
+    );
+    let bodies = [
+        "savings-probe alpha: the reactor schedule moved to March and Sarah approved the reactor plan.",
+        "savings-probe beta: vendor contracts were renewed in Geneva and every term held.",
+        "savings-probe gamma: travel policy updates landed and flights now require approval.",
+        "savings-probe delta: this secret body must never reach either token sum.",
+        "savings-probe epsilon: the quarterly forecast covers revenue targets and team velocity.",
+    ];
+    let mut body_by_id = BTreeMap::new();
+    let mut secret_id = String::new();
+    {
+        let coordinator = registry.default.coord.lock().unwrap();
+        for (index, body) in bodies.iter().enumerate() {
+            let mut frame = CaptureFrame::new(
+                *body, CaptureChannel::Typed, "notes", LatticeAnchor::udc("0"),
+                "v2-recall-lens-test", "test-v1",
+            );
+            if index == 3 {
+                frame.provenance_sensitivity = Sensitivity::Secret;
+            }
+            let id = coordinator.capture(&registry.default.handle, frame, NOW).expect("capture").id;
+            if index == 3 {
+                secret_id = id.clone();
+            }
+            body_by_id.insert(id, *body);
+        }
+    }
+    (registry, body_by_id, secret_id)
+}
+
+#[test]
+fn execute_distilled_recall_reports_savings_over_emitted_rows_only() {
+    use genius_locus_kit::hydration_representation::estimated_token_count;
+    let (registry, body_by_id, secret_id) = savings_probe_estate();
+    let request = V2RecallLensRequest::decode(
+        V2RecallLensOperation::RecallDistilled,
+        &arguments([
+            ("query", JsonValue::String("savings-probe".to_owned())),
+            ("limit", JsonValue::Integer(100)),
+        ]),
+    )
+    .expect("request");
+    let data = {
+        let coordinator = registry.default.coord.lock().unwrap();
+        execute_distilled_recall(&coordinator, &registry.default.handle, &request, 1_700_000_001)
+            .expect("distilled recall")
+    };
+    let value = serde_json::to_value(&data).unwrap();
+    let distillation = &value["capabilities"]["distillation"];
+    assert!(distillation.is_object(), "distillation missing: {value}");
+
+    // Expected sums: the estimator over the emitted distilled strings and over
+    // the captured bodies of those same rows, joined by id.
+    let mut expected_returned: i64 = 0;
+    let mut expected_original: i64 = 0;
+    let mut secret_row_seen = false;
+    for row in &data.results {
+        let id = row["id"].as_str().expect("row id");
+        if id == secret_id {
+            secret_row_seen = true;
+            assert!(row.get("distilled").is_none(), "the secret row must carry no distilled body: {row}");
+            continue;
+        }
+        let Some(distilled) = row["distilled"].as_str() else { continue };
+        let body = body_by_id.get(id).expect("every emitted distilled row is a captured record");
+        expected_returned += estimated_token_count(distilled);
+        expected_original += estimated_token_count(body);
+    }
+    assert!(secret_row_seen, "the secret row is present in results: {value}");
+    assert!(expected_returned > 0, "the probe query must return distilled bodies: {value}");
+    assert_eq!(distillation["returnedTokens"], serde_json::json!(expected_returned), "{distillation}");
+    assert_eq!(distillation["originalTokens"], serde_json::json!(expected_original), "{distillation}");
+    assert_eq!(distillation["estimated"], serde_json::json!(true));
+    assert_eq!(distillation["estimator"], serde_json::json!(cognition_kit::ESTIMATOR_NAME));
+    assert!(distillation.get("skim").is_none(), "skim must be absent: {distillation}");
+    let display = distillation["display"].as_str().expect("display").to_owned();
+    assert!(display.starts_with("\u{1F331} Distilled: ~"), "{display}");
+
+    // The selected surface appends the display line to the compact text.
+    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", "", None);
+    let response = call(&dispatcher, "moot_recall_distilled", serde_json::json!({"query": "savings-probe", "limit": 100}));
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let text = response["result"]["content"][0]["text"].as_str().expect("compact text");
+    assert!(text.ends_with(&format!("\n{display}")), "compact text must end with the display line: {text}");
+    assert_eq!(response["result"]["structuredContent"]["data"]["capabilities"]["distillation"]["display"], serde_json::json!(display));
+}
+
+#[test]
+fn execute_distilled_recall_with_no_rows_still_reports_the_zero_distillation_object() {
+    let registry = aria_mcp::estate_registry::EstateRegistry::new_inmemory_with(
+        aria_mcp::estate_registry::EstateOpening { federate: false, seed_charters: false },
+    );
+    let request = V2RecallLensRequest::decode(
+        V2RecallLensOperation::RecallDistilled,
+        &arguments([("query", JsonValue::String("savings-probe".to_owned()))]),
+    )
+    .expect("request");
+    let data = {
+        let coordinator = registry.default.coord.lock().unwrap();
+        execute_distilled_recall(&coordinator, &registry.default.handle, &request, 1_700_000_001)
+            .expect("distilled recall")
+    };
+    assert!(data.results.is_empty(), "an estate with no drawers returns no rows");
+    let value = serde_json::to_value(&data).unwrap();
+    let zero = "\u{1F331} Distilled: ~0 tokens returned vs ~0 original \u{00B7} ~0 saved (0%)";
+    assert_eq!(value["capabilities"]["distillation"]["returnedTokens"], serde_json::json!(0));
+    assert_eq!(value["capabilities"]["distillation"]["originalTokens"], serde_json::json!(0));
+    assert_eq!(value["capabilities"]["distillation"]["display"], serde_json::json!(zero));
+    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", "", None);
+    let response = call(&dispatcher, "moot_recall_distilled", serde_json::json!({"query": "savings-probe"}));
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["content"][0]["text"],
+        serde_json::json!(format!("Returned 0 typed recall result(s).\n{zero}"))
+    );
+}
+
+#[test]
+fn execute_precise_recall_carries_no_distillation() {
+    let (registry, _, _) = savings_probe_estate();
+    let request = V2RecallLensRequest::decode(
+        V2RecallLensOperation::RecallPrecise,
+        &arguments([("query", JsonValue::String("savings-probe".to_owned()))]),
+    )
+    .expect("request");
+    let data = {
+        let coordinator = registry.default.coord.lock().unwrap();
+        execute_precise_recall(&coordinator, &registry.default.handle, &request, 1_700_000_001)
+            .expect("precise recall")
+    };
+    let value = serde_json::to_value(&data).unwrap();
+    assert!(value["capabilities"].get("distillation").is_none(), "{value}");
+    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", "", None);
+    let response = call(&dispatcher, "moot_recall_precise", serde_json::json!({"query": "savings-probe"}));
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let text = response["result"]["content"][0]["text"].as_str().expect("compact text");
+    assert!(!text.contains('\u{1F331}'), "{text}");
+}
