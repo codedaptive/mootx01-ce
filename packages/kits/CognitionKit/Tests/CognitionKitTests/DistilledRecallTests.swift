@@ -14,6 +14,8 @@
 //            exact-search request for the same query.
 //   CK-DR-3: every row renders inline — no fallback marker, no sweep needed.
 //   CK-DR-4: empty estate → matches = [], no crash.
+//   CK-DR-5: per-match tokenCount and originalTokenCount equal the estimator
+//            over the distilled text and the captured body.
 
 import Testing
 import Foundation
@@ -169,6 +171,42 @@ struct DistilledRecallTests {
             #expect(output.matches.isEmpty)
             #expect(output.discrimination == .single,
                 "empty result must yield .single discrimination")
+        }
+    }
+
+    // MARK: - CK-DR-5: per-match counts equal the estimator
+
+    @Test("CK-DR-5: per-match tokenCount and originalTokenCount equal the estimator over text and body")
+    func perMatchTokenCountsEqualEstimator() async throws {
+        try await withCognitionLock {
+            let (kit, handle) = try await openEstate()
+            let bodies = [
+                "The economics meeting covered the quarterly forecast and revenue targets.",
+                "Infrastructure costs rose by twelve percent. The vendor adjusted rates.",
+                "Team velocity metrics improved across all product areas this quarter.",
+            ]
+            // Body by returned id: the assertion runs only over captured
+            // records, so seeded system drawers cannot interfere.
+            var bodyByID: [String: String] = [:]
+            for body in bodies {
+                let id = try await capture(body, kit: kit, handle: handle)
+                bodyByID[id] = body
+            }
+
+            let output = try await DistilledRecall().run(
+                input: DistilledRecall.Input(query: "economics quarterly"),
+                estate: handle, kit: kit)
+
+            var checked = 0
+            for match in output.matches {
+                guard let body = bodyByID[match.id] else { continue }
+                checked += 1
+                #expect(match.originalTokenCount == GeniusLocusKit.estimatedTokenCount(of: body),
+                    "originalTokenCount must equal the estimator over the captured body")
+                #expect(match.tokenCount == GeniusLocusKit.estimatedTokenCount(of: match.text),
+                    "tokenCount must equal the estimator over the distilled text")
+            }
+            #expect(checked >= 1, "at least one captured record must come back")
         }
     }
 }

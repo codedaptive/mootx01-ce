@@ -11,6 +11,12 @@
 // budgeting). Every row renders inline via ContextDistillLib at read time
 // — there is no sweep, no "not yet distilled" state, and no fallback path.
 //
+// Each match also carries `original_token_count`, the estimator over the
+// record's full content. The recipe does not sum the pair: the ARIA v2
+// surface applies `DistilledSavings` over the rows it actually emits,
+// after its row cap and privacy projection (ARIA_V2_CONTRACT.md,
+// "Distilled recall savings").
+//
 // Origin discipline (B-10a): the recipe request stays INTERNAL — only
 // the ARIA boundary marks requests external. Mirrors the Swift
 // PreciseRecall/ShapedRecall precedent.
@@ -62,6 +68,9 @@ pub struct DistilledMatch {
     /// Per-hit token estimate for context budgeting. Always present —
     /// every row renders inline, so there is no fallback without a count.
     pub token_count: i64,
+    /// Estimator over the record's full `content`: the original-body cost
+    /// the ARIA surface sums over the rows it emits. Never summed here.
+    pub original_token_count: i64,
     /// The exact-search fusion score that ranked this hit.
     pub score: f64,
     /// The room node id of the source drawer (callers resolve display
@@ -157,17 +166,21 @@ pub fn run_distilled_recall(
 
     // Hydrate each hit through the hydration selector pinned to Distilled.
     // Every row renders inline via ContextDistillLib — no stored columns,
-    // no sweep dependency, no fallback path.
+    // no sweep dependency, no fallback path. Each match carries the
+    // estimator over its distilled text and over its full content; the
+    // ARIA surface sums both over the rows it emits.
     let mut matches: Vec<DistilledMatch> = Vec::new();
     for hit in &result.hits {
         let Some(drawer) = &hit.drawer else { continue };
         let text =
             resolve_hydration_representation(HydrationRepresentation::Distilled, drawer);
         let token_count = estimated_token_count(&text);
+        let original_token_count = estimated_token_count(&drawer.content);
         matches.push(DistilledMatch {
             id: drawer.id.clone(),
             text,
             token_count,
+            original_token_count,
             score: hit.score.final_score as f64,
             parent_node_id: drawer.parent_node_id.clone(),
         });
@@ -360,5 +373,49 @@ mod tests {
         assert_eq!(classify_distilled_discrimination(&[1.0, 0.5]), L::High);
         assert_eq!(classify_distilled_discrimination(&[1.0, 0.99, 0.98]), L::Low);
         assert_eq!(classify_distilled_discrimination(&[1.0, 0.9, 0.5]), L::Medium);
+    }
+
+    // CK-DR-R5: per-match token_count and original_token_count equal the
+    // estimator over the distilled text and the captured body. Only captured
+    // ids are checked, so seeded system drawers cannot interfere.
+    #[test]
+    fn per_match_token_counts_equal_estimator() {
+        let (coord, h) = open_estate();
+        let bodies = [
+            "The economics meeting covered the quarterly forecast and revenue targets.",
+            "Infrastructure costs rose by twelve percent. The vendor adjusted rates.",
+            "Team velocity metrics improved across all product areas this quarter.",
+        ];
+        let mut body_by_id: std::collections::HashMap<String, &str> =
+            std::collections::HashMap::new();
+        for body in bodies {
+            let id = capture(&coord, &h, body);
+            body_by_id.insert(id, body);
+        }
+
+        let out = run_distilled_recall(
+            &DistilledRecallInput::new("economics quarterly"),
+            &coord,
+            &h,
+            NOW + 1,
+        )
+        .expect("recall");
+
+        let mut checked = 0;
+        for m in &out.matches {
+            let Some(body) = body_by_id.get(&m.id) else { continue };
+            checked += 1;
+            assert_eq!(
+                m.original_token_count,
+                estimated_token_count(body),
+                "original_token_count must equal the estimator over the captured body"
+            );
+            assert_eq!(
+                m.token_count,
+                estimated_token_count(&m.text),
+                "token_count must equal the estimator over the distilled text"
+            );
+        }
+        assert!(checked >= 1, "at least one captured record must come back");
     }
 }
