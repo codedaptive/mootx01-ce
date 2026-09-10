@@ -113,3 +113,76 @@ pub fn refusal(
         "isError": true,
     })
 }
+
+/// Attach a coaching hint to a non-error v2 result (RULING 3, §12.5).
+///
+/// Two mutations, both guarded by isError check:
+/// 1. `structuredContent["hint"]` — top-level string sibling of "data" and "meta".
+/// 2. `content[0].text` — `"\nhint: <text>"` appended AFTER the 512 Unicode-scalar
+///    body clamp. The hint line itself is not clamped.
+///
+/// Called at the v2 dispatcher choke point when `coaching_hint` returns `Some`.
+/// Never on a refusal (isError:true) — the caller's coach.rs guards this, but
+/// this function also re-checks so it is safe regardless of call order.
+///
+/// Parity: Rust twin of Swift `AriaV2Envelope.applyHint(_:to:)`.
+pub fn apply_hint(mut result: Value, hint: &str) -> Value {
+    // Re-check: never mutate an error result.
+    if result.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+        return result;
+    }
+    // 1. structuredContent["hint"] — present only when a hint fires.
+    if let Some(sc) = result.get_mut("structuredContent") {
+        if let Some(obj) = sc.as_object_mut() {
+            obj.insert("hint".to_owned(), Value::String(hint.to_owned()));
+        }
+    }
+    // 2. content[0].text — append "\nhint: <text>" after the 512-scalar body.
+    if let Some(content) = result.get_mut("content") {
+        if let Some(arr) = content.as_array_mut() {
+            if let Some(first) = arr.get_mut(0) {
+                if let Some(obj) = first.as_object_mut() {
+                    if let Some(text) = obj.get_mut("text") {
+                        if let Some(s) = text.as_str() {
+                            *text = Value::String(format!("{}\nhint: {}", s, hint));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Append a periodic coaching block to `content[0].text` of a non-error v2
+/// result (§12.5 periodic coaching cadence, FACT E).
+///
+/// Unlike `apply_hint`, the block has no structuredContent key — it is text
+/// only, appended after any hint line already present. Never on a refusal.
+///
+/// Called at the v2 dispatcher choke point when `mode_session_state.should_coach()`
+/// returns true. Gated by the caller, but this function re-checks isError for
+/// safety.
+///
+/// Parity: Rust twin of Swift `AriaV2Envelope.applyCoachingBlock(_:to:)`.
+pub fn apply_coaching_block(mut result: Value, block: &str) -> Value {
+    // Re-check: never mutate an error result.
+    if result.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+        return result;
+    }
+    // Append coaching block to content[0].text after any hint already present.
+    if let Some(content) = result.get_mut("content") {
+        if let Some(arr) = content.as_array_mut() {
+            if let Some(first) = arr.get_mut(0) {
+                if let Some(obj) = first.as_object_mut() {
+                    if let Some(text) = obj.get_mut("text") {
+                        if let Some(s) = text.as_str() {
+                            *text = Value::String(format!("{}\n{}", s, block));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
