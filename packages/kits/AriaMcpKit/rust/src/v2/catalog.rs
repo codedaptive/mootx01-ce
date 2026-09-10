@@ -161,7 +161,7 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                         // frontier_k: candidate-pool depth override. Engine clamps to [64, 256].
                         // Absent uses the engine default formula min(max(limit × 4, 64), 256).
                         "frontier_k":{"type":"integer","minimum":1},
-                        "explain":{"type":"boolean"},
+                        "explain":{"type":"boolean","description":"Opt-in flag. When true, appends a discrimination: control line when recall confidence is low or medium, surfacing how clearly the top result separates from the field. Absent or false suppresses the line."},
                         // answer: response-shape adjective. Never (default) → dense rows only.
                         // Always → compose answer block + rows. Auto → confidence gate decides.
                         // Unknown values produce -32602 at decode (Swift parity).
