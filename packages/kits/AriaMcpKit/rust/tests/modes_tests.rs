@@ -867,17 +867,39 @@ fn provisioned_coaching_calls_two_fires_on_call_two() {
 ///
 /// Converted from `#[cfg(any())]` to `#[ignore]` so the test is COMPILED, VISIBLE,
 /// and COUNTED as ignored rather than silently absent from every count.
-/// Body uses `todo!()` because `aria_mcp::teachme_guides` does not exist in v2 and
-/// the test body cannot compile against it. `todo!()` is never reached; `#[ignore]`
-/// prevents execution. When a v2 guide surface with a stable byte output is added,
-/// restore the fixture assertion against its output.
+/// When a v2 guide surface with a stable byte output is added, restore the
+/// fixture assertion against its output.
 /// Do NOT delete this test; do NOT weaken to pass.
 #[test]
 #[ignore = "BLOCKED: teachme_guides is a v1-only module with no v2 equivalent; moot_help is the v2 discovery surface but exposes no static guide string."]
 fn modes_teachme_guide_byte_identity() {
-    // aria_mcp::teachme_guides::modes_teachme_guide() — v1-only, absent from v2.
-    // moot_help was investigated; it exposes no static guide string to assert on.
-    // Fixture: Tests/Conformance/modes_teachme_guide_fixture.json
-    // Restore against a v2 guide surface when one exists.
-    todo!("V2 has no teachme_guides equivalent; moot_help exposes no static guide string.");
+    /*
+    // Original body, verbatim from commit 07a81609a:
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set during cargo test");
+    // CARGO_MANIFEST_DIR = .../AriaMcpKit/rust
+    let fixture_path = Path::new(&manifest_dir)
+        .parent()
+        .unwrap()
+        .join("Tests/Conformance/modes_teachme_guide_fixture.json");
+
+    let data = fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("Failed to read fixture at {}: {}", fixture_path.display(), e));
+
+    let parsed: serde_json::Value = serde_json::from_str(&data)
+        .expect("Fixture JSON must be valid");
+
+    let expected = parsed.get("expected")
+        .and_then(|v| v.as_str())
+        .expect("modes_teachme_guide_fixture.json must have an 'expected' string field");
+
+    let actual = aria_mcp::teachme_guides::modes_teachme_guide();
+
+    assert_eq!(
+        actual, expected,
+        "modes_teachme_guide() must be byte-identical to the shared fixture.\n\
+         Actual length: {}\nExpected length: {}",
+        actual.len(), expected.len()
+    );
+    */
 }
