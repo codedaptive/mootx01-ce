@@ -561,6 +561,35 @@ public struct ToolDispatcher: Sendable {
                 ])
             )
         }
+        // `memory` is intercepted before the admitsDispatch guard because it stays
+        // outside the v2 registry. When the flag is off, we return a soft isError
+        // refusal rather than a -32601 throw: Anthropic tool-use clients expect a
+        // content result from a named tool call, not a protocol-level error.
+        // (ARIA_MCP_INTERFACE.md §18, §26). Frozen posture is evaluated per command,
+        // not by tool name, using ToolMutationInventory.frozenReadCommands: `view`
+        // proceeds; every other command (and a missing or unknown command) is refused
+        // before the adapter runs and before session state records the call.
+        if name == "memory" {
+            let now = benchClock.now()
+            guard ToolProjection.memoryToolEnabled(environment: environment) else {
+                return Self.errorResult("memory tool is disabled (set MOOTX01_MEMORY_TOOL=1 to enable)")
+            }
+            if posture == .frozen {
+                let command: String?
+                if case .string(let s) = args["command"] { command = s } else { command = nil }
+                let readCommands = ToolMutationInventory.frozenReadCommands["memory"] ?? []
+                let isReadCommand = command.map { readCommands.contains($0) } ?? false
+                if !isReadCommand {
+                    return Self.errorResult(
+                        EstatePosture.refusalMessage(tool: "memory", command: command))
+                }
+            }
+            // Record the admitted call before running the adapter so the session
+            // counter reflects every dispatched memory command (refused commands
+            // return above and are not counted).
+            await modeSessionState.recordCall(toolName: name, mode: nil)
+            return try await runMemoryTool(args, now: now)
+        }
         guard ToolProjection.admitsDispatch(name: name, environment: environment) else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
