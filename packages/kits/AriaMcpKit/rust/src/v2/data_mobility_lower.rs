@@ -222,6 +222,7 @@ impl V2DataMobilityLower for DirectDataMobilityLower<'_> {
             applied: apply,
             mode: mode.as_str().to_owned(),
             estate_id: open.estate_id,
+            estate_name: open.estate_name.clone(),
             fdc_data_version,
             fdc_recalculation_version,
             scanned,
