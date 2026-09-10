@@ -79,7 +79,7 @@ fn has_memory(tools: &[serde_json::Value]) -> bool {
 /// this file exists to provide.
 #[test]
 fn memory_tool_present_when_env_var_enabled() {
-    let _guard = ENV_LOCK.lock().expect("ENV_LOCK poisoned");
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // Safety: see module-level comment. This binary's only tests concern
     // MOOTX01_MEMORY_TOOL; ENV_LOCK prevents concurrent mutation.
@@ -117,7 +117,7 @@ fn memory_tool_present_when_env_var_enabled() {
 /// `ENV_LOCK`.
 #[test]
 fn memory_tool_absent_when_env_var_disabled() {
-    let _guard = ENV_LOCK.lock().expect("ENV_LOCK poisoned");
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // Explicitly set to "0"; the default (absent) would also disable the
     // tool, but an explicit value makes the test intent unambiguous.
