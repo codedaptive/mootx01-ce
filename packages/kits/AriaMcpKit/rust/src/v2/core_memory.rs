@@ -257,6 +257,30 @@ pub enum V2SearchScoring { Raw, Rrf, MatrixAware, Discriminative }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2SearchOrdering { ByCaptureTimeDesc, ByCaptureTimeAsc, ByRoomAsc, ByRelevanceDesc }
 
+
+/// Response shape for `moot_memory_search`. Unknown values fail closed at decode
+/// with -32602 INVALID_PARAMS and the exact message "Unknown answer: <value>.
+/// Valid: never, always, auto" — mirroring the Swift `PackagerAnswerMode` validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2AnswerMode {
+    /// Dense rows only; no synthesis block emitted (default).
+    Never,
+    /// Compose a GroundedSynthesis answer block plus the row list.
+    Always,
+    /// Let the packager's confidence gate decide the response level.
+    Auto,
+}
+
+impl V2AnswerMode {
+    pub fn raw_value(self) -> &'static str {
+        match self {
+            Self::Never  => "never",
+            Self::Always => "always",
+            Self::Auto   => "auto",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2MemorySearchRequest {
     pub estate_id: Option<Uuid>,
@@ -276,7 +300,9 @@ pub struct V2MemorySearchRequest {
     /// Validated at decode; "byRelevanceDesc" maps to ByCaptureTimeDesc in the service.
     pub ordering: Option<V2SearchOrdering>,
     pub frontier_k: Option<i64>,
-    pub answer: Option<String>,
+    /// Validated at decode; unknown values return -32602 INVALID_PARAMS.
+    /// Default (absent) is Never — dense rows only, no synthesis block.
+    pub answer: Option<V2AnswerMode>,
 }
 
 impl V2MemorySearchRequest {
@@ -352,7 +378,14 @@ impl V2MemorySearchRequest {
             media_type, explain: optional_bool(object, "explain")?,
             door, scoring, ordering,
             frontier_k: optional_integer(object, "frontier_k")?,
-            answer: optional_string(object, "answer")?.map(str::to_owned),
+            answer: match optional_string(object, "answer")? {
+                None          => None,
+                Some("never")  => Some(V2AnswerMode::Never),
+                Some("always") => Some(V2AnswerMode::Always),
+                Some("auto")   => Some(V2AnswerMode::Auto),
+                Some(unknown) => return Err(V2InvalidArgument::new("$.answer",
+                    format!("Unknown answer: {unknown}. Valid: never, always, auto"))),
+            },
         })
     }
 }
@@ -495,7 +528,9 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
                 }
             }
             dependencies.surfaced_recall_ledger.record_surfaced(&results.iter().map(|row| canonical_uuid(row.memory_id)).collect::<Vec<_>>(), context.now_millis / 1_000);
-            success(MEMORY_SEARCH_TOOL, &SearchData { results }, &meta, "memory search").map_err(jsonrpc_internal)
+            let count = results.len();
+            let compact = format!("found {} candidate {}", count, if count == 1 { "memory" } else { "memories" });
+            success(MEMORY_SEARCH_TOOL, &SearchData { results }, &meta, &compact).map_err(jsonrpc_internal)
         }
         Err(failure) => Ok(failure.render(MEMORY_SEARCH_TOOL, &meta)),
     }
