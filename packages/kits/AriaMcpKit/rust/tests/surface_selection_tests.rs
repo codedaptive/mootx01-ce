@@ -185,7 +185,6 @@ fn v2_dispatcher(probe: Arc<MonitoringProbe>) -> Dispatcher {
         "ARIA_MCP_Rust",
         "test",
         "test-serial",
-        "",
         Some(probe),
     )
 }
@@ -448,7 +447,7 @@ fn v2_preserves_mission01_monitoring_semantics_with_v2_effect_vocabulary() {
 
     let unavailable = vector(&fixture, "unavailable_monitoring_inspection");
     let unavailable_dispatcher = Dispatcher::new(
-        EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", "", None,
+        EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", None,
     );
     let unavailable_result = call(
         &unavailable_dispatcher,
@@ -577,7 +576,7 @@ fn v2_memory_search_and_get_exclude_provenance_sensitive_rows() {
     let elevated = seed_provenance_memory(&registry, "q23 boundary elevated common-token", Sensitivity::Elevated);
     let restricted = seed_provenance_memory(&registry, "q23 boundary restricted common-token", Sensitivity::Restricted);
     let secret = seed_provenance_memory(&registry, "q23 boundary secret common-token", Sensitivity::Secret);
-    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", "", None);
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
 
     let searched = call(&dispatcher, "moot_memory_search", serde_json::json!({
         "query":"q23 boundary common-token", "limit":10
@@ -679,7 +678,7 @@ fn v2_synthesis_ranks_an_older_query_match_above_recent_distractors() {
         assert!(relevant_hit.sources.contains(&RecallEvidencePath::CorpusBm25),
             "direct scored lane must carry BM25 evidence: {:?}", relevant_hit.sources);
     }
-    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", "", None);
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
     let synthesized = call(&dispatcher, "moot_synthesize", serde_json::json!({
         "query":"orchard radio calibration", "limit":1
     }));
@@ -748,7 +747,7 @@ fn v2_review_tunnel_endorse_uses_the_selected_coordinator_ladder() {
         .capture_tunnel(frame, 1_700_000_000_123).expect("proposed tunnel");
     let tunnel_id = tunnel.id.to_lowercase();
     let dispatcher = Dispatcher::new(
-        registry, "ARIA_MCP_Rust", "test", "test-serial", "", None,
+        registry, "ARIA_MCP_Rust", "test", "test-serial", None,
     );
 
     let endorsed = call(&dispatcher, "moot_review_tunnel", serde_json::json!({

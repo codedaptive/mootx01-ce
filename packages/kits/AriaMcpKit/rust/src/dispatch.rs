@@ -69,8 +69,11 @@ pub fn dispatch_tool(
 /// Dispatch with an explicit vault-on flag. Used by tests that need to verify
 /// vault-gating behaviour without mutating the process environment
 /// (std::env::set_var is not thread-safe under the parallel Rust test runner).
-/// Production code uses `dispatch_tool` / `dispatch_tool_with_vault_ledger`
-/// which read the env var via `vault_enabled()`.
+/// `dispatch_tool` and `dispatch_tool_with_vault_ledger` are also
+/// test-helper entry points (see the module header); the only production
+/// read of the env var is in `Dispatcher::new`, which resolves
+/// `vault_enabled()` once at construction time to build the surface
+/// catalog.
 pub fn dispatch_tool_with_vault_flag(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
@@ -88,11 +91,13 @@ pub fn dispatch_tool_with_vault_flag(
 }
 
 /// Internal dispatch entry point that accepts an explicit `vault_ledger`,
-/// build serial, and version-skew advisory. Used by `Dispatcher::handle`
-/// (passes the owned ledger, serial, and advisory) and by `dispatch_tool`
-/// (passes a throwaway ledger and empty strings for callers that don't need
-/// job tracking or build-serial/version-skew surfacing, such as test helpers
-/// that call individual tools in isolation).
+/// build serial, and version-skew advisory. Used directly by
+/// `tests/dispatch_tests.rs`, which passes an explicit build serial and
+/// version-skew advisory to exercise vault export/import job tracking, and
+/// by `dispatch_tool` (passes a throwaway ledger and empty strings for
+/// callers that don't need job tracking or build-serial/version-skew
+/// surfacing, such as test helpers that call individual tools in
+/// isolation).
 pub fn dispatch_tool_with_vault_ledger(
     name: &str,
     args: &BTreeMap<String, JsonValue>,
@@ -488,15 +493,6 @@ fn inject_hint(
     result
 }
 
-/// Append a hint line when the caller sent argument keys not declared in the
-/// tool's inputSchema. Never modifies error results (`isError: true`). Also
-/// logs unrecognized keys to stderr for daemon log visibility.
-///
-/// Accepted keys are extracted from `crate::tool_list::accepted_arg_keys`,
-/// which reads the v2 catalog schema directly. Returns `None` for unknown
-/// tool names — no check runs.
-///
-/// Mirrors Swift `ToolDispatcher.appendUnknownArgsHint`.
 /// Arg names that `interface_tools` (reachable here only through this
 /// v1 test-helper dispatch path) still reads under their original names.
 /// These are accepted by the tool's handler but not listed in the v2 catalog
@@ -515,6 +511,15 @@ fn v1_interface_arg_exemptions(tool_name: &str) -> &'static [&'static str] {
     }
 }
 
+/// Append a hint line when the caller sent argument keys not declared in the
+/// tool's inputSchema. Never modifies error results (`isError: true`). Also
+/// logs unrecognized keys to stderr for daemon log visibility.
+///
+/// Accepted keys are extracted from `crate::tool_list::accepted_arg_keys`,
+/// which reads the v2 catalog schema directly. Returns `None` for unknown
+/// tool names — no check runs.
+///
+/// Mirrors Swift `ToolDispatcher.appendUnknownArgsHint`.
 fn inject_unknown_args_hint(
     name: &str,
     args: &BTreeMap<String, JsonValue>,

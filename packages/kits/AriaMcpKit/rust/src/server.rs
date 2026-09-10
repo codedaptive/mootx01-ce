@@ -261,7 +261,6 @@ pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: Serv
         &config.server_name,
         &config.server_version,
         &config.build_serial,
-        &config.version_skew,
         None,
     )
     // Forwarded even though resident hosts wire it only for HTTP mode —
