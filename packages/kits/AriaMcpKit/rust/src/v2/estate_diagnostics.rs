@@ -11,6 +11,10 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+// lattice_lib provides the pinned FDC recalculation version string used to
+// determine whether the estate floor is current, stale, or missing.
+use lattice_lib;
+
 pub const ESTATE_STATUS_TOOL: &str = "moot_estate_status";
 pub const ESTATE_MAP_TOOL: &str = "moot_estate_map";
 pub const ESTATE_PING_TOOL: &str = "moot_estate_ping";
@@ -169,6 +173,10 @@ pub struct EstateDiagnosticsSnapshot {
     pub drains: Vec<EstateDrain>,
     pub rebuild: EstateRebuildState,
     pub timing: EstateTiming,
+    /// Stored value of `aria.fdc.recalced_data_version` from the estate meta
+    /// table. `None` means the key has never been written (no floor set yet).
+    /// Read by `Status`; left `None` by `Ping`, `Map`, and other operations.
+    pub fdc_floor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +206,10 @@ pub struct EstateStatusData {
     pub estate_name: String,
     pub memory_count: u64,
     pub fact_count: u64,
+    /// One of `"current"`, `"missing"`, or `"stale"`. Computed from the
+    /// stored `aria.fdc.recalced_data_version` meta key versus the pinned
+    /// FDC recalculation version. Per data contract §5.
+    pub fdc_recalculation: String,
     pub drains: Vec<EstateDrain>,
 }
 
@@ -265,11 +277,20 @@ impl<P: EstateDiagnosticsAuthority> EstateDiagnosticsService<P> {
         let memory_count = public_memories(&snapshot).count() as u64;
         let fact_count = snapshot.facts.iter().filter(|fact| public_fact(fact)).count() as u64;
         let drains = snapshot.drains.clone();
+        // Compute the fdc_recalculation field from the stored floor versus
+        // the pinned recalculation version. Mirrors Swift ToolDispatch.swift:3564.
+        let current_recalc = lattice_lib::Fdc::recalculation_version();
+        let fdc_recalculation = match snapshot.fdc_floor.as_deref() {
+            Some(floor) if floor == current_recalc.as_str() => "current".to_owned(),
+            None => "missing".to_owned(),
+            Some(_) => "stale".to_owned(),
+        };
         Ok(EstateStatusData {
             estate_id: canonical_uuid(snapshot.estate_id),
             estate_name: snapshot.estate_name,
             memory_count,
             fact_count,
+            fdc_recalculation,
             drains,
         })
     }

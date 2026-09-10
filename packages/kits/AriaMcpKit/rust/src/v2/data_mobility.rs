@@ -95,10 +95,47 @@ pub enum V2ImportMode { Foreground, Background }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2DatasetSensitivity { Normal, Elevated, Restricted, Secret }
 
+/// Reclassify mode for `moot_reclassify_fdc`. Wire values are `suspectOnly`
+/// and `all`, exactly as they appear in the FDC re-lookup API. No case-folding
+/// in v2: the caller must supply the exact string. Per data contract §2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2FdcReclassifyMode {
+    /// Only repairs drawers whose anchor change is a sentinel-adjacent or
+    /// same-code QID-drift case. Default.
+    SuspectOnly,
+    /// Repairs every active drawer whose anchor would change.
+    All,
+}
+
+/// One anchor change recorded in `V2ReclassifyFdcReport.changes`. Capped at 25
+/// entries per scan per the data contract §3 (changes_omitted carries the rest).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2FdcReclassifyChange {
+    /// Drawer id.
+    pub id: String,
+    /// UDC code before reclassify.
+    pub old_code: String,
+    /// UDC code after reclassify.
+    pub new_code: String,
+    /// Wikidata QID before reclassify; omitted when the drawer had no QID.
+    pub old_qid: Option<String>,
+    /// Wikidata QID after re-lookup; omitted when the re-lookup produced no QID.
+    pub new_qid: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2ReindexRequest { pub estate_id: Option<Uuid> }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct V2ReclassifyFdcRequest { pub estate_id: Option<Uuid> }
+pub struct V2ReclassifyFdcRequest {
+    pub estate_id: Option<Uuid>,
+    /// Apply anchor changes. Default false (dry run).
+    pub apply: bool,
+    /// Which anchors qualify as candidates. Default SuspectOnly.
+    pub mode: V2FdcReclassifyMode,
+    /// Cap the candidate set to at most this many drawers. None = no cap.
+    /// Must be 1–50000 when present; out-of-range is an invalid-argument refusal.
+    pub limit: Option<usize>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2PalaceImportRequest { pub palace_path: String, pub mode: Option<V2ImportMode>, pub estate_id: Option<Uuid> }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +174,36 @@ pub struct V2VaultReconcileRequest { pub vault_path: String, pub apply: Option<b
 pub struct V2VaultJobRequest { pub job_id: Uuid }
 
 impl V2ReindexRequest { pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> { let o = strict_object(value, ["estate_id"])?; Ok(Self { estate_id: optional_uuid(o, "estate_id")? }) } }
-impl V2ReclassifyFdcRequest { pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> { let o = strict_object(value, ["estate_id"])?; Ok(Self { estate_id: optional_uuid(o, "estate_id")? }) } }
+impl V2ReclassifyFdcRequest {
+    pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
+        let o = strict_object(value, ["estate_id", "apply", "mode", "limit"])?;
+        // Mode: exactly "suspectOnly" or "all". No case-folding — v2 is strict.
+        // An unrecognised mode value is an invalid-argument refusal per data contract §2.
+        let mode = match optional_string(o, "mode")? {
+            None | Some("suspectOnly") => V2FdcReclassifyMode::SuspectOnly,
+            Some("all") => V2FdcReclassifyMode::All,
+            Some(s) => return Err(V2InvalidArgument::new("$.mode",
+                format!("must be \"suspectOnly\" or \"all\"; received {s}"))),
+        };
+        // Limit: must be 1–50000 when present. Out-of-range is a refusal.
+        let limit = match optional_integer(o, "limit")? {
+            None => None,
+            Some(raw) => {
+                if raw < 1 || raw > 50_000 {
+                    return Err(V2InvalidArgument::new("$.limit",
+                        format!("must be 1–50000; received {raw}")));
+                }
+                Some(raw as usize)
+            }
+        };
+        Ok(Self {
+            estate_id: optional_uuid(o, "estate_id")?,
+            apply: optional_bool(o, "apply")?.unwrap_or(false),
+            mode,
+            limit,
+        })
+    }
+}
 impl V2PalaceImportRequest {
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
         let o = strict_object(value, ["palace_path", "mode", "estate_id"])?;
@@ -309,7 +375,47 @@ fn validate_dataset_order(values: &[JsonValue]) -> V2DecodeResult<()> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum V2ReindexState { Running, AlreadyRunning }
-#[derive(Debug, Clone, PartialEq, Eq)] pub struct V2ReclassifyFdcReport { pub applied: bool, pub mode: String, pub scanned: u64, pub unchanged: u64, pub candidates: u64, pub updated: u64, pub unclassified_after: u64 }
+
+/// Typed report for one `moot_reclassify_fdc` run. 18 properties per data contract §3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V2ReclassifyFdcReport {
+    /// True when the run wrote anchor changes.
+    pub applied: bool,
+    /// Resolved mode: "suspectOnly" or "all".
+    pub mode: String,
+    /// UUID of the estate scanned.
+    pub estate_id: uuid::Uuid,
+    /// FDC classifier data version string (non-empty).
+    pub fdc_data_version: String,
+    /// FDC recalculation version string (non-empty).
+    pub fdc_recalculation_version: String,
+    /// Active drawers examined.
+    pub scanned: u64,
+    /// Anchors that re-derived identically (code and QID both unchanged).
+    pub unchanged: u64,
+    /// Drawers whose content was blank at scan time.
+    pub empty_content: u64,
+    /// Anchors the mode admitted as candidates.
+    pub candidates: u64,
+    /// Anchors written; 0 on a dry run.
+    pub updated: u64,
+    /// Candidates on a dry run; 0 when applied.
+    pub would_update: u64,
+    /// Candidates whose new code is the "000" sentinel.
+    pub unclassified_after: u64,
+    /// Changed anchors the mode declined to repair.
+    pub skipped_non_candidate_changes: u64,
+    /// Floor stamp status. One of the five verbatim strings in data contract §4.
+    pub floor_stamp: String,
+    /// Estate floor before the run; None when no floor was stored.
+    pub estate_recalced_data_version_before: Option<String>,
+    /// Estate floor after the run; None when no floor was written.
+    pub estate_recalced_data_version_after: Option<String>,
+    /// Change list, capped at 25 entries, in scan order.
+    pub changes: Vec<V2FdcReclassifyChange>,
+    /// candidates − changes.len(); 0 when nothing was cut.
+    pub changes_omitted: u64,
+}
 #[derive(Debug, Clone, PartialEq, Eq)] pub struct V2PalaceImportReport { pub drawers_written: u64, pub drawers_updated: u64, pub drawers_skipped_unchanged: u64, pub drawers_skipped_tombstoned: u64, pub drawers_skipped_partial_write: u64, pub tunnels_created: u64, pub items_skipped: u64, pub fdc_classified: u64, pub fdc_unclassified: u64, pub fields_dropped: BTreeMap<String, u64>, pub enqueued_for_encode: u64 }
 #[derive(Debug, Clone, PartialEq, Eq)] pub struct V2JsonImportReport { pub seed_name: String, pub drawers_written: u64, pub facts_written: u64, pub tunnels_created: u64, pub enqueued_for_encode: u64, pub subjects_provided: u64, pub subjects_debt: u64, pub seed_sha256: String, pub id_map: Option<BTreeMap<String, Uuid>> }
 #[derive(Debug, Clone, PartialEq, Eq)] pub struct V2DatasetFiled { pub dataset_id: Uuid, pub handle_memory_id: Uuid, pub name: String, pub location: String, pub wing: Option<String>, pub columns: u64, pub rows: u64, pub source: String, pub sensitivity: String, pub signatures: String }

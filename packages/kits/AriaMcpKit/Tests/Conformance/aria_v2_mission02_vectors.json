@@ -2594,10 +2594,10 @@
           ]
         },
         "accepted_keys": [
-          "estate_id",
           "apply",
-          "mode",
-          "limit"
+          "estate_id",
+          "limit",
+          "mode"
         ],
         "inputSchema": {
           "type": "object",
@@ -2610,11 +2610,11 @@
               "type": "boolean"
             },
             "mode": {
+              "type": "string",
               "enum": [
                 "suspectOnly",
                 "all"
-              ],
-              "type": "string"
+              ]
             },
             "limit": {
               "type": "integer",
@@ -2641,10 +2641,6 @@
                   "type": "boolean"
                 },
                 "mode": {
-                  "enum": [
-                    "suspectOnly",
-                    "all"
-                  ],
                   "type": "string"
                 },
                 "estate_id": {
@@ -2652,12 +2648,10 @@
                   "format": "uuid"
                 },
                 "fdc_data_version": {
-                  "type": "string",
-                  "minLength": 1
+                  "type": "string"
                 },
                 "fdc_recalculation_version": {
-                  "type": "string",
-                  "minLength": 1
+                  "type": "string"
                 },
                 "scanned": {
                   "type": "integer",

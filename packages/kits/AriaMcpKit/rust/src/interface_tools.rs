@@ -83,11 +83,15 @@ const DEFAULT_EMBEDDING_MODEL: &str = "default";
 /// when it sees this sentinel (one-door principle). Previously "000.000"
 /// (a child node); corrected to "000" (the UDC root, per the LatticeLib
 /// Code grammar — the three-digit root is the correct unresolved sentinel).
-const DEFAULT_LATTICE_CODE: &str = "000";
+// pub(crate) so the v2 data-mobility lower can read the same constant
+// without duplicating it — single definition, both routes agree.
+pub(crate) const DEFAULT_LATTICE_CODE: &str = "000";
 /// Estate-wide floor: after a successful full FDC reclassification apply,
 /// this key records the composite classifier/artifact version against which
 /// every active stored anchor has been checked.
-const FDC_RECALCED_DATA_VERSION_META_KEY: &str = "aria.fdc.recalced_data_version";
+// pub(crate) so the v2 estate-diagnostics provider and data-mobility lower
+// can read and stamp the same key without duplication.
+pub(crate) const FDC_RECALCED_DATA_VERSION_META_KEY: &str = "aria.fdc.recalced_data_version";
 
 // ---------------------------------------------------------------------------
 // Tool surface declaration
@@ -4020,8 +4024,10 @@ fn run_timing_report(
     Ok(text_result(&lines.join("\n")))
 }
 
+// pub(crate): the v2 data-mobility lower converts from V2FdcReclassifyMode
+// (the v2 request type) to this enum before passing it to the shared helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FdcReclassifyMode {
+pub(crate) enum FdcReclassifyMode {
     SuspectOnly,
     All,
 }
@@ -4042,7 +4048,7 @@ impl FdcReclassifyMode {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::SuspectOnly => "suspectOnly",
             Self::All => "all",
@@ -4058,84 +4064,12 @@ struct FdcReclassifyChange {
     new_qid: Option<String>,
 }
 
-/// Typed default-mode receipt for the selected v2 reclassification operation.
-/// The v2 request has no legacy apply, mode, or limit arguments, so it uses
-/// the source tool's default dry-run `suspectOnly` scan.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FdcReclassifySnapshot {
-    pub applied: bool,
-    pub mode: String,
-    pub scanned: usize,
-    pub unchanged: usize,
-    pub candidates: usize,
-    pub updated: usize,
-    pub unclassified_after: usize,
-}
-
-/// Run the default FDC reclassification scan without the v1 dispatcher or its
-/// rendered output. This is intentionally dry-run only: v2 has no `apply`,
-/// `mode`, or `limit` request fields and must retain the v1 defaults.
-pub fn reclassify_fdc_snapshot(open: &OpenEstate) -> Result<FdcReclassifySnapshot, String> {
-    let drawers = {
-        let coord = open.coord.lock().unwrap();
-        coord.all_drawers(&open.handle)
-            .map_err(|error| describe_verb_dispatch_error(&error))?
-    };
-    let active: Vec<_> = drawers.into_iter()
-        .filter(|drawer| {
-            drawer.tombstoned_at.is_none()
-                && drawer.is_currently_believed()
-                && drawer.content_kind() != ContentKind::Dataset
-        })
-        .take(50_000)
-        .collect();
-    let inputs: Vec<(&str, lattice_lib::FdcContentKind)> = active.iter().map(|drawer| {
-        let kind = if drawer.content_kind() == ContentKind::Code {
-            lattice_lib::FdcContentKind::Code
-        } else {
-            lattice_lib::FdcContentKind::Text
-        };
-        (drawer.content.as_str(), kind)
-    }).collect();
-    let anchors = classify_contents_in_parallel(&inputs);
-
-    let mut unchanged = 0usize;
-    let mut candidates = 0usize;
-    let mut unclassified_after = 0usize;
-    for (index, drawer) in active.iter().enumerate() {
-        let old_code = normalized_fdc_code(&drawer.udc_code);
-        let old_qid = normalized_qid(drawer.wikidata_qid.as_deref());
-        let anchor = &anchors[index];
-        let new_code = normalized_fdc_code(&anchor.code);
-        let new_qid = normalized_qid(anchor.wikidata_qid.as_deref());
-        if old_code == new_code && old_qid == new_qid {
-            unchanged += 1;
-            continue;
-        }
-        if !should_repair_fdc_anchor(
-            FdcReclassifyMode::SuspectOnly,
-            &old_code,
-            old_qid.as_deref(),
-            &new_code,
-            new_qid.as_deref(),
-        ) {
-            continue;
-        }
-        candidates += 1;
-        if new_code == DEFAULT_LATTICE_CODE {
-            unclassified_after += 1;
-        }
-    }
-    Ok(FdcReclassifySnapshot {
-        applied: false,
-        mode: FdcReclassifyMode::SuspectOnly.as_str().to_owned(),
-        scanned: active.len(),
-        unchanged,
-        candidates,
-        updated: 0,
-        unclassified_after,
-    })
-}
+// FdcReclassifySnapshot and reclassify_fdc_snapshot were the dry-run-only
+// v2 stub seam. Removed when the v2 lower was rewritten to call the same
+// shared helpers as run_reclassify_fdc (classify_contents_in_parallel,
+// should_repair_fdc_anchor, normalized_fdc_code, normalized_qid) and gained
+// the apply/mode/limit arguments from the data contract. The lower now holds
+// the typed logic directly; neither struct nor function is called anywhere.
 
 impl FdcReclassifyChange {
     fn label(code: &str, qid: Option<&str>) -> String {
@@ -4154,7 +4088,10 @@ impl FdcReclassifyChange {
     }
 }
 
-fn normalized_fdc_code(code: &str) -> String {
+// pub(crate): shared by v1 run_reclassify_fdc (below) and the v2 lower
+// (data_mobility_lower.rs::reclassify_fdc). Single normalisation rule,
+// both routes agree: empty or whitespace-only code becomes the sentinel.
+pub(crate) fn normalized_fdc_code(code: &str) -> String {
     let trimmed = code.trim();
     if trimmed.is_empty() {
         DEFAULT_LATTICE_CODE.to_string()
@@ -4163,13 +4100,16 @@ fn normalized_fdc_code(code: &str) -> String {
     }
 }
 
-fn normalized_qid(qid: Option<&str>) -> Option<String> {
+// pub(crate): shared by both routes for consistent QID normalisation.
+pub(crate) fn normalized_qid(qid: Option<&str>) -> Option<String> {
     qid.map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
 }
 
-fn should_repair_fdc_anchor(
+// pub(crate): shared candidate-selection predicate. The v2 lower calls this
+// with the same FdcReclassifyMode it converted from V2FdcReclassifyMode.
+pub(crate) fn should_repair_fdc_anchor(
     mode: FdcReclassifyMode,
     old_code: &str,
     old_qid: Option<&str>,
@@ -4425,6 +4365,10 @@ fn run_reclassify_fdc(
 
 /// Classify each content/kind pair to its FDC anchor across a bounded worker
 /// pool, returning anchors in the SAME order as `inputs`.
+// pub(crate): the v2 data-mobility lower calls this directly rather than
+// going through run_reclassify_fdc (which builds a v1 text result and cannot
+// return a structured V2ReclassifyFdcReport). Both callers share one parallel
+// implementation so the determinism proof applies to both routes.
 ///
 /// Used by `run_reclassify_fdc` to parallelize the one expensive step of a
 /// reclassify scan (running content through the v4 classifier + semantic
@@ -4440,7 +4384,7 @@ fn run_reclassify_fdc(
 /// are unaffected). Each worker owns a disjoint output slice; contiguous
 /// chunking of the input and output in lockstep preserves index order, so the
 /// caller's serial audited-write phase sees the identical scan order.
-fn classify_contents_in_parallel(
+pub(crate) fn classify_contents_in_parallel(
     inputs: &[(&str, lattice_lib::FdcContentKind)],
 ) -> Vec<eidetic_lib::Anchor> {
     let n = inputs.len();
