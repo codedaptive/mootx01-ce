@@ -145,10 +145,22 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                     json!({"type":"object","properties":{
                         "query":{"type":"string"},"near":{"type":"string","format":"uuid"},
                         "limit":{"type":"integer","minimum":1,"maximum":500},
-                        "filter":{"type":"string"},"wing":{"type":"string"},
-                        "media_type":{"type":"string"},"door":{"type":"string"},
-                        "scoring":{"type":"string"},"ordering":{"type":"string"},
-                        "frontier_k":{"type":"integer"},
+                        // filter: constrains recall by confirmation state (unconfirmed, userConfirmed),
+                        // exportability (exportable, contained), or feature flag (pinned). Mirrors Swift.
+                        "filter":{"type":"string","enum":["unconfirmed","userConfirmed","exportable","contained","pinned"],"description":"Scope recall by confirmation state or feature flag. 'pinned' constrains to user-pinned memories. Composable with wing and media_type."},
+                        "wing":{"type":"string"},
+                        // media_type: constrains to drawers with a specific media capture type.
+                        // 'voice' → hasVoice (bit 13), 'image' → hasImage (bit 14).
+                        "media_type":{"type":"string","enum":["voice","image"]},
+                        // door: scoring-strategy adjective. 'guess' reads the A1 per-corpus DoorManifest.
+                        "door":{"type":"string","enum":["guess","raw","rrf","matrixAware","discriminative"],"description":"Scoring strategy adjective. 'guess' reads the optimizer-provisioned A1 per-corpus config. Direct values (rrf, matrixAware, raw, discriminative) override it. Absent falls through to scoring, then A1 manifest, then matrixAware."},
+                        // scoring: explicit strategy used when door is absent. Fail-closed on unknown values.
+                        "scoring":{"type":"string","enum":["raw","rrf","matrixAware","discriminative"]},
+                        // ordering: result ordering. 'byRelevanceDesc' routes through the scored recall path.
+                        "ordering":{"type":"string","enum":["byCaptureTimeDesc","byCaptureTimeAsc","byRoomAsc","byRelevanceDesc"],"description":"Result ordering. 'byRelevanceDesc' routes through the scored recall pipeline (results are relevance-ordered by score). 'byCaptureTimeDesc' (default), 'byCaptureTimeAsc', 'byRoomAsc' use the LocusKit ordering field."},
+                        // frontier_k: candidate-pool depth override. Engine clamps to [64, 256].
+                        // Absent uses the engine default formula min(max(limit × 4, 64), 256).
+                        "frontier_k":{"type":"integer","minimum":1},
                         "explain":{"type":"boolean"},
                         "estate_id":{"type":"string","format":"uuid"}},
                         "oneOf":[
@@ -181,7 +193,10 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                     "Produce a grounded synthesis from authorized memories.",
                     &["Produce a grounded synthesis from authorized memories."],
                     json!({"type":"object","properties":{
-                        "query":{"type":"string"},"filter":{"type":"string"},
+                        "query":{"type":"string"},
+                        // filter: scope synthesis recall. "hasLinks" constrains to drawers with
+                        // citations/links — citation-scoped synthesis path (hasLinks feature flag).
+                        "filter":{"type":"string","description":"Filter kind: unconfirmed, userConfirmed, exportable, contained, hasLinks. 'hasLinks' scopes synthesis to drawers with links/citations. Composable with query. null is invalid."},
                         "limit":{"type":"integer","minimum":1},
                         "estate_id":{"type":"string","format":"uuid"}},
                         "required":[],"additionalProperties":false})),
@@ -804,7 +819,9 @@ fn recall_input_schema(name: &str) -> Option<Value> {
             json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1},"depth":{"type":"integer","minimum":1},"filter":{"type":"string"},"wing":{"type":"string"},"estate_id":{"type":"string","format":"uuid"}},"required":["query"],"additionalProperties":false}),
         ),
         "moot_recall_shaped" => Some(
-            json!({"type":"object","properties":{"query":{"type":"string"},"preset":{"type":"string"},"limit":{"type":"integer","minimum":1},"filter":{"type":"string"},"wing":{"type":"string"},"estate_id":{"type":"string","format":"uuid"}},"required":["query"],"additionalProperties":false}),
+            // frontier_k: candidate-pool depth override, same semantics as moot_memory_search.
+            // The shaped-recall engine clamps the value to [64, 256].
+            json!({"type":"object","properties":{"query":{"type":"string"},"preset":{"type":"string"},"limit":{"type":"integer","minimum":1},"filter":{"type":"string"},"wing":{"type":"string"},"frontier_k":{"type":"integer","minimum":1},"estate_id":{"type":"string","format":"uuid"}},"required":["query"],"additionalProperties":false}),
         ),
         "moot_recall_distilled" | "moot_recall_vague" | "moot_recall_walk" => {
             let mut props = basic();
