@@ -209,8 +209,10 @@ struct AriaV2CallChainTests {
         // lo runs first (position 10), hi runs second (position 20).
         #expect(egressA.result == .string("base|lo|hi"))
 
-        // Part B: same concerns, positions swapped. Textual order is now "lo" before "hi",
-        // but "hi" has the lower position — so "hi" should run first now.
+        // Part B: same names, positions unchanged — textual order is now "lo" before "hi".
+        // This is the control: positions are identical to Part A, only the declaration
+        // order is inverted. The expected result must be the same, isolating textual
+        // order as a variable that has no effect on run order.
         let chainB = try AriaV2CallChain(registrations: [
             // Textually first, declared position 10 — should run FIRST.
             AriaV2ChainRegistration(
@@ -374,7 +376,8 @@ struct AriaV2CallChainTests {
             ingressOutcome: ingress
         )
 
-        // Gate error halts fail-closed — late marker must be absent.
+        // Gate error halts fail-closed — payload is unmodified and late marker is absent.
+        #expect(egress.result == .string("base"))
         #expect(egress.halt == .gateFailed("erroring-gate"))
         if case .string(let s) = egress.result {
             #expect(!s.contains("|late"))
@@ -469,7 +472,8 @@ struct AriaV2CallChainTests {
             ingressOutcome: ingress
         )
 
-        // Rule 4: failed ingress on a gating concern halts fail-closed.
+        // Rule 4: failed ingress on a gating concern halts fail-closed. Payload is unmodified.
+        #expect(egress.result == .string("base"))
         #expect(egress.halt == .gateFailed("lost-gate"))
         if case .string(let s) = egress.result {
             #expect(!s.contains("|after-gate-ran"))
