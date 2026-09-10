@@ -4064,13 +4064,6 @@ struct FdcReclassifyChange {
     new_qid: Option<String>,
 }
 
-// FdcReclassifySnapshot and reclassify_fdc_snapshot were the dry-run-only
-// v2 stub seam. Removed when the v2 lower was rewritten to call the same
-// shared helpers as run_reclassify_fdc (classify_contents_in_parallel,
-// should_repair_fdc_anchor, normalized_fdc_code, normalized_qid) and gained
-// the apply/mode/limit arguments from the data contract. The lower now holds
-// the typed logic directly; neither struct nor function is called anywhere.
-
 impl FdcReclassifyChange {
     fn label(code: &str, qid: Option<&str>) -> String {
         match qid {
