@@ -81,7 +81,9 @@ public struct AriaV2RecallLensRequest: Sendable, Equatable {
         .recallPrecise: schema(["query"], recall.merging(["pool": .positiveInteger, "composition": .string]) { _, n in n }),
         .recallTemporal: schema(["query"], recall.merging(["window": .string, "from": .string, "to": .string, "pool": .positiveInteger, "grab": .string]) { _, n in n }),
         .recallConnected: schema(["query"], recall.merging(["depth": .positiveInteger]) { _, n in n }),
-        .recallShaped: schema(["query"], recall.merging(["preset": .string]) { _, n in n }),
+        // frontier_k shares the .positiveInteger kind used on moot_memory_search;
+        // the shaped-recall engine clamps [64, 256] internally.
+        .recallShaped: schema(["query"], recall.merging(["preset": .string, "frontier_k": .positiveInteger]) { _, n in n }),
         .recallDistilled: schema(["query"], recall), .recallVague: schema(["query"], recall), .recallWalk: schema(["query"], recall),
         .lensKeystones: schema(["wing"], ["wing": .string, "topK": .string, "keystoneOnly": .string]),
         .lensConstellation: schema(["wing"], ["wing": .string]),
@@ -133,7 +135,9 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
             let a = request.arguments; let f = try filter(a["filter"]?.stringValue)
             let preset = a["preset"]?.stringValue ?? "balanced"
             guard RecallShape.presetNames.contains(preset) else { throw AriaV2InvalidArgument(path: "preset", message: "Unknown recall preset '\(preset)'.").jsonRPCError }
-            let rows = try await ShapedRecall().run(input: .init(query: a["query"]!.stringValue!, preset: preset, filter: a["wing"]?.stringValue.map { .all([f, .inWing($0)]) } ?? f, limit: Int(a["limit"]?.integerValue ?? 20), frontierK: nil), estate: handle, kit: kit).matches
+            // Thread frontier_k through to the engine; absent means nil (engine default formula).
+            let frontierK = a["frontier_k"]?.integerValue.map { Int($0) }
+            let rows = try await ShapedRecall().run(input: .init(query: a["query"]!.stringValue!, preset: preset, filter: a["wing"]?.stringValue.map { .all([f, .inWing($0)]) } ?? f, limit: Int(a["limit"]?.integerValue ?? 20), frontierK: frontierK), estate: handle, kit: kit).matches
             return try await projectedResult(
                 rows.map { .init(id: $0.id, score: $0.score) },
                 control: discrimination(rows.map(\.score)), label: "shaped recall")
