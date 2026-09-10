@@ -118,6 +118,49 @@ enum AriaV2SelectedCatalog {
                     "minimum": .integer(1),
                     "maximum": .integer(Int64(AriaV2MemorySearchRequest.maximumLimit)),
                 ]),
+                // filter: constrains recall by confirmation state (unconfirmed, userConfirmed),
+                // exportability (exportable, contained), or feature flag (pinned). Composable
+                // with wing and media_type. 'pinned' activates the container-fingerprint
+                // pruning path via hasFeatureFlag(.isPinned).
+                "filter": .object([
+                    "type": .string("string"),
+                    "enum": .array(["unconfirmed", "userConfirmed", "exportable", "contained", "pinned"].map(JSONValue.string)),
+                    "description": .string("Scope recall by confirmation state or feature flag. 'pinned' constrains to user-pinned memories. Composable with wing and media_type."),
+                ]),
+                // wing: scopes recall to a named wing of the estate (e.g. 'Agentic Memory').
+                // Absent means recall spans all wings. Composable with filter and media_type.
+                "wing": stringSchema(),
+                // media_type: constrains recall to drawers carrying a specific media capture type.
+                // 'voice' → hasVoice (bit 13), 'image' → hasImage (bit 14). Composable with filter and wing.
+                "media_type": enumSchema(["voice", "image"]),
+                // door: scoring-strategy adjective on the recall verb. 'guess' reads the
+                // optimizer-provisioned A1 per-corpus DoorManifest; absent or unprovisioned
+                // falls back to matrixAware. Direct scoring rawValues bypass the A1 config.
+                // Overrides scoring when both are present.
+                "door": .object([
+                    "type": .string("string"),
+                    "enum": .array(["guess", "raw", "rrf", "matrixAware", "discriminative"].map(JSONValue.string)),
+                    "description": .string("Scoring strategy adjective. 'guess' reads the optimizer-provisioned A1 per-corpus config. Direct values (rrf, matrixAware, raw, discriminative) override it. Absent falls through to scoring, then A1 manifest, then matrixAware."),
+                ]),
+                // scoring: explicit scoring strategy, used when door is absent.
+                // Fail-closed: unknown values throw invalidParams (not silently coerced).
+                "scoring": enumSchema(["raw", "rrf", "matrixAware", "discriminative"]),
+                // ordering: result ordering. 'byRelevanceDesc' is a compatibility spelling
+                // for the scored recall path; results are already relevance-ordered by scores.
+                // All other values map directly to LocusKit.Ordering cases.
+                "ordering": .object([
+                    "type": .string("string"),
+                    "enum": .array(["byCaptureTimeDesc", "byCaptureTimeAsc", "byRoomAsc", "byRelevanceDesc"].map(JSONValue.string)),
+                    "description": .string("Result ordering. 'byRelevanceDesc' routes through the scored recall pipeline (results are relevance-ordered by score). 'byCaptureTimeDesc' (default), 'byCaptureTimeAsc', 'byRoomAsc' use the LocusKit ordering field."),
+                ]),
+                // frontier_k: candidate-pool depth override. The GLK engine clamps to [64, 256].
+                // Absent uses the engine default formula min(max(limit × 4, 64), 256).
+                "frontier_k": positiveIntegerSchema(),
+                // explain:true renders a discrimination line when the recall confidence signal
+                // is low or medium — surfaces how clearly the top result separates from
+                // the field. Absent means a clear, nominal result; opt-in because the
+                // discrimination line adds tokens the caller may not want.
+                "explain": booleanSchema(),
                 "estate_id": uuidSchema(),
             ], inputSchemaAdditions: ["oneOf": exactlyOneOf("query", "near")],
             dataSchema: memorySearchDataSchema()
@@ -161,26 +204,34 @@ enum AriaV2SelectedCatalog {
             identity: "recall_shaped", name: AriaV2RecallLensOperation.recallShaped.rawValue,
             effect: .read, description: "Recall memories with the selected shaped-retrieval composition.",
             intents: ["Recall memories with the selected shaped-retrieval composition."],
-            properties: recallProperties(extras: ["preset": stringSchema()]),
+            // frontier_k: candidate-pool depth override, same semantics as moot_memory_search.
+            // The shaped-recall engine clamps the value to [64, 256].
+            properties: recallProperties(extras: ["preset": stringSchema(), "frontier_k": positiveIntegerSchema()]),
             required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "recall_distilled", name: AriaV2RecallLensOperation.recallDistilled.rawValue,
             effect: .read, description: "Recall compact distilled memory projections.",
             intents: ["Recall compact distilled memory projections."],
-            properties: recallProperties(), required: ["query"], dataSchema: distilledRecallDataSchema()
+            // echo_query:true echoes the rewritten query in the result so the
+            // caller can verify the server's interpretation of a vague or
+            // expanded cue.
+            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
+            required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "recall_vague", name: AriaV2RecallLensOperation.recallVague.rawValue,
             effect: .read, description: "Recall memories from a vague cue.",
             intents: ["Recall memories from a vague cue."],
-            properties: recallProperties(), required: ["query"], dataSchema: recallDataSchema()
+            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
+            required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "recall_walk", name: AriaV2RecallLensOperation.recallWalk.rawValue,
             effect: .read, description: "Recall with the bounded escalation ladder.",
             intents: ["Recall with the bounded escalation ladder."],
-            properties: recallProperties(), required: ["query"], dataSchema: recallDataSchema()
+            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
+            required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "lens_keystones", name: AriaV2RecallLensOperation.lensKeystones.rawValue,
@@ -636,7 +687,13 @@ enum AriaV2SelectedCatalog {
             description: "Produce a grounded synthesis from authorized memories.",
             intents: ["Produce a grounded synthesis from authorized memories."],
             properties: [
-                "query": stringSchema(), "filter": stringSchema(),
+                "query": stringSchema(),
+                // filter: scope synthesis recall. "hasLinks" constrains to drawers with
+                // citations/links — citation-scoped synthesis path (hasLinks feature flag).
+                "filter": .object([
+                    "type": .string("string"),
+                    "description": .string("Filter kind: unconfirmed, userConfirmed, exportable, contained, hasLinks. 'hasLinks' scopes synthesis to drawers with links/citations. Composable with query. null is invalid."),
+                ]),
                 "limit": .object(["type": .string("integer"), "minimum": .integer(1)]),
                 "estate_id": uuidSchema(),
             ],
@@ -872,7 +929,15 @@ enum AriaV2SelectedCatalog {
             effect: .write,
             description: "Import a local JSON source into the selected estate.",
             intents: ["Import a local JSON source into the selected estate."],
-            properties: ["path": stringSchema(), "estate_id": uuidSchema()],
+            properties: [
+                "path": stringSchema(),
+                // return_id_map:true adds a second text block with a JSON map
+                // {"id_map":{"<record id>":"<drawer id>"}} naming the drawer each
+                // seed record became. Off by default (most callers want the receipt,
+                // not N id pairs).
+                "return_id_map": booleanSchema(),
+                "estate_id": uuidSchema(),
+            ],
             required: ["path"],
             requiredCapabilities: [vaultCapability],
             dataSchema: jsonImportDataSchema()
@@ -985,9 +1050,15 @@ enum AriaV2SelectedCatalog {
             identity: "vault_job",
             name: "moot_vault_job",
             effect: .read,
-            description: "Fetch the status of one vault job.",
+            description: "Fetch the status of one vault job. Returns running, complete, or failed status with progress details.",
             intents: ["Fetch the status of one vault job."],
-            properties: ["job_id": uuidSchema()],
+            // job_id carries a description so the tools/list entry matches the v2 catalog
+            // and Rust port exactly — both ports share the "Job ID returned by..." text.
+            properties: ["job_id": .object([
+                "type": .string("string"),
+                "format": .string("uuid"),
+                "description": .string("Job ID returned by moot_vault_import or moot_vault_export."),
+            ])],
             required: ["job_id"],
             requiredCapabilities: [vaultCapability],
             dataSchema: vaultJobDataSchema()
@@ -1600,35 +1671,6 @@ enum AriaV2SelectedCatalog {
 
     private static func recallDataSchema() -> JSONValue {
         lensDataSchema(.lensPartialCue)
-    }
-
-    /// `moot_recall_distilled` declares its own data schema: the shared memory
-    /// row plus a required `capabilities` object that always carries the
-    /// `distillation` savings (ARIA_V2_CONTRACT.md, "Distilled recall savings").
-    private static func distilledRecallDataSchema() -> JSONValue {
-        orderedExactObjectSchema([
-            "results": .object(["type": .string("array"), "items": lensMemoryRowSchema()]),
-            "capabilities": distilledCapabilitiesSchema(),
-        ], required: ["results", "capabilities"])
-    }
-
-    private static func distilledCapabilitiesSchema() -> JSONValue {
-        orderedExactObjectSchema([
-            "discrimination": enumSchema(["low", "medium"]),
-            "distillation": distillationSchema(),
-        ], required: ["distillation"])
-    }
-
-    /// The `skim` object is declared now so schema consumers do not change
-    /// when skim is wired; it is absent until then.
-    private static func distillationSchema() -> JSONValue {
-        orderedExactObjectSchema([
-            "returnedTokens": nonnegativeIntegerSchema(), "originalTokens": nonnegativeIntegerSchema(),
-            "savedTokens": integerSchema(), "savedPercent": integerSchema(),
-            "estimated": booleanSchema(), "estimator": stringSchema(),
-            "skim": orderedExactObjectSchema(["omittedTokens": nonnegativeIntegerSchema()], required: ["omittedTokens"]),
-            "display": stringSchema(),
-        ], required: ["returnedTokens", "originalTokens", "savedTokens", "savedPercent", "estimated", "estimator", "display"])
     }
 
     private static func transcriptRecallDataSchema() -> JSONValue {

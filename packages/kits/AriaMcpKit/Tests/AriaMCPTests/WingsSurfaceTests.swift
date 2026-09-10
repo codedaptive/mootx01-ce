@@ -61,14 +61,89 @@ struct WingsSurfaceTests {
         return s
     }
 
+    /// Extract estate_map content from a v2 response.
+    ///
+    /// The v2 estate_map stores map data in structuredContent.data.wings (not in
+    /// the compact text block). This helper converts the structured wings/rooms
+    /// data to the canonical "  WingName/\n    RoomName: N" text format so that
+    /// assertions written against that format work correctly on the v2 surface.
+    /// Falls back to the compact text block if structured content is absent
+    /// (v1 path compatibility).
+    private func estateMapText(of result: JSONValue) -> String {
+        if let wings = result.objectValue?["structuredContent"]?.objectValue?["data"]?
+                .objectValue?["wings"]?.arrayValue {
+            var lines: [String] = []
+            for wingVal in wings {
+                guard let wingObj = wingVal.objectValue,
+                      let name = wingObj["name"]?.stringValue,
+                      !name.isEmpty,
+                      let rooms = wingObj["rooms"]?.arrayValue
+                else { continue }
+                lines.append("  \(name)/")
+                for roomVal in rooms {
+                    guard let roomObj = roomVal.objectValue,
+                          let roomName = roomObj["name"]?.stringValue,
+                          let count = roomObj["memory_count"]?.integerValue
+                    else { continue }
+                    lines.append("    \(roomName): \(count)")
+                }
+            }
+            return lines.joined(separator: "\n")
+        }
+        return text(of: result)
+    }
+
     // MARK: - Change 1: moot_file_memory wing routing
 
     /// `moot_file_memory` with an explicit `wing` must land the drawer in that wing.
     /// `moot_estate_map` confirms placement after capture.
+    @Test func fileMemoryExplicitWingLandsInCorrectWing() async throws {
+        let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("explicit-wing-routing-test memory"),
+                "subject": .string("explicit-wing-routing-test memory"),
+                "location": .string("test-room"),
+                "wing": .string("Projects"),
+            ]))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_map", arguments: .object([:]))
+        // v2 estate_map stores data in structuredContent; estateMapText extracts it.
+        let output = estateMapText(of: result)
+        #expect(output.contains("Projects/"),
+            "estate_map must show the 'Projects' wing after explicit wing routing; got:\n\(output)")
+    }
 
     /// `moot_file_memory` without a `wing` argument must land in "Agentic Memory"
     /// (the default wing — LocusKit.defaultWingName). Recall scoped to that wing
     /// must find the drawer; recall scoped to a different wing must not find it.
+    @Test func fileMemoryAbsentWingDefaultsToAgenticMemory() async throws {
+        let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("absent-wing-defaults-to-agentic-memory-test"),
+                "subject": .string("absent-wing-defaults-to-agentic-memory-test"),
+                "location": .string("test-room"),
+            ]))
+
+        // moot_memory_search with wing="Agentic Memory" must find the drawer.
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("absent-wing-defaults-to-agentic-memory-test"),
+                "wing": .string("Agentic Memory"),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false),
+            "absent wing must default to Agentic Memory and be findable; got: \(obj)")
+    }
 
     /// `moot_file_memory` `wing` schema must advertise an optional `wing` property.
     @Test func fileMemorySchemaAdvertisesWingArgument() throws {
@@ -103,10 +178,60 @@ struct WingsSurfaceTests {
     /// counted as a normal room entry (AI_Charter_Hint: 1). No inline "charter: <text>"
     /// special rendering — hint drawers are normal drawers.
 
+    /// `moot_estate_map` must show the "Agentic Memory" wing with its hint drawer
+    /// counted as a normal room entry (AI_Charter_Hint: 1). No inline "charter: <text>"
+    /// special rendering — hint drawers are normal drawers.
+    @Test func estateMapSurfacesAgenticMemoryWithHintDrawerCount() async throws {
+        let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_map", arguments: .object([:]))
+        // v2 estate_map stores data in structuredContent; estateMapText extracts it.
+        let output = estateMapText(of: result)
+
+        #expect(output.contains("Agentic Memory/"),
+            "estate_map must show Agentic Memory wing; got:\n\(output)")
+        #expect(output.contains("AI_Charter_Hint"),
+            "estate_map must show AI_Charter_Hint room as a normal count entry; got:\n\(output)")
+    }
+
     /// All seven default wings must appear in `moot_estate_map` output.
+    @Test func estateMapSurfacesAllSevenDefaultWings() async throws {
+        let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_map", arguments: .object([:]))
+        // v2 estate_map stores data in structuredContent; estateMapText extracts it.
+        let output = estateMapText(of: result)
+
+        let expectedWings = ["Agentic Memory", "User Canon", "Source Corpus",
+                              "Personal", "Professional", "Projects", "Temp"]
+        for wing in expectedWings {
+            #expect(output.contains("\(wing)/"),
+                "estate_map must show \(wing) wing; got:\n\(output)")
+        }
+    }
 
     /// Hint drawers (AI_Charter_Hint room) must appear as a normal room count line
     /// under each wing, not as inline "charter: <text>" and not as "_charter: N".
+    @Test func estateMapShowsHintDrawerAsNormalRoomCount() async throws {
+        let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_map", arguments: .object([:]))
+        // v2 estate_map stores data in structuredContent; estateMapText extracts it.
+        let output = estateMapText(of: result)
+
+        // AI_Charter_Hint must appear as a room count line (e.g. "    AI_Charter_Hint: 1"),
+        // not as an inline "charter: <text>" rendering.
+        #expect(output.contains("AI_Charter_Hint:"),
+            "hint drawer must appear as 'AI_Charter_Hint: N' count line, not inline charter text; got:\n\(output)")
+        #expect(!output.contains("charter: "),
+            "estate_map must not contain inline 'charter: <text>' rendering; got:\n\(output)")
+    }
 
     /// The old `_charter` room name must not appear in estate_map output at all —
     /// neither as a count line nor as inline charter text.
@@ -125,6 +250,25 @@ struct WingsSurfaceTests {
     // MARK: - Change 3: schema verification — wing argument declared
 
     /// `moot_memory_search` schema must advertise an optional `wing` property.
+    @Test func memorySearchSchemaAdvertisesWingArgument() throws {
+        let tool = try #require(
+            ToolProjection.tools().first { $0.name == "moot_memory_search" })
+        guard case let .object(schema) = tool.inputSchema,
+              case let .object(props)? = schema["properties"],
+              props["wing"] != nil
+        else {
+            Issue.record("moot_memory_search schema must expose a `wing` property")
+            return
+        }
+        // wing must be optional — not in required.
+        if case let .array(required)? = schema["required"] {
+            let names = required.compactMap { v -> String? in
+                if case let .string(s) = v { return s }; return nil
+            }
+            #expect(!names.contains("wing"),
+                "moot_memory_search wing must be optional (not in required)")
+        }
+    }
 
     /// `moot_recall_precise` schema must advertise an optional `wing` property.
     @Test func recallPreciseSchemaAdvertisesWingArgument() throws {
@@ -189,9 +333,44 @@ struct WingsSurfaceTests {
     /// `moot_memory_search` with `wing` = "Agentic Memory" must succeed.
     /// Captured content lands in defaultWingName ("Agentic Memory"), so the
     /// scoped search must not error.
+    @Test func memorySearchWithDefaultWingScopedSucceeds() async throws {
+        let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("wing-scoped-search-agentic-memory"),
+                "subject": .string("wing-scoped-search-agentic-memory"),
+                "location": .string("wildlife"),
+            ]))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("wing-scoped-search-agentic-memory"),
+                "wing": .string("Agentic Memory"),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false),
+            "memory_search scoped to 'Agentic Memory' must succeed; got: \(obj)")
+    }
 
     /// `moot_memory_search` scoped to an empty wing must succeed (no error)
     /// even when no content is in that wing. Empty is a valid result.
+    @Test func memorySearchWithEmptyWingScopedSucceeds() async throws {
+        let (dispatcher, kit, handle) = try await makeProvisionedDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("empty-wing-test"),
+                "wing": .string("Projects"),  // wing exists but has no relevant content
+            ]))
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "memory_search on an empty wing must succeed with no results, not error")
+    }
 
     // MARK: - Change 3: behaviour — moot_recall_precise
 
