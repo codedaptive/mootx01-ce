@@ -6,12 +6,20 @@
 
 use std::path::Path;
 
+use locus_kit::drawer_operational::ContentKind;
+
 use crate::estate_registry::{EstateRegistry, OpenEstate};
+use crate::interface_tools::{
+    classify_contents_in_parallel, normalized_fdc_code, normalized_qid,
+    should_repair_fdc_anchor, FdcReclassifyMode,
+    DEFAULT_LATTICE_CODE, FDC_RECALCED_DATA_VERSION_META_KEY,
+};
 
 use super::data_mobility::{
     V2DataMobilityAdmission, V2DataMobilityLower, V2DatasetFiled,
     V2DatasetQueryRequest, V2DatasetQueryResult, V2DatasetStatsRequest,
-    V2DatasetStatsResult, V2DatasetSensitivity, V2FileDatasetRequest, V2JsonImportReport,
+    V2DatasetStatsResult, V2DatasetSensitivity, V2FdcReclassifyChange,
+    V2FdcReclassifyMode, V2FileDatasetRequest, V2JsonImportReport,
     V2ImportMode, V2JsonImportRequest, V2PalaceImportReport, V2PalaceImportRequest,
     V2ReclassifyFdcReport, V2ReclassifyFdcRequest, V2ReindexRequest,
     V2ReindexState, V2VaultCandidate, V2VaultExportRequest,
@@ -53,18 +61,182 @@ impl V2DataMobilityLower for DirectDataMobilityLower<'_> {
     fn reclassify_fdc(
         &self,
         admission: &V2DataMobilityAdmission,
-        _: &V2ReclassifyFdcRequest,
+        request: &V2ReclassifyFdcRequest,
     ) -> Result<V2ReclassifyFdcReport, ()> {
         let open = self.selected_open(admission)?;
-        let snapshot = crate::interface_tools::reclassify_fdc_snapshot(open).map_err(|_| ())?;
+        let apply = request.apply;
+        // Convert from the v2 request enum to the shared FdcReclassifyMode.
+        // Both enums carry identical semantics; the split exists because
+        // data_mobility.rs is imported via `#[path = "..."]` in the unit
+        // test and cannot access `crate::interface_tools`.
+        let mode = match request.mode {
+            V2FdcReclassifyMode::SuspectOnly => FdcReclassifyMode::SuspectOnly,
+            V2FdcReclassifyMode::All => FdcReclassifyMode::All,
+        };
+
+        // FDC version strings from the pinned artifact bundle. Both methods
+        // return `&'static str`; we own String in the report so convert here.
+        let fdc_data_version = lattice_lib::Fdc::data_version().to_string();
+        let fdc_recalculation_version = lattice_lib::Fdc::recalculation_version().to_string();
+
+        // Read the stored estate floor before the scan.
+        let prior_floor = open.store
+            .get_meta(FDC_RECALCED_DATA_VERSION_META_KEY)
+            .map_err(|_| ())?;
+
+        // Load all active, classifiable drawers. Dataset handles carry
+        // structured JSON rather than free text — classifying them corrupts
+        // their DatasetHandleContent payload (MX-TAB-4 locked decision).
+        let drawers = {
+            let coord = open.coord.lock().unwrap();
+            coord.all_drawers(&open.handle).map_err(|_| ())?
+        };
+        let mut active: Vec<_> = drawers
+            .into_iter()
+            .filter(|d| {
+                d.tombstoned_at.is_none()
+                    && d.is_currently_believed()
+                    && d.content_kind() != ContentKind::Dataset
+            })
+            .collect();
+        // Apply the limit cap before classification so the parallel pass
+        // never classifies drawers that won't enter the candidate loop.
+        if let Some(limit) = request.limit {
+            active.truncate(limit);
+        }
+
+        // Phase A — PARALLEL classify. classify_contents_in_parallel returns
+        // anchors in the same order as `active`, so the serial Phase B loop
+        // below produces byte-identical output to a serial classify.
+        let inputs: Vec<(&str, lattice_lib::FdcContentKind)> = active.iter().map(|d| {
+            let kind = if d.content_kind() == ContentKind::Code {
+                lattice_lib::FdcContentKind::Code
+            } else {
+                lattice_lib::FdcContentKind::Text
+            };
+            (d.content.as_str(), kind)
+        }).collect();
+        let anchors = classify_contents_in_parallel(&inputs);
+
+        // Phase B — SERIAL, ORDERED scan and optional audited write.
+        let mut scanned = 0u64;
+        let mut empty_content = 0u64;
+        let mut unchanged = 0u64;
+        let mut candidate_count = 0u64;
+        let mut applied_count = 0u64;
+        let mut skipped_non_candidate_changes = 0u64;
+        let mut unclassified_after = 0u64;
+        let mut change_list: Vec<V2FdcReclassifyChange> = Vec::new();
+
+        for (index, drawer) in active.iter().enumerate() {
+            scanned += 1;
+            if drawer.content.trim().is_empty() {
+                empty_content += 1;
+            }
+
+            let old_code = normalized_fdc_code(&drawer.udc_code);
+            let old_qid = normalized_qid(drawer.wikidata_qid.as_deref());
+            let anchor = &anchors[index];
+            let new_code = normalized_fdc_code(&anchor.code);
+            let new_qid = normalized_qid(anchor.wikidata_qid.as_deref());
+
+            if old_code == new_code && old_qid == new_qid {
+                unchanged += 1;
+                continue;
+            }
+            if !should_repair_fdc_anchor(mode, &old_code, old_qid.as_deref(), &new_code, new_qid.as_deref()) {
+                skipped_non_candidate_changes += 1;
+                continue;
+            }
+
+            candidate_count += 1;
+            if new_code == DEFAULT_LATTICE_CODE {
+                unclassified_after += 1;
+            }
+            if change_list.len() < 25 {
+                change_list.push(V2FdcReclassifyChange {
+                    id: drawer.id.clone(),
+                    old_code: old_code.clone(),
+                    new_code: new_code.clone(),
+                    old_qid: old_qid.clone(),
+                    new_qid: new_qid.clone(),
+                });
+            }
+
+            if apply {
+                // Repair only the primary udc_code and wikidata_qid from
+                // the re-lookup. udc_facets and wikidata_qids_secondary are
+                // carried forward unchanged — FDC re-lookup has no opinion on
+                // secondary classification, so a reclassify apply must not
+                // silently wipe facets or secondary QIDs a human or the
+                // enrichment daemon attached. Per data contract §6.
+                let new_anchor = locus_kit::estate_types::LatticeAnchor::new(
+                    new_code,
+                    drawer.udc_facets.clone(),
+                    new_qid,
+                    drawer.wikidata_qids_secondary.clone(),
+                );
+                let coord = open.coord.lock().unwrap();
+                // reanchor_anchor (not the generic reanchor) so the audit event
+                // names this tool as the actor with a tool-specific reason string,
+                // matching Swift's reanchorAnchor changedBy: serverIdentity
+                // reason: "FDC reclassified via moot_reclassify_fdc". The generic
+                // coord.reanchor path stamps the estate owner and a generic reason,
+                // misattributing this automated repair in the audit trail.
+                coord.reanchor_anchor(
+                    &open.handle,
+                    &drawer.id,
+                    new_anchor,
+                    self.registry.server_identity.as_str(),
+                    "FDC reclassified via moot_reclassify_fdc",
+                ).map_err(|_| ())?;
+                applied_count += 1;
+            }
+        }
+
+        // Floor stamp: only case 1 writes the key. Cases 2–5 leave the stored
+        // floor untouched. Selection order matches data contract §4.
+        let mut floor_after = prior_floor.clone();
+        let floor_stamp = if apply
+            && mode == FdcReclassifyMode::All
+            && request.limit.is_none()
+            && skipped_non_candidate_changes == 0
+        {
+            open.store
+                .set_meta(FDC_RECALCED_DATA_VERSION_META_KEY, &fdc_recalculation_version)
+                .map_err(|_| ())?;
+            floor_after = Some(fdc_recalculation_version.clone());
+            "stamped".to_owned()
+        } else if !apply {
+            "dry-run".to_owned()
+        } else if request.limit.is_some() {
+            "skipped: limited run cannot update estate-wide floor".to_owned()
+        } else if mode != FdcReclassifyMode::All {
+            "skipped: mode=all is required for an estate-wide floor".to_owned()
+        } else {
+            "skipped: changed non-suspect anchors remain".to_owned()
+        };
+
+        let changes_omitted = candidate_count.saturating_sub(change_list.len() as u64);
         Ok(V2ReclassifyFdcReport {
-            applied: snapshot.applied,
-            mode: snapshot.mode,
-            scanned: u64::try_from(snapshot.scanned).map_err(|_| ())?,
-            unchanged: u64::try_from(snapshot.unchanged).map_err(|_| ())?,
-            candidates: u64::try_from(snapshot.candidates).map_err(|_| ())?,
-            updated: u64::try_from(snapshot.updated).map_err(|_| ())?,
-            unclassified_after: u64::try_from(snapshot.unclassified_after).map_err(|_| ())?,
+            applied: apply,
+            mode: mode.as_str().to_owned(),
+            estate_id: open.estate_id,
+            fdc_data_version,
+            fdc_recalculation_version,
+            scanned,
+            unchanged,
+            empty_content,
+            candidates: candidate_count,
+            updated: applied_count,
+            would_update: if apply { 0 } else { candidate_count },
+            unclassified_after,
+            skipped_non_candidate_changes,
+            floor_stamp,
+            estate_recalced_data_version_before: prior_floor,
+            estate_recalced_data_version_after: floor_after,
+            changes: change_list,
+            changes_omitted,
         })
     }
 
@@ -312,7 +484,12 @@ mod tests {
         let report =
             lower.reclassify_fdc(
                 &admission(&registry),
-                &V2ReclassifyFdcRequest { estate_id: None },
+                &V2ReclassifyFdcRequest {
+                    estate_id: None,
+                    apply: false,
+                    mode: V2FdcReclassifyMode::SuspectOnly,
+                    limit: None,
+                },
             ).expect("empty estate has a valid typed dry-run report");
         assert!(!report.applied);
         assert_eq!(report.mode, "suspectOnly");

@@ -1025,15 +1025,57 @@ fn vault_lifecycle_data(
                 crate::v2::data_mobility::V2ReindexState::AlreadyRunning => "already_running",
             },
         }),
-        V2DataMobilityResult::ReclassifyFdc(result) => json!({
-            "applied": result.applied,
-            "mode": result.mode,
-            "scanned": result.scanned,
-            "unchanged": result.unchanged,
-            "candidates": result.candidates,
-            "updated": result.updated,
-            "unclassified_after": result.unclassified_after,
-        }),
+        V2DataMobilityResult::ReclassifyFdc(result) => {
+            // Build the data object, then insert the four optional fields only
+            // when they carry a value. The optional keys must be absent (not
+            // null) when there is no stored floor — the catalog schema declares
+            // them outside the required list and additionalProperties:false
+            // means any unexpected key is a validation failure.
+            let mut data = json!({
+                "applied": result.applied,
+                "mode": result.mode,
+                "estate_id": result.estate_id.hyphenated().to_string(),
+                "fdc_data_version": result.fdc_data_version,
+                "fdc_recalculation_version": result.fdc_recalculation_version,
+                "scanned": result.scanned,
+                "unchanged": result.unchanged,
+                "empty_content": result.empty_content,
+                "candidates": result.candidates,
+                "updated": result.updated,
+                "would_update": result.would_update,
+                "unclassified_after": result.unclassified_after,
+                "skipped_non_candidate_changes": result.skipped_non_candidate_changes,
+                "floor_stamp": result.floor_stamp,
+                "changes": result.changes.iter().map(|c| {
+                    let mut entry = json!({
+                        "id": c.id,
+                        "old_code": c.old_code,
+                        "new_code": c.new_code,
+                    });
+                    if let Some(ref q) = c.old_qid {
+                        entry.as_object_mut().unwrap().insert("old_qid".to_owned(), json!(q));
+                    }
+                    if let Some(ref q) = c.new_qid {
+                        entry.as_object_mut().unwrap().insert("new_qid".to_owned(), json!(q));
+                    }
+                    entry
+                }).collect::<Vec<_>>(),
+                "changes_omitted": result.changes_omitted,
+            });
+            if let Some(ref v) = result.estate_recalced_data_version_before {
+                data.as_object_mut().unwrap().insert(
+                    "estate_recalced_data_version_before".to_owned(),
+                    json!(v),
+                );
+            }
+            if let Some(ref v) = result.estate_recalced_data_version_after {
+                data.as_object_mut().unwrap().insert(
+                    "estate_recalced_data_version_after".to_owned(),
+                    json!(v),
+                );
+            }
+            data
+        },
         V2DataMobilityResult::PalaceImport(result) => json!({
             "drawers_written": result.drawers_written,
             "drawers_updated": result.drawers_updated,
