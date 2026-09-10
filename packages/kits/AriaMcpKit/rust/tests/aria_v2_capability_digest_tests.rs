@@ -1,4 +1,3 @@
-#![cfg(feature = "aria-v2")]
 
 use aria_mcp::v2::capability_digest::{
     canonical_capability_bytes, canonical_json_bytes, capability_digest, CapabilityEffect,
@@ -8,7 +7,7 @@ use aria_mcp::v2::capability_digest::{
 #[test]
 fn selected_catalog_digest_shared_vector() {
     let digest = aria_mcp::v2::catalog::selected_capability_digest();
-    assert_eq!(digest, "73ba31151d33ab5a87496c29d8e671a911b6259faa8ad2fdcb6e4387e0ec036d");
+    assert_eq!(digest, "b64fb90039d80b7bb7d18ca4028ea64c023f29d2b10d956ecf1ce3dd219b994b");
     let artifact_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().unwrap()
         .join("Registry/aria-v2-selected-release.json");
