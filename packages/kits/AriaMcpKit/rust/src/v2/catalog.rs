@@ -145,6 +145,10 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                     json!({"type":"object","properties":{
                         "query":{"type":"string"},"near":{"type":"string","format":"uuid"},
                         "limit":{"type":"integer","minimum":1,"maximum":500},
+                        "filter":{"type":"string"},"wing":{"type":"string"},
+                        "media_type":{"type":"string"},"door":{"type":"string"},
+                        "scoring":{"type":"string"},"ordering":{"type":"string"},
+                        "frontier_k":{"type":"integer"},
                         "explain":{"type":"boolean"},
                         "estate_id":{"type":"string","format":"uuid"}},
                         "oneOf":[
