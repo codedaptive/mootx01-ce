@@ -1041,7 +1041,15 @@ fn data_mobility_input_schema(name: &str) -> Value {
     let string = || json!({"type":"string"});
     let (properties, required) = match name {
         "moot_reindex" => (json!({"estate_id":uuid()}), json!([])),
-        "moot_reclassify_fdc" => (json!({"estate_id":uuid()}), json!([])),
+        "moot_reclassify_fdc" => (
+            json!({
+                "estate_id": uuid(),
+                "apply": {"type":"boolean"},
+                "mode": {"type":"string","enum":["suspectOnly","all"]},
+                "limit": {"type":"integer","minimum":1,"maximum":50000},
+            }),
+            json!([]),
+        ),
         "moot_palace_import" => (
             json!({"palace_path":string(),"mode":{"type":"string","enum":["foreground","background"]},"estate_id":uuid()}),
             json!(["palace_path"]),
@@ -1287,6 +1295,10 @@ fn estate_diagnostics_data_schema(name: &str) -> Option<Value> {
             ("memory_count".to_owned(), count()),
             ("fact_count".to_owned(), count()),
             (
+                "fdc_recalculation".to_owned(),
+                json!({"type":"string","enum":["current","missing","stale"]}),
+            ),
+            (
                 "drains".to_owned(),
                 json!({"type":"array","items":drain_entry_schema()}),
             ),
@@ -1338,21 +1350,54 @@ fn data_mobility_data_schema(name: &str) -> Option<Value> {
             }),
             json!(["state"]),
         )),
-        "moot_reclassify_fdc" => Some(exact(
-            json!({
-                "applied":{"type":"boolean"}, "mode":string(), "scanned":count(),
-                "unchanged":count(), "candidates":count(), "updated":count(), "unclassified_after":count(),
-            }),
-            json!([
-                "applied",
-                "mode",
-                "scanned",
-                "unchanged",
-                "candidates",
-                "updated",
-                "unclassified_after"
-            ]),
-        )),
+        "moot_reclassify_fdc" => {
+            // The four optional fields (estate_recalced_data_version_before,
+            // estate_recalced_data_version_after) are declared in properties
+            // but omitted from required. The `changes` items carry three
+            // required fields and two optional QID fields. Per data contract §3.
+            let change_item = json!({
+                "type":"object",
+                "properties": {
+                    "id": {"type":"string","minLength":1},
+                    "old_code": {"type":"string","minLength":1},
+                    "new_code": {"type":"string","minLength":1},
+                    "old_qid": {"type":"string"},
+                    "new_qid": {"type":"string"},
+                },
+                "required": ["id","old_code","new_code"],
+                "additionalProperties": false,
+            });
+            Some(exact(
+                json!({
+                    "applied": {"type":"boolean"},
+                    "mode": string(),
+                    "estate_id": {"type":"string","format":"uuid"},
+                    "fdc_data_version": string(),
+                    "fdc_recalculation_version": string(),
+                    "scanned": count(),
+                    "unchanged": count(),
+                    "empty_content": count(),
+                    "candidates": count(),
+                    "updated": count(),
+                    "would_update": count(),
+                    "unclassified_after": count(),
+                    "skipped_non_candidate_changes": count(),
+                    "floor_stamp": string(),
+                    "estate_recalced_data_version_before": string(),
+                    "estate_recalced_data_version_after": string(),
+                    "changes": {"type":"array","items":change_item},
+                    "changes_omitted": count(),
+                }),
+                json!([
+                    "applied", "mode", "estate_id",
+                    "fdc_data_version", "fdc_recalculation_version",
+                    "scanned", "unchanged", "empty_content",
+                    "candidates", "updated", "would_update",
+                    "unclassified_after", "skipped_non_candidate_changes",
+                    "floor_stamp", "changes", "changes_omitted",
+                ]),
+            ))
+        },
         "moot_palace_import" => Some(exact(
             json!({
                 "drawers_written":count(), "drawers_updated":count(),
