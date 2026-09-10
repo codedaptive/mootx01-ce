@@ -478,8 +478,17 @@ impl Dispatcher {
                     ),
                 ));
             }
+            // §12.5 coaching: advance the session counter BEFORE execute so
+            // should_coach reflects this call. record_call must precede
+            // should_coach (mode_session_state.rs ordering contract).
+            self.mode_session_state.record_call(name, None);
+            // Clone request for post-execute coaching-hint inspection. The
+            // executed request is moved into surface::execute; the clone carries
+            // the decoded argument data the coaching engine needs to check
+            // triggers (e.g. query length for moot_memory_search).
+            let coaching_request = request.clone();
             let now_millis = crate::dispatch::bench_clock_now();
-            return crate::surface::execute(
+            let result = crate::surface::execute(
                 &self.surface,
                 self.posture,
                 request,
@@ -490,7 +499,24 @@ impl Dispatcher {
                 self.monitoring_control.as_deref(),
                 &self.build_serial,
                 now_millis,
-            );
+            )?;
+            // §12.5 hint injection: check the six §12.5 triggers and, if one
+            // fires, attach the hint to the result (structuredContent["hint"]
+            // + "\nhint: …" appended to content[0].text). Never on isError:true.
+            let result = if let Some(hint) = crate::v2::coach::coaching_hint(&coaching_request, &result) {
+                crate::v2::render::apply_hint(result, &hint)
+            } else {
+                result
+            };
+            // Periodic coaching block: render and append when the cadence fires.
+            // should_coach is called AFTER record_call (ordering contract).
+            let result = if self.mode_session_state.should_coach() {
+                let snap = self.mode_session_state.snapshot();
+                crate::v2::render::apply_coaching_block(result, &crate::periodic_coach::render_block(&snap))
+            } else {
+                result
+            };
+            return Ok(result);
         }
 
         // No tool matched the v2 catalog — surface.decode() already returns
