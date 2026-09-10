@@ -1,0 +1,90 @@
+{
+  "cases": [
+    {
+      "name": "three_records_sample",
+      "records": [
+        {"distilledTokens": 500, "originalTokens": 900},
+        {"distilledTokens": 450, "originalTokens": 700},
+        {"distilledTokens": 250, "originalTokens": 400}
+      ],
+      "skimOmittedTokens": null,
+      "expected": {
+        "display": "🌱 Distilled: ~1,200 tokens returned vs ~2,000 original · ~800 saved (40%)",
+        "estimated": true,
+        "estimator": "ContextDistillLib.estimateTokens (TokenCompaction v1)",
+        "originalTokens": 2000,
+        "returnedTokens": 1200,
+        "savedPercent": 40,
+        "savedTokens": 800
+      }
+    },
+    {
+      "name": "zero_savings",
+      "records": [
+        {"distilledTokens": 500, "originalTokens": 500},
+        {"distilledTokens": 250, "originalTokens": 250}
+      ],
+      "skimOmittedTokens": null,
+      "expected": {
+        "display": "🌱 Distilled: ~750 tokens returned vs ~750 original · ~0 saved (0%)",
+        "estimated": true,
+        "estimator": "ContextDistillLib.estimateTokens (TokenCompaction v1)",
+        "originalTokens": 750,
+        "returnedTokens": 750,
+        "savedPercent": 0,
+        "savedTokens": 0
+      }
+    },
+    {
+      "name": "growth",
+      "records": [
+        {"distilledTokens": 1050, "originalTokens": 1000},
+        {"distilledTokens": 1050, "originalTokens": 1000}
+      ],
+      "skimOmittedTokens": null,
+      "expected": {
+        "display": "🌱 Distilled: ~2,100 tokens returned vs ~2,000 original · ~100 increase (5%)",
+        "estimated": true,
+        "estimator": "ContextDistillLib.estimateTokens (TokenCompaction v1)",
+        "originalTokens": 2000,
+        "returnedTokens": 2100,
+        "savedPercent": -5,
+        "savedTokens": -100
+      }
+    },
+    {
+      "name": "skim_present",
+      "records": [
+        {"distilledTokens": 500, "originalTokens": 900},
+        {"distilledTokens": 450, "originalTokens": 700},
+        {"distilledTokens": 250, "originalTokens": 400}
+      ],
+      "skimOmittedTokens": 700,
+      "expected": {
+        "display": "🌱 Distillation saved ~800 tokens; skim omitted another ~700 tokens.",
+        "estimated": true,
+        "estimator": "ContextDistillLib.estimateTokens (TokenCompaction v1)",
+        "originalTokens": 2000,
+        "returnedTokens": 500,
+        "savedPercent": 40,
+        "savedTokens": 800,
+        "skim": {"omittedTokens": 700}
+      }
+    },
+    {
+      "name": "empty",
+      "records": [],
+      "skimOmittedTokens": null,
+      "expected": {
+        "display": "🌱 Distilled: ~0 tokens returned vs ~0 original · ~0 saved (0%)",
+        "estimated": true,
+        "estimator": "ContextDistillLib.estimateTokens (TokenCompaction v1)",
+        "originalTokens": 0,
+        "returnedTokens": 0,
+        "savedPercent": 0,
+        "savedTokens": 0
+      }
+    }
+  ],
+  "purpose": "Shared vector for DistilledSavings: both ports sum the records, call the measurement, and compare the whole decoded expected object."
+}

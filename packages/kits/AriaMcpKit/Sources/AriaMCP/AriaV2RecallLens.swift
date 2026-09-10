@@ -140,8 +140,12 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         case .recallDistilled:
             let a = request.arguments; let out = try await DistilledRecall().run(input: .init(query: a["query"]!.stringValue!, filter: try filter(a["filter"]?.stringValue), limit: Int(a["limit"]?.integerValue ?? 20)), estate: handle, kit: kit)
             return try await projectedResult(
-                out.matches.map { .init(id: $0.id, score: $0.score, distilled: $0.text, representation: "distilled") },
-                control: distilledDiscrimination(out.discrimination), label: "distilled recall")
+                out.matches.map {
+                    .init(id: $0.id, score: $0.score, distilled: $0.text, representation: "distilled",
+                          originalTokenCount: $0.originalTokenCount, distilledTokenCount: $0.tokenCount)
+                },
+                control: distilledDiscrimination(out.discrimination), label: "distilled recall",
+                reportsDistillation: true)
         case .recallTemporal:
             let a = request.arguments; let f = try filter(a["filter"]?.stringValue)
             let mode = TemporalWindowMode(rawValue: a["window"]?.stringValue ?? "loose")
@@ -213,10 +217,16 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         let distilled: String?
         let representation: String?
         let tier: String?
+        /// Estimator counts the distilled recipe carries per match: the full
+        /// original content and the distilled text. Nil for every other
+        /// operation.
+        let originalTokenCount: Int64?
+        let distilledTokenCount: Int64?
 
         init(id: String, score: Double? = nil, eventTime: String? = nil,
              retrievalSource: String? = nil, distilled: String? = nil,
-             representation: String? = nil, tier: String? = nil) {
+             representation: String? = nil, tier: String? = nil,
+             originalTokenCount: Int64? = nil, distilledTokenCount: Int64? = nil) {
             self.id = id
             self.score = score
             self.eventTime = eventTime
@@ -224,17 +234,22 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
             self.distilled = distilled
             self.representation = representation
             self.tier = tier
+            self.originalTokenCount = originalTokenCount
+            self.distilledTokenCount = distilledTokenCount
         }
     }
 
     /// Project direct lower-kit matches through the same structured hydration
     /// gate used by the existing recall surfaces.  It intentionally consumes
     /// typed match/drawer values and never invokes or reparses a v1 tool.
+    /// `reportsDistillation` is true only for distilled recall, whose response
+    /// always carries `capabilities.distillation`, even with zero rows.
     private func projectedResult(
         _ matches: [ProjectedMatch],
         filterChain: [LocusKit.Filter] = [],
         control: ControlSignals = .init(),
-        label: String
+        label: String,
+        reportsDistillation: Bool = false
     ) async throws -> AriaV2RecallLensOutcome {
         let shown = Array(matches.prefix(50))
         let estate = try await kit.estate(for: handle)
@@ -260,9 +275,63 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
                 room: nodeNames[drawer.parentNodeId]?.room, retrievalSource: match.retrievalSource,
                 distilled: projection.distilled, representation: projection.representation, tier: match.tier)
         }
-        return .init(
-            data: ResultComposer.structuredS1(rows: rows, control: control),
-            compactText: "Returned \(rows.count) \(label) result(s).")
+        var data = ResultComposer.structuredS1(rows: rows, control: control)
+        var compactText = "Returned \(rows.count) \(label) result(s)."
+        if reportsDistillation {
+            let savings = distilledSavings(shown: shown, rows: rows)
+            data = Self.insertingDistillation(savings, into: data)
+            // Both ports append the display line after a newline.
+            compactText += "\n" + savings.display
+        }
+        return .init(data: data, compactText: compactText)
+    }
+
+    /// Sum the per-match estimator counts over the rows this response actually
+    /// emits with a distilled body, joined to the matches by id. A row whose
+    /// body the privacy projection withheld (restricted, secret or unknown
+    /// provenance) or whose drawer is unavailable counts on neither side, so
+    /// the published figure covers the payload as sent after the row cap
+    /// (ARIA_V2_CONTRACT.md, "Distilled recall savings"). Zero rows measure
+    /// as zero on both sides.
+    private func distilledSavings(shown: [ProjectedMatch], rows: [CandidateRowData]) -> DistilledSavings {
+        let emittedWithBody = Set(rows.filter { $0.distilled != nil }.map(\.id))
+        var originalTokens: Int64 = 0
+        var distilledTokens: Int64 = 0
+        for match in shown where emittedWithBody.contains(match.id) {
+            originalTokens += match.originalTokenCount ?? 0
+            distilledTokens += match.distilledTokenCount ?? 0
+        }
+        // Skim is not applied on this surface today; the key stays absent.
+        return DistilledSavings.measure(
+            originalTokens: originalTokens, distilledTokens: distilledTokens, skimOmittedTokens: nil)
+    }
+
+    /// Insert `capabilities.distillation` into a structured S1 object, creating
+    /// the `capabilities` object when the control signals produced none.
+    private static func insertingDistillation(_ savings: DistilledSavings, into data: JSONValue) -> JSONValue {
+        var object = data.objectValue ?? [:]
+        var capabilities = object["capabilities"]?.objectValue ?? [:]
+        capabilities["distillation"] = distillationValue(savings)
+        object["capabilities"] = .object(capabilities)
+        return .object(object)
+    }
+
+    /// Hand-encoded `DistilledSavings` wire object. The `skim` key is present
+    /// only when skim was applied, matching the Rust serde shape key for key.
+    private static func distillationValue(_ savings: DistilledSavings) -> JSONValue {
+        var object: [String: JSONValue] = [
+            "returnedTokens": .integer(savings.returnedTokens),
+            "originalTokens": .integer(savings.originalTokens),
+            "savedTokens": .integer(savings.savedTokens),
+            "savedPercent": .integer(savings.savedPercent),
+            "estimated": .bool(savings.estimated),
+            "estimator": .string(savings.estimator),
+            "display": .string(savings.display),
+        ]
+        if let skim = savings.skim {
+            object["skim"] = .object(["omittedTokens": .integer(skim.omittedTokens)])
+        }
+        return .object(object)
     }
 
     private func discrimination(_ scores: [Double]) -> ControlSignals {

@@ -60,6 +60,13 @@ persistence-kit = { path = "../../PersistenceKit/rust" }
 name = "cognition_conformance"
 path = "tests/cognition_conformance.rs"
 
+# Shared-vector conformance for DistilledSavings (both ports, same fixture).
+# Reads Tests/CognitionKitTests/Fixtures/distilled_savings_vectors.json and
+# asserts measure_distilled_savings reproduces all expected fields.
+[[test]]
+name = "distilled_savings_conformance"
+path = "tests/distilled_savings_conformance.rs"
+
 # CognitionKit P2 self-report telemetry integration tests.
 # Mirrors CognitionKitTelemetryTests.swift §1–§4.
 # cp-cognitionkit-report; in-repository dependency direction.

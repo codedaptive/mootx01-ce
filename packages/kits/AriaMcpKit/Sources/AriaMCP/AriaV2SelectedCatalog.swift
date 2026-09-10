@@ -118,11 +118,6 @@ enum AriaV2SelectedCatalog {
                     "minimum": .integer(1),
                     "maximum": .integer(Int64(AriaV2MemorySearchRequest.maximumLimit)),
                 ]),
-                // explain:true renders a discrimination line when the recall confidence signal
-                // is low or medium — surfaces how clearly the top result separates from
-                // the field. Absent means a clear, nominal result; opt-in because the
-                // discrimination line adds tokens the caller may not want.
-                "explain": booleanSchema(),
                 "estate_id": uuidSchema(),
             ], inputSchemaAdditions: ["oneOf": exactlyOneOf("query", "near")],
             dataSchema: memorySearchDataSchema()
@@ -173,25 +168,19 @@ enum AriaV2SelectedCatalog {
             identity: "recall_distilled", name: AriaV2RecallLensOperation.recallDistilled.rawValue,
             effect: .read, description: "Recall compact distilled memory projections.",
             intents: ["Recall compact distilled memory projections."],
-            // echo_query:true echoes the rewritten query in the result so the
-            // caller can verify the server's interpretation of a vague or
-            // expanded cue.
-            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
-            required: ["query"], dataSchema: recallDataSchema()
+            properties: recallProperties(), required: ["query"], dataSchema: distilledRecallDataSchema()
         ),
         descriptor(
             identity: "recall_vague", name: AriaV2RecallLensOperation.recallVague.rawValue,
             effect: .read, description: "Recall memories from a vague cue.",
             intents: ["Recall memories from a vague cue."],
-            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
-            required: ["query"], dataSchema: recallDataSchema()
+            properties: recallProperties(), required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "recall_walk", name: AriaV2RecallLensOperation.recallWalk.rawValue,
             effect: .read, description: "Recall with the bounded escalation ladder.",
             intents: ["Recall with the bounded escalation ladder."],
-            properties: recallProperties(extras: ["echo_query": booleanSchema()]),
-            required: ["query"], dataSchema: recallDataSchema()
+            properties: recallProperties(), required: ["query"], dataSchema: recallDataSchema()
         ),
         descriptor(
             identity: "lens_keystones", name: AriaV2RecallLensOperation.lensKeystones.rawValue,
@@ -883,15 +872,7 @@ enum AriaV2SelectedCatalog {
             effect: .write,
             description: "Import a local JSON source into the selected estate.",
             intents: ["Import a local JSON source into the selected estate."],
-            properties: [
-                "path": stringSchema(),
-                // return_id_map:true adds a second text block with a JSON map
-                // {"id_map":{"<record id>":"<drawer id>"}} naming the drawer each
-                // seed record became. Off by default (most callers want the receipt,
-                // not N id pairs).
-                "return_id_map": booleanSchema(),
-                "estate_id": uuidSchema(),
-            ],
+            properties: ["path": stringSchema(), "estate_id": uuidSchema()],
             required: ["path"],
             requiredCapabilities: [vaultCapability],
             dataSchema: jsonImportDataSchema()
@@ -1004,15 +985,9 @@ enum AriaV2SelectedCatalog {
             identity: "vault_job",
             name: "moot_vault_job",
             effect: .read,
-            description: "Fetch the status of one vault job. Returns running, complete, or failed status with progress details.",
+            description: "Fetch the status of one vault job.",
             intents: ["Fetch the status of one vault job."],
-            // job_id carries a description so the tools/list entry matches the v2 catalog
-            // and Rust port exactly — both ports share the "Job ID returned by..." text.
-            properties: ["job_id": .object([
-                "type": .string("string"),
-                "format": .string("uuid"),
-                "description": .string("Job ID returned by moot_vault_import or moot_vault_export."),
-            ])],
+            properties: ["job_id": uuidSchema()],
             required: ["job_id"],
             requiredCapabilities: [vaultCapability],
             dataSchema: vaultJobDataSchema()
@@ -1625,6 +1600,35 @@ enum AriaV2SelectedCatalog {
 
     private static func recallDataSchema() -> JSONValue {
         lensDataSchema(.lensPartialCue)
+    }
+
+    /// `moot_recall_distilled` declares its own data schema: the shared memory
+    /// row plus a required `capabilities` object that always carries the
+    /// `distillation` savings (ARIA_V2_CONTRACT.md, "Distilled recall savings").
+    private static func distilledRecallDataSchema() -> JSONValue {
+        orderedExactObjectSchema([
+            "results": .object(["type": .string("array"), "items": lensMemoryRowSchema()]),
+            "capabilities": distilledCapabilitiesSchema(),
+        ], required: ["results", "capabilities"])
+    }
+
+    private static func distilledCapabilitiesSchema() -> JSONValue {
+        orderedExactObjectSchema([
+            "discrimination": enumSchema(["low", "medium"]),
+            "distillation": distillationSchema(),
+        ], required: ["distillation"])
+    }
+
+    /// The `skim` object is declared now so schema consumers do not change
+    /// when skim is wired; it is absent until then.
+    private static func distillationSchema() -> JSONValue {
+        orderedExactObjectSchema([
+            "returnedTokens": nonnegativeIntegerSchema(), "originalTokens": nonnegativeIntegerSchema(),
+            "savedTokens": integerSchema(), "savedPercent": integerSchema(),
+            "estimated": booleanSchema(), "estimator": stringSchema(),
+            "skim": orderedExactObjectSchema(["omittedTokens": nonnegativeIntegerSchema()], required: ["omittedTokens"]),
+            "display": stringSchema(),
+        ], required: ["returnedTokens", "originalTokens", "savedTokens", "savedPercent", "estimated", "estimator", "display"])
     }
 
     private static func transcriptRecallDataSchema() -> JSONValue {
