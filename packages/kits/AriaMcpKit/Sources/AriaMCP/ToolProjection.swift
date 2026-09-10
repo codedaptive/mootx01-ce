@@ -152,7 +152,6 @@ public enum ToolProjection {
     ///
     /// Order: tier 1–5 interface tools, then federation, recipe, lens, vault.
     /// Every tool schema carries the v2 input schema defined in the ARIA v2 catalog.
-    /// 
     ///
     /// Vault tools are omitted when `MOOTX01_VAULT=0` (installed with
     /// `--vault-off`). All other tiers are unaffected. See the open 1.0 Vault posture.
