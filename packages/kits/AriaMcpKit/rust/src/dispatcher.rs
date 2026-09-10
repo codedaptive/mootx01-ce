@@ -508,6 +508,23 @@ impl Dispatcher {
                     ),
                 ));
             }
+            // Apply provisioned modes preferences on the first tool call of
+            // this session. The once-guard (configured_from_estate bit) lives
+            // inside ModeSessionState::apply_preferences. Falls back to spec
+            // defaults (sticky_enabled=true, coaching_calls=25) when the
+            // estate carries no manifest key or the coordinator lock fails.
+            // Mirrors Swift ToolDispatcher.applyPreferencesIfNeeded().
+            if !self.mode_session_state.is_configured_from_estate() {
+                let manifest = self.registry.coord
+                    .lock()
+                    .ok()
+                    .and_then(|coord| {
+                        coord.provisioned_modes_config(&self.registry.default.handle).ok()
+                    })
+                    .unwrap_or_default();
+                self.mode_session_state
+                    .apply_preferences(manifest.sticky_enabled, manifest.coaching_calls);
+            }
             // §12.5 coaching: advance the session counter BEFORE execute so
             // should_coach reflects this call. record_call must precede
             // should_coach (mode_session_state.rs ordering contract).
