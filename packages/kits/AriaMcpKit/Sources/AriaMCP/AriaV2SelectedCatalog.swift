@@ -160,7 +160,10 @@ enum AriaV2SelectedCatalog {
                 // is low or medium — surfaces how clearly the top result separates from
                 // the field. Absent means a clear, nominal result; opt-in because the
                 // discrimination line adds tokens the caller may not want.
-                "explain": booleanSchema(),
+                "explain": .object([
+                    "type": .string("boolean"),
+                    "description": .string("Opt-in flag. When true, appends a discrimination: control line when recall confidence is low or medium, surfacing how clearly the top result separates from the field. Absent or false suppresses the line."),
+                ]),
                 // answer: selects the response shape adjective (packager mode):
                 //   "never"  (default) — dense rows only, byte-identical to pre-packager path
                 //   "always"           — compose answer block + rows (L1-full shape)
