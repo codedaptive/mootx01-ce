@@ -151,14 +151,22 @@ impl Dispatcher {
     /// one anywhere in the v2 request path (`self.surface.execute` never
     /// receives it, and `surface::execute` itself takes no `version_skew`
     /// parameter). The Rust v2 surface renders no version-skew advisory at
-    /// all: `interface_tools::dispatch`, the only function that reads a
-    /// `version_skew: &str` argument, has exactly one caller
-    /// (`dispatch_tool_with_vault_ledger_and_flag` in `dispatch.rs`), which
-    /// is the v1 test-helper path this module documents as unreached by the
-    /// running server. The Swift twin does render the advisory: `ToolProjection`'s
-    /// dispatcher in `Sources/AriaMCP/ToolDispatch.swift` appends
-    /// `"version_skew: \(versionSkewAdvisory)"` in both `runEstateStatus`
-    /// and `runEstatePing` when a skew is present.
+    /// all: `interface_tools::dispatch`'s sole in-crate caller is
+    /// `route_tool` (`dispatch.rs:198`, call site at `dispatch.rs:238`),
+    /// which is itself called only from
+    /// `dispatch_tool_with_vault_ledger_and_flag` (`dispatch.rs:132`) — the
+    /// v1 test-helper path this module documents as unreached by the
+    /// running server. Thirteen further call sites exist in
+    /// `tests/dispatch_tests.rs` and `tests/memory_adapter_tests.rs`,
+    /// exercising that same v1 path directly. The `version_skew: &str`
+    /// argument is read by `run_estate_status` (`interface_tools.rs:2956`,
+    /// read at line 3119) and `run_estate_ping` (`interface_tools.rs:3341`,
+    /// read at line 3367); `route_tool` and
+    /// `dispatch_tool_with_vault_ledger_and_flag` also take the argument
+    /// and thread it through unread. The Swift twin does render the
+    /// advisory: `ToolDispatcher` (`Sources/AriaMCP/ToolDispatch.swift:141`)
+    /// appends `"version_skew: \(versionSkewAdvisory)"` in both
+    /// `runEstateStatus` and `runEstatePing` when a skew is present.
     pub fn new(
         registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
         monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
