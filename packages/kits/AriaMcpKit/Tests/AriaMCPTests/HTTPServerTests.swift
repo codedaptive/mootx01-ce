@@ -519,6 +519,31 @@ struct HTTPServerTests {
     }
 
     /// last_n=1000 (above ceiling 500) must be clamped to 500 — no error, just truncated.
+    ///
+    /// BLOCKED: v2 `moot_read_journal` uses `limit` (not `last_n`) as its argument key,
+    /// and the v2 `AriaV2ReadJournalRequest` decoder REJECTS values above the 500
+    /// ceiling (throws invalidParams) rather than clamping them silently. The v1 path
+    /// used `runReadJournal` with `Self.clampLimit` which clamped; the v2 path uses
+    /// `AriaV2KnowledgeJournalRequest.limit()` which throws. The test's pinned assertion
+    /// ("must not error") cannot be satisfied with either key name in v2. Awaiting
+    /// catalog decision on whether v2 should clamp or reject over-ceiling limit values.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 moot_read_journal uses 'limit' not 'last_n', and the v2 decoder rejects values above the 500 ceiling (throws invalidParams) rather than clamping silently. Pinned assertion 'must not error' cannot pass against v2 behavior. Awaiting catalog decision on clamp-vs-reject semantics. Do not delete; do not weaken to pass."))
+    func readJournalHugeLastNIsClamped() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        // A fresh estate has an empty journal; last_n=1000 is clamped to 500
+        // silently and the call succeeds (result, not error).
+        let body = #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"last_n":1000}}}"#
+        let result = try #require(httpRequest(port: port, method: "POST", body: body))
+        #expect(result.status == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: result.body) as? [String: Any])
+        // Result (not error): clamping to ceiling is silent success.
+        #expect(json["result"] != nil,
+                "last_n=1000 must be clamped silently to 500 — must not error; got: \(json)")
+    }
 
     // MARK: - Finding #8 — Host guard on ARIA MCP GET routes → 421
 
@@ -1514,6 +1539,67 @@ struct FirstPartyLaneSeparationTests {
     /// socket) but allows for heavily loaded CI runners.  A 2-second overrun is a
     /// real defect: it means the accept thread is not waking up on shutdown(2), which
     /// is the defect the F6 fix addresses.
+    @Test("serve(withFD:) returns after accept thread exits on task cancellation")
+    func serveWithFDShutdownOrdering() async throws {
+        let dispatcher = try await makeDispatcher()
+        let server = HTTPServer(
+            dispatcher: dispatcher,
+            port: 0,
+            // Use isolated gate instances so this test cannot affect concurrent tests.
+            concurrencyGate: ConcurrencyGate(maxConcurrent: 4, maxQueued: 8),
+            sseConcurrencyGate: ConcurrencyGate(maxConcurrent: 2, maxQueued: 0)
+        )
+
+        // Bind the listen socket.
+        let (fd, _) = try server.bind()
+
+        // Launch serve(withFD:) in a detached Task.  Detached so the test's own
+        // cancellation context does not propagate here inadvertently.
+        let serveTask = Task.detached {
+            await server.serve(withFD: fd)
+        }
+
+        // Give the accept thread a moment to enter blocking accept(2).
+        // 50 ms is more than sufficient on any supported platform.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        // Cancel the serve task — this triggers the cooperative shutdown sequence:
+        // stopFlag=true → shutdown(fd,SHUT_RDWR) → close(fd) → accept thread wakes,
+        // sees stopFlag, breaks loop, signals threadDone — serve(withFD:) returns.
+        serveTask.cancel()
+
+        // Measure how long it takes for serve(withFD:) to return.
+        // If the accept thread does not wake on shutdown(2), this await would block
+        // indefinitely and the test would time out.  The 2-second guarantee is
+        // expressed via the Task.sleep timeout below.
+        let deadline = Task.detached {
+            // Give the shutdown up to 2 seconds.  On a healthy implementation this
+            // completes in milliseconds; 2 s is a generous CI-safe bound.
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+
+        // await the serve task — it must finish before the deadline.
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await serveTask.value }
+            group.addTask { try? await deadline.value }
+            // First one to finish ends the group; the other task is cancelled.
+            await group.next()
+            group.cancelAll()
+        }
+
+        // If serve(withFD:) returns correctly, the fd is now closed.
+        // Writing to a closed fd returns EBADF; success here means the fd leaked.
+        let dummyByte = [UInt8(0x00)]
+        let writeResult = dummyByte.withUnsafeBytes { ptr in
+            write(fd, ptr.baseAddress!, 1)
+        }
+        // EBADF == fd is closed.  Any other errno or a successful write (>= 0)
+        // means the fd was NOT closed — the shutdown guarantee was violated.
+        #expect(writeResult == -1, "serve(withFD:) must close the fd before returning (F6)")
+        if writeResult == -1 {
+            #expect(errno == EBADF, "expected EBADF after serve(withFD:) returned, got errno \(errno)")
+        }
+    }
 
     @Test("The legacy view reproduces LoopbackHTTP's field handling")
     func legacyViewReproducesFieldHandling() throws {
