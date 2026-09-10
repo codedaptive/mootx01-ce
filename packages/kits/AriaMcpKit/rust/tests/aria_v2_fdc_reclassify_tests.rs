@@ -611,3 +611,53 @@ fn limit_above_max_is_refused() {
         .contains("must be 1\u{2013}50000"),
         "refusal message must name the accepted range, got: {result}");
 }
+
+/// Gate: compact text must carry " (limit N)" suffix on the "scanned:" line when
+/// a limit was supplied, matching Swift AriaV2DataMobility.swift:588+596:
+///
+///   let limitSuffix = limit.map { " (limit \($0))" } ?? ""
+///   "scanned: \(scanned) active drawer(s)\(limitSuffix)",
+///
+/// Also asserts the exact estate line as a whole substring — "estate: {name} [{UUID}]"
+/// with UPPERCASE UUID matching Swift's \(handle.estateUUID) interpolation
+/// (UUID.description is always uppercase in Swift).
+///
+/// Both assertions MUST FAIL against the pre-fix builder: the builder emits
+/// "scanned: N active drawer(s)" unconditionally and uses .hyphenated() (lowercase).
+#[test]
+fn reclassify_compact_text_limit_suffix_and_estate_line() {
+    let registry = EstateRegistry::new_inmemory();
+    // Capture estate_id and estate_name before moving registry into dispatcher.
+    let estate_id = registry.default.estate_id;
+    let estate_name = registry.default.estate_name.clone();
+    let dispatcher = Dispatcher::new(registry, "test", "test", "test", None);
+
+    // Dry run with an explicit limit of 5.
+    let result = call(&dispatcher, "moot_reclassify_fdc", serde_json::json!({"limit": 5}));
+    assert!(is_success(&result), "dry run with limit must succeed, got: {result}");
+
+    let text = result["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text must be a string");
+
+    // Assert 1: the "scanned:" line must carry the limit suffix exactly as Swift emits it.
+    // Expected: "scanned: N active drawer(s) (limit 5)"
+    // Swift format: " (limit \(n))" — one space before '(', word 'limit', one space, number, ')'.
+    assert!(
+        text.contains("(limit 5)"),
+        "compact text must contain '(limit 5)' on the scanned line, got:\n{text}"
+    );
+
+    // Assert 2: the estate line must be the exact string "estate: {name} [{UUID_UPPERCASE}]".
+    // Swift emits \(handle.estateUUID) which calls UUID.description — always uppercase.
+    let expected_estate_line = format!(
+        "estate: {} [{}]",
+        estate_name,
+        estate_id.to_string().to_uppercase()
+    );
+    assert!(
+        text.contains(&expected_estate_line),
+        "compact text must contain estate line '{}', got:\n{text}",
+        expected_estate_line
+    );
+}
