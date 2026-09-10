@@ -253,6 +253,15 @@
             "explain": {
               "type": "boolean"
             },
+            "answer": {
+              "type": "string",
+              "enum": [
+                "never",
+                "always",
+                "auto"
+              ],
+              "description": "Response shape adjective. \"never\" (default) returns dense rows only. \"always\" composes an answer block and rows (requires estate content). \"auto\" lets the server choose the response level by confidence gate (L0 answer-only, L1 answer+rows, or rowsOnly)."
+            },
             "estate_id": {
               "type": "string",
               "format": "uuid"
