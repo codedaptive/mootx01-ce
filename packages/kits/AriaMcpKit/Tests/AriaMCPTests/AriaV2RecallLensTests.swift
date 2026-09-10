@@ -1,6 +1,10 @@
 import AriaMCPWire
+import CognitionKit
 import Foundation
+import GeniusLocusKit
 import LocusKit
+import PersistenceKit
+import PersistenceKitInMemory
 import Testing
 @testable import AriaMCP
 
@@ -81,6 +85,109 @@ struct AriaV2RecallLensTests {
         #expect(row.score == 0.9)
         #expect(row.distilled == nil)
         #expect(row.representation == nil)
+    }
+
+    // MARK: - Distilled recall savings gate
+
+    /// Open a scratch in-memory estate holding five distinct bodies. The
+    /// fourth carries secret provenance, so the v2 privacy projection withholds
+    /// its body and it must count on neither side of the savings figure.
+    private func distilledEstate() async throws -> (GeniusLocusKit, EstateHandle, [String: String], String) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-recall-lens-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let bodies = [
+            "savings-probe alpha: the reactor schedule moved to March and Sarah approved the reactor plan.",
+            "savings-probe beta: vendor contracts were renewed in Geneva and every term held.",
+            "savings-probe gamma: travel policy updates landed and flights now require approval.",
+            "savings-probe delta: this secret body must never reach either token sum.",
+            "savings-probe epsilon: the quarterly forecast covers revenue targets and team velocity.",
+        ]
+        var bodyByID: [String: String] = [:]
+        var secretID = ""
+        for (index, body) in bodies.enumerated() {
+            let drawer = try await kit.capture(handle, CaptureFrame(
+                content: body, channel: .typed, room: "notes", latticeAnchor: .udc("0"),
+                addedBy: "aria-v2-recall-lens-tests", embeddingModelID: "test-v1",
+                provenanceSensitivity: index == 3 ? .secret : .normal))
+            bodyByID[drawer.id] = body
+            if index == 3 { secretID = drawer.id }
+        }
+        return (kit, handle, bodyByID, secretID)
+    }
+
+    @Test("distilled recall savings cover only the emitted rows that carry a distilled body")
+    func distilledSavingsCoverEmittedRowsOnly() async throws {
+        let (kit, handle, bodyByID, secretID) = try await distilledEstate()
+        let authority = AriaV2GeniusLocusRecallLensAuthority(kit: kit, handle: handle)
+        let outcome = try await authority.execute(try AriaV2RecallLensRequest(
+            tool: "moot_recall_distilled",
+            arguments: .object(["query": .string("savings-probe"), "limit": .integer(100)])))
+        let data = try #require(outcome.data.objectValue)
+        let results = try #require(data["results"]?.arrayValue)
+        let distillation = try #require(data["capabilities"]?.objectValue?["distillation"]?.objectValue)
+
+        // Expected sums: the estimator over the emitted distilled strings and
+        // over the captured bodies of those same rows, joined by id.
+        var expectedReturned: Int64 = 0
+        var expectedOriginal: Int64 = 0
+        var secretRowSeen = false
+        for row in results {
+            let object = try #require(row.objectValue)
+            let id = try #require(object["id"]?.stringValue)
+            if id == secretID {
+                secretRowSeen = true
+                #expect(object["distilled"] == nil, "the secret row must carry no distilled body")
+                continue
+            }
+            guard let distilled = object["distilled"]?.stringValue else { continue }
+            let body = try #require(bodyByID[id], "every emitted distilled row is a captured record")
+            expectedReturned += GeniusLocusKit.estimatedTokenCount(of: distilled)
+            expectedOriginal += GeniusLocusKit.estimatedTokenCount(of: body)
+        }
+        #expect(secretRowSeen, "the secret row is present in results")
+        #expect(expectedReturned > 0, "the probe query must return distilled bodies")
+        #expect(distillation["returnedTokens"] == .integer(expectedReturned))
+        #expect(distillation["originalTokens"] == .integer(expectedOriginal))
+        #expect(distillation["estimated"] == .bool(true))
+        #expect(distillation["estimator"] == .string(DistilledSavings.estimatorName))
+        #expect(distillation["skim"] == nil)
+        let display = try #require(distillation["display"]?.stringValue)
+        #expect(display.hasPrefix("\u{1F331} Distilled: ~"))
+        #expect(outcome.compactText.hasSuffix("\n" + display))
+    }
+
+    @Test("distilled recall with no rows still reports the zero distillation object")
+    func distilledSavingsOnEmptyResultAreZero() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-recall-lens-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let authority = AriaV2GeniusLocusRecallLensAuthority(kit: kit, handle: handle)
+        let outcome = try await authority.execute(try AriaV2RecallLensRequest(
+            tool: "moot_recall_distilled", arguments: .object(["query": .string("savings-probe")])))
+        let data = try #require(outcome.data.objectValue)
+        #expect(data["results"] == .array([]))
+        let distillation = try #require(data["capabilities"]?.objectValue?["distillation"]?.objectValue)
+        let zero = "\u{1F331} Distilled: ~0 tokens returned vs ~0 original \u{00B7} ~0 saved (0%)"
+        #expect(distillation["returnedTokens"] == .integer(0))
+        #expect(distillation["originalTokens"] == .integer(0))
+        #expect(distillation["display"] == .string(zero))
+        #expect(outcome.compactText == "Returned 0 distilled recall result(s).\n" + zero)
+    }
+
+    @Test("precise recall carries no distillation object")
+    func preciseRecallCarriesNoDistillation() async throws {
+        let (kit, handle, _, _) = try await distilledEstate()
+        let authority = AriaV2GeniusLocusRecallLensAuthority(kit: kit, handle: handle)
+        let outcome = try await authority.execute(try AriaV2RecallLensRequest(
+            tool: "moot_recall_precise", arguments: .object(["query": .string("savings-probe")])))
+        let data = try #require(outcome.data.objectValue)
+        #expect(data["capabilities"]?.objectValue?["distillation"] == nil)
+        #expect(!outcome.compactText.contains("\u{1F331}"))
     }
 }
 
