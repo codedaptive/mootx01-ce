@@ -7,11 +7,11 @@
 //! The name "call_chain" is deliberate.  "Door" is already taken in this kit:
 //! it is the recall-strategy selector on `moot_memory_search` (values: rrf /
 //! matrixAware / raw / guess), backed by `DoorManifest` and
-//! `provisionDoorConfig`, with its own suite
-//! `tests/aria_v2_door_dispatch_tests.rs`.  A second unrelated "door" module
-//! in the same kit would be read as recall-strategy code.
+//! `provisionDoorConfig`, with its argument exercised in
+//! `tests/aria_v2_memory_search_arg_tests.rs`.  A second unrelated "door"
+//! module in the same kit would be read as recall-strategy code.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value as SjValue;
 
