@@ -1153,11 +1153,25 @@
           "mode": {
             "type": "string"
           },
+          "estate_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fdc_data_version": {
+            "type": "string"
+          },
+          "fdc_recalculation_version": {
+            "type": "string"
+          },
           "scanned": {
             "type": "integer",
             "minimum": 0
           },
           "unchanged": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "empty_content": {
             "type": "integer",
             "minimum": 0
           },
@@ -1169,7 +1183,60 @@
             "type": "integer",
             "minimum": 0
           },
+          "would_update": {
+            "type": "integer",
+            "minimum": 0
+          },
           "unclassified_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "skipped_non_candidate_changes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "floor_stamp": {
+            "type": "string"
+          },
+          "estate_recalced_data_version_before": {
+            "type": "string"
+          },
+          "estate_recalced_data_version_after": {
+            "type": "string"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "old_code": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "new_code": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "old_qid": {
+                  "type": "string"
+                },
+                "new_qid": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "old_code",
+                "new_code"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "changes_omitted": {
             "type": "integer",
             "minimum": 0
           }
@@ -1177,18 +1244,26 @@
         "required": [
           "applied",
           "mode",
+          "estate_id",
+          "fdc_data_version",
+          "fdc_recalculation_version",
           "scanned",
           "unchanged",
+          "empty_content",
           "candidates",
           "updated",
-          "unclassified_after"
+          "would_update",
+          "unclassified_after",
+          "skipped_non_candidate_changes",
+          "floor_stamp",
+          "changes",
+          "changes_omitted"
         ],
         "additionalProperties": false
       },
       "source_anchors": [
-        "packages/kits/AriaMcpKit/Sources/AriaMCP/ToolDispatch.swift:4191"
-      ],
-      "source_gap": "Implement the FDC scan report adapter."
+        "packages/kits/AriaMcpKit/rust/src/v2/data_mobility_lower.rs"
+      ]
     },
     "moot_palace_import": {
       "catalog_index": 28,
