@@ -668,7 +668,7 @@ mod frozen_command_tests {
     }
 
     #[test]
-    fn v2_rejects_inactive_teachme_before_the_session_records_it() {
+    fn v2_rejects_malformed_file_memory_arguments_before_the_session_records_it() {
         let dispatcher = frozen_dispatcher();
         let response = call(
             &dispatcher,
@@ -686,7 +686,108 @@ mod frozen_command_tests {
         assert_eq!(
             dispatcher.mode_session_state.snapshot().total_calls,
             0,
-            "inactive v1 names must reject before v2 session handling",
+            "a malformed call on a live v2 name must reject before v2 session handling",
+        );
+    }
+}
+
+#[cfg(test)]
+mod catalog_sync_tests {
+    //! Regression gate for the defect this stream fixes: the `tools/list` append
+    //! in `Dispatcher::new` and the `retain`/`push` branches in
+    //! `with_memory_tool_enabled` had no test covering them.  Deleting the append
+    //! at dispatcher.rs and running `cargo test` produced 796 passed, 0 failed —
+    //! the defect was invisible.  Swift catches the equivalent mutation via
+    //! `FrozenPostureTests.swift:98 inventoryNamesOnlyReachableTools`, but Rust
+    //! could not, because `tool_mutation_inventory::reachable()` synthesises
+    //! `memory` from `FROZEN_READ_COMMANDS` rather than reading the dispatcher's
+    //! real `tools` field.
+    //!
+    //! This module reads the dispatcher's actual `tools/list` response — the same
+    //! bytes a client sees — not the inventory or the surface catalog.
+    use super::*;
+
+    /// Make a `tools/list` request against the dispatcher and return the array.
+    fn tools_list(dispatcher: &Dispatcher) -> Vec<serde_json::Value> {
+        let raw = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+        });
+        let request = JSONRPCRequest::decode(&raw).expect("tools/list request must decode");
+        let response = serde_json::to_value(dispatcher.handle(&request))
+            .expect("tools/list response must serialize");
+        response["result"]["tools"]
+            .as_array()
+            .expect("tools/list result must contain a `tools` array")
+            .clone()
+    }
+
+    fn has_memory(tools: &[serde_json::Value]) -> bool {
+        tools
+            .iter()
+            .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("memory"))
+    }
+
+    /// Reads the dispatcher's actual tools/list response — not the inventory,
+    /// not the surface catalog — and asserts the `memory` entry is present when
+    /// enabled and absent when disabled.  The absolute counts (85 / 84) pin the
+    /// full roster so any addition or removal shows up here.
+    ///
+    /// This covers both the `tools/list` append in `Dispatcher::new` (the
+    /// defect vector) and the `retain`/`push` branches in
+    /// `with_memory_tool_enabled` (added in a34b8d652).
+    #[test]
+    fn dispatcher_catalog_includes_memory_tool_when_enabled_and_excludes_it_when_disabled() {
+        let enabled = Dispatcher::new(
+            EstateRegistry::new_inmemory(),
+            "ARIA_MCP_Rust",
+            "test",
+            "test-serial",
+            None,
+        )
+        .with_memory_tool_enabled(true);
+
+        let disabled = Dispatcher::new(
+            EstateRegistry::new_inmemory(),
+            "ARIA_MCP_Rust",
+            "test",
+            "test-serial",
+            None,
+        )
+        .with_memory_tool_enabled(false);
+
+        let enabled_tools = tools_list(&enabled);
+        let disabled_tools = tools_list(&disabled);
+
+        // The `memory` entry is the sole difference between the two catalogs.
+        assert_eq!(
+            enabled_tools.len(),
+            disabled_tools.len() + 1,
+            "enabled tools/list must be exactly one entry longer than disabled; \
+             enabled={}, disabled={}",
+            enabled_tools.len(),
+            disabled_tools.len(),
+        );
+        // Absolute counts pin the full roster: an unrelated addition or removal
+        // will surface here before it can hide behind a relative-only assertion.
+        assert_eq!(
+            enabled_tools.len(),
+            85,
+            "enabled tools/list must have exactly 85 entries; got {}",
+            enabled_tools.len(),
+        );
+        assert_eq!(
+            disabled_tools.len(),
+            84,
+            "disabled tools/list must have exactly 84 entries; got {}",
+            disabled_tools.len(),
+        );
+        assert!(
+            has_memory(&enabled_tools),
+            "enabled tools/list must contain a tool named `memory`",
+        );
+        assert!(
+            !has_memory(&disabled_tools),
+            "disabled tools/list must NOT contain a tool named `memory`",
         );
     }
 }
