@@ -236,6 +236,68 @@ struct FrozenDispatcherTests {
     }
 
 
+    // MARK: - Command-classified tool: memory is view-only when frozen
+
+    /// `memory` is classified per call: `view` proceeds and reads; every
+    /// other command, and a missing or unknown one, is refused before the
+    /// adapter runs and before session state records the call, with the
+    /// estate byte-identical on disk. The adapter itself is posture-blind:
+    /// the same `delete` lands through a live dispatcher.
+    @Test func frozenMemoryToolIsViewOnly() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle) = try await openSQLiteEstate(url: url)
+        let memoryOn = ["MOOTX01_MEMORY_TOOL": "1"]
+        let live = ToolDispatcher(kit: kit, handle: handle, environment: memoryOn)
+        let frozen = ToolDispatcher(kit: kit, handle: handle, environment: memoryOn, posture: .frozen)
+        let path = "/memories/frozen-notes.txt"
+
+        // One file created live, so view has something to read and delete a target.
+        let created = try await live.dispatch(name: "memory", arguments: .object([
+            "command": .string("create"), "path": .string(path),
+            "file_text": .string("frozen posture view-only test"),
+        ]))
+        #expect(firstText(created).contains("File created successfully"), "precondition; got: \(firstText(created))")
+
+        let before = try estateBytes(url)
+        let callsBefore = await frozen.modeSessionState.totalCallCount
+        let mutating: [(command: String?, arguments: [String: JSONValue])] = [
+            ("create", ["path": .string("/memories/other.txt"), "file_text": .string("must not land")]),
+            ("str_replace", ["path": .string(path), "old_str": .string("view-only"), "new_str": .string("must not land")]),
+            ("insert", ["path": .string(path), "insert_line": .integer(0), "insert_text": .string("must not land")]),
+            ("delete", ["path": .string(path)]),
+            ("rename", ["old_path": .string(path), "new_path": .string("/memories/renamed.txt")]),
+            ("frobnicate", ["path": .string(path)]),
+            (nil, ["path": .string(path)]),
+        ]
+        for (command, arguments) in mutating {
+            var args = arguments
+            if let command { args["command"] = .string(command) }
+            let result = try await frozen.dispatch(name: "memory", arguments: .object(args))
+            #expect(isError(result), "memory \(command ?? "(missing)") must be refused when frozen; got: \(firstText(result))")
+            #expect(firstText(result) == EstatePosture.refusalMessage(tool: "memory", command: command))
+        }
+        #expect(try estateBytes(url) == before, "refused memory commands must leave the estate byte-identical on disk")
+        let callsAfterRefusals = await frozen.modeSessionState.totalCallCount
+        #expect(callsAfterRefusals == callsBefore, "a refused memory command must not be recorded in session state")
+
+        // view proceeds and reads the live-created file; the dispatcher records it.
+        let view = try await frozen.dispatch(name: "memory",
+                                             arguments: .object(["command": .string("view"), "path": .string(path)]))
+        #expect(!isError(view) && firstText(view).contains("frozen posture view-only test"),
+                "memory view is a read and must work when frozen; got: \(firstText(view))")
+        let callsAfterView = await frozen.modeSessionState.totalCallCount
+        #expect(callsAfterView == callsBefore + 1, "a view the dispatcher lets through is recorded")
+
+        // The adapter is posture-blind: the same delete lands live.
+        let deleted = try await live.dispatch(name: "memory",
+                                              arguments: .object(["command": .string("delete"), "path": .string(path)]))
+        #expect(firstText(deleted).hasPrefix("Successfully deleted"), "live delete must still work; got: \(firstText(deleted))")
+        let gone = try await frozen.dispatch(name: "memory",
+                                             arguments: .object(["command": .string("view"), "path": .string(path)]))
+        #expect(firstText(gone).contains("does not exist"), "the deleted file must be gone; got: \(firstText(gone))")
+    }
+
     // MARK: - moot_synthesize is a read under frozen
 
     /// `moot_synthesize` reads candidates and generates text; it writes no
