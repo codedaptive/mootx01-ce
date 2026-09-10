@@ -31,7 +31,7 @@ fn data_keys(response: &Value) -> std::collections::BTreeSet<String> {
 }
 
 fn dispatcher() -> Dispatcher {
-    Dispatcher::new(EstateRegistry::new_inmemory_bare(), "ARIA", "test", "test-build", "", None)
+    Dispatcher::new(EstateRegistry::new_inmemory_bare(), "ARIA", "test", "test-build", None)
 }
 
 fn call(dispatcher: &Dispatcher, name: &str, arguments: Value) -> Value {

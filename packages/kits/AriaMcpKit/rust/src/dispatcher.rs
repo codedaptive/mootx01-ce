@@ -147,16 +147,14 @@ impl Dispatcher {
     /// It is surfaced by `moot_estate_ping` so drivers can confirm they are
     /// talking to the most recently compiled binary.
     ///
-    /// `_version_skew` is accepted but not stored — `Dispatcher` does not
-    /// read it anywhere in the v2 request path (`self.surface.execute`
-    /// never receives it). It stays in the signature so the many existing
-    /// `Dispatcher::new` call sites (production and tests) stay unchanged;
-    /// the version-skew advisory that `moot_estate_ping`/`moot_estate_status`
-    /// actually render comes from the `version_skew: &str` argument threaded
-    /// separately through `interface_tools::dispatch` (see `runtime.rs`).
+    /// `Dispatcher` does not take a version-skew advisory: it does not read
+    /// one anywhere in the v2 request path (`self.surface.execute` never
+    /// receives it). The version-skew advisory that `moot_estate_ping`/
+    /// `moot_estate_status` actually render comes from the `version_skew:
+    /// &str` argument threaded separately through `interface_tools::dispatch`
+    /// (see `runtime.rs`).
     pub fn new(
         registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
-        _version_skew: &str,
         monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
     ) -> Self {
         let surface = crate::surface::SelectedSurface::selected(
@@ -410,7 +408,7 @@ mod frozen_command_tests {
     use super::*;
 
     fn frozen_dispatcher() -> Dispatcher {
-        Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", "", None)
+        Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", None)
             .with_posture(EstatePosture::Frozen)
     }
 
