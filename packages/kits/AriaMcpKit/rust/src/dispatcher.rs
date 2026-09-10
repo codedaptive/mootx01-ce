@@ -94,15 +94,6 @@ pub struct Dispatcher {
     /// server startup via `crate::build_serial::derive()` and stored here
     /// so the filesystem is not touched on every ping call.
     pub(crate) build_serial: String,
-    /// version-skew advisory surfaced by `moot_estate_ping` /
-    /// `moot_estate_status` when the host detected a mismatch between an
-    /// installed plugin (e.g. Claude Code's `mootx01@mootx01`) and this
-    /// running binary. Empty string when no plugin is detected or its
-    /// version matches — the common case, which omits the field entirely
-    /// (see `run_estate_ping`/`run_estate_status` in `interface_tools.rs`).
-    /// Computed once at server startup by the host binary (mootx01-cli's
-    /// `serve` command); this kit never reads `~/.claude/plugins/` itself.
-    pub(crate) version_skew: String,
     /// Upstream-release advisory provider: returns a one-line "a newer
     /// release exists" message, or `None` when there is nothing to say.
     /// Unlike `version_skew` this is a CLOSURE, not a startup-computed
@@ -149,20 +140,23 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    /// Construct from an estate registry, server identity, build serial, and
-    /// version-skew advisory.
+    /// Construct from an estate registry, server identity, and build serial.
     ///
     /// `build_serial` is produced by `crate::build_serial::derive()` at
     /// server startup and carried unchanged for the lifetime of the server.
     /// It is surfaced by `moot_estate_ping` so drivers can confirm they are
     /// talking to the most recently compiled binary.
     ///
-    /// `version_skew` is empty when the host detected no plugin/binary
-    /// version mismatch — pass `""` from callers that have no
-    /// skew to report (e.g. `aria-mcp-server`, which has no plugin concept).
+    /// `_version_skew` is accepted but not stored — `Dispatcher` does not
+    /// read it anywhere in the v2 request path (`self.surface.execute`
+    /// never receives it). It stays in the signature so the many existing
+    /// `Dispatcher::new` call sites (production and tests) stay unchanged;
+    /// the version-skew advisory that `moot_estate_ping`/`moot_estate_status`
+    /// actually render comes from the `version_skew: &str` argument threaded
+    /// separately through `interface_tools::dispatch` (see `runtime.rs`).
     pub fn new(
         registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
-        version_skew: &str,
+        _version_skew: &str,
         monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
     ) -> Self {
         let surface = crate::surface::SelectedSurface::selected(
@@ -180,7 +174,6 @@ impl Dispatcher {
             vault_ledger: VaultJobLedger::new(),
             sensitivity_ledger: SensitivityGrantLedger::new(),
             build_serial: build_serial.to_owned(),
-            version_skew: version_skew.to_owned(),
             // Wired post-construction via `with_update_advisory` — the Rust
             // equivalent of Swift's defaulted `updateAdvisoryProvider: nil`
             // initializer parameter, chosen so the many existing
@@ -338,7 +331,7 @@ impl Dispatcher {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| JsonValue::Object(Default::default()));
-        let mut args_map = match arguments.as_object() {
+        let args_map = match arguments.as_object() {
             Some(args) => args.clone(),
             None => {
                 let message =
@@ -356,9 +349,11 @@ impl Dispatcher {
             }
         };
 
-        // Surface admission: decode the typed v2 request before frozen policy,
-        // teachme interception, or mode parsing. A name absent from the v2
-        // catalog is rejected here before any legacy runner can fire.
+        // Surface admission: decode the typed v2 request before frozen policy
+        // is evaluated. A name absent from the v2 catalog is rejected here
+        // (METHOD_NOT_FOUND below) — `dispatch::route_tool` is never reached
+        // from this handler; it is a v1 test-helper path called directly by
+        // the integration suites, not by the running server.
         if let Some(request) = self.surface.decode(name, &args_map)? {
             // Stable typed effect drives posture before the request clock or
             // any session/estate state changes.
