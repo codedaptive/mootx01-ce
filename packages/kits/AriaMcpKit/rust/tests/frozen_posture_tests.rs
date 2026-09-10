@@ -46,7 +46,7 @@ fn temp_sqlite_path(label: &str) -> String {
 }
 
 fn make_dispatcher(registry: EstateRegistry, posture: EstatePosture) -> Dispatcher {
-    Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", "", None).with_posture(posture)
+    Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None).with_posture(posture)
 }
 
 fn tools_call(dispatcher: &Dispatcher, tool: &str, args: JsonValue) -> JsonValue {
