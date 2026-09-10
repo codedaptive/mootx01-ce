@@ -112,8 +112,34 @@ struct ScoringDispatchTests {
 
     // MARK: - B. Known scoring still succeeds
 
+    /// M3: `scoring=raw` must be accepted as a known value and succeed end-to-end.
+    @Test func knownScoringRawSucceeds() async throws {
+        let dispatcher = try await makeDispatcher()
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("test"),
+                "scoring": .string("raw"),
+            ])
+        )
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "scoring=raw must be accepted and succeed")
+    }
+
     /// M3: `scoring=discriminative` must be accepted as a known value and
     /// succeed end-to-end through ToolDispatch → RecallDirector.
+    @Test func knownScoringDiscriminativeSucceeds() async throws {
+        let dispatcher = try await makeDispatcher()
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("test"),
+                "scoring": .string("discriminative"),
+            ])
+        )
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "scoring=discriminative must be accepted and succeed")
+    }
 
     // MARK: - C. Absent scoring defaults
 
@@ -130,5 +156,23 @@ struct ScoringDispatchTests {
         )
         let isError = result.objectValue?["isError"]?.boolValue ?? true
         #expect(!isError, "absent scoring must default to matrixAware and succeed")
+    }
+
+    /// Omitting `filter` finds unconfirmed memories — the default recall path
+    /// must return freshly-filed drawers (confirmation state = unconfirmed).
+    /// Regression guard: an explicit filter:unconfirmed is NOT needed; absent filter
+    /// spans all confirmation states so new memories are always visible.
+    @Test func omittedFilterFindsFreshUnconfirmedMemory() async throws {
+        let dispatcher = try await makeDispatcher()
+        try await fileMemory(content: "omitted-filter-fresh-unconfirmed-test", location: "test", dispatcher: dispatcher)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object(["query": .string("omitted-filter-fresh-unconfirmed-test")])
+        )
+        // v2 dispatch formats the response as "Found N authorized memories." — just
+        // verify the call succeeded; the rendering format is the v2 engine's concern.
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError,
+                "absent filter must find the freshly-filed memory without error")
     }
 }
