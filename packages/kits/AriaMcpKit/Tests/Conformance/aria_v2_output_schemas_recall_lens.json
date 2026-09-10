@@ -65,6 +65,39 @@
       "required": ["results"],
       "additionalProperties": false
     },
+    "distillation": {
+      "type": "object",
+      "properties": {
+        "returnedTokens": { "type": "integer", "minimum": 0 },
+        "originalTokens": { "type": "integer", "minimum": 0 },
+        "savedTokens": { "type": "integer" },
+        "savedPercent": { "type": "integer" },
+        "estimated": { "type": "boolean" },
+        "estimator": { "type": "string" },
+        "skim": { "type": "object", "properties": { "omittedTokens": { "type": "integer", "minimum": 0 } }, "required": ["omittedTokens"], "additionalProperties": false },
+        "display": { "type": "string" }
+      },
+      "required": ["returnedTokens", "originalTokens", "savedTokens", "savedPercent", "estimated", "estimator", "display"],
+      "additionalProperties": false
+    },
+    "distilled_capabilities": {
+      "type": "object",
+      "properties": {
+        "discrimination": { "type": "string", "enum": ["low", "medium"] },
+        "distillation": { "$ref": "#/$defs/distillation" }
+      },
+      "required": ["distillation"],
+      "additionalProperties": false
+    },
+    "distilled_recall_data": {
+      "type": "object",
+      "properties": {
+        "results": { "type": "array", "items": { "$ref": "#/$defs/memory_row" } },
+        "capabilities": { "$ref": "#/$defs/distilled_capabilities" }
+      },
+      "required": ["results", "capabilities"],
+      "additionalProperties": false
+    },
     "metric": {
       "type": "object",
       "properties": {
@@ -133,8 +166,8 @@
     },
     "moot_recall_distilled": {
       "catalog_index": 41,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:2263-2351", "packages/kits/CognitionKit/Sources/CognitionKit/DistilledRecall.swift:31-99", "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1004-1029"],
-      "data_schema": { "$ref": "#/$defs/recall_data" }
+      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2RecallLens.swift:140-147", "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2RecallLens.swift:241-333", "packages/kits/CognitionKit/Sources/CognitionKit/DistilledRecall.swift:50-84", "packages/kits/CognitionKit/Sources/CognitionKit/DistilledSavings.swift:73-182", "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2SelectedCatalog.swift:1608-1632"],
+      "data_schema": { "$ref": "#/$defs/distilled_recall_data" }
     },
     "moot_recall_vague": {
       "catalog_index": 42,

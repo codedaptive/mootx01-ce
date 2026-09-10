@@ -11,6 +11,12 @@
 // `token_count` (context budgeting). Every row renders inline — there is
 // no sweep, no "not yet distilled" state, and no fallback marker.
 //
+// Each match also carries `originalTokenCount`, the estimator over the
+// record's full content. The recipe does not sum the pair: the ARIA v2
+// surface applies `DistilledSavings` over the rows it actually emits,
+// after its row cap and privacy projection (ARIA_V2_CONTRACT.md,
+// "Distilled recall savings").
+//
 // Layer discipline B-1/B-2: one GLK recall call. Read-only (B-6, I-6).
 
 import Foundation
@@ -51,6 +57,9 @@ public struct DistilledMatch: Sendable, Equatable, Codable {
     /// Per-hit token estimate for context budgeting. Always present —
     /// every row renders inline, so there is no fallback without a count.
     public let tokenCount: Int64
+    /// Estimator over the record's full `content`: the original-body cost
+    /// the ARIA surface sums over the rows it emits. Never summed here.
+    public let originalTokenCount: Int64
     /// The exact-search fusion score that ranked this hit.
     public let score: Double
     /// The room node id of the source drawer (callers resolve display
@@ -61,12 +70,14 @@ public struct DistilledMatch: Sendable, Equatable, Codable {
         id: String,
         text: String,
         tokenCount: Int64,
+        originalTokenCount: Int64,
         score: Double,
         parentNodeId: String
     ) {
         self.id = id
         self.text = text
         self.tokenCount = tokenCount
+        self.originalTokenCount = originalTokenCount
         self.score = score
         self.parentNodeId = parentNodeId
     }
@@ -160,7 +171,9 @@ public struct DistilledRecall: Recipe {
 
         // Hydrate each hit through the hydration selector pinned to .distilled.
         // Every row renders inline via ContextDistillLib — no stored columns,
-        // no sweep dependency, no fallback path.
+        // no sweep dependency, no fallback path. Each match carries the
+        // estimator over its distilled text and over its full content; the
+        // ARIA surface sums both over the rows it emits.
         var matches: [DistilledMatch] = []
         for hit in result.hits {
             guard let drawer = hit.drawer else { continue }
@@ -169,6 +182,7 @@ public struct DistilledRecall: Recipe {
                 id: drawer.id,
                 text: text,
                 tokenCount: GeniusLocusKit.estimatedTokenCount(of: text),
+                originalTokenCount: GeniusLocusKit.estimatedTokenCount(of: drawer.content),
                 score: Double(hit.score.final),
                 parentNodeId: drawer.parentNodeId))
         }
