@@ -68,11 +68,98 @@ struct ConflictProjectionSectionTests {
     /// Normal+normal pair: the lens appends the full typed section with
     /// a PROVEN block, value digests, temporal bases, reasons, and the
     /// legacy grouped-objects view stays present above it.
+    ///
+    /// BLOCKED: v2 `moot_lens_contradiction` routes through
+    /// `AriaV2LensLower.lensContradiction`, which returns JSON-structured
+    /// data in `structuredContent.data` with compact text
+    /// "Found N tunnels and M fact groups." — it never calls
+    /// `RecipeTools.renderConflictProjection`, so the text-format strings
+    /// (`proven:`, `PROVEN`, `rule:`, `coordinate:`, `reasons:`) are absent
+    /// from `content[0].text`. The legacy text path (LensTools.swift) is
+    /// bypassed. Awaiting catalog decision on whether the typed proving
+    /// section should be added to the v2 lower response. Do not delete;
+    /// do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 lensContradiction lower returns JSON-only compact text; renderConflictProjection text format not present in content[0].text. Legacy text path bypassed. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    func lensAppendsFullTypedSection() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-normal")
+        try await plantClaim(kit, handle, content: "Claim one.",
+                             employer: "Acme Robotics", sensitivity: .normal)
+        try await plantClaim(kit, handle, content: "Claim two.",
+                             employer: "Beta Corp", sensitivity: .normal)
+        let body = text(of: try await dispatcher.dispatch(
+            name: "moot_lens_contradiction", arguments: .object([:])))
+        // Legacy view intact (additive contract).
+        #expect(body.contains("conflicting_facts: 1 subject+predicate pair(s)"))
+        // Typed section.
+        #expect(body.contains("proven: 1"))
+        #expect(body.contains("historical: 0"))
+        #expect(body.contains("compatible: 0"))
+        #expect(body.contains("unknown_or_invalid: 0"))
+        #expect(body.contains("coverage: 2/2"))
+        // The lens has no lexical lane — no candidates line.
+        #expect(!body.contains("candidates:"))
+        #expect(body.contains("  PROVEN "))
+        #expect(body.contains("    rule: dim.person.employer@1"))
+        #expect(body.contains("    coordinate: person:sarah chen c0|employer"))
+        #expect(body.contains(" vs "))
+        #expect(body.contains("    time: t:pt:1690000000 | t:pt:1690000000"))
+        #expect(body.contains(
+            "    reasons: same_coordinate, validity_overlap, values_exclusive"))
+    }
 
     /// F13 — restricted+normal pair: counted, but the block collapses to
     /// the coordinate-digest line. No source ids, no value digests, no
     /// dense rows for the pair.
+    ///
+    /// BLOCKED: same as `lensAppendsFullTypedSection` — text-format strings
+    /// absent from v2 compact text. Additionally, v2 filters `.restricted`
+    /// facts via `isBulkExportable` before grouping (not counted-but-redacted),
+    /// so the F13 "counted in proven: N but [restricted]" behavior is absent.
+    /// Awaiting catalog decision. Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 lensContradiction lower returns JSON-only compact text; restricted facts are filtered (not counted-but-redacted) in the v2 lower path. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    func f13RestrictedPairIsRedacted() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-restricted")
+        try await plantClaim(kit, handle, content: "Public claim.",
+                             employer: "Acme Robotics", sensitivity: .normal)
+        try await plantClaim(kit, handle, content: "Restricted claim.",
+                             employer: "Beta Corp", sensitivity: .restricted)
+        let body = text(of: try await dispatcher.dispatch(
+            name: "moot_lens_contradiction", arguments: .object([:])))
+        #expect(body.contains("proven: 1"))
+        #expect(body.contains("a conflicting claim exists at "))
+        #expect(body.contains("[restricted]"))
+        // The full block never renders: no rule line, no value digests,
+        // no temporal bases.
+        #expect(!body.contains("  PROVEN "))
+        #expect(!body.contains("    rule: "))
+        #expect(!body.contains("    values: "))
+    }
 
     /// Secret ceiling: the pair is COUNTED in `proven: N` and emits no
     /// block at all — not even the redacted line.
+    ///
+    /// Both halves must be asserted: `proven: 1` (counted) and the absence
+    /// of the PROVEN block and the [restricted] redaction line (silent).
+    /// An assertion that only checks silence passes on a lens that dropped
+    /// the row entirely — check both.
+    ///
+    /// BLOCKED: same as `lensAppendsFullTypedSection` — v2 lower path returns
+    /// JSON-only; `.secret` facts are filtered before grouping (not
+    /// counted-but-silent). Awaiting catalog decision. Do not delete;
+    /// do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 lensContradiction lower returns JSON-only compact text; secret facts are filtered (not counted-but-silent) in the v2 lower path. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    func secretCeilingIsCountedButSilent() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-secret")
+        try await plantClaim(kit, handle, content: "Public claim.",
+                             employer: "Acme Robotics", sensitivity: .normal)
+        try await plantClaim(kit, handle, content: "Secret claim.",
+                             employer: "Beta Corp", sensitivity: .secret)
+        let body = text(of: try await dispatcher.dispatch(
+            name: "moot_lens_contradiction", arguments: .object([:])))
+        // The pair IS counted in the totals (not dropped silently).
+        #expect(body.contains("proven: 1"))
+        // But the block and redacted marker are both absent (silent, not redacted).
+        #expect(!body.contains("  PROVEN "))
+        #expect(!body.contains("[restricted]"))
+    }
 }

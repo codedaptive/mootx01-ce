@@ -182,6 +182,41 @@ struct RecallDiscriminationTests {
         )
     }
 
+    /// Conversion of the v1 case that asserted the discrimination line always
+    /// appeared in every moot_memory_search result. In v2 the line is gated
+    /// behind `explain: true`; the rewrite adds that flag and preserves both
+    /// pinned assertions: the "discrimination:" prefix AND a known level label.
+    /// The two-part assertion prevents a false green where the line is emitted
+    /// with an empty or unrecognised label string.
+    @Test func memorySearchResultAlwaysContainsDiscriminationLine() async throws {
+        let dispatcher = try await makeDispatcher()
+        // Three memories with closely-related content produce a low or medium
+        // discrimination signal. Both levels carry a named label in the text output.
+        try await fileMemory(content: "recall-discrimination-v1-port alpha", location: "lab", dispatcher: dispatcher)
+        try await fileMemory(content: "recall-discrimination-v1-port beta", location: "lab", dispatcher: dispatcher)
+        try await fileMemory(content: "recall-discrimination-v1-port gamma", location: "lab", dispatcher: dispatcher)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("recall-discrimination-v1-port"),
+                "explain": .bool(true),
+            ])
+        )
+        let text = result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        // The discrimination line must appear (not silently swallowed).
+        #expect(
+            text.contains("discrimination:"),
+            "explain:true must produce a discrimination: line; got: \(text.prefix(400))")
+        // At least one known level label must be present — guards against the
+        // line emitting with an empty or non-canonical label.
+        let hasKnownLevel = text.contains("discrimination: high")
+            || text.contains("discrimination: medium")
+            || text.contains("discrimination: low")
+        #expect(
+            hasKnownLevel,
+            "discrimination line must carry a known level label (high/medium/low); got: \(text.prefix(400))")
+    }
+
     /// With explain:true on an estate seeded with near-identical memories, the
     /// moot_memory_search response MUST contain a "discrimination:" line. Three
     /// memories with closely-spaced content produce a low or medium

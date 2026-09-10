@@ -78,6 +78,71 @@ struct AriaV2OrchestrationLowerTests {
         #expect(receipt.discardOutcomes.filter { $0.status == .discarded }.map(\.branchID) == expectedDiscardedIDs)
     }
 
+    /// Drives `moot_federated_recall` through `ToolDispatcher` with a real grant
+    /// in place. Verifies that content planted in the source estate surfaces in
+    /// `structuredContent.data.results[*].excerpt` — the dispatcher path, not the
+    /// lower provider seam. The v1 test drove `provider.federatedSearch()` directly;
+    /// the v2 conversion uses `ToolDispatcher.registering(_:)` to register the
+    /// source, then dispatches through the production tool surface.
+    @Test("federated lower returns an actual registered peer grant receipt")
+    func federatedLowerUsesAuthorizedPeer() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-federation-lower")
+        let requesterStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let sourceStorage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: requesterStorage, owner: owner)
+        _ = try await LocusKit.Estate.create(storage: sourceStorage, owner: owner)
+        let requester = try await kit.open(
+            storage: requesterStorage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: true)
+        let source = try await kit.open(
+            storage: sourceStorage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: true)
+        // Source grants whole-estate read to the requester.
+        _ = try await kit.issueGrant(source, GrantOptions(
+            granteeEstateID: requester.estateUUID,
+            scope: .wholeEstate))
+        // Plant distinguishable content into the source estate.
+        _ = try await kit.capture(source, CaptureFrame(
+            content: "peer-only-v2-federation-row",
+            channel: .typed,
+            room: "aria-v2-federation",
+            latticeAnchor: .udc("004"),
+            addedBy: "aria-v2-orchestration-lower-tests",
+            embeddingModelID: "test-model-v1"))
+        // Dispatcher: requester is primary; source is a registered peer.
+        let dispatcher = ToolDispatcher(kit: kit, handle: requester)
+            .registering(source)
+        let result = try await dispatcher.dispatch(
+            name: "moot_federated_recall",
+            arguments: .object([
+                "requester_estate_id": .string(requester.estateUUID.uuidString),
+                "hydration_level": .string("full"),
+            ])
+        )
+        // Extract results from structuredContent.data.results.
+        // The compact text is just an operation-complete message; the payload
+        // lives in structuredContent (AriaV2Envelope.success shape).
+        guard case let .object(obj) = result,
+              case let .object(sc)? = obj["structuredContent"],
+              case let .object(data)? = sc["data"],
+              case let .array(results)? = data["results"]
+        else {
+            Issue.record("Unexpected result shape: \(result)")
+            return
+        }
+        let excerpts = results.compactMap { item -> String? in
+            guard case let .object(mem) = item,
+                  case let .string(text)? = mem["excerpt"] else { return nil }
+            return text
+        }
+        #expect(
+            excerpts.contains { $0.contains("peer-only-v2-federation-row") },
+            "federated recall must surface content from the peer estate; excerpts: \(excerpts)")
+    }
+
     @Test("a federation response carries the lower engine grant identity")
     func federatedReceiptCarriesGrantIdentity() {
         let source = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
