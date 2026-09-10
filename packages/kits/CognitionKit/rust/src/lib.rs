@@ -43,7 +43,14 @@ pub mod anticipate_recipe;
 // run_distilled_recall recipe body. Rust parity with CognitionKit/DistilledRecall.swift.
 // Exact-search geometry over originals with the hydration selector pinned to
 // `distilled`; every row renders inline via ContextDistillLib at read time.
+// Each match carries token_count and original_token_count; the ARIA surface
+// sums them over the rows it emits.
 pub mod distilled_recall;
+// distilled_savings.rs: DistilledSavings/DistilledSkim types and the
+// measure_distilled_savings factory. Rust parity with
+// CognitionKit/DistilledSavings.swift. Applied by the ARIA v2 surface over the
+// rows it emits, from the per-match counts run_distilled_recall carries.
+pub mod distilled_savings;
 pub mod association_rules_recipe;
 pub mod exploratory_recall_recipe;
 pub mod bias_recipe;
@@ -87,6 +94,9 @@ pub use anticipate_recipe::run_anticipate;
 pub use distilled_recall::{
     classify_distilled_discrimination, run_distilled_recall, DistilledDiscriminationLevel,
     DistilledMatch, DistilledRecallInput, DistilledRecallOutput,
+};
+pub use distilled_savings::{
+    measure_distilled_savings, DistilledSavings, DistilledSkim, ESTIMATOR_NAME,
 };
 pub use association_rules_recipe::{
     run_apriori_rules, run_association_rules, AprioriRulesOutput, AssociationRuleResult,

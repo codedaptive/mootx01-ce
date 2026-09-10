@@ -1042,6 +1042,13 @@ pub fn execute_distilled_recall(
         now_millis,
     )
     .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
+    // The savings figure covers only the rows this response emits with a
+    // distilled body: a withheld body (restricted, secret or unknown
+    // provenance) or a dropped row counts on neither side, so the published
+    // numbers describe the payload as sent (ARIA_V2_CONTRACT.md, "Distilled
+    // recall savings"). The recipe carries the per-match pair; the surface sums.
+    let mut original_tokens: i64 = 0;
+    let mut distilled_tokens: i64 = 0;
     let results = output
         .matches
         .iter()
@@ -1052,15 +1059,25 @@ pub fn execute_distilled_recall(
                     let object = row.as_object_mut().expect("fixed recall row");
                     object.insert("distilled".to_owned(), json!(matched.text));
                     object.insert("representation".to_owned(), json!("distilled"));
+                    original_tokens += matched.original_token_count;
+                    distilled_tokens += matched.token_count;
                 }
                 row
             })
         })
         .collect();
+    // Skim is not applied on this surface today; the key stays absent.
+    let savings = cognition_kit::measure_distilled_savings(original_tokens, distilled_tokens, None);
     let discrimination = format!("{:?}", output.discrimination).to_lowercase();
-    let metadata = matches!(discrimination.as_str(), "low" | "medium")
-        .then(|| json!({"discrimination": discrimination}));
-    Ok(V2RecipeRecallData { results, metadata })
+    let mut capabilities = serde_json::Map::new();
+    if matches!(discrimination.as_str(), "low" | "medium") {
+        capabilities.insert("discrimination".to_owned(), json!(discrimination));
+    }
+    capabilities.insert(
+        "distillation".to_owned(),
+        serde_json::to_value(&savings).expect("DistilledSavings serialises to plain JSON"),
+    );
+    Ok(V2RecipeRecallData { results, metadata: Some(Value::Object(capabilities)) })
 }
 
 pub fn execute_vague_recall(
