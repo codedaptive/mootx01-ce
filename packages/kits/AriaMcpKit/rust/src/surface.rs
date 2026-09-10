@@ -153,8 +153,9 @@ impl SelectedSurface {
     }
 
     /// Decode the selected v2 request after name/argument parsing and before
-    /// legacy frozen, teachme, or session processing. V1 returns `None` so
-    /// its historical dispatch behavior remains byte-compatible.
+    /// frozen posture or session processing. Names outside the v2 catalog
+    /// fail here with `METHOD_NOT_FOUND`; every name the catalog admits
+    /// decodes to `Ok(Some(_))` — this never returns `Ok(None)`.
     pub(crate) fn decode(
         &self,
         name: &str,

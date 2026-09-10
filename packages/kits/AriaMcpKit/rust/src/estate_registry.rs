@@ -403,8 +403,8 @@ impl EstateRegistry {
         // below can create the file; it gates the create-time defaults.
         let first_run = !std::path::Path::new(path).exists();
         let frozen = crate::estate_posture::EstatePosture::from_process_environment().is_frozen();
-        // This startup policy belongs only to the selected v2 surface. Legacy
-        // v1 opens retain their existing frozen wiring behaviour.
+        // This startup policy belongs to the selected v2 surface — the only
+        // surface a running server opens through; there are no v1 opens.
         let preserve_v2_frozen_configuration = frozen;
         if frozen && first_run {
             return Err("frozen SQLite open requires an existing estate".to_string());

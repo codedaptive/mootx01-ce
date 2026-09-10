@@ -16,7 +16,9 @@
 //!
 //!   PROVENANCE: .interface — dataset tools are user-facing CRUD operations that
 //!   target a specific estate (they carry an optional estateID like all interface
-//!   tools). The schema wraps with with_estate_id/with_teachme in tool_list.rs.
+//!   tools). The schema comes from the v2 catalog (`crate::v2::catalog`);
+//!   `tool_list.rs` is a thin shim over it (`vault_enabled`, `memory_enabled`,
+//!   `accepted_arg_keys`, `build_tool_list`).
 //!
 //!   CSV SIZE CAP: CSV_SIZE_CAP_BYTES = 100 MiB. Mirrors Swift csvPathSizeCapBytes.
 //!   Rationale: generous for substantial real-world datasets while bounding peak
