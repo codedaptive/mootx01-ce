@@ -146,6 +146,17 @@ public struct AriaV2MemorySearchRequest: Sendable, Equatable {
     public let query: String?
     public let near: UUID?
     public let limit: Int
+    // Eight restored arguments (validated at decode; raw strings stored to preserve Equatable).
+    public let filter: String?
+    public let wing: String?
+    public let mediaType: String?
+    public let door: String?
+    public let scoringKey: String?
+    // ordering defaults to "byCaptureTimeDesc"; "byRelevanceDesc" is a compatibility
+    // spelling routed to the scored recall path at the ARIA boundary.
+    public let ordering: String
+    public let frontierK: Int64?
+    public let explain: Bool
     public let estateID: UUID?
 
     public init(arguments: JSONValue) throws {
@@ -169,14 +180,75 @@ public struct AriaV2MemorySearchRequest: Sendable, Equatable {
         } else {
             limit = Self.defaultLimit
         }
-        // The remaining source-faithful keys are intentionally not guessed at
-        // this foundation boundary.  They remain declared by the registry but
-        // require their own typed filter/scoring adapters before becoming live.
-        for key in ["filter", "wing", "media_type", "explain", "door", "scoring", "ordering", "frontier_k", "answer"] {
+        // 'answer' remains deferred; its unit owns the declaration.
+        for key in ["answer"] {
             guard !decoder.has(key) else {
                 throw AriaV2FileMemoryRequest.invalid(path: key, message: "Argument '\(key)' is not available in the incomplete v2 memory service.")
             }
         }
+        // filter: validate against known values; fail closed on unknown strings.
+        let rawFilter = try decoder.optionalString("filter")
+        if let f = rawFilter {
+            let valid = ["unconfirmed", "userConfirmed", "exportable", "contained", "pinned"]
+            guard valid.contains(f) else {
+                throw AriaV2FileMemoryRequest.invalid(
+                    path: "filter",
+                    message: "Unknown filter: \(f). Valid: \(valid.joined(separator: ", "))"
+                )
+            }
+        }
+        filter = rawFilter
+        // wing: no accept-list — any estate wing name is valid.
+        wing = try decoder.optionalString("wing")
+        // media_type: constrain to known capture types; unknown values fail closed.
+        let rawMediaType = try decoder.optionalString("media_type")
+        if let mt = rawMediaType {
+            guard ["voice", "image"].contains(mt) else {
+                throw AriaV2FileMemoryRequest.invalid(
+                    path: "media_type",
+                    message: "Unknown media_type: \(mt). Valid: voice, image"
+                )
+            }
+        }
+        mediaType = rawMediaType
+        // door: 'guess' reads A1 DoorManifest; known scoring rawValues bypass it.
+        // Reserved names ('hedge', 'thorough') and any unknown string fail closed.
+        let rawDoor = try decoder.optionalString("door")
+        if let d = rawDoor {
+            let valid = ["guess", "raw", "rrf", "matrixAware", "discriminative"]
+            guard valid.contains(d) else {
+                throw AriaV2FileMemoryRequest.invalid(
+                    path: "door",
+                    message: "Unknown door: \(d). Valid: guess, raw, rrf, matrixAware, discriminative"
+                )
+            }
+        }
+        door = rawDoor
+        // scoring: explicit override when door is absent; fail closed on unknown values.
+        let rawScoringKey = try decoder.optionalString("scoring")
+        if let s = rawScoringKey {
+            guard GLKRecallScoring(rawValue: s) != nil else {
+                throw AriaV2FileMemoryRequest.invalid(
+                    path: "scoring",
+                    message: "Unknown scoring: \(s). Valid: raw, rrf, matrixAware, discriminative"
+                )
+            }
+        }
+        scoringKey = rawScoringKey
+        // ordering: accept-list includes 'byRelevanceDesc' as a compatibility spelling.
+        let rawOrdering = try decoder.optionalString("ordering") ?? "byCaptureTimeDesc"
+        let validOrderings = ["byCaptureTimeDesc", "byCaptureTimeAsc", "byRoomAsc", "byRelevanceDesc"]
+        guard validOrderings.contains(rawOrdering) else {
+            throw AriaV2FileMemoryRequest.invalid(
+                path: "ordering",
+                message: "Unknown ordering: \(rawOrdering). Valid: \(validOrderings.joined(separator: ", "))"
+            )
+        }
+        ordering = rawOrdering
+        // frontier_k: passed through to GLKRecallRequest without clamping here;
+        // the GLK engine clamps to [frontierKFloor, frontierKCeiling] internally.
+        frontierK = try decoder.optionalInteger("frontier_k")
+        explain = try decoder.optionalBoolean("explain") ?? false
         estateID = try decoder.optionalUUID("estate_id")
     }
 }
@@ -316,12 +388,90 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         } else {
             return []
         }
+        // Build filter chain: sensitivity ceiling first (always present), then
+        // caller's filter/wing/media_type arguments in composition order.
+        // The sensitivity ceiling suppresses the BitmapEvaluator default narrower
+        // ceiling (.elevated), matching the precedence documented in ToolDispatch.
+        var filterChain: [Filter] = [.sensitivityAtMost(context.maximumSensitivity)]
+        if let filterStr = request.filter {
+            switch filterStr {
+            case "unconfirmed":   filterChain.append(.unconfirmed)
+            case "userConfirmed": filterChain.append(.userConfirmed)
+            case "exportable":    filterChain.append(.exportable)
+            case "contained":     filterChain.append(.contained)
+            // isPinned: container-fingerprint pruning path (Feature-flag adoption §1).
+            case "pinned":        filterChain.append(.hasFeatureFlag(.isPinned))
+            default: break // validated at decode; impossible at runtime
+            }
+        }
+        // wing: scope recall to a named wing of the estate.
+        if let wingName = request.wing {
+            filterChain.append(.inWing(wingName))
+        }
+        // media_type: constrain recall to drawers with a specific media capture type.
+        if let mediaType = request.mediaType {
+            switch mediaType {
+            case "voice": filterChain.append(.hasFeatureFlag(.hasVoice))
+            case "image": filterChain.append(.hasFeatureFlag(.hasImage))
+            default: break // validated at decode; impossible at runtime
+            }
+        }
+        // Door/scoring precedence: explicit door > explicit scoring > A1 DoorManifest > matrixAware.
+        // 'door=guess' reads the optimizer-provisioned per-corpus DoorManifest.
+        // Direct door scoring rawValues bypass the A1 config.
+        // Mirrors the precedence chain in ToolDispatch.runMemorySearch.
+        let scoring: GLKRecallScoring
+        if let doorStr = request.door {
+            switch doorStr {
+            case "guess":
+                // A1 per-corpus static config: read the DoorManifest provisioned by
+                // the quality optimizer. Absent or malformed key falls back to .matrixAware.
+                let doorManifest = try await kit.provisionedDoorConfig(for: handle)
+                scoring = doorManifest.scoring
+            default:
+                // doorStr was validated at decode as a GLKRecallScoring rawValue.
+                scoring = GLKRecallScoring(rawValue: doorStr) ?? .matrixAware
+            }
+        } else if let scoringStr = request.scoringKey {
+            // scoringStr validated at decode; force-unwrap would be safe but use ?? for safety.
+            scoring = GLKRecallScoring(rawValue: scoringStr) ?? .matrixAware
+        } else {
+            // Neither door nor scoring supplied: read the A1 per-corpus config.
+            // Falls back to .matrixAware when no config is provisioned.
+            let doorManifest = try await kit.provisionedDoorConfig(for: handle)
+            scoring = doorManifest.scoring
+        }
+        // Decode ordering. 'byRelevanceDesc' maps to .byCaptureTimeDesc as a tie-break
+        // within the scored layer; the final result order is driven by scores, not page order.
+        // Mirrors ToolDispatch.decodeOrdering.
+        let ordering: Ordering
+        switch request.ordering {
+        case "byCaptureTimeDesc": ordering = .byCaptureTimeDesc
+        case "byCaptureTimeAsc":  ordering = .byCaptureTimeAsc
+        case "byRoomAsc":         ordering = .byRoomAsc
+        // byRelevanceDesc: results are relevance-ordered by the scoring machinery;
+        // byCaptureTimeDesc serves as a stable tie-break within the scored layer.
+        case "byRelevanceDesc":   ordering = .byCaptureTimeDesc
+        default:                  ordering = .byCaptureTimeDesc // validated at decode; impossible
+        }
         let frame = RecallFrame(
-            filterChain: [.sensitivityAtMost(context.maximumSensitivity)], hydrationLevel: .full, limit: request.limit)
+            filterChain: filterChain,
+            hydrationLevel: .full,
+            limit: request.limit,
+            ordering: ordering
+        )
         let result = try await kit.recall(handle, GLKRecallRequest(
-            frame: frame, mode: .unionBest, scoring: .matrixAware, limit: request.limit,
-            fallback: .allowDegraded, queryText: query, origin: context.recallOrigin,
-            door: "memory_search", subSpanScoring: .off))
+            frame: frame,
+            mode: .unionBest,
+            scoring: scoring,
+            limit: request.limit,
+            fallback: .allowDegraded,
+            queryText: query,
+            origin: context.recallOrigin,
+            door: "memory_search",
+            frontierK: request.frontierK.map { Int($0) },
+            subSpanScoring: .off
+        ))
         var records: [(record: AriaV2MemoryRecord, score: Double)] = []
         for hit in result.hits {
             guard let drawer = hit.drawer else { continue }
