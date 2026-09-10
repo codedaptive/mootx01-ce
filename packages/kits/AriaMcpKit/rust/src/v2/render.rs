@@ -186,3 +186,133 @@ pub fn apply_coaching_block(mut result: Value, block: &str) -> Value {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Build a minimal success-shaped envelope for testing render functions.
+    fn make_success(text: &str) -> Value {
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": {"surface_version": "v2"},
+            "isError": false
+        })
+    }
+
+    // Build a minimal error-shaped envelope for the isError guard tests.
+    fn make_error(text: &str) -> Value {
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": {"surface_version": "v2"},
+            "isError": true
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // compact_text
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compact_text_clamps_to_512_scalars() {
+        // A body longer than 512 scalars must be clamped to exactly 512.
+        let long = "x".repeat(600);
+        let result = compact_text(&long);
+        assert_eq!(result.chars().count(), 512, "must clamp 600 scalars to 512");
+    }
+
+    #[test]
+    fn compact_text_short_string_unchanged() {
+        // A body shorter than the limit must pass through unchanged.
+        let short = "hello world";
+        let result = compact_text(short);
+        assert_eq!(result, short, "short string must pass through unchanged");
+    }
+
+    #[test]
+    fn compact_text_exactly_512_scalars_unchanged() {
+        // A body of exactly 512 scalars must not be shortened.
+        let exact = "a".repeat(512);
+        let result = compact_text(&exact);
+        assert_eq!(
+            result.chars().count(),
+            512,
+            "512-scalar string must survive intact"
+        );
+        assert_eq!(result, exact, "512-scalar string content must be unchanged");
+    }
+
+    // ------------------------------------------------------------------
+    // apply_hint
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_hint_sets_structured_content_and_appends_text() {
+        // Both mutation sites fire: structuredContent["hint"] is set and
+        // content[0].text gains the "\nhint: <text>" suffix.
+        let result = apply_hint(make_success("base text"), "do this instead");
+        assert_eq!(
+            result["structuredContent"]["hint"].as_str(),
+            Some("do this instead"),
+            "structuredContent[hint] must be set to the hint text"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("\nhint: do this instead"),
+            "content[0].text must contain the hint line; got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn apply_hint_ignores_error_result() {
+        // isError:true — the function must return the envelope unchanged.
+        let err = make_error("error text");
+        let after = apply_hint(err.clone(), "some hint");
+        assert_eq!(after, err, "apply_hint must leave an error result unchanged");
+    }
+
+    // ------------------------------------------------------------------
+    // apply_coaching_block
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn apply_coaching_block_appends_block_to_text() {
+        // The coaching block is appended to content[0].text with a leading newline.
+        let result = apply_coaching_block(
+            make_success("operation result"),
+            "coaching block content",
+        );
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.ends_with("\ncoaching block content"),
+            "coaching block must be appended with a leading newline; got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn apply_coaching_block_ignores_error_result() {
+        // isError:true — the function must return the envelope unchanged.
+        let err = make_error("error text");
+        let after = apply_coaching_block(err.clone(), "some block");
+        assert_eq!(
+            after, err,
+            "apply_coaching_block must leave an error result unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_coaching_block_appends_after_hint() {
+        // When both fire in order, the hint line precedes the coaching block.
+        let base = make_success("body");
+        let with_hint = apply_hint(base, "hint text");
+        let with_block = apply_coaching_block(with_hint, "--- block ---");
+        let text = with_block["content"][0]["text"].as_str().unwrap_or("");
+        let hint_pos = text.find("\nhint:").expect("hint must be present");
+        let block_pos = text.find("--- block ---").expect("block must be present");
+        assert!(
+            hint_pos < block_pos,
+            "hint must precede coaching block in text; text: {text:?}"
+        );
+    }
+}
