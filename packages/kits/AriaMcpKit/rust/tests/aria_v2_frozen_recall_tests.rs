@@ -15,7 +15,7 @@ fn frozen_selected_memory_search_preserves_traces_and_live_search_records_usage(
     for posture in [EstatePosture::Frozen, EstatePosture::Live] {
         let registry = EstateRegistry::new_inmemory();
         let store = registry.default.store.clone();
-        let dispatcher = Dispatcher::new(registry, "test", "test", "test", "", None)
+        let dispatcher = Dispatcher::new(registry, "test", "test", "test", None)
             .with_posture(EstatePosture::Live);
         // impatient:true ensures corpus ingestion is synchronous (WriteMode::Impatient)
         // so the BM25 index is ready before the search runs in the same call sequence.
