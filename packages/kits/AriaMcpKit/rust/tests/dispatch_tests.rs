@@ -11011,35 +11011,46 @@ fn memory_search_door_raw_succeeds() {
 //   scoring wins (matrixAware) → no degradation line
 // This discriminating assertion proves which path ran — not just that the
 // call succeeded.
+//
+// The search is driven through the v2 Dispatcher (the shipped surface). The
+// v1 dispatch_tool path reaches interface_tools.rs, not the v2 core_memory
+// renderer — so a test on dispatch_tool proves nothing about what ships.
 #[test]
 fn memory_search_door_overrides_scoring_when_both_present() {
+    use aria_mcp::dispatcher::Dispatcher;
+    use aria_mcp::jsonrpc::JSONRPCRequest;
+    use serde_json::json;
+
     let registry = EstateRegistry::new_inmemory();
     file_one_memory(&registry, "door-overrides-scoring-test content", "lab/notes");
 
-    // door=rrf wins; scoring=matrixAware is superseded. The rrf path on
-    // unionBest records "unionBest.rrf" in degraded_stages, proving the
-    // door arg was applied (not the scoring arg).
-    let result = dispatch_tool(
-        "moot_memory_search",
-        &args![
-            "query" => "door-overrides-scoring-test",
-            "door" => "rrf",
-            "scoring" => "matrixAware"
-        ],
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("door=rrf + scoring=matrixAware must not throw");
+    // Move registry into the v2 Dispatcher after seeding.
+    let dispatcher = Dispatcher::new(registry, "test", "test", "test", None);
+    let request = JSONRPCRequest::decode(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "name": "moot_memory_search",
+            "arguments": {
+                "query": "door-overrides-scoring-test",
+                "door": "rrf",
+                "scoring": "matrixAware"
+            }
+        }
+    })).expect("request decode must succeed");
+    let response = serde_json::to_value(dispatcher.handle(&request))
+        .expect("response serialize must succeed");
+
+    // Response shape from Dispatcher: {"jsonrpc":"2.0","id":1,"result":{...}}
     assert!(
-        is_success(&result),
-        "door takes precedence over scoring; must succeed; got: {result:?}"
+        response["result"]["isError"] == json!(false),
+        "door takes precedence over scoring; must succeed; got: {response:?}"
     );
     // Discriminating assertion: the `retrieval: degraded` control line proves
     // door=rrf won over scoring=matrixAware (unionBest.rrf is the recorded
     // stage). If scoring won instead, the matrixAware full-pipeline path
     // would record no scoring fallback and render no degradation line.
-    // Same assertion as the Swift DoorDispatchTests twin.
-    let text = content_text(&result);
+    // Mirrors the Swift DoorDispatchTests.doorOverridesScoringWhenBothPresent twin.
+    let text = response["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(
         text.contains("retrieval: degraded"),
         "door=rrf must win over scoring=matrixAware — response must show degraded \

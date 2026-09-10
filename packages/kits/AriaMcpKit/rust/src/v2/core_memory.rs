@@ -99,6 +99,12 @@ pub struct V2SearchAnswerBlock {
 pub struct V2MemorySearchResult {
     pub rows: Vec<V2CompactMemory>,
     pub answer_block: Option<V2SearchAnswerBlock>,
+    /// True when one or more ranking stages were unavailable during recall,
+    /// mirroring `GLKRecallResult.degraded_stages.is_empty() == false`. Drives
+    /// the "retrieval: degraded" compact text control line — the same control
+    /// line the v1 S1 surface emits via ResultComposer.controlLines. Estate
+    /// adapters set this from `!recall_result.degraded_stages.is_empty()`.
+    pub degraded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -593,9 +599,10 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
             };
 
             // explain: append discrimination line when signal level warrants it.
-            // Mirrors Swift AriaV2MemoryOperations.search() explain branch: compute
-            // RecallDiscrimination over visible hit scores, add result_line for
-            // low and medium only (high/single/not_found are silent in v2 compact).
+            // v1 control line order: discrimination precedes degradation
+            // (ResultComposer.controlLines §1 before §3). Only low and medium
+            // are surfaced in v2 compact text (high/single/not_found are silent).
+            // Mirrors Swift AriaV2MemoryOperations.search() explain branch.
             if request.explain.unwrap_or(false) {
                 let scores: Vec<f64> = result.rows.iter().filter_map(|r| r.score).collect();
                 let disc = crate::recall_discrimination::classify(&scores);
@@ -607,6 +614,16 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
                     }
                     _ => {}
                 }
+            }
+
+            // retrieval: degraded — emit AFTER discrimination, matching the v1 S1
+            // surface control line order (ResultComposer.controlLines §3 follows §1).
+            // rrf on unionBest records "unionBest.rrf" in degraded_stages; matrixAware
+            // runs cleanly with no degradation — the difference discriminates door=rrf
+            // from door=matrixAware in the door discriminating assertion.
+            if result.degraded {
+                compact.push('\n');
+                compact.push_str("retrieval: degraded — one or more ranking stages unavailable");
             }
 
             // Build answer data for the structured response field.

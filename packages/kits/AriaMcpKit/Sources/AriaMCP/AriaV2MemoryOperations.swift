@@ -720,17 +720,11 @@ public struct AriaV2MemoryOperations: Sendable {
         } else {
             compactText = foundHeader
         }
-        // Degradation: append control line when one or more ranking stages were
-        // unavailable, matching the v1 S1 surface (ResultComposer.controlLines §3).
-        // rrf on unionBest mode records "unionBest.rrf" in degradedStages; matrixAware
-        // runs cleanly with no degradation — the difference discriminates door=rrf
-        // from door=matrixAware in the DoorDispatchTests discriminating assertion.
-        if result.degraded {
-            compactText += "\nretrieval: degraded — one or more ranking stages unavailable"
-        }
-        // explain: append discrimination line when signal warrants it. Only low and
-        // medium are surfaced in v2 compact text (high/single/not_found are silent).
-        // Mirrors the Rust v2 execute_memory_search explain branch.
+        // explain: append discrimination line when signal warrants it. v1 control
+        // line order: discrimination precedes degradation (ResultComposer.controlLines
+        // §1 before §3). Only low and medium are surfaced in v2 compact text
+        // (high/single/not_found are silent). Mirrors the Rust v2 execute_memory_search
+        // explain branch.
         if request.explain {
             let scores = visible.map { $0.score }
             let disc = RecallDiscrimination.classify(scores)
@@ -740,6 +734,14 @@ public struct AriaV2MemoryOperations: Sendable {
             default:
                 break
             }
+        }
+        // Degradation: append control line AFTER discrimination, matching the v1 S1
+        // surface (ResultComposer.controlLines §3 follows §1). rrf on unionBest mode
+        // records "unionBest.rrf" in degradedStages; matrixAware runs cleanly with no
+        // degradation — the difference discriminates door=rrf from door=matrixAware in
+        // the DoorDispatchTests discriminating assertion.
+        if result.degraded {
+            compactText += "\nretrieval: degraded — one or more ranking stages unavailable"
         }
 
         return AriaV2Envelope.success(
