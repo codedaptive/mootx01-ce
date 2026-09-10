@@ -678,3 +678,148 @@ fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) { match depth { V2
 fn serialize_uuid<S>(value: &Uuid, serializer: S) -> Result<S::Ok, S::Error> where S: serde::Serializer { serializer.serialize_str(&canonical_uuid(*value)) }
 fn jsonrpc_internal(error: serde_json::Error) -> JSONRPCError { JSONRPCError::new(crate::jsonrpc::JSONRPCErrorCode::INTERNAL_ERROR, error.to_string()) }
 fn meta_for(base: &V2ResultMeta, effect: super::operation::V2OperationEffect) -> V2ResultMeta { V2ResultMeta { build_id: base.build_id.clone(), capability_digest: base.capability_digest.clone(), effect, completeness: base.completeness.clone() } }
+
+// ---------------------------------------------------------------------------
+// Unit tests — execute_memory_search answer block injection
+// ---------------------------------------------------------------------------
+//
+// These tests call execute_memory_search directly with a fake service that
+// returns a V2MemorySearchResult carrying an answer_block. They prove the
+// four compact text header lines (answer, confidence, [citations,] signals)
+// and the data.answer object in the JSON response are wired correctly.
+// Mirrors the Swift AnswerArgDispatchTests fake-backed path.
+
+#[cfg(test)]
+mod answer_block_seam_tests {
+    use super::*;
+    use crate::{
+        sensitivity_grant_ledger::SensitivityGrantLedger,
+        surfaced_recall_ledger::SurfacedRecallLedger,
+    };
+    use super::super::{
+        operation::V2OperationEffect,
+        render::V2ResultMeta,
+    };
+
+    // Fake clock: always returns a fixed epoch millisecond.
+    struct FixedClock;
+    impl V2MemoryClock for FixedClock {
+        fn now_millis(&self) -> i64 { 1_700_000_000_000 }
+    }
+
+    // Fake authorization: always permits.
+    struct PermitAll;
+    impl V2MemoryAuthorization for PermitAll {
+        fn authorize(&self, _op: V2CoreMemoryOperation, _ctx: &V2MemoryOperationContext)
+            -> Result<(), V2MemoryFailure> { Ok(()) }
+    }
+
+    // Fake service: returns a hard-coded V2MemorySearchResult carrying an
+    // answer_block so the execute_memory_search renderer can be exercised
+    // end-to-end without a real estate. File and get paths return not_found.
+    struct FakeAnswerService;
+    impl V2CoreMemoryService for FakeAnswerService {
+        fn file_memory(&self, _ctx: &V2MemoryOperationContext, _req: &V2FileMemoryRequest)
+            -> Result<V2FiledMemory, V2MemoryFailure> { Err(V2MemoryFailure::not_found()) }
+
+        fn get_memories(&self, _ctx: &V2MemoryOperationContext, _req: &V2MemoryGetRequest)
+            -> Result<Vec<V2Memory>, V2MemoryFailure> { Err(V2MemoryFailure::not_found()) }
+
+        fn search_memories(&self, _ctx: &V2MemoryOperationContext, _req: &V2MemorySearchRequest)
+            -> Result<V2MemorySearchResult, V2MemoryFailure>
+        {
+            Ok(V2MemorySearchResult {
+                rows: vec![],
+                answer_block: Some(V2SearchAnswerBlock {
+                    text: "fake synthesized answer".to_owned(),
+                    confidence: "intermediate".to_owned(),
+                    citation_ids: vec!["00000000-0000-0000-0000-000000000001".to_owned()],
+                    signals_m1: 0.9,
+                    signals_m2: 0.8,
+                    signals_m3: 0.7,
+                    signals_m4: true,
+                }),
+                degraded: false,
+            })
+        }
+    }
+
+    fn deps<'a>(
+        service: &'a FakeAnswerService,
+        auth: &'a PermitAll,
+        clock: &'a FixedClock,
+        sensitivity: &'a SensitivityGrantLedger,
+        ledger: &'a SurfacedRecallLedger,
+    ) -> V2CoreMemoryDependencies<'a> {
+        V2CoreMemoryDependencies {
+            service,
+            authorization: auth,
+            clock,
+            sensitivity_ledger: sensitivity,
+            surfaced_recall_ledger: ledger,
+            caller_identity: "unit-test",
+            meta: V2ResultMeta {
+                build_id: "test-build".to_owned(),
+                capability_digest: "test-digest".to_owned(),
+                effect: V2OperationEffect::Read,
+                completeness: "complete".to_owned(),
+            },
+        }
+    }
+
+    /// Injecting a V2MemorySearchResult with a non-None answer_block must
+    /// produce four compact text header lines: answer, confidence, citations,
+    /// signals — followed by the found-N footer.  Mirrors the Swift
+    /// AnswerArgDispatchTests.alwaysAnswerSerializesAnswerBlock path.
+    #[test]
+    fn answer_block_produces_four_header_lines_and_data_answer_object() {
+        let service = FakeAnswerService;
+        let auth = PermitAll;
+        let clock = FixedClock;
+        let sensitivity = SensitivityGrantLedger::new();
+        let ledger = SurfacedRecallLedger::new();
+        let d = deps(&service, &auth, &clock, &sensitivity, &ledger);
+
+        let request = V2MemorySearchRequest {
+            estate_id: None,
+            target: V2SearchTarget::Query("answer-block-test".to_owned()),
+            limit: 20,
+            filter: None,
+            wing: None,
+            media_type: None,
+            explain: None,
+            door: None,
+            scoring: None,
+            ordering: None,
+            frontier_k: None,
+            // answer:always so the renderer exercises the answer block path.
+            answer: Some(V2AnswerMode::Always),
+        };
+
+        let result = execute_memory_search(request, &d).expect("execute must succeed");
+
+        // Compact text: answer on line 1, confidence on line 2,
+        // citations on line 3, signals on line 4, found-N on line 5.
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.starts_with("answer: fake synthesized answer\n"),
+            "compact text must start with answer line; got: {text:?}");
+        assert!(text.contains("\nconfidence: intermediate\n"),
+            "compact text must contain confidence line; got: {text:?}");
+        assert!(text.contains("\ncitations: "),
+            "compact text must contain citations line; got: {text:?}");
+        assert!(text.contains("\nsignals: margin=0.9 lane_agreement=0.8 dense_spread=0.7 containment=true\n"),
+            "compact text must contain signals line with injected values; got: {text:?}");
+        assert!(text.contains("found 0 candidate memories"),
+            "compact text must end with found-N footer; got: {text:?}");
+
+        // Structured data.answer lives in structuredContent.data.answer (v2 envelope).
+        let answer_obj = &result["structuredContent"]["data"]["answer"];
+        assert!(!answer_obj.is_null(), "data.answer must be present; got: {result:?}");
+        assert_eq!(answer_obj["text"], serde_json::json!("fake synthesized answer"),
+            "data.answer.text must match injected answer; got: {answer_obj:?}");
+        assert_eq!(answer_obj["confidence"], serde_json::json!("intermediate"),
+            "data.answer.confidence must match injected level; got: {answer_obj:?}");
+        assert_eq!(result["isError"], serde_json::json!(false),
+            "execute must produce a non-error result; got: {result:?}");
+    }
+}
