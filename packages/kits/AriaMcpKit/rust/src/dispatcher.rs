@@ -211,12 +211,22 @@ impl Dispatcher {
             crate::tool_list::vault_enabled(),
             crate::tool_list::memory_enabled(),
         );
+        // Resolve once so tools/list and the intercept gate use the same value.
+        // Calling memory_enabled() twice (once for tools, once for the field)
+        // is harmless in new() because the env is stable, but it opens a window
+        // where a two-call sequence could theoretically differ. More importantly,
+        // it means with_memory_tool_enabled() overrides the field while the
+        // tools list was built from the env call — leaving them inconsistent.
+        // Resolving here and using mem_enabled for both closes that gap at the
+        // source. with_memory_tool_enabled() then keeps tools in sync when it
+        // overrides the field after construction.
+        let mem_enabled = crate::tool_list::memory_enabled();
         // Append the memory tool schema to tools/list when the adapter is
         // enabled. `memory` stays out of the v2 typed registry (and thus out
         // of the v2 capability digest), but must appear in tools/list when
         // MOOTX01_MEMORY_TOOL=1, matching Swift's ToolProjection.tools().
         let mut tools = surface.catalog().clone();
-        if crate::tool_list::memory_enabled() {
+        if mem_enabled {
             if let Some(arr) = tools.as_array_mut() {
                 arr.push(memory_tool_schema());
             }
@@ -242,9 +252,9 @@ impl Dispatcher {
             // read from the default estate's manifest (apply_preferences).
             mode_session_state: ModeSessionState::new(),
             posture: EstatePosture::from_process_environment(),
-            // Resolved once here so dispatch_memory never re-reads the process
-            // environment. Mirrors how posture is resolved once in new().
-            memory_tool_enabled: crate::tool_list::memory_enabled(),
+            // Set from the same resolved value used to build tools/list above,
+            // so the catalog and the intercept gate start in agreement.
+            memory_tool_enabled: mem_enabled,
         }
     }
 
@@ -258,11 +268,24 @@ impl Dispatcher {
         self
     }
 
-    /// Builder-style override of the memory-tool gate. Tests use this so no
-    /// env-var mutation is needed — `std::env::set_var` is not thread-safe
-    /// under the parallel Rust test runner. Mirrors `with_posture`.
+    /// Builder-style override of the memory-tool gate. Updates both the
+    /// intercept field and the tools/list catalog so they always agree.
+    /// Tests use this so no env-var mutation is needed — `std::env::set_var`
+    /// is not thread-safe under the parallel Rust test runner. Mirrors
+    /// `with_posture`.
     pub fn with_memory_tool_enabled(mut self, enabled: bool) -> Self {
         self.memory_tool_enabled = enabled;
+        // Keep tools/list in sync: the catalog and the intercept gate must
+        // always agree. Add the schema when enabling (if absent); remove it
+        // when disabling (if present).
+        if let Some(arr) = self.tools.as_array_mut() {
+            let present = arr.iter().any(|v| v["name"] == "memory");
+            if enabled && !present {
+                arr.push(memory_tool_schema());
+            } else if !enabled && present {
+                arr.retain(|v| v["name"] != "memory");
+            }
+        }
         self
     }
 
@@ -410,12 +433,31 @@ impl Dispatcher {
         // v2 decoder — because `memory` stays out of the v2 registry. The v2
         // envelope would break Anthropic's reply-text contract and move the
         // capability digest.
-        // Frozen posture is evaluated per command using frozen_read_commands:
-        // `view` proceeds, every other value (and missing or unknown command)
-        // is refused before the adapter runs and before session state records
-        // the call. The refusal shape is plain isError:true — not the v2
-        // render::refusal envelope, which would wrap the wrong schema.
+        // Guard order matches Swift (ToolDispatch.swift): disabled-flag first,
+        // then frozen per-command, then record, then adapter. The disabled flag
+        // runs first because when the adapter is switched off the tool does not
+        // exist for this serve at all — its frozen classification is not
+        // reachable and must not be reported. Answering with a posture
+        // classification for a tool that is switched off also states more about
+        // the serve than a disabled tool should. The refusal shape is plain
+        // isError:true — not the v2 render::refusal envelope.
         if name == "memory" {
+            // Disabled-flag guard runs first. When the adapter is switched off
+            // the tool does not exist for this serve; returning a frozen
+            // classification here would be wrong. dispatch_memory handles the
+            // flag and returns the disabled text when memory_tool_enabled is false.
+            if !self.memory_tool_enabled {
+                return crate::memory_adapter::dispatch_memory(
+                    &args_map,
+                    &self.registry,
+                    self.memory_tool_enabled,
+                    &self.sensitivity_ledger,
+                );
+            }
+            // Frozen posture is evaluated per command using frozen_read_commands:
+            // `view` proceeds, every other value (and missing or unknown command)
+            // is refused before the adapter runs and before session state records
+            // the call.
             if self.posture.is_frozen() {
                 let command = args_map.get("command").and_then(|v| v.as_str());
                 let read_cmds = crate::tool_mutation_inventory::frozen_read_commands("memory")
@@ -428,21 +470,9 @@ impl Dispatcher {
                     }));
                 }
             }
-            // Disabled-flag refusal returns before session state is recorded,
-            // mirroring Swift's placement of the memoryToolEnabled guard ahead
-            // of recordCall. An admitted call is counted below so the session
-            // counter reflects every dispatched memory command.
-            if !self.memory_tool_enabled {
-                return crate::memory_adapter::dispatch_memory(
-                    &args_map,
-                    &self.registry,
-                    self.memory_tool_enabled,
-                    &self.sensitivity_ledger,
-                );
-            }
             // Record the admitted call before running the adapter so the session
-            // counter reflects every dispatched memory command. Frozen-refused and
-            // flag-off calls return above and are not counted.
+            // counter reflects every dispatched memory command. Disabled-flag and
+            // frozen-refused calls return above and are not counted.
             self.mode_session_state.record_call("memory", None);
             return crate::memory_adapter::dispatch_memory(
                 &args_map,
@@ -539,8 +569,14 @@ mod frozen_command_tests {
     use super::*;
 
     fn frozen_dispatcher() -> Dispatcher {
+        // Enable the memory adapter so frozen-posture tests reach the
+        // per-command gate. Without memory enabled the disabled-flag guard
+        // fires first (correct behaviour), which would make frozen-posture
+        // tests test the wrong path. Tests that need memory disabled call
+        // with_memory_tool_enabled(false) themselves.
         Dispatcher::new(EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", None)
             .with_posture(EstatePosture::Frozen)
+            .with_memory_tool_enabled(true)
     }
 
     fn call(dispatcher: &Dispatcher, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
@@ -582,6 +618,36 @@ mod frozen_command_tests {
         assert_ne!(view["result"]["isError"], serde_json::json!(true), "memory view must be admitted under frozen; got {view}");
         assert_eq!(control.mode_session_state.snapshot().total_calls, 1,
             "an admitted memory command must be recorded in session state");
+    }
+
+    #[test]
+    fn frozen_disabled_memory_returns_disabled_text_not_frozen_refusal() {
+        // Pins the guard order: disabled-flag runs before frozen per-command.
+        // When the adapter is switched off, the tool does not exist for this
+        // serve at all; returning a frozen classification would be wrong and
+        // would reveal serve posture for a tool the caller should not see.
+        let dispatcher = Dispatcher::new(
+            EstateRegistry::new_inmemory(), "ARIA_MCP_Rust", "test", "test-serial", None,
+        )
+        .with_posture(EstatePosture::Frozen)
+        .with_memory_tool_enabled(false);
+        let response = call(
+            &dispatcher,
+            "memory",
+            serde_json::json!({"command": "create", "path": "/memories/x.txt", "file_text": "x"}),
+        );
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        assert_eq!(
+            text,
+            "memory tool is disabled; run `mootx01 enable memory-tool` to activate it",
+            "disabled memory must return disabled text; got {response}"
+        );
+        assert!(
+            !text.contains("frozen"),
+            "disabled memory must NOT return frozen refusal; got {text}"
+        );
     }
 
     #[test]
