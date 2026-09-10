@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{
-    codec::{canonical_uuid, optional_integer, optional_string, optional_uuid, required_string, strict_object, V2DecodeResult, V2InvalidArgument},
+    codec::{canonical_uuid, optional_bool, optional_integer, optional_string, optional_uuid, required_string, strict_object, V2DecodeResult, V2InvalidArgument},
     render::{refusal, success, V2OperationalRefusal, V2ResultMeta},
 };
 
@@ -235,11 +235,11 @@ pub struct V2MemorySearchRequest {
     pub filter: Option<String>,
     pub wing: Option<String>,
     pub media_type: Option<String>,
-    pub explain: Option<String>,
+    pub explain: Option<bool>,
     pub door: Option<String>,
     pub scoring: Option<String>,
     pub ordering: Option<String>,
-    pub frontier_k: Option<String>,
+    pub frontier_k: Option<i64>,
     pub answer: Option<String>,
 }
 
@@ -263,11 +263,11 @@ impl V2MemorySearchRequest {
             filter: optional_string(object, "filter")?.map(str::to_owned),
             wing: optional_string(object, "wing")?.map(str::to_owned),
             media_type: optional_string(object, "media_type")?.map(str::to_owned),
-            explain: optional_string(object, "explain")?.map(str::to_owned),
+            explain: optional_bool(object, "explain")?,
             door: optional_string(object, "door")?.map(str::to_owned),
             scoring: optional_string(object, "scoring")?.map(str::to_owned),
             ordering: optional_string(object, "ordering")?.map(str::to_owned),
-            frontier_k: optional_string(object, "frontier_k")?.map(str::to_owned),
+            frontier_k: optional_integer(object, "frontier_k")?,
             answer: optional_string(object, "answer")?.map(str::to_owned),
         })
     }
