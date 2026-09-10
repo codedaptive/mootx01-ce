@@ -303,7 +303,12 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             }
         });
 
-        Ok(V2MemorySearchResult { rows, answer_block })
+        // Propagate degradation signal so execute_memory_search can emit the
+        // "retrieval: degraded" control line, matching Swift AriaV2GeniusLocusMemoryBackend
+        // which sets `degraded: !result.degradedStages.isEmpty` in the returned
+        // AriaV2SearchResult. The rrf door on unionBest always records at least one
+        // stage; matrixAware runs clean.
+        Ok(V2MemorySearchResult { rows, answer_block, degraded: !result.degraded_stages.is_empty() })
     }
 
     fn get_memories(&self, context: &V2MemoryOperationContext, request: &V2MemoryGetRequest) -> Result<Vec<V2Memory>, V2MemoryFailure> {
