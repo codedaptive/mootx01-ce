@@ -604,12 +604,31 @@ public struct ToolDispatcher: Sendable {
 // MARK: - V2 dispatch
 
 private extension ToolDispatcher {
+    /// Entry point for every v2 tool call. Handles frozen posture, advances the
+    /// §12.5 coaching session counter, dispatches to `executeV2Core`, and applies
+    /// any coaching hint and periodic coaching block before returning.
+    ///
+    /// FACT C choke point: `recordCall` + coaching injection are here, once,
+    /// covering every v2 operation. Do not inject per-arm inside `executeV2Core`.
     private func dispatchV2(_ request: AriaSurfaceRequest) async -> JSONValue {
+        // Load estate-provisioned modes preferences on the first call of the
+        // session. Subsequent calls are no-ops (guarded by `configuredFromEstate`
+        // inside `applyPreferences`). Falls back silently when the estate has no
+        // stored manifest — spec defaults (stickyEnabled=true, coachingCalls=25)
+        // remain in effect. This is the wiring gate for P2 and P3.
+        if let manifest = try? await kit.provisionedModesConfig(for: handle) {
+            await modeSessionState.applyPreferences(
+                stickyEnabled: manifest.stickyEnabled,
+                coachingCalls: manifest.coachingCalls
+            )
+        }
+
         switch request.operation.effect {
         case .inspection:
             break
         case .mutation:
             if posture == .frozen {
+                // Frozen refusal: never recorded in session state.
                 return AriaV2Envelope.refusal(
                     tool: request.toolName,
                     error: .init(
@@ -621,6 +640,36 @@ private extension ToolDispatcher {
             }
         }
 
+        // §12.5 coaching: advance the session counter BEFORE execute so
+        // shouldCoach() reflects this call. recordCall must precede shouldCoach
+        // (ModeSessionState ordering contract). mode: nil because v2 catalog
+        // carries no `mode` property (OBSTACLE 4).
+        // ModeSessionState is an actor — await required.
+        await modeSessionState.recordCall(toolName: request.toolName, mode: nil)
+
+        // Execute the v2 operation — all business logic lives in executeV2Core.
+        let coreResult = await executeV2Core(request)
+
+        // §12.5 hint injection: first matching trigger attaches to the result.
+        // AriaV2Coach.coachingHint returns nil for error results (RULING 3).
+        var result = coreResult
+        if let hint = AriaV2Coach.coachingHint(request: request, result: result) {
+            result = AriaV2Envelope.applyHint(hint, to: result)
+        }
+        // Periodic coaching block: render and append when the cadence fires.
+        // shouldCoach is called AFTER recordCall (ordering contract).
+        if await modeSessionState.shouldCoach() {
+            let snap = await modeSessionState.snapshot
+            result = AriaV2Envelope.applyCoachingBlock(
+                PeriodicCoach.renderBlock(for: snap), to: result)
+        }
+        return result
+    }
+
+    /// All v2 business logic: service setup, the tool dispatch switch, and
+    /// error projection. Extracted from `dispatchV2` so coaching can wrap it
+    /// at the choke point without injecting per tool arm.
+    private func executeV2Core(_ request: AriaSurfaceRequest) async -> JSONValue {
         let now = benchClock.now()
         let effectiveRegistry = AriaV2SelectedCatalog.registry(environment: environment)
         let capabilityDigest = try! AriaV2CapabilityDigest.digest(registry: effectiveRegistry)
