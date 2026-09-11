@@ -1581,10 +1581,17 @@ fn execute_synthesize(
             &crate::v2::render::V2OperationalRefusal {
                 code: match error {
                     crate::v2::orchestration::V2OrchestrationFailure::EstateUnavailable => "estate_unavailable",
+                    crate::v2::orchestration::V2OrchestrationFailure::InvalidCue => "invalid_argument",
                     _ => "synthesis_unavailable",
                 }.to_owned(),
-                message: "The selected estate could not produce a grounded synthesis.".to_owned(),
-                retryable: true,
+                message: match error {
+                    crate::v2::orchestration::V2OrchestrationFailure::InvalidCue =>
+                        "query contains no usable terms (all tokens are stopwords or too short); provide distinctive words to ground on".to_owned(),
+                    _ => "The selected estate could not produce a grounded synthesis.".to_owned(),
+                },
+                // A bad cue is the caller's to fix; the same call will not
+                // start working.
+                retryable: !matches!(error, crate::v2::orchestration::V2OrchestrationFailure::InvalidCue),
                 recovery: None,
             },
             meta,
