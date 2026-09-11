@@ -803,7 +803,7 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             let farEndpointID = farDrawerID.flatMap(UUID.init(uuidString:))
             return AriaV2TunnelRow(
                 tunnelID: tunnelID,
-                kind: String(describing: tunnel.kind),
+                kind: tunnel.kind.wireString,
                 lifecycle: String(describing: tunnel.lifecycle),
                 farEndpointID: farEndpointID)
         }
