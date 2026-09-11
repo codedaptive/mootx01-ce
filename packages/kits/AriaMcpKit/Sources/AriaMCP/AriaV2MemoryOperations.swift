@@ -334,8 +334,13 @@ public struct AriaV2MemoryRecord: Sendable, Equatable {
     public let provenance: String?
     public let context: String?
     public let isAuthorized: Bool
+    /// Active linked tunnels for depth:full. Empty for depth:subject and
+    /// depth:distilled (mirrors v1 which only queried tunnels on the full-record
+    /// path). Sensitivity-filtered: tunnel sensitivity <= request ceiling, and
+    /// far-endpoint drawer (when present) also <= ceiling.
+    public let tunnels: [AriaV2TunnelRow]
 
-    public init(memoryID: UUID, subject: String? = nil, content: String = "", wing: String = "", room: String = "", filedAt: Date, eventTime: Date, state: String = "active", trust: String = "verbatim", sensitivity: String = "normal", exportability: String = "private", confirmation: String = "unconfirmed", lineageID: UUID, provenance: String? = nil, context: String? = nil, isAuthorized: Bool = true) {
+    public init(memoryID: UUID, subject: String? = nil, content: String = "", wing: String = "", room: String = "", filedAt: Date, eventTime: Date, state: String = "active", trust: String = "verbatim", sensitivity: String = "normal", exportability: String = "private", confirmation: String = "unconfirmed", lineageID: UUID, provenance: String? = nil, context: String? = nil, isAuthorized: Bool = true, tunnels: [AriaV2TunnelRow] = []) {
         self.memoryID = memoryID
         self.subject = subject
         self.content = content
@@ -352,6 +357,31 @@ public struct AriaV2MemoryRecord: Sendable, Equatable {
         self.provenance = provenance
         self.context = context
         self.isAuthorized = isAuthorized
+        self.tunnels = tunnels
+    }
+}
+
+/// A single tunnel edge attached to a depth:full memory record.
+///
+/// Carries the minimum fields for a caller to understand who a memory is
+/// connected to and follow the connection: the tunnel's own id, relationship
+/// kind and current lifecycle, and the far-end drawer id when the far end is
+/// a specific drawer rather than a room-level endpoint.
+///
+/// Sensitivity disclosure follows the connection-tools rule: the tunnel itself
+/// must be at or below the request's sensitivity ceiling, and the far-endpoint
+/// drawer (when present) must also be at or below that ceiling.
+public struct AriaV2TunnelRow: Sendable, Equatable {
+    public let tunnelID: UUID
+    public let kind: String
+    public let lifecycle: String
+    public let farEndpointID: UUID?
+
+    public init(tunnelID: UUID, kind: String, lifecycle: String, farEndpointID: UUID?) {
+        self.tunnelID = tunnelID
+        self.kind = kind
+        self.lifecycle = lifecycle
+        self.farEndpointID = farEndpointID
     }
 }
 
@@ -686,7 +716,16 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
                     break
                 }
             }
-            records.append(try await record(for: drawer, authorized: authorized))
+            // Tunnel rows are only included for depth:full. depth:subject and
+            // depth:distilled carry no tunnels, matching v1 which only queried
+            // tunnels on the full-record path (ToolDispatch.swift:2568-2579).
+            let tunnels: [AriaV2TunnelRow]
+            if request.depth == .full {
+                tunnels = try await loadTunnels(for: drawer, estate: estate, ceiling: context.maximumSensitivity)
+            } else {
+                tunnels = []
+            }
+            records.append(try await record(for: drawer, authorized: authorized, tunnels: tunnels))
         }
         return records
     }
@@ -697,7 +736,7 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         }
     }
 
-    private func record(for drawer: Drawer, authorized: Bool) async throws -> AriaV2MemoryRecord {
+    private func record(for drawer: Drawer, authorized: Bool, tunnels: [AriaV2TunnelRow] = []) async throws -> AriaV2MemoryRecord {
         let names = try await kit.resolveNodeNames(handle, parentNodeIds: [drawer.parentNodeId])
         let location = names[drawer.parentNodeId] ?? (wing: "", room: "")
         guard let memoryID = UUID(uuidString: drawer.id) else {
@@ -709,7 +748,65 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             filedAt: drawer.filedAt, eventTime: drawer.eventTime, state: String(describing: drawer.state),
             trust: String(describing: drawer.trust), sensitivity: String(describing: drawer.adjectiveSensitivity),
             exportability: String(describing: drawer.exportability), confirmation: String(describing: drawer.confirmation),
-            lineageID: drawer.lineageID, provenance: String(describing: drawer.sourceType), isAuthorized: authorized)
+            lineageID: drawer.lineageID, provenance: String(describing: drawer.sourceType), isAuthorized: authorized,
+            tunnels: tunnels)
+    }
+
+    /// Load active linked tunnels for a drawer, filtered by sensitivity ceiling and
+    /// the connection-tools endpoint disclosure rule.
+    ///
+    /// Uses `activeTunnelsFrom(drawerId:)` + `activeTunnelsTo(drawerId:)` so the
+    /// lifecycle filter (`tombstonedAt == nil && lifecycle == .active`) runs at
+    /// the SQL layer, matching the v1 filter at ToolDispatch.swift:2568-2579.
+    /// Cap: 50 rows, matching v1 `linked.prefix(50)`.
+    /// Sensitivity: tunnel must be at or below `ceiling`; far-endpoint drawer
+    /// (when present and found in the estate) must also be at or below `ceiling`.
+    /// A nil far-endpoint (room-level connection) passes through without a drawer check.
+    private func loadTunnels(for drawer: Drawer, estate: Estate, ceiling: AdjectiveSensitivity) async throws -> [AriaV2TunnelRow] {
+        // Active lifecycle + tombstonedAt == nil filtered at the SQL layer via
+        // activeTunnelsFrom/To (LocusKit.Estate L947, L955).
+        let fromTunnels = try await estate.activeTunnelsFrom(drawerId: drawer.id)
+        let toTunnels = try await estate.activeTunnelsTo(drawerId: drawer.id)
+
+        // Deduplicate in case a self-referential tunnel appears in both lists.
+        var seen = Set<String>()
+        var combined: [Tunnel] = []
+        for tunnel in fromTunnels + toTunnels {
+            guard seen.insert(tunnel.id).inserted else { continue }
+            combined.append(tunnel)
+        }
+
+        // Sensitivity gate: drop tunnels whose own sensitivity exceeds the ceiling.
+        let withinCeiling = combined.filter { $0.adjectiveSensitivity.rawValue <= ceiling.rawValue }
+
+        // Cap at 50, matching v1 behavior (ToolDispatch.swift:2576 linked.prefix(50)).
+        let capped = Array(withinCeiling.prefix(50))
+        guard !capped.isEmpty else { return [] }
+
+        // Resolve far-endpoint drawers to apply the connection-tools disclosure
+        // rule (AriaV2KnowledgeJournal.swift:399-413 visibleTunnels): drop a
+        // tunnel when the far-side drawer is known but its sensitivity exceeds
+        // the ceiling. A nil far id (room-level endpoint) passes through.
+        let farIDs: [String] = capped.compactMap { tunnel in
+            let isOutgoing = tunnel.sourceDrawerId == drawer.id
+            return isOutgoing ? tunnel.targetDrawerId : tunnel.sourceDrawerId
+        }
+        let endpointDrawers = (try? await estate.getDrawers(ids: Array(Set(farIDs)), hydrationLevel: .structured)) ?? []
+        let visibleEndpointIDs = Set(endpointDrawers.filter { $0.adjectiveSensitivity.rawValue <= ceiling.rawValue }.map(\.id))
+
+        return capped.compactMap { tunnel -> AriaV2TunnelRow? in
+            guard let tunnelID = UUID(uuidString: tunnel.id) else { return nil }
+            let isOutgoing = tunnel.sourceDrawerId == drawer.id
+            let farDrawerID = isOutgoing ? tunnel.targetDrawerId : tunnel.sourceDrawerId
+            // Drop the tunnel if the far endpoint is a known drawer over the ceiling.
+            if let farID = farDrawerID, !visibleEndpointIDs.contains(farID) { return nil }
+            let farEndpointID = farDrawerID.flatMap(UUID.init(uuidString:))
+            return AriaV2TunnelRow(
+                tunnelID: tunnelID,
+                kind: String(describing: tunnel.kind),
+                lifecycle: String(describing: tunnel.lifecycle),
+                farEndpointID: farEndpointID)
+        }
     }
 
     static func provenanceVisible(_ provenance: Int64) -> Bool {
@@ -895,6 +992,20 @@ public struct AriaV2MemoryOperations: Sendable {
             result["exportability"] = .string(record.exportability)
             result["confirmation"] = .string(record.confirmation)
             result["lineage_id"] = .string(id(record.lineageID))
+            // Tunnel rows: active linked tunnels, sensitivity-filtered, capped at 50.
+            // Always present at depth:full (empty array when no active tunnels are linked).
+            // depth:subject and depth:distilled carry no tunnels — those depths omit this key.
+            result["tunnels"] = .array(record.tunnels.map { t in
+                var row: [String: JSONValue] = [
+                    "tunnel_id": .string(Self.id(t.tunnelID)),
+                    "kind": .string(t.kind),
+                    "lifecycle": .string(t.lifecycle),
+                ]
+                if let far = t.farEndpointID {
+                    row["far_endpoint_id"] = .string(Self.id(far))
+                }
+                return .object(row)
+            })
         }
         return .object(result)
     }
