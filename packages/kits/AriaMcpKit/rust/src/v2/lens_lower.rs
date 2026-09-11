@@ -64,6 +64,46 @@ pub struct CoordinatorRecallLensLower {
 /// Three years in milliseconds, matching the v1 window ceiling.
 const MAXIMUM_WINDOW_MILLIS: i64 = (3.0 * 365.25 * 24.0 * 60.0 * 60.0 * 1000.0) as i64;
 
+/// Dense-row hydration helper for the v2 lens lower — returns structured
+/// fields (subject, best_span, event_time) for admissible drawers.
+///
+/// Mirrors `recipe_tools::s2_rows_by_id` but returns structured fields
+/// instead of a rendered string. THE EMPTY FILTER CHAIN IS LOAD-BEARING:
+/// `BitmapEvaluator::insert_defaults` inserts `SensitivityAtMost(Elevated)`,
+/// so restricted/secret drawers are absent from the returned map and callers
+/// emit no dense fields for them (indistinguishability rule).
+fn structured_drawers_by_id(
+    coord: &genius_locus_kit::coordinator::EstateCoordinator,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    ids: &[String],
+) -> BTreeMap<String, (String, Option<String>, String)> {
+    if ids.is_empty() {
+        return BTreeMap::new();
+    }
+    match coord.estate_for(handle) {
+        Ok(locus_estate) => {
+            let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+            locus_estate
+                .get_drawers_matching_frame(ids, &frame)
+                .map(|f| {
+                    f.admissible
+                        .into_iter()
+                        .map(|d| {
+                            let row = crate::result_composer::candidate_from_drawer(&d);
+                            let subject = row.subject.unwrap_or_else(|| "-".to_owned());
+                            let best_span = row.best_span;
+                            let event_time = row.event_time;
+                            (d.id, (subject, best_span, event_time))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        Err(_) => BTreeMap::new(),
+    }
+}
+
 impl CoordinatorRecallLensLower {
     pub fn new(coordinator: Arc<Mutex<EstateCoordinator>>) -> Self {
         Self { coordinator }
@@ -86,15 +126,33 @@ impl CoordinatorRecallLensLower {
         )
         .map_err(|_| ())?;
 
+        // Dense-row hydration through the sensitivity gate (empty filterChain →
+        // BitmapEvaluator::insert_defaults injects SensitivityAtMost(Elevated)).
+        // Restricted/secret drawers are absent from the map and receive no structured
+        // fields; they still appear with id and centrality (indistinguishability rule).
+        let ids: Vec<String> = keystones.iter().map(|k| k.id.clone()).collect();
+        let structured = structured_drawers_by_id(&coordinator, &admission.estate_handle, &ids);
+
         Ok(result(
             request.operation,
             keystones
                 .into_iter()
                 .map(|keystone| {
-                    row([
-                        ("memory_id", JsonValue::String(keystone.id)),
-                        ("centrality", JsonValue::Double(keystone.centrality)),
-                    ])
+                    let mut r: BTreeMap<String, JsonValue> = BTreeMap::new();
+                    r.insert("memory_id".to_owned(), JsonValue::String(keystone.id.clone()));
+                    r.insert("centrality".to_owned(), JsonValue::Double(keystone.centrality));
+                    // Dense fields: present only for admissible (non-gated) rows.
+                    if let Some((subject, best_span, event_time)) = structured.get(&keystone.id) {
+                        r.insert("subject".to_owned(), JsonValue::String(subject.clone()));
+                        r.insert(
+                            "best_span".to_owned(),
+                            JsonValue::String(
+                                best_span.clone().unwrap_or_else(|| "-".to_owned()),
+                            ),
+                        );
+                        r.insert("event_time".to_owned(), JsonValue::String(event_time.clone()));
+                    }
+                    r
                 })
                 .collect(),
         ))
@@ -557,20 +615,41 @@ impl CoordinatorRecallLensLower {
                 ),
             ),
         ]));
+        // Dense-row hydration for ranked IDs through the sensitivity gate.
+        // Restricted/secret rows are absent from the map and carry only id.
+        let structured = structured_drawers_by_id(
+            &coordinator,
+            &admission.estate_handle,
+            &output.ranked_ids,
+        );
+        let ranked_id_rows: Vec<JsonValue> = output
+            .ranked_ids
+            .iter()
+            .map(|id| {
+                if let Some((subject, best_span, event_time)) = structured.get(id) {
+                    let mut obj: BTreeMap<String, JsonValue> = BTreeMap::new();
+                    obj.insert("id".to_owned(), JsonValue::String(id.clone()));
+                    obj.insert("subject".to_owned(), JsonValue::String(subject.clone()));
+                    obj.insert(
+                        "best_span".to_owned(),
+                        JsonValue::String(best_span.clone().unwrap_or_else(|| "-".to_owned())),
+                    );
+                    obj.insert("event_time".to_owned(), JsonValue::String(event_time.clone()));
+                    JsonValue::Object(obj)
+                } else {
+                    // Gated (restricted/secret) row: id only.
+                    let mut obj: BTreeMap<String, JsonValue> = BTreeMap::new();
+                    obj.insert("id".to_owned(), JsonValue::String(id.clone()));
+                    JsonValue::Object(obj)
+                }
+            })
+            .collect();
+
         Ok(result(
             request.operation,
             vec![row([
                 ("context", context),
-                (
-                    "ranked_ids",
-                    JsonValue::Array(
-                        output
-                            .ranked_ids
-                            .into_iter()
-                            .map(JsonValue::String)
-                            .collect(),
-                    ),
-                ),
+                ("ranked_ids", JsonValue::Array(ranked_id_rows)),
                 ("high_trust_count", usize_value(output.high_trust_count)?),
             ])],
         ))
@@ -1397,10 +1476,24 @@ pub fn project_data(result: &V2RecallLensResult) -> Result<serde_json::Value, ()
     use serde_json::json;
     match result.operation {
         V2RecallLensOperation::LensKeystones => Ok(json!({
-            "keystones": result.rows.iter().map(|row| Ok(json!({
-                "id": json_value(required_field(row, "memory_id")?)?,
-                "centrality": json_value(required_field(row, "centrality")?)?,
-            }))).collect::<Result<Vec<_>, ()>>()?,
+            "keystones": result.rows.iter().map(|row| {
+                let id = json_value(required_field(row, "memory_id")?)?;
+                let centrality = json_value(required_field(row, "centrality")?)?;
+                let mut obj = serde_json::Map::new();
+                obj.insert("id".to_owned(), id);
+                obj.insert("centrality".to_owned(), centrality);
+                // Dense fields: present only for admissible (non-gated) rows.
+                if let Some(v) = row.get("subject") {
+                    obj.insert("subject".to_owned(), json_value(v)?);
+                }
+                if let Some(v) = row.get("best_span") {
+                    obj.insert("bestSpan".to_owned(), json_value(v)?);
+                }
+                if let Some(v) = row.get("event_time") {
+                    obj.insert("eventTime".to_owned(), json_value(v)?);
+                }
+                Ok(serde_json::Value::Object(obj))
+            }).collect::<Result<Vec<_>, ()>>()?,
         })),
         V2RecallLensOperation::LensConstellation => Ok(json!({
             "communities": result.rows.iter().map(|row| {
@@ -1515,9 +1608,33 @@ pub fn project_data(result: &V2RecallLensResult) -> Result<serde_json::Value, ()
         }
         V2RecallLensOperation::LensTrustSynthesis => {
             let row = one_row(result)?;
+            let ranked_ids_raw = json_value(required_field(row, "ranked_ids")?)?;
+            // Map each ranked-id object from internal snake_case to camelCase wire keys.
+            // Gated rows carry only {id}; admissible rows carry {id, subject, bestSpan, eventTime}.
+            let ranked_ids: Vec<serde_json::Value> = ranked_ids_raw
+                .as_array()
+                .ok_or(())?
+                .iter()
+                .map(|item| {
+                    let obj = item.as_object().ok_or(())?;
+                    let id = obj.get("id").ok_or(())?.clone();
+                    let mut mapped = serde_json::Map::new();
+                    mapped.insert("id".to_owned(), id);
+                    if let Some(s) = obj.get("subject") {
+                        mapped.insert("subject".to_owned(), s.clone());
+                    }
+                    if let Some(s) = obj.get("best_span") {
+                        mapped.insert("bestSpan".to_owned(), s.clone());
+                    }
+                    if let Some(s) = obj.get("event_time") {
+                        mapped.insert("eventTime".to_owned(), s.clone());
+                    }
+                    Ok(serde_json::Value::Object(mapped))
+                })
+                .collect::<Result<Vec<_>, ()>>()?;
             Ok(json!({
                 "context": json_value(required_field(row, "context")?)?,
-                "rankedIDs": json_value(required_field(row, "ranked_ids")?)?,
+                "rankedIDs": ranked_ids,
                 "highTrustCount": json_value(required_field(row, "high_trust_count")?)?,
             }))
         }
@@ -2176,6 +2293,12 @@ mod tests {
             )
         );
 
+        // Trust synthesis: admissible row carries all dense fields.
+        let mut trust_ranked_obj: BTreeMap<String, JsonValue> = BTreeMap::new();
+        trust_ranked_obj.insert("id".to_owned(), JsonValue::String("memory-1".to_owned()));
+        trust_ranked_obj.insert("subject".to_owned(), JsonValue::String("a subject".to_owned()));
+        trust_ranked_obj.insert("best_span".to_owned(), JsonValue::String("body content".to_owned()));
+        trust_ranked_obj.insert("event_time".to_owned(), JsonValue::String("2024-01-01T00:00:00Z".to_owned()));
         let trust = V2RecallLensResult {
             operation: V2RecallLensOperation::LensTrustSynthesis,
             rows: vec![row([
@@ -2192,7 +2315,7 @@ mod tests {
                 ),
                 (
                     "ranked_ids",
-                    JsonValue::Array(vec![JsonValue::String("memory-1".to_owned())]),
+                    JsonValue::Array(vec![JsonValue::Object(trust_ranked_obj)]),
                 ),
                 ("high_trust_count", JsonValue::Integer(1)),
             ])],
@@ -2200,7 +2323,38 @@ mod tests {
         assert_eq!(
             project_data(&trust),
             Ok(
-                serde_json::json!({"context":{"summary":"summary","patterns":[],"successRate":1.0,"averageReward":0.0,"recommendations":[],"keyInsights":[]},"rankedIDs":["memory-1"],"highTrustCount":1})
+                serde_json::json!({"context":{"summary":"summary","patterns":[],"successRate":1.0,"averageReward":0.0,"recommendations":[],"keyInsights":[]},"rankedIDs":[{"id":"memory-1","subject":"a subject","bestSpan":"body content","eventTime":"2024-01-01T00:00:00Z"}],"highTrustCount":1})
+            )
+        );
+
+        // Trust synthesis: gated row carries only id (no dense fields).
+        let mut gated_obj: BTreeMap<String, JsonValue> = BTreeMap::new();
+        gated_obj.insert("id".to_owned(), JsonValue::String("gated-1".to_owned()));
+        let trust_gated = V2RecallLensResult {
+            operation: V2RecallLensOperation::LensTrustSynthesis,
+            rows: vec![row([
+                (
+                    "context",
+                    JsonValue::Object(row([
+                        ("summary", JsonValue::String("s".to_owned())),
+                        ("patterns", JsonValue::Array(vec![])),
+                        ("successRate", JsonValue::Double(0.0)),
+                        ("averageReward", JsonValue::Double(0.0)),
+                        ("recommendations", JsonValue::Array(vec![])),
+                        ("keyInsights", JsonValue::Array(vec![])),
+                    ])),
+                ),
+                (
+                    "ranked_ids",
+                    JsonValue::Array(vec![JsonValue::Object(gated_obj)]),
+                ),
+                ("high_trust_count", JsonValue::Integer(0)),
+            ])],
+        };
+        assert_eq!(
+            project_data(&trust_gated),
+            Ok(
+                serde_json::json!({"context":{"summary":"s","patterns":[],"successRate":0.0,"averageReward":0.0,"recommendations":[],"keyInsights":[]},"rankedIDs":[{"id":"gated-1"}],"highTrustCount":0})
             )
         );
 
@@ -2244,5 +2398,51 @@ mod tests {
         );
         assert_eq!(content_kind("code"), Ok(ContentKind::Code));
         assert_eq!(content_kind("unknown"), Err(()));
+    }
+
+    /// Dense fields appear for admissible keystones rows. The row struct
+    /// now carries subject, best_span, event_time; project_data maps them
+    /// to subject, bestSpan, eventTime in the wire schema.
+    #[test]
+    fn keystones_lower_projects_dense_fields_for_admissible_rows() {
+        let mut r: BTreeMap<String, JsonValue> = BTreeMap::new();
+        r.insert("memory_id".to_owned(), JsonValue::String("abc-123".to_owned()));
+        r.insert("centrality".to_owned(), JsonValue::Double(0.8));
+        r.insert("subject".to_owned(), JsonValue::String("test subject".to_owned()));
+        r.insert("best_span".to_owned(), JsonValue::String("best span text".to_owned()));
+        r.insert("event_time".to_owned(), JsonValue::String("2024-01-01T00:00:00Z".to_owned()));
+        let ks = V2RecallLensResult {
+            operation: V2RecallLensOperation::LensKeystones,
+            rows: vec![r],
+        };
+        let data = project_data(&ks).expect("project must succeed");
+        let keystones = data["keystones"].as_array().expect("keystones array");
+        let k = &keystones[0];
+        assert_eq!(k["id"], serde_json::json!("abc-123"));
+        assert_eq!(k["centrality"], serde_json::json!(0.8));
+        assert_eq!(k["subject"], serde_json::json!("test subject"));
+        assert_eq!(k["bestSpan"], serde_json::json!("best span text"));
+        assert_eq!(k["eventTime"], serde_json::json!("2024-01-01T00:00:00Z"));
+    }
+
+    /// Gated keystones row (restricted/secret): id and centrality only,
+    /// subject/bestSpan/eventTime absent from the wire schema.
+    #[test]
+    fn keystones_lower_projects_no_dense_fields_for_gated_rows() {
+        let mut r: BTreeMap<String, JsonValue> = BTreeMap::new();
+        r.insert("memory_id".to_owned(), JsonValue::String("gated-456".to_owned()));
+        r.insert("centrality".to_owned(), JsonValue::Double(0.5));
+        // No subject, best_span, event_time — gated row.
+        let ks = V2RecallLensResult {
+            operation: V2RecallLensOperation::LensKeystones,
+            rows: vec![r],
+        };
+        let data = project_data(&ks).expect("project must succeed");
+        let keystones = data["keystones"].as_array().expect("keystones array");
+        let k = &keystones[0];
+        assert_eq!(k["id"], serde_json::json!("gated-456"));
+        assert!(k["subject"].is_null(), "gated row must not expose subject");
+        assert!(k["bestSpan"].is_null(), "gated row must not expose bestSpan");
+        assert!(k["eventTime"].is_null(), "gated row must not expose eventTime");
     }
 }
