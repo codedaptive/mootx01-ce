@@ -849,7 +849,7 @@ struct RecipeToolsTests {
     /// line 193 ("Unknown precise-recall composition '\(composition)'") is swallowed
     /// there; specific argument names and invalid values never reach the tool result text.
     /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: AriaV2RecallLens.swift:350-351 catch-all swallows AriaV2InvalidArgument from line 193; 'unknown composition' and 'no-such-composition' never reach tool result text"))
+    @Test
     func testPreciseRecallUnknownCompositionFailsClosed() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
@@ -976,7 +976,7 @@ struct RecipeToolsTests {
     /// line 137 ("Unknown recall preset '\(preset)'") is swallowed there; specific
     /// preset names and invalid values never reach the tool result text.
     /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: AriaV2RecallLens.swift:350-351 catch-all swallows AriaV2InvalidArgument from line 137; 'unknown preset' and 'no-such-preset' never reach tool result text"))
+    @Test
     func testShapedRecallUnknownPresetFailsClosed() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(

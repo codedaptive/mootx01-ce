@@ -128,7 +128,7 @@ struct GateRejectionMessageTests {
     /// phrase "cannot reject an active memory". The catch arm is:
     ///   `} catch { return unavailable("moot_update_memory") }`
     /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: AriaV2MemoryMutations.swift:253 inner catch returns the generic unavailable() message for ALL update errors, swallowing the specific gate phrase \"cannot reject an active memory\""))
+    @Test
     func activeRejectEmitsActionableMessage() async throws {
         let dispatcher = try await makeDispatcher()
         let id = try await fileActiveMemory(dispatcher)
@@ -160,7 +160,7 @@ struct GateRejectionMessageTests {
     /// phrase "already rejected". The catch arm is:
     ///   `} catch { return unavailable("moot_update_memory") }`
     /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: AriaV2MemoryMutations.swift:253 inner catch returns the generic unavailable() message for ALL update errors, swallowing the specific gate phrase \"already rejected\""))
+    @Test
     func rejectedRejectEmitsActionableMessage() async throws {
         let dispatcher = try await makeDispatcher()
         let id = try await fileActiveMemory(dispatcher)
