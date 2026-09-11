@@ -1449,30 +1449,65 @@ struct RecipeToolsTests {
 
     /// v2: `ack` arg removed from `moot_recall_distilled` (COMPOSER-02B §8.6).
     /// The tool runs unconditionally — no ceremony precedes results.
+    ///
+    /// Routing test: the assertions must fail when a DIFFERENT v2 read operation
+    /// (e.g. moot_recall_precise) is dispatched instead. Discriminating properties:
+    ///   - compactText contains "distilled recall result" (label unique to this engine)
+    ///   - structuredContent.data.results[*].representation == "distilled"
+    /// moot_recall_precise produces "precise recall result" and no representation field.
     @Test func testRecallDistilledDispatchRoutesToRunRecallDistilled() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // v2: no `ack` arg — the schema rejects unknown keys.
+        // Plant a memory so the distilled engine returns at least one result;
+        // representation: "distilled" in results is the distilled-engine marker
+        // that proves routing (the projectedResult path sets it from the match).
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "distilled recall routing probe"))
+
+        // v2: no `ack` arg; filter: unconfirmed so the freshly-filed row is visible.
         let result = try await dispatcher.dispatch(
             name: "moot_recall_distilled",
-            arguments: .object(["query": .string("any query")]))
+            arguments: .object([
+                "query": .string("distilled recall routing probe"),
+                "filter": .string("unconfirmed"),
+            ]))
 
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // v2 compactText: "Returned N X result(s)."
-        // Verify no legacy ceremony text.
-        #expect(!text.contains("[distilled]"),
-                "PR-03: the [distilled] header tag is retired")
-        #expect(!text.contains("CONTRACT CHANGE"),
-                "no ceremony may precede results")
-        // Results available in structuredContent.data.
-        #expect(obj["structuredContent"] != nil,
-                "v2 envelope must include structuredContent")
+
+        // v2 compactText for distilled recall: "Returned N distilled recall result(s)."
+        // A mis-routed operation produces a different label (e.g. "precise recall result"),
+        // which fails the contains check and proves routing discrimination.
+        #expect(text.hasPrefix("Returned "),
+                "v2 compactText must use the 'Returned N X result(s).' format")
+        #expect(text.contains("distilled recall result"),
+                "compactText must name the distilled engine; a mis-routed moot_recall_precise produces 'precise recall result' here")
+
+        // Default: echo_query is absent from the v2 decoder — the compact text
+        // never echoes the query. This is the v2 equivalent of the v1 default-off
+        // assertion. Note: the v1 opt-in (echo_query:true) is now entirely absent
+        // from v2 (blocked in testRecallDistilledEchoQueryOptIn), so "default off"
+        // became "permanently off" — not configurable, always the case.
+        #expect(!text.contains("for:"),
+                "compactText must NOT echo the query (echo_query removed in v2)")
+
+        // structuredContent.data.results must carry representation: "distilled"
+        // on every result row — the typed distilled-engine marker from projectedResult.
+        let data = try #require(structuredData(result),
+                                "structuredContent.data must be present")
+        let results = try #require(data["results"]?.arrayValue,
+                                   "data.results must be an array")
+        #expect(!results.isEmpty,
+                "estate has content — distilled recall must return at least one result")
+        #expect(results.allSatisfy {
+            $0.objectValue?["representation"]?.stringValue == "distilled"
+        }, "every result row must carry representation: 'distilled'; a mis-routed operation would omit this field")
     }
 
     @Test func testRecallDistilledOutputFormatStartsWithFoundN() async throws {
@@ -1565,18 +1600,23 @@ struct RecipeToolsTests {
     @Test func testRecollectStubReturnsNoticeNeverExecutes() async throws {
         // moot_recollect is not in AriaV2SelectedCatalog (its substrate,
         // factoid drawers, was retired). ToolProjection.admitsDispatch returns
-        // false → ToolDispatcher.dispatch throws methodNotFound (JSONRPCError)
+        // false → ToolDispatcher.dispatch throws JSONRPCError(code: methodNotFound)
         // before any estate access. RecipeTools.dispatch stub is never reached.
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-stub"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        await #expect(throws: JSONRPCError.self,
-                      "moot_recollect is not in the v2 catalog — must throw methodNotFound") {
+        // Pin the specific error code, not just the type. Any JSONRPCError would
+        // also pass on invalidParams (wrong argument), which is a different failure.
+        do {
             _ = try await dispatcher.dispatch(
                 name: "moot_recollect",
                 arguments: .object(["query": .string("test")]))
+            Issue.record("moot_recollect dispatch must throw JSONRPCError(methodNotFound) but returned a result")
+        } catch let error as JSONRPCError {
+            #expect(error.code == JSONRPCErrorCode.methodNotFound,
+                    "moot_recollect must throw methodNotFound (\(JSONRPCErrorCode.methodNotFound)); got code \(error.code)")
         }
     }
 
