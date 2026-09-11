@@ -259,11 +259,11 @@ fn fdc_floor(registry: &EstateRegistry) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 84 tools exact (v2 catalog)
+// 1. tools/list surface assertions — 80 tools exact (v2 catalog)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_84() {
+fn tools_list_count_is_80() {
     // Gate: the 5-tier AI-client surface after MCP-RUST-ALIGN-01 + aria-tools +
     // the precise-recall parity mission + moot_dream (on-demand dream tool) +
     // moot_vault_job (tool-surface parity, Bob's ruling 2026-06-12) +
@@ -293,14 +293,15 @@ fn tools_list_count_is_84() {
     //    6  maintenance tools (moot_reindex, moot_drain_status, moot_reclassify_fdc,
     //                          moot_timing_report, moot_palace_import, moot_json_import)
     //    2  contradiction-hunter tools (moot_hunt_contradictions, moot_review_tunnel)
-    //   77  total (memory adapter excluded — opt-in, off by default; D10 added
+    //   73  total (memory adapter excluded — opt-in, off by default; D10 added
     //       moot_recall_walk escalation-ladder recall recipe; 2026-08-26 added
-    //       moot_rebuild_status, the derived-state rebuild condition surface)
-    // v2 catalog: 84 tools with vault-on (the default), 77 without vault.
+    //       moot_rebuild_status, the derived-state rebuild condition surface;
+    //       work packets retired V2_PACKETS_RETIRE)
+    // v2 catalog: 80 tools with vault-on (the default), 73 without vault.
     // Use selected_tools_for_registry with vault_enabled() for deterministic count.
     let tools = selected_tools_for_registry(&selected_registry_with_vault(vault_enabled()));
     let arr = tools.as_array().expect("selected_tools must return an array");
-    assert_eq!(arr.len(), 84, "expected 84 v2 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 80, "expected 80 v2 tools; got {}", arr.len());
 }
 
 #[test]
@@ -339,10 +340,6 @@ fn tools_list_name_set_matches_expected_names() {
         "moot_read_journal",
         // Contradiction writes (2)
         "moot_hunt_contradictions", "moot_propose_contradictions",
-        // Work packet reads (3)
-        "moot_packet_get", "moot_packet_lineage", "moot_packet_list",
-        // Work packet writes (1)
-        "moot_file_packet",
         // Transcript recall (1)
         "moot_memory_recall_transcript",
         // Help (1)
@@ -380,7 +377,7 @@ fn tools_list_name_set_matches_expected_names() {
     .copied()
     .collect();
 
-    // v2 catalog with vault-on (84 tools).
+    // v2 catalog with vault-on (80 tools).
     let tools = selected_tools_for_registry(&selected_registry_with_vault(vault_enabled()));
     let arr = tools.as_array().expect("selected_tools must return an array");
     let actual: std::collections::HashSet<&str> =
@@ -6058,7 +6055,7 @@ fn vault_enabled_default_is_true() {
 fn v2_catalog_with_vault_on_includes_vault_tools() {
     let tools = selected_tools_for_registry(&selected_registry_with_vault(true));
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 84, "vault-on must produce 84 v2 tools");
+    assert_eq!(arr.len(), 80, "vault-on must produce 80 v2 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -6072,7 +6069,7 @@ fn v2_catalog_with_vault_on_includes_vault_tools() {
 fn v2_catalog_with_vault_off_excludes_vault_tools() {
     let tools = selected_tools_for_registry(&selected_registry_with_vault(false));
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 77, "vault-off must produce 77 v2 tools (84 - 7 vault-gated)");
+    assert_eq!(arr.len(), 73, "vault-off must produce 73 v2 tools (80 - 7 vault-gated)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
