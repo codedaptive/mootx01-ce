@@ -168,6 +168,59 @@ struct MultiBlockHintAndTimingWindowTests {
     }
 
 
+    // MARK: - id_map block key ordering with multiple records
+
+    /// A two-record import with reverse-sorted IDs must produce an id_map block
+    /// whose keys are emitted in sorted order. This pins the BTreeMap-collect
+    /// path in the Rust port and the sorted-keys path in the Swift port.
+    ///
+    /// Rust twin: v2_json_import_id_map_two_records_sorted
+    /// (rust/tests/surface_selection_tests.rs).
+    @Test("moot_json_import id_map second block keys are sorted when importing two records")
+    func jsonImportIDMapTwoRecordsAreSorted() async throws {
+        let (dispatcher, kit, handle) = try await makeVaultDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Two seeds with intentionally reverse-sorted IDs: "zeta/b" sorts AFTER
+        // "alpha/a". The emitted id_map JSON must list them sorted "alpha/a" first.
+        func seed(_ ids: [String]) throws -> URL {
+            let records = ids.map { id in
+                """
+                {"id":"\(id)","content":"ordering test \(id)","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"}
+                """
+            }.joined(separator: ",")
+            return try tempSeedFile("""
+            {"format_version":1,"name":"ordering","records":[\(records)]}
+            """)
+        }
+
+        let file = try seed(["zeta/b", "alpha/a"])
+        defer { try? FileManager.default.removeItem(at: file) }
+        let result = try await dispatcher.dispatch(
+            name: "moot_json_import",
+            arguments: .object([
+                "path": .string(file.path),
+                "return_id_map": .bool(true),
+            ]))
+        #expect(!isError(of: result), "two-record import must succeed")
+
+        let contentBlocks = blocks(of: result)
+        #expect(contentBlocks.count == 2, "two-record import with return_id_map:true must have two blocks; got \(contentBlocks)")
+
+        // Recover the drawer IDs from structured data.
+        guard let idMapObj = data(of: result)?["id_map"]?.objectValue,
+              let alphaID = idMapObj["alpha/a"]?.stringValue,
+              let zetaID = idMapObj["zeta/b"]?.stringValue else {
+            Issue.record("id_map must contain both seeded record IDs")
+            return
+        }
+
+        // The second block text must have alpha/a before zeta/b (sorted keys).
+        let expected = "{\"id_map\":{\"alpha/a\":\"\(alphaID)\",\"zeta/b\":\"\(zetaID)\"}}"
+        #expect(contentBlocks[1] == expected,
+                "id_map block keys must be in sorted order; got \(contentBlocks[1])")
+    }
+
     // MARK: - Finding B guard: error results stay untouched by the hint path
 
     // MARK: - Finding A: the timing window is bounded at the call level

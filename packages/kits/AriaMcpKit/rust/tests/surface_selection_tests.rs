@@ -1026,3 +1026,243 @@ fn v2_monitoring_set_writes_only_when_live_and_returns_confirmed_state() {
     assert_eq!(frozen_probe.writes.load(Ordering::SeqCst), 0);
 }
 
+
+// ---------------------------------------------------------------------------
+// v2-path envelope text for moot_list_lenses — through execute_cognition_catalog
+// ---------------------------------------------------------------------------
+
+/// Asserts the v2 envelope text for `moot_list_lenses` in terse and verbose
+/// modes through the live v2 dispatch path (`execute_cognition_catalog`), NOT
+/// through `dispatch_tool`. The legacy text-runner path never reaches
+/// `execute_cognition_catalog`, so only a test dispatched through the v2
+/// surface proves the envelope text changed.
+///
+/// Swift twin: the text assertions in `listLensesTerseDefaultAndVerbose`
+/// (UtilityTierTests.swift).
+#[test]
+fn v2_list_lenses_envelope_text_through_v2_path() {
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+
+    // Terse: "Listed N callable cognition tools." with a hint line appended.
+    let terse = call(&dispatcher, "moot_list_lenses", serde_json::json!({}));
+    assert_eq!(terse["result"]["isError"], false, "terse lenses must not error");
+    let terse_text = terse["result"]["content"][0]["text"]
+        .as_str()
+        .expect("terse response must carry a text block");
+    assert!(
+        terse_text.contains("callable cognition tools."),
+        "terse text must contain 'callable cognition tools.'; got: {terse_text:?}"
+    );
+    assert!(
+        terse_text.contains("(terse — pass verbose:true"),
+        "terse text must carry the schema hint; got: {terse_text:?}"
+    );
+    // Terse must NOT carry the full schema names list.
+    assert!(
+        !terse_text.contains("(full schema)"),
+        "terse text must not mention 'full schema'; got: {terse_text:?}"
+    );
+
+    // Verbose: "Listed N callable cognition tools (full schema). Tools: name1, name2, …"
+    let verbose = call(&dispatcher, "moot_list_lenses", serde_json::json!({"verbose": true}));
+    assert_eq!(verbose["result"]["isError"], false, "verbose lenses must not error");
+    let verbose_text = verbose["result"]["content"][0]["text"]
+        .as_str()
+        .expect("verbose response must carry a text block");
+    assert!(
+        verbose_text.contains("callable cognition tools (full schema). Tools:"),
+        "verbose text must contain 'callable cognition tools (full schema). Tools:'; got: {verbose_text:?}"
+    );
+    // Verbose must NOT carry the hint.
+    assert!(
+        !verbose_text.contains("(terse — pass verbose:true"),
+        "verbose text must not carry the terse hint; got: {verbose_text:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// id_map second block key ordering with two records (reverse-sorted seed)
+// ---------------------------------------------------------------------------
+
+/// Seeding two records whose IDs are in reverse-sorted order and asserting
+/// the emitted id_map second block lists them sorted pins the BTreeMap-collect
+/// path in surface.rs that enforces sort order regardless of insert order.
+///
+/// Swift twin: jsonImportIDMapTwoRecordsAreSorted (MultiBlockHintAndTimingWindowTests.swift).
+#[test]
+fn v2_json_import_id_map_two_records_sorted() {
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+
+    // Two records with intentionally reverse-sorted IDs.
+    // "zeta/b" sorts AFTER "alpha/a"; the emitted block must list "alpha/a" first.
+    let path = std::env::temp_dir().join(format!("aria-v2-idmap-two-{}.json", uuid::Uuid::new_v4()));
+    fs::write(&path, r#"{"format_version":1,"name":"ordering","records":[
+        {"id":"zeta/b","content":"ordering test zeta","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"},
+        {"id":"alpha/a","content":"ordering test alpha","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"}
+    ]}"#).expect("write two-record seed");
+
+    let result = call(&dispatcher, "moot_json_import", serde_json::json!({
+        "path": path.display().to_string(),
+        "return_id_map": true,
+    }));
+    let _ = fs::remove_file(&path);
+
+    assert_eq!(result["result"]["isError"], false, "two-record import must succeed; got {result}");
+
+    let content = result["result"]["content"].as_array()
+        .expect("content must be an array");
+    assert_eq!(
+        content.len(), 2,
+        "two-record import with return_id_map:true must have two blocks; got {content:?}"
+    );
+
+    // Recover the drawer IDs from structured data.
+    let id_map = &result["result"]["structuredContent"]["data"]["id_map"];
+    let alpha_id = id_map["alpha/a"].as_str()
+        .expect("id_map must contain alpha/a");
+    let zeta_id = id_map["zeta/b"].as_str()
+        .expect("id_map must contain zeta/b");
+
+    // The second block text must have alpha/a before zeta/b (sorted keys).
+    let expected = format!("{{\"id_map\":{{\"alpha/a\":\"{alpha_id}\",\"zeta/b\":\"{zeta_id}\"}}}}");
+    let actual = content[1]["text"].as_str()
+        .expect("second block must be a text value");
+    assert_eq!(
+        actual, expected,
+        "id_map block keys must be in sorted order"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// outputSchema-conformance gate for moot_list_lenses — registry-based
+// ---------------------------------------------------------------------------
+
+/// Validates a LIVE `moot_list_lenses` response against the `outputSchema`
+/// that the operation itself advertises in the selected registry, in both
+/// terse and verbose modes.
+///
+/// The schema is taken from the registry (not hard-coded) so the test tracks
+/// the contract instead of duplicating it.
+///
+/// What this catches:
+/// - Before the fix (commit 6ab748019): terse rows omit `input_schema` but the
+///   schema declared it as `required` → fails required-key check. Verbose rows
+///   include `output_schema` which wasn't declared → fails additionalProperties.
+/// - After the fix: terse rows have `required: ["description","name"]`; all
+///   four properties are declared so verbose rows pass additionalProperties.
+///
+/// Swift twin: listLensesResponseConformsToAdvertisedOutputSchema (UtilityTierTests.swift).
+#[test]
+fn cognition_catalog_output_schema_conforms_to_registry() {
+    use aria_mcp::v2::catalog::selected_registry;
+    use std::collections::{BTreeSet, HashSet};
+
+    let registry = selected_registry();
+    let op = registry.operation("moot_list_lenses")
+        .expect("moot_list_lenses must be in the selected registry");
+    let output_schema = &op.projection.output_schema;
+
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+
+    // Validate a live response against the schema.
+    let validate = |data: &serde_json::Value, schema: &serde_json::Value, path: &str| {
+        let Some(schema_obj) = schema.as_object() else {
+            panic!("{path}: schema is not an object");
+        };
+
+        match schema_obj.get("type").and_then(|t| t.as_str()) {
+            Some("object") => {
+                let Some(data_obj) = data.as_object() else {
+                    panic!("{path}: expected object, got {data}");
+                };
+                // required keys must be present
+                if let Some(required) = schema_obj.get("required").and_then(|r| r.as_array()) {
+                    for req in required {
+                        if let Some(key) = req.as_str() {
+                            assert!(
+                                data_obj.contains_key(key),
+                                "{path}: required key \"{key}\" is missing from {data_obj:?}"
+                            );
+                        }
+                    }
+                }
+                // additionalProperties: false — no keys outside properties
+                if schema_obj.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
+                    if let Some(props) = schema_obj.get("properties").and_then(|p| p.as_object()) {
+                        let declared: HashSet<&str> = props.keys().map(String::as_str).collect();
+                        for key in data_obj.keys() {
+                            assert!(
+                                declared.contains(key.as_str()),
+                                "{path}: undeclared key \"{key}\" violates additionalProperties:false; declared: {declared:?}"
+                            );
+                        }
+                    }
+                }
+                // recurse into properties that are present in data
+                if let Some(props) = schema_obj.get("properties").and_then(|p| p.as_object()) {
+                    for (key, prop_schema) in props {
+                        if let Some(child) = data_obj.get(key) {
+                            // inline recurse for one level of nesting (array items)
+                            if let (Some("array"), Some(items_schema)) = (
+                                prop_schema.get("type").and_then(|t| t.as_str()),
+                                prop_schema.get("items"),
+                            ) {
+                                let Some(arr) = child.as_array() else {
+                                    panic!("{path}.{key}: expected array, got {child}");
+                                };
+                                for (i, item) in arr.iter().enumerate() {
+                                    let item_path = format!("{path}.{key}[{i}]");
+                                    let Some(item_schema_obj) = items_schema.as_object() else { continue };
+                                    let Some(item_obj) = item.as_object() else {
+                                        panic!("{item_path}: expected object, got {item}");
+                                    };
+                                    // required
+                                    if let Some(req_arr) = item_schema_obj.get("required").and_then(|r| r.as_array()) {
+                                        for req in req_arr {
+                                            if let Some(k) = req.as_str() {
+                                                assert!(
+                                                    item_obj.contains_key(k),
+                                                    "{item_path}: required key \"{k}\" missing"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    // additionalProperties: false
+                                    if item_schema_obj.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
+                                        if let Some(item_props) = item_schema_obj.get("properties").and_then(|p| p.as_object()) {
+                                            let decl: BTreeSet<&str> = item_props.keys().map(String::as_str).collect();
+                                            for key in item_obj.keys() {
+                                                assert!(
+                                                    decl.contains(key.as_str()),
+                                                    "{item_path}: undeclared key \"{key}\" violates additionalProperties:false; declared: {decl:?}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some("array") => {
+                assert!(data.is_array(), "{path}: expected array, got {data}");
+            }
+            _ => {} // other types: no assertions needed for this schema shape
+        }
+    };
+
+    // The declared outputSchema describes the whole structuredContent envelope
+    // (surface_version, tool, data, meta, and the optional hint), not the data
+    // payload alone, so the envelope is what gets validated against it. Swift
+    // twin: listLensesResponseConformsToAdvertisedOutputSchema.
+    let terse = call(&dispatcher, "moot_list_lenses", serde_json::json!({}));
+    assert_eq!(terse["result"]["isError"], false, "terse lenses must not error");
+    let terse_envelope = &terse["result"]["structuredContent"];
+    validate(terse_envelope, output_schema, "terse");
+
+    let verbose = call(&dispatcher, "moot_list_lenses", serde_json::json!({"verbose": true}));
+    assert_eq!(verbose["result"]["isError"], false, "verbose lenses must not error");
+    let verbose_envelope = &verbose["result"]["structuredContent"];
+    validate(verbose_envelope, output_schema, "verbose");
+}

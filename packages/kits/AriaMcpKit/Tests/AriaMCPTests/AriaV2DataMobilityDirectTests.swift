@@ -350,6 +350,61 @@ struct AriaV2DataMobilityDirectTests {
         }
     }
 
+    /// reclassify_fdc must strip surrounding whitespace before the case-fold,
+    /// so a caller sending "ALL " (with trailing space) is accepted.
+    /// Fails if the decoder lowercases before trimming — "all " would not
+    /// match any enum case and produce an unknown-value error.
+    @Test("reclassify_fdc trims whitespace from mode")
+    func reclassifyFdcModeTrimIsAccepted() throws {
+        let withTrailingSpace = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_reclassify_fdc",
+            arguments: .object(["mode": .string("ALL ")]))
+        if case .reclassifyFDC(_, _, let mode, _) = withTrailingSpace {
+            #expect(mode == "all", "\"ALL \" with trailing space must normalise to \"all\"")
+        } else {
+            Issue.record("Expected .reclassifyFDC case")
+        }
+
+        let withLeadingSpace = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_reclassify_fdc",
+            arguments: .object(["mode": .string(" SuspectOnly")]))
+        if case .reclassifyFDC(_, _, let mode, _) = withLeadingSpace {
+            // Canonical form: trim → "SuspectOnly", lowercase → "suspectonly", match → "suspectOnly"
+            #expect(mode == "suspectOnly", "\" SuspectOnly\" with leading space must normalise to canonical \"suspectOnly\"")
+        } else {
+            Issue.record("Expected .reclassifyFDC case")
+        }
+    }
+
+    /// palace_import must strip surrounding whitespace before the case-fold,
+    /// so a caller sending "BACKGROUND " (with trailing space) is accepted.
+    @Test("palace_import trims whitespace from mode")
+    func palaceImportModeTrimIsAccepted() throws {
+        let withTrailingSpace = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_palace_import",
+            arguments: .object([
+                "palace_path": .string("/tmp/palace"),
+                "mode": .string("BACKGROUND "),
+            ]))
+        if case .palaceImport(_, let mode, _) = withTrailingSpace {
+            #expect(mode == .background, "\"BACKGROUND \" with trailing space must decode to .background")
+        } else {
+            Issue.record("Expected .palaceImport case")
+        }
+
+        let withLeadingSpace = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_palace_import",
+            arguments: .object([
+                "palace_path": .string("/tmp/palace"),
+                "mode": .string(" Foreground"),
+            ]))
+        if case .palaceImport(_, let mode, _) = withLeadingSpace {
+            #expect(mode == .foreground, "\" Foreground\" with leading space must decode to .foreground")
+        } else {
+            Issue.record("Expected .palaceImport case")
+        }
+    }
+
     // MARK: - ITEM 2: return_id_map — decoder must accept the key without rejection
 
     /// moot_json_import must accept return_id_map without an unknown-key error.

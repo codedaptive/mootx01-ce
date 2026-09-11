@@ -186,12 +186,11 @@ impl V2ReindexRequest { pub fn decode(value: &JsonValue) -> V2DecodeResult<Self>
 impl V2ReclassifyFdcRequest {
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
         let o = strict_object(value, ["estate_id", "apply", "mode", "limit"])?;
-        // Mode: exactly "suspectOnly" or "all". No case-folding — v2 is strict.
+        // Mode: case-insensitive and whitespace-tolerant ("ALL ", "SuspectOnly", etc.)
+        // resolve like v1, which trimmed whitespace then lowercased before comparing.
         // An unrecognised mode value is an invalid-argument refusal per data contract §2.
-        // Case-insensitive: "ALL", "SuspectOnly", "SUSPECTONLY" etc. resolve like v1.
-        // Lowercased before matching so any capitalisation of "suspectOnly" or "all"
-        // reaches the correct variant. Canonical form is preserved in the enum value.
-        let mode = match optional_string(o, "mode")?.map(|s| s.to_lowercase()).as_deref() {
+        // Canonical form is preserved in the enum value.
+        let mode = match optional_string(o, "mode")?.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
             None | Some("suspectonly") => V2FdcReclassifyMode::SuspectOnly,
             Some("all") => V2FdcReclassifyMode::All,
             Some(s) => return Err(V2InvalidArgument::new("$.mode",
@@ -219,8 +218,9 @@ impl V2ReclassifyFdcRequest {
 impl V2PalaceImportRequest {
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
         let o = strict_object(value, ["palace_path", "mode", "estate_id"])?;
-        // Case-insensitive: "FOREGROUND", "Background", etc. resolve like v1.
-        let mode = match optional_string(o, "mode")?.map(|s| s.to_lowercase()).as_deref() {
+        // Case-insensitive and whitespace-tolerant ("FOREGROUND ", "Background", etc.)
+        // resolve like v1, which trimmed whitespace then lowercased before matching.
+        let mode = match optional_string(o, "mode")?.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
             None => None,
             Some("foreground") => Some(V2ImportMode::Foreground),
             Some("background") => Some(V2ImportMode::Background),
