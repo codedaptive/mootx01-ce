@@ -3,8 +3,7 @@ import AriaMCPWire
 // MARK: - Module note
 
 /// This file implements `AriaV2CallChain`, the ARIA v2 request-processing
-/// chain: two ordered hook sequences (ingress before the handler,
-/// egress after handler return) that wrap a single v2 tool call.
+/// chain: three ordered hook sequences that wrap a single v2 tool call.
 ///
 /// The name "CallChain" is deliberate. "Door" is already taken in this kit:
 /// it is the recall-strategy selector on `moot_memory_search` (values: rrf /
@@ -43,25 +42,29 @@ public enum AriaV2EgressHook: Sendable {
 
 /// One concern's contribution to the chain.
 ///
-/// A concern may declare an ingress hook, an egress hook, both, or neither.
-/// Ingress-only and egress-only are both legal: at adoption the coaching hint
-/// is egress-only.
-///
-/// `position` in the `ingress` and `egress` tuples lives in independent spaces:
-/// an ingress position of 10 and an egress position of 10 are not related.
-/// Ordering within each chain is by ascending position; duplicate positions
-/// within a chain are rejected at `AriaV2CallChain.init`.
+/// A concern may declare any combination of transform, ingress, and egress hooks,
+/// or none. Each phase has an independent position space: a transform position
+/// of 10, an ingress position of 10, and an egress position of 10 are all
+/// unrelated. Ordering within each chain is by ascending position; duplicate
+/// positions within a chain are rejected at `AriaV2CallChain.init`.
 public struct AriaV2ChainRegistration: Sendable {
     public let concernName: String
+    /// Transform hook: runs before argument decode so a hook can remove a key
+    /// the strict decoder rejects. Returns the mutated arguments.
+    public let transform: (position: Int, hook: @Sendable (String, JSONValue) async throws -> JSONValue)?
+    /// Ingress (record) hook: runs after decode and after the frozen guard, before
+    /// the handler. Returns mutated arguments and optional per-concern state.
     public let ingress: (position: Int, hook: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?))?
     public let egress: (position: Int, hook: AriaV2EgressHook)?
 
     public init(
         concernName: String,
+        transform: (position: Int, hook: @Sendable (String, JSONValue) async throws -> JSONValue)? = nil,
         ingress: (position: Int, hook: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?))? = nil,
         egress: (position: Int, hook: AriaV2EgressHook)? = nil
     ) {
         self.concernName = concernName
+        self.transform = transform
         self.ingress = ingress
         self.egress = egress
     }
@@ -72,6 +75,7 @@ public struct AriaV2ChainRegistration: Sendable {
 /// Errors produced at chain-construction time; none are deferred to run time.
 public enum AriaV2CallChainError: Error, Sendable, Equatable {
     case duplicateConcernName(String)
+    case duplicateTransformPosition(Int)
     case duplicateIngressPosition(Int)
     case duplicateEgressPosition(Int)
 }
@@ -85,6 +89,7 @@ public enum AriaV2CallChainError: Error, Sendable, Equatable {
 /// normally.
 public struct AriaV2HookFailure: Sendable {
     public enum Phase: Sendable, Equatable {
+        case transform
         case ingress
         case egress
     }
@@ -111,7 +116,15 @@ public enum AriaV2HaltReason: Sendable, Equatable {
 
 // MARK: - Outcomes
 
-/// Result of running the ingress chain.
+/// Result of running the transform chain.
+public struct AriaV2TransformOutcome: Sendable {
+    /// The final arguments after all successful pre-decode mutations.
+    public let arguments: JSONValue
+    /// Failure records in hook-execution order.
+    public let failures: [AriaV2HookFailure]
+}
+
+/// Result of running the ingress (record) chain.
 public struct AriaV2IngressOutcome: Sendable {
     /// The final arguments after all successful ingress mutations.
     public let arguments: JSONValue
@@ -139,28 +152,31 @@ public struct AriaV2EgressOutcome: Sendable {
 /// The ARIA v2 pre/post processor.
 ///
 /// Build-once and immutable. Validated at construction, then `Sendable`.
-/// The two hook chains (ingress and egress) run in ascending declared-position
-/// order; textual registration order has no effect on behaviour.
+/// The three hook chains run in ascending declared-position order; textual
+/// registration order has no effect on behaviour.
 ///
-/// **Ingress** runs before the handler. A hook receives the tool name and
-/// the raw arguments, may remove keys from the arguments (so no operation
-/// declares them and no accepted-key set changes), and may record state for
-/// delivery to its own egress hook only. The invocation point is the caller's
-/// choice: key removal only reaches the decoder if the caller invokes ingress
-/// before decode. The v2 dispatcher invokes ingress after decode, so no
-/// concern registered today may rely on key removal taking effect.
+/// **Transform** runs before argument decode. A hook receives the tool name
+/// and the raw arguments, may remove keys (so the strict decoder never sees
+/// them), and returns the mutated arguments. The transform phase runs before
+/// the frozen-mutation guard; it is for argument shape, not for counting.
+///
+/// **Ingress** (record phase) runs after decode and after the frozen guard,
+/// before the handler. A hook receives the tool name and arguments, may
+/// mutate them, and may record state for delivery to its own egress hook.
+/// Counting happens here so a refused or decode-failed call is not counted.
 ///
 /// **Egress** runs after the handler returns. A hook receives the tool name,
 /// the current result, and any state its own ingress hook recorded.
 ///
 /// **Throw policy** (all four rules, no hook error escapes the chain):
-/// 1. A transform hook that throws: result unchanged, chain continues, failure recorded.
+/// 1. An egress transform hook that throws: result unchanged, chain continues, failure recorded.
 /// 2. A gate hook that throws: chain halts fail-closed. A guard that cannot decide
 ///    must not be assumed to permit.
 /// 3. An ingress hook that throws: arguments unchanged, no state recorded, that
 ///    concern's egress hook does not run.
 /// 4. If the failed-ingress concern has a gate egress hook: chain halts fail-closed
 ///    at that egress position (rule 2 applied retroactively).
+/// 5. A transform hook that throws: arguments unchanged, chain continues, failure recorded.
 ///
 /// **Scope of containment:** Swift `throw` errors are contained. `fatalError` and
 /// Objective-C exceptions are not catchable by this component and propagate normally.
@@ -169,6 +185,8 @@ public struct AriaV2EgressOutcome: Sendable {
 /// returns the payload unmodified, and tells the caller why. The caller renders.
 public struct AriaV2CallChain: Sendable {
 
+    // Transform hooks sorted by declared position (ascending).
+    private let transformChain: [(concernName: String, hook: @Sendable (String, JSONValue) async throws -> JSONValue)]
     // Ingress hooks sorted by declared position (ascending).
     private let ingressChain: [(concernName: String, hook: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?))]
     // Egress hooks sorted by declared position (ascending).
@@ -178,10 +196,12 @@ public struct AriaV2CallChain: Sendable {
 
     /// Construct the chain from an ordered list of registrations.
     ///
-    /// Validation happens here; `runIngress` and `runEgress` never throw.
+    /// Validation happens here; `runTransform`, `runIngress`, and `runEgress` never throw.
     ///
     /// - Throws: `AriaV2CallChainError.duplicateConcernName` if two registrations
     ///   share a concern name.
+    /// - Throws: `AriaV2CallChainError.duplicateTransformPosition` if two transform
+    ///   hooks share a declared position.
     /// - Throws: `AriaV2CallChainError.duplicateIngressPosition` if two ingress
     ///   hooks share a declared position.
     /// - Throws: `AriaV2CallChainError.duplicateEgressPosition` if two egress
@@ -195,7 +215,19 @@ public struct AriaV2CallChain: Sendable {
             }
         }
 
-        // 2. Collect and sort ingress hooks; reject duplicate positions.
+        // 2. Collect and sort transform hooks; reject duplicate positions.
+        var transformEntries: [(pos: Int, name: String, hook: @Sendable (String, JSONValue) async throws -> JSONValue)] = []
+        var seenTransformPos = Set<Int>()
+        for r in registrations {
+            guard let (pos, hook) = r.transform else { continue }
+            guard seenTransformPos.insert(pos).inserted else {
+                throw AriaV2CallChainError.duplicateTransformPosition(pos)
+            }
+            transformEntries.append((pos, r.concernName, hook))
+        }
+        transformEntries.sort { $0.pos < $1.pos }
+
+        // 3. Collect and sort ingress hooks; reject duplicate positions.
         var ingressEntries: [(pos: Int, name: String, hook: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?))] = []
         var seenIngressPos = Set<Int>()
         for r in registrations {
@@ -207,7 +239,7 @@ public struct AriaV2CallChain: Sendable {
         }
         ingressEntries.sort { $0.pos < $1.pos }
 
-        // 3. Collect and sort egress hooks; reject duplicate positions.
+        // 4. Collect and sort egress hooks; reject duplicate positions.
         var egressEntries: [(pos: Int, name: String, hook: AriaV2EgressHook)] = []
         var seenEgressPos = Set<Int>()
         var gating = Set<String>()
@@ -221,16 +253,46 @@ public struct AriaV2CallChain: Sendable {
         }
         egressEntries.sort { $0.pos < $1.pos }
 
+        self.transformChain = transformEntries.map { ($0.name, $0.hook) }
         self.ingressChain = ingressEntries.map { ($0.name, $0.hook) }
         self.egressChain = egressEntries.map { ($0.name, $0.hook) }
         self.gatingConcerns = gating
+    }
+
+    // MARK: Transform
+
+    /// Run all transform hooks in ascending declared-position order.
+    ///
+    /// Never throws. Errors from hooks are contained and recorded. The transform
+    /// phase runs before argument decode; a hook can remove a key the strict
+    /// decoder rejects and the decoder never sees it.
+    public func runTransform(toolName: String, arguments: JSONValue) async -> AriaV2TransformOutcome {
+        var current = arguments
+        var failures: [AriaV2HookFailure] = []
+
+        for (name, hook) in transformChain {
+            do {
+                current = try await hook(toolName, current)
+            } catch {
+                failures.append(AriaV2HookFailure(
+                    concernName: name,
+                    phase: .transform,
+                    errorDescription: error.localizedDescription
+                ))
+                // Arguments unchanged; chain continues.
+            }
+        }
+
+        return AriaV2TransformOutcome(arguments: current, failures: failures)
     }
 
     // MARK: Ingress
 
     /// Run all ingress hooks in ascending declared-position order.
     ///
-    /// Never throws. Errors from hooks are contained and recorded.
+    /// Never throws. Errors from hooks are contained and recorded. The ingress
+    /// phase runs after decode and after the frozen guard; counting happens here
+    /// so a refused or decode-failed call is not counted.
     public func runIngress(toolName: String, arguments: JSONValue) async -> AriaV2IngressOutcome {
         var current = arguments
         var state: [String: JSONValue] = [:]
