@@ -67,7 +67,10 @@ impl<'a> EstateV2MemoryService<'a> {
             exportability: Some(format!("{:?}", drawer.exportability()).to_lowercase()),
             confirmation: Some(format!("{:?}", drawer.confirmation()).to_lowercase()),
             lineage_id: Some(drawer.lineage_id.to_string()),
-            tunnels,
+            // Wrap in Some(…) so depth:full always serialises the key (even when
+            // the vec is empty). project_depth() sets this to None for non-full
+            // depths, causing the key to be omitted by skip_serializing_if.
+            tunnels: Some(tunnels),
             fetch: placeholder_fetch(memory_id),
         })
     }
@@ -142,7 +145,7 @@ impl<'a> EstateV2MemoryService<'a> {
             }
             Some(V2TunnelRow {
                 tunnel_id: canonical_uuid_str(&t.id),
-                kind: format!("{:?}", t.kind).to_lowercase(),
+                kind: tunnel_kind_wire(t.kind),
                 lifecycle: format!("{:?}", TunnelLifecycle::Active).to_lowercase(),
                 far_endpoint_id: far_drawer_id.map(canonical_uuid_str),
             })
@@ -731,10 +734,43 @@ fn recall_frame(context: &V2MemoryOperationContext, limit: usize) -> RecallFrame
 fn sensitivity(value: V2Sensitivity) -> AdjectiveSensitivity { match value { V2Sensitivity::Normal => AdjectiveSensitivity::Normal, V2Sensitivity::Elevated => AdjectiveSensitivity::Elevated, V2Sensitivity::Restricted => AdjectiveSensitivity::Restricted, V2Sensitivity::Secret => AdjectiveSensitivity::Secret } }
 fn exportability(value: V2Exportability) -> AdjectiveExportability { match value { V2Exportability::Private => AdjectiveExportability::Private, V2Exportability::Public => AdjectiveExportability::Public } }
 
-/// Map the optional sensitivity ceiling from context to an AdjectiveSensitivity,
-/// defaulting to Normal (public floor) when no ceiling grant is active.
+/// Canonical wire representation for a TunnelKind value.
+///
+/// Swift emits camelCase via `String(describing:)` on the Swift enum cases,
+/// which are themselves camelCase (e.g. `.derivesFrom`, `.respondsTo`). The
+/// Rust enum uses PascalCase (`DerivesFrom`, `RespondsTo`); `format!("{:?}")`
+/// produces the Pascal form, and `.to_lowercase()` flattens humps to
+/// "derivesfrom" / "respondsto" — both wrong. This explicit match preserves
+/// the camelCase humps required by the wire contract.
+fn tunnel_kind_wire(kind: locus_kit::tunnel_operational::TunnelKind) -> String {
+    use locus_kit::tunnel_operational::TunnelKind;
+    match kind {
+        TunnelKind::Supersedes  => "supersedes".to_owned(),
+        TunnelKind::References  => "references".to_owned(),
+        TunnelKind::Blocks      => "blocks".to_owned(),
+        TunnelKind::Validates   => "validates".to_owned(),
+        TunnelKind::Contradicts => "contradicts".to_owned(),
+        TunnelKind::DerivesFrom => "derivesFrom".to_owned(),
+        TunnelKind::Covers      => "covers".to_owned(),
+        TunnelKind::Elaborates  => "elaborates".to_owned(),
+        TunnelKind::RespondsTo  => "respondsTo".to_owned(),
+        TunnelKind::Parent      => "parent".to_owned(),
+    }
+}
+
+/// Map the optional sensitivity ceiling from context to an AdjectiveSensitivity.
+///
+/// When no explicit ceiling grant is active, defaults to Elevated — matching
+/// Swift's `V2MemoryOperationContext.maximumSensitivity` default of `.elevated`
+/// at AriaV2MemoryOperations.swift:38. The v1 reference is interface_tools.rs
+/// line 2556, which also applied the Elevated floor for ungated reads.
+///
+/// Normal is the wire-encoded floor for sensitivity values (raw 0); Elevated
+/// (raw 16) is the default grant ceiling meaning "readable without a special
+/// grant, but not publicly listed". Using Normal here would silently filter
+/// Elevated-sensitivity tunnel endpoints from depth:full reads.
 fn sensitivity_ceiling(context: &V2MemoryOperationContext) -> AdjectiveSensitivity {
-    context.sensitivity_ceiling.map(sensitivity).unwrap_or(AdjectiveSensitivity::Normal)
+    context.sensitivity_ceiling.map(sensitivity).unwrap_or(AdjectiveSensitivity::Elevated)
 }
 
 /// Normalise a raw tunnel/drawer id string to lowercase-canonical UUID form.
