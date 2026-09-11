@@ -327,15 +327,25 @@ public struct AriaV2MemoryMutations: Sendable {
         try validateEstate(request.estateID)
         do {
             let storedID = try await storedMemoryID(request.memoryID)
-            let outcome = try await kit.expunge(handle, .init(
+            let expungeOutcome = try await kit.expunge(handle, .init(
                 rowID: storedID,
                 reason: request.reason ?? "",
                 confirmation: request.confirmation
             ), now: context.now())
+            // D1: a partial erasure is a COMPLETED operation with a partial verdict,
+            // not a failure. isError stays false — the rows that were erased ARE gone.
+            // The outcome field uses the closed vocabulary `erased` / `erased_partially`
+            // so the caller can branch without parsing the text. D8: ids lowercased.
+            let refusedIDs = expungeOutcome.refusedSiblingIDs.map { $0.lowercased() }
+            let isPartial = !refusedIDs.isEmpty
+            let text = isPartial
+                ? "Partially erased memory \(id(request.memoryID)); \(refusedIDs.count) sibling(s) refused by the audit gate."
+                : "Erased memory \(id(request.memoryID))."
             return success(tool: "moot_erase_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)),
-                "refused_sibling_memory_ids": .array(outcome.refusedSiblingIDs.map { .string($0.lowercased()) }),
-            ]), text: "Erased memory \(id(request.memoryID)).")
+                "outcome": .string(isPartial ? "erased_partially" : "erased"),
+                "refused_sibling_memory_ids": .array(refusedIDs.map { .string($0) }),
+            ]), text: text)
         } catch { return unavailable("moot_erase_memory") }
     }
 
