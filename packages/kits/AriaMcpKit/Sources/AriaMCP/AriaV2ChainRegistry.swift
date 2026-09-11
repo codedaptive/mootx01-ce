@@ -12,17 +12,24 @@ enum AriaV2ChainPositions {
 
     // MARK: Transform
 
-    /// Transform position 1 is reserved for pre-decode argument mutation.
+    /// Transform position 1: used by the mode concern to strip the `mode` global
+    /// modifier and inject the sticky recall `answer` arg before decode.
     ///
-    /// The transform phase runs before AriaSurfaceDecoder so a hook can remove
-    /// a key the strict decoder rejects. No concern registers on the transform
-    /// phase in production today; the slot is defined so future concerns can
-    /// reserve a position without colliding.
+    /// The transform phase runs before `AriaSurfaceDecoder` so a hook can remove
+    /// or add a key before the strict decoder sees the arguments. The mode concern
+    /// occupies this position in production via `ariaV2PreDecodeRegistrations`.
     static let transformReserved: Int = 1
 
     // MARK: Ingress (record phase)
 
-    /// Session-accounting concern (recordCall) runs at ingress position 10.
+    /// Mode concern reads the pending declaration at ingress position 5, before
+    /// coaching at position 10 clears it.
+    ///
+    /// Returns the `unknownHint` text as per-concern ingress state so the mode
+    /// egress hook at position 20 can append the hint without re-reading actor state.
+    static let ingressMode: Int = 5
+
+    /// Session-accounting concern (`recordCall`) runs at ingress position 10.
     ///
     /// The ingress (record) phase runs after decode and after the frozen-mutation
     /// guard. Counting runs here because a refused or decode-failed call is not
@@ -42,49 +49,173 @@ enum AriaV2ChainPositions {
 
     /// Coaching hint and periodic-block transform run at egress position 10.
     static let egressCoaching: Int = 10
+
+    /// Mode hint egress runs at position 20, after the coaching hint at position 10.
+    ///
+    /// Appends an `unknownHint` line when the transform phase parsed a mode
+    /// declaration whose name or variant is not recognised. Recognised modes
+    /// (e.g. `Recall=Auto`) produce no hint here.
+    static let egressMode: Int = 20
+}
+
+// MARK: - Pre-decode registration factory
+
+/// Build the pre-decode (transform-phase) chain registration for one v2 call.
+///
+/// Called per call from `ToolDispatcher.dispatch` before `AriaSurfaceDecoder.decode`.
+/// The registration carries ONLY a transform hook; no ingress or egress hooks are
+/// present.
+///
+/// The mode concern's transform hook performs two jobs, in order:
+///   1. **Recall answer injection:** when `answer` is absent and the tool is
+///      `moot_memory_search` and the session has a sticky Recall variant, injects
+///      the variant's answer-mode raw value as the `answer` arg before decode.
+///      Per-call explicit `answer` always wins — injection only fires when the key
+///      is absent.
+///   2. **Mode arg stripping:** strips the `mode` global modifier from arguments so
+///      the strict decoder never sees it, unless the operation owns `mode` in its
+///      `inputSchema` (collision). Parses the declaration and stashes it in
+///      `modeSessionState.pendingDeclaration` for the post-decode ingress/egress hooks.
+///
+/// - Parameters:
+///   - environment: The process-environment dictionary used to select the v2 catalog.
+///   - modeSessionState: The per-session state actor.
+/// - Returns: One registration, concern name `"mode"`, transform hook only.
+func ariaV2PreDecodeRegistrations(
+    environment: [String: String],
+    modeSessionState: ModeSessionState
+) -> [AriaV2ChainRegistration] {
+
+    let transformHook: @Sendable (String, JSONValue) async throws -> JSONValue = { toolName, arguments in
+        var args = arguments.objectValue ?? [:]
+
+        // --- Recall answer injection (before mode stripping) ---
+        // Per-call explicit `answer` always wins. Only inject when the key is absent,
+        // the tool is moot_memory_search, and the session has a sticky Recall variant.
+        // The injected value causes AriaSurfaceDecoder to decode answer=<variant> rather
+        // than defaulting to PackagerAnswerMode.never, enabling the auto/always gate path.
+        if toolName == "moot_memory_search",
+           args["answer"] == nil,
+           let answerMode = await modeSessionState.stickyRecallAnswerMode {
+            args["answer"] = .string(answerMode)
+        }
+
+        // --- Mode arg stripping ---
+        // Some operations own `mode` in their inputSchema (e.g. moot_reclassify_fdc,
+        // moot_palace_import, moot_vault_import, moot_lens_partial_cue). When the
+        // operation owns `mode`, the key is left untouched and the stash is set to nil —
+        // the decoder will see and handle it normally.
+        var pendingDecl: ModeDeclaration? = nil
+        if let modeValue = args["mode"] {
+            let registry = AriaV2SelectedCatalog.registry(environment: environment)
+            var operationOwnsMode = false
+            if let op = registry.operation(named: toolName),
+               case .object(let schema) = op.inputSchema,
+               let propsValue = schema["properties"],
+               case .object(let props) = propsValue {
+                operationOwnsMode = props["mode"] != nil
+            }
+
+            if !operationOwnsMode {
+                // Strip the global modifier so the strict decoder never sees it.
+                args["mode"] = nil
+                // Parse the declaration; stash for the post-decode ingress hooks.
+                if case .string(let modeStr) = modeValue {
+                    pendingDecl = ModeDeclaration.parse(modeStr)
+                }
+            }
+        }
+
+        // Write the stash whether or not `mode` was present. A nil stash means
+        // "no mode declared this call" — the ingress hooks treat nil as no-op.
+        await modeSessionState.setPendingDeclaration(pendingDecl)
+        return .object(args)
+    }
+
+    return [
+        AriaV2ChainRegistration(
+            concernName: "mode",
+            transform: (position: AriaV2ChainPositions.transformReserved, hook: transformHook)
+        )
+    ]
 }
 
 // MARK: - Production registration factory
 
-/// Build the production chain registrations for one v2 call.
+/// Build the post-decode production chain registrations for one v2 call.
 ///
 /// Called per call because coaching's egress hook captures the decoded request
 /// and the session state, both of which vary per call.
+///
+/// Two registrations are returned:
+///   - `"mode"`: ingress at position 5, egress at position 20.
+///   - `"coaching"`: ingress at position 10, egress at position 10.
+///
+/// **Ingress order** (5 before 10): the mode ingress reads `pendingDeclaration`
+/// and returns its `unknownHint` as per-concern state, before coaching at position 10
+/// reads the same stash and calls `recordCall`.
+///
+/// **Egress order** (10 before 20): coaching hint fires first; mode hint appends
+/// after it, so coaching and mode hints appear in that order in the wire text.
 ///
 /// Construction can only fail on a duplicate concern name or a duplicate
 /// position, both programmer errors in this hard-coded list. Use `try!` at
 /// the call site (precedent: ToolDispatch.swift `try! AriaV2CapabilityDigest.digest`).
 ///
-/// The transform phase is empty in production: no concern removes keys before
-/// decode. The chain's transform slot is defined and reserved; it lands empty.
-///
 /// - Parameters:
 ///   - request: The decoded `AriaSurfaceRequest` for this call.
 ///   - modeSessionState: The per-session state actor.
-/// - Returns: One registration, concern name `"coaching"`.
+/// - Returns: Two registrations, concern names `"mode"` and `"coaching"`.
 func ariaV2ProductionRegistrations(
     request: AriaSurfaceRequest,
     modeSessionState: ModeSessionState
 ) -> [AriaV2ChainRegistration] {
 
-    // MARK: Coaching ingress (record) hook
+    // MARK: Mode ingress hook (position 5)
+    //
+    // Reads `pendingDeclaration` set by the transform hook and returns the
+    // declaration's `unknownHint` text as per-concern ingress state. The mode
+    // egress hook at position 20 receives this state and calls `applyHint`.
+    //
+    // Does NOT clear `pendingDeclaration` — the coaching ingress at position 10
+    // clears it after reading it for `recordCall`.
+    let modeIngress: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?) = {
+        _, arguments in
+        let decl = await modeSessionState.pendingDeclaration
+        // Per-concern state: bare unknownHint text as a string JSONValue, or nil.
+        // AriaV2Envelope.applyHint adds the "hint: " prefix — pass the bare text here.
+        let state: JSONValue? = decl?.unknownHint.map { .string($0) } ?? nil
+        return (arguments, state)
+    }
 
-    // Calls `recordCall` after decode and after the frozen guard so the
-    // periodic-coaching counter advances on admitted calls only. A frozen
-    // refusal returns before dispatchV2 reaches this hook; a decode failure
-    // throws before dispatchV2 is reached at all. Neither increments the
-    // counter.
+    // MARK: Mode egress hook (position 20)
+    //
+    // Applies the unknown-mode hint to the result when per-concern state is
+    // present. Recognised modes (e.g. Recall=Auto) have no unknownHint so this
+    // hook is a no-op for them. Never fires on error results (applyHint guards).
+    let modeEgress = AriaV2EgressHook.transform({ _, result, state in
+        guard let state, case .string(let hint) = state else { return result }
+        return AriaV2Envelope.applyHint(hint, to: result)
+    })
+
+    // MARK: Coaching ingress (record) hook (position 10)
+    //
+    // Reads `pendingDeclaration` (already consumed by the mode ingress at position 5),
+    // then clears it and calls `recordCall` with the declaration so the sticky state
+    // and call counters are updated for this call.
+    //
+    // The ingress (record) phase runs after decode and after the frozen-mutation
+    // guard. Counting runs here because a refused or decode-failed call is not a
+    // call. The transform phase runs before decode and must not advance the counter.
     let coachingIngress: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?) = {
         toolName, arguments in
-        await modeSessionState.recordCall(toolName: toolName, mode: nil)
+        let decl = await modeSessionState.pendingDeclaration
+        await modeSessionState.clearPendingDeclaration()
+        await modeSessionState.recordCall(toolName: toolName, mode: decl)
         return (arguments, nil)
     }
 
-    // MARK: Coaching egress hook (transform — not a gate)
-
-    // The transform phase runs before decode so a hook can remove a key the
-    // strict decoder rejects. Counting runs after the frozen guard because a
-    // refused call is not a call.
+    // MARK: Coaching egress hook (position 10, transform — not a gate)
     //
     // Order preserved from the inline implementation this hook replaces:
     //   1. Hint injection: AriaV2Coach.coachingHint → AriaV2Envelope.applyHint.
@@ -106,9 +237,14 @@ func ariaV2ProductionRegistrations(
 
     return [
         AriaV2ChainRegistration(
+            concernName: "mode",
+            ingress: (position: AriaV2ChainPositions.ingressMode, hook: modeIngress),
+            egress: (position: AriaV2ChainPositions.egressMode, hook: modeEgress)
+        ),
+        AriaV2ChainRegistration(
             concernName: "coaching",
             ingress: (position: AriaV2ChainPositions.ingressCoaching, hook: coachingIngress),
             egress: (position: AriaV2ChainPositions.egressCoaching, hook: coachingEgress)
-        )
+        ),
     ]
 }
