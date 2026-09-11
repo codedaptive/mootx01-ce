@@ -91,8 +91,26 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 kit: kit, handle: handle, wing: try string(request, "wing"),
                 topK: try boundedStringInteger(request, "topK", defaultValue: 5, maximum: 500),
                 now: context.now)
-            return .init(data: .object(["keystones": .array(ranked.map {
-                .object(["id": .string($0.id.lowercased()), "centrality": .double($0.centrality)])
+            // Dense-row hydration through the sensitivity gate (empty filterChain →
+            // BitmapEvaluator.insertDefaults injects sensitivityAtMost(.elevated)).
+            // Restricted/secret rows are absent from drawersByID and receive no structured
+            // fields; they still appear with id and centrality (indistinguishability rule).
+            let estate = try await kit.estate(for: handle)
+            let drawersByID = try await RecipeTools.structuredDrawersByID(
+                ids: ranked.map { $0.id }, estate: estate)
+            return .init(data: .object(["keystones": .array(ranked.map { keystone in
+                let id = keystone.id.lowercased()
+                guard let drawer = drawersByID[keystone.id] else {
+                    // Gated (restricted/secret) row: id and centrality only.
+                    return .object(["id": .string(id), "centrality": .double(keystone.centrality)])
+                }
+                return .object([
+                    "id": .string(id),
+                    "centrality": .double(keystone.centrality),
+                    "subject": .string(drawer.subject ?? "-"),
+                    "bestSpan": .string(drawer.content.isEmpty ? "-" : drawer.content),
+                    "eventTime": .string(ResultComposer.iso8601(drawer.eventTime)),
+                ])
             })]), compactText: "Found \(ranked.count) keystones.")
 
         case .lensConstellation:
@@ -281,7 +299,13 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         case .lensTrustSynthesis:
             let output = try await TrustLens.run(
                 kit: kit, handle: handle, frame: frame(request, context: context))
-            return .init(data: trustData(output), compactText: "Synthesized \(output.rankedIDs.count) trust-ranked memories.")
+            // Dense-row hydration through the sensitivity gate (empty filterChain).
+            let trustEstate = try await kit.estate(for: handle)
+            let trustDrawersByID = try await RecipeTools.structuredDrawersByID(
+                ids: output.rankedIDs, estate: trustEstate)
+            return .init(
+                data: trustData(output, drawersByID: trustDrawersByID),
+                compactText: "Synthesized \(output.rankedIDs.count) trust-ranked memories.")
 
         case .lensPartialCue:
             let matches = try await PartialCueRecall.run(
@@ -694,7 +718,30 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         ])
     }
 
-    private func trustData(_ output: TrustGroundedOutput) -> JSONValue {
+    /// Build the trust synthesis wire payload.
+    ///
+    /// `drawersByID` is the result of `RecipeTools.structuredDrawersByID` with an
+    /// empty filterChain (the sensitivity gate). Rows absent from the map are
+    /// restricted/secret and carry only the id field; admissible rows carry all
+    /// dense fields (subject, bestSpan, eventTime).
+    private func trustData(
+        _ output: TrustGroundedOutput,
+        drawersByID: [String: Drawer]
+    ) -> JSONValue {
+        // Dense-row hydration: rankedIDs becomes an array of objects.
+        // Gated rows carry only {id}; admissible rows carry {id, subject, bestSpan, eventTime}.
+        let rankedRows: JSONValue = .array(output.rankedIDs.map { id in
+            let lowID = id.lowercased()
+            guard let drawer = drawersByID[id] else {
+                return .object(["id": .string(lowID)])
+            }
+            return .object([
+                "id": .string(lowID),
+                "subject": .string(drawer.subject ?? "-"),
+                "bestSpan": .string(drawer.content.isEmpty ? "-" : drawer.content),
+                "eventTime": .string(ResultComposer.iso8601(drawer.eventTime)),
+            ])
+        })
         var data: [String: JSONValue] = [
             "context": .object([
                 "summary": .string(output.context.summary),
@@ -704,7 +751,7 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 "recommendations": .array(output.context.recommendations.map(JSONValue.string)),
                 "keyInsights": .array(output.context.keyInsights.map(JSONValue.string)),
             ]),
-            "rankedIDs": .array(output.rankedIDs.map { .string($0.lowercased()) }),
+            "rankedIDs": rankedRows,
             "highTrustCount": .integer(Int64(output.highTrustCount)),
         ]
         if let values = output.calibratedConfidences {
