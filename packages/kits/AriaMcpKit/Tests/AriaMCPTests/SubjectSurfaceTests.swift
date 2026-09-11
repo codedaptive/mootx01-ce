@@ -77,6 +77,77 @@ struct SubjectSurfaceTests {
     /// Characters — under the limit by that count — and 140 scalars, over it.
     /// Twin of the Rust `subject_length_counts_scalars_not_graphemes`.
 
+    /// BLOCKED: v2 routes moot_file_memory through AriaV2ArgumentDecoder, which
+    /// throws "Missing required argument 'subject'." (no "NEXT AI" instructive
+    /// text). The v1 dispatch path `runFileMemory()` (ToolDispatch.swift:1644+)
+    /// produced the "NEXT AI" register guidance, but in v2 `ToolDispatcher.dispatch()`
+    /// calls `AriaSurfaceDecoder.decode()` → `AriaV2FileMemoryRequest.init()` →
+    /// `decoder.requireString("subject")` which throws the generic missing-arg message.
+    /// Awaiting a ruling on whether v2 should also teach the register.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 AriaV2ArgumentDecoder throws \"Missing required argument 'subject'.\" with no NEXT AI instructive text; v1 runFileMemory() produced register guidance the v2 path does not"))
+    func fileMemoryWithoutSubjectIsRejectedInstructively() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "subject-missing"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_memory",
+                arguments: .object(["content": .string("content without a subject"),
+                                    "location": .string("subject-tests")]))
+        }
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_memory",
+                arguments: .object(["content": .string("content without a subject"),
+                                    "location": .string("subject-tests")]))
+        } catch let error as JSONRPCError {
+            #expect(error.message.contains("subject"))
+            #expect(error.message.contains("NEXT AI"),
+                "the error must teach the register, got: \(error.message)")
+        }
+    }
+
+    /// BLOCKED: v2 routes moot_file_memory through AriaV2ArgumentDecoder. For
+    /// oversize subject, `AriaV2MemoryOperations.subject()` at line 817 throws
+    /// "Argument 'subject' must be at most N characters." — a THROW not an
+    /// isError:true return. The v1 body expects `isError:true` and checks for
+    /// "subject must be 1–N characters"; the v2 dispatch throws JSONRPCError
+    /// before returning any result, so the guard on isError:true is never reached.
+    /// Awaiting a ruling on the v2 error-delivery shape.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 moot_file_memory throws JSONRPCError for oversize subject (AriaV2MemoryOperations.swift:817) instead of returning isError:true; v1 expected isError:true with message \"subject must be 1–N characters\""))
+    func fileMemoryOversizeSubjectReturnsContractError() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "subject-oversize"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let oversize = String(repeating: "x", count: DrawerStore.subjectLengthContract + 1)
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("some content"),
+                "subject": .string(oversize),
+                "location": .string("subject-tests"),
+            ]))
+        guard case let .object(obj) = result,
+              obj["isError"]?.boolValue == true,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(errorText)? = first["text"]
+        else {
+            Issue.record("oversize subject must return isError:true result, got: \(result)")
+            return
+        }
+        #expect(
+            errorText.contains("subject must be 1–\(DrawerStore.subjectLengthContract) characters"),
+            "error must name the contract; got: \(errorText)")
+        #expect(
+            errorText.contains("\(DrawerStore.subjectLengthContract + 1)"),
+            "error must include the actual count; got: \(errorText)")
+    }
+
     // MARK: - 2 + 3. Debt enumeration and setSubject round-trip
 
     /// setSubject oversize: v2 arg names are memory_id (not id) and set_subject (not setSubject).
@@ -283,5 +354,44 @@ struct SubjectSurfaceTests {
             #expect(error.message.contains("subject"),
                 "rejection must mention subject contract; got: \(error.message)")
         }
+    }
+
+    /// BLOCKED: v2 `moot_file_fact` subject validation at
+    /// `AriaV2KnowledgeJournal.swift:576` produces
+    /// "Argument 'subject' must contain 1–N characters." — a different message
+    /// from the v1 exact string "subject must be 1–N characters (got n).
+    /// One telegraphic sentence in the AI-facing register — compress, don't truncate."
+    /// The two ports must produce byte-identical error text; the v2 Swift message
+    /// diverges from the Rust port's format. Awaiting a ruling on which message wins.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 AriaV2KnowledgeJournal.swift:576 produces \"Argument 'subject' must contain 1–N characters.\" which does not match the Rust port's exact verbatim string that v1 pinned"))
+    func fileFactOversizeSubjectMessageMatchesRustPort() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "fact-subject-parity"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let n = DrawerStore.subjectLengthContract + 1
+        let oversize = String(repeating: "x", count: n)
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_fact",
+            arguments: .object([
+                "subject": .string(oversize),
+                "predicate": .string("worksAt"),
+                "object": .string("Acme"),
+            ]))
+        guard case let .object(obj) = result,
+              obj["isError"]?.boolValue == true,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(errorText)? = first["text"]
+        else {
+            Issue.record("oversize fact subject must return isError:true result, got: \(result)")
+            return
+        }
+        let expected = "subject must be 1–\(DrawerStore.subjectLengthContract) characters "
+            + "(got \(n)). One telegraphic sentence in the AI-facing "
+            + "register \u{2014} compress, don\u{2019}t truncate."
+        #expect(errorText == expected,
+            "file_fact error text must match Rust port verbatim, got: \(errorText)")
     }
 }
