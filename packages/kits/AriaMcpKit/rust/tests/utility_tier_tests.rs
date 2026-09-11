@@ -376,18 +376,19 @@ fn cognition_catalog_v2_verbose_row_key_set_matches_swift() {
         let obj = row.as_object().expect("a row must serialize as an object");
         let keys: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
 
+        // All v2 catalog operations supply an output_schema (the descriptor
+        // projection always has one). The expected key set is therefore fixed:
+        // a conditional on whether output_schema is present would allow one
+        // port to omit it silently while the other includes it, defeating
+        // the cross-port agreement check.
+        let expected: BTreeSet<&str> =
+            ["name", "description", "input_schema", "output_schema"].into_iter().collect();
         // No port may ever emit a null output_schema.
         assert!(
             !obj.get("output_schema").is_some_and(serde_json::Value::is_null),
             "{}: output_schema must be omitted, never null",
             tool.name
         );
-
-        let expected: BTreeSet<&str> = if obj.contains_key("output_schema") {
-            ["name", "description", "input_schema", "output_schema"].into_iter().collect()
-        } else {
-            ["name", "description", "input_schema"].into_iter().collect()
-        };
         assert_eq!(keys, expected, "{} verbose key set", tool.name);
     }
 
