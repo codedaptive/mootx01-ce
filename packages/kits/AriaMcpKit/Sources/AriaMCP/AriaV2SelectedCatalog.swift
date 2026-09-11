@@ -1841,13 +1841,38 @@ enum AriaV2SelectedCatalog {
     }
 
     private static func estateStatusDataSchema() -> JSONValue {
-        exactObjectSchema([
+        let count = JSONValue.object(["type": .string("integer"), "minimum": .integer(0)])
+        // `recall_trace_count` and `shared_content_migration` are the two
+        // optional members: the first is omitted when the count could not be
+        // read, because a fabricated zero would be indistinguishable from an
+        // empty trace table; the second only appears once a migration record
+        // exists, so an estate that never ran detection keeps its old shape.
+        return orderedExactObjectSchema([
             "estate_id": uuidSchema(),
             "estate_name": stringSchema(),
-            "memory_count": .object(["type": .string("integer"), "minimum": .integer(0)]),
-            "fact_count": .object(["type": .string("integer"), "minimum": .integer(0)]),
+            "memory_count": count,
+            "fact_count": count,
             "drains": .object(["type": .string("array"), "items": drainEntrySchema()]),
             "fdc_recalculation": enumSchema(["current", "missing", "stale"]),
+            "recall_trace_count": count,
+            "sync_state": stringSchema(),
+            "subjects_bearing": count,
+            "subjects_eligible": count,
+            "shared_content_migration": .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "state": stringSchema(),
+                    "estimated_reclaimable_bytes": count,
+                    "reclaimed_bytes": count,
+                ]),
+                "required": .array([.string("state")]),
+                "additionalProperties": .bool(false),
+            ]),
+        // Sorted, matching what exactObjectSchema emits and what the Rust port
+        // produces — the required array is ordered, so a different order is a
+        // different catalog and the shared digest diverges.
+        ], required: [
+            "drains", "estate_id", "estate_name", "fact_count", "fdc_recalculation", "memory_count", "subjects_bearing", "subjects_eligible", "sync_state",
         ])
     }
 

@@ -177,6 +177,30 @@ pub struct EstateDiagnosticsSnapshot {
     /// table. `None` means the key has never been written (no floor set yet).
     /// Read by `Status`; left `None` by `Ping`, `Map`, and other operations.
     pub fdc_floor: Option<String>,
+    /// Recall-trace depth, or `None` when the count could not be read.
+    ///
+    /// `None` is NOT zero, and the distinction is the point: a fabricated
+    /// zero is indistinguishable from a genuinely empty trace table and would
+    /// lie about how deep the reward pipeline is.
+    pub recall_trace_count: Option<u64>,
+    /// Sync backend state, or `local-only` when no engine is wired.
+    pub sync_state: String,
+    /// Subject debt, counted over the sensitivity-visible, non-empty set.
+    pub subjects_bearing: u64,
+    pub subjects_eligible: u64,
+    /// Present only once a migration record exists.
+    pub shared_content_migration: Option<SharedContentMigration>,
+}
+
+/// Shared-content reclaim progress, reported by `moot_estate_status` when a
+/// migration record exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SharedContentMigration {
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_reclaimable_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaimed_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +235,14 @@ pub struct EstateStatusData {
     /// FDC recalculation version. Per data contract §5.
     pub fdc_recalculation: String,
     pub drains: Vec<EstateDrain>,
+    /// Omitted rather than zeroed when unreadable; see the snapshot field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recall_trace_count: Option<u64>,
+    pub sync_state: String,
+    pub subjects_bearing: u64,
+    pub subjects_eligible: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_content_migration: Option<SharedContentMigration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -292,6 +324,11 @@ impl<P: EstateDiagnosticsAuthority> EstateDiagnosticsService<P> {
             fact_count,
             fdc_recalculation,
             drains,
+            recall_trace_count: snapshot.recall_trace_count,
+            sync_state: snapshot.sync_state,
+            subjects_bearing: snapshot.subjects_bearing,
+            subjects_eligible: snapshot.subjects_eligible,
+            shared_content_migration: snapshot.shared_content_migration,
         })
     }
 
