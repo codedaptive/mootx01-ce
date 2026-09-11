@@ -68,7 +68,15 @@ impl CognitionCatalogFailure {
 pub struct CognitionToolDescriptor {
     pub name: String,
     pub description: String,
-    pub input_schema: Value,
+    /// Full input schema (JSON Schema object with "required" array and
+    /// "properties"). Present in verbose mode only; omitted in terse mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Value>,
+    /// Declared output schema for this operation. Present in verbose mode
+    /// only; omitted in terse mode so callers are not burdened with the
+    /// schema object when they only need the name list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -81,7 +89,10 @@ pub struct CognitionRecipeDescriptor {
     pub name: String,
     pub version: String,
     pub description: String,
-    pub required_capabilities: Vec<String>,
+    /// The NeuronKit capabilities this recipe requires. Present in verbose
+    /// mode only; omitted in terse mode to keep the listing compact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -108,10 +119,12 @@ impl CognitionCatalogService {
         request: CognitionCatalogRequest,
     ) -> Result<CognitionLensesData, CognitionCatalogFailure> {
         self.validate(request)?;
-        let _ = request.verbose;
-
-        let tools = crate::v2::catalog::selected_tools();
-        let tools = tools
+        // inputSchema and outputSchema keys are camelCase in the catalog JSON
+        // produced by selected_tools() (Swift catalog format). The struct fields
+        // and serialized keys are snake_case (Serde default), so the mismatch
+        // is intentional: we read camelCase from the catalog, emit snake_case.
+        let catalog = crate::v2::catalog::selected_tools();
+        let tools = catalog
             .as_array()
             .expect("the v2 catalog must return an array")
             .iter()
@@ -123,14 +136,38 @@ impl CognitionCatalogService {
                 {
                     return None;
                 }
-                Some(CognitionToolDescriptor {
-                    name: name.to_owned(),
-                    description: tool["description"]
-                        .as_str()
-                        .expect("lower tool descriptors must have descriptions")
-                        .to_owned(),
-                    input_schema: tool["inputSchema"].clone(),
-                })
+                let description = tool["description"]
+                    .as_str()
+                    .expect("lower tool descriptors must have descriptions")
+                    .to_owned();
+                if request.verbose {
+                    // Verbose: include the full input and output schemas.
+                    Some(CognitionToolDescriptor {
+                        name: name.to_owned(),
+                        description,
+                        input_schema: Some(tool["inputSchema"].clone()),
+                        // `.get().cloned()` and NOT `tool["outputSchema"]`:
+                        // indexing a serde_json::Value with a missing key
+                        // yields Value::Null, which would serialize as
+                        // `"output_schema": null`. Swift omits the key when
+                        // ProjectedTool.outputSchema is nil
+                        // (AriaV2CognitionCatalog.swift buildOutputSchemaLookup),
+                        // so emitting null here would diverge from Swift.
+                        // Neither port ever emits a null output_schema.
+                        output_schema: tool
+                            .get("outputSchema")
+                            .filter(|schema| !schema.is_null())
+                            .cloned(),
+                    })
+                } else {
+                    // Terse: name and description only.
+                    Some(CognitionToolDescriptor {
+                        name: name.to_owned(),
+                        description,
+                        input_schema: None,
+                        output_schema: None,
+                    })
+                }
             })
             .collect();
         Ok(CognitionLensesData { tools })
@@ -141,17 +178,23 @@ impl CognitionCatalogService {
         request: CognitionCatalogRequest,
     ) -> Result<CognitionRecipesData, CognitionCatalogFailure> {
         self.validate(request)?;
-        let _ = request.verbose;
         let recipes = cognition_kit::recipe_catalog()
             .into_iter()
             .map(|recipe| CognitionRecipeDescriptor {
                 name: recipe.name,
                 version: recipe.version,
                 description: recipe.description,
-                required_capabilities: recipe.required_capabilities
-                    .into_iter()
-                    .map(|capability| capability.raw_value().to_owned())
-                    .collect(),
+                // Verbose: include required_capabilities; terse: omit them.
+                required_capabilities: if request.verbose {
+                    Some(
+                        recipe.required_capabilities
+                            .into_iter()
+                            .map(|capability| capability.raw_value().to_owned())
+                            .collect(),
+                    )
+                } else {
+                    None
+                },
             })
             .collect();
         Ok(CognitionRecipesData { recipes })
