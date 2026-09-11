@@ -327,11 +327,12 @@ public struct ToolDispatcher: Sendable {
     /// Shared by every value-semantic dispatcher derived from this session.
     let v2MemoryListCursorSession: AriaV2MemoryListCursorSession
 
-    /// Transform-phase registrations injected before argument decode.
+    /// Transform-phase registrations run before argument decode.
     ///
-    /// In production this is always empty — no concern removes keys before decode.
-    /// Test code populates it to prove the transform phase strips a decoder-rejected
-    /// key before AriaSurfaceDecoder sees the arguments.
+    /// In production this is populated by `ariaV2PreDecodeRegistrations` with the
+    /// mode concern's transform hook (strips `mode` global modifier, injects sticky
+    /// recall `answer` for `moot_memory_search`). Test code may replace this field
+    /// entirely to exercise the transform phase with a custom hook.
     internal var preDecodeRegistrations: [AriaV2ChainRegistration] = []
 
     /// Construct a single-estate dispatcher. `handle` is registered as
@@ -378,6 +379,13 @@ public struct ToolDispatcher: Sendable {
         // Hosts that parse `--frozen` pass the posture explicitly; everyone
         // else (the aria-mcp dev server, tests) gets the environment twin.
         self.posture = posture ?? EstatePosture.resolve(frozenFlag: false, environment: environment)
+        // Wire the mode concern's pre-decode transform hook: strips the `mode`
+        // global modifier before AriaSurfaceDecoder sees the arguments, and injects
+        // the sticky recall `answer` for moot_memory_search when absent.
+        self.preDecodeRegistrations = ariaV2PreDecodeRegistrations(
+            environment: environment,
+            modeSessionState: modeSessionState
+        )
     }
 
     /// Return a dispatcher that also addresses `additional`, with the
@@ -461,6 +469,13 @@ public struct ToolDispatcher: Sendable {
         self.modeSessionState = modeSessionState
         self.v2MemoryListCursorSession = v2MemoryListCursorSession
         self.posture = posture
+        // Re-wire the mode concern's pre-decode transform hook using the forwarded
+        // environment and modeSessionState. This preserves the production hook on
+        // dispatchers produced by registering(_:) and withMonitoringControl(_:).
+        self.preDecodeRegistrations = ariaV2PreDecodeRegistrations(
+            environment: environment,
+            modeSessionState: modeSessionState
+        )
     }
 
     // MARK: - Build serial derivation
@@ -650,9 +665,12 @@ public struct ToolDispatcher: Sendable {
             )
         }
 
-        // Transform phase: run before decode so a hook can remove a key the
-        // strict argument decoder rejects. The production registration list is
-        // empty; hooks arrive only through preDecodeRegistrations (test seam).
+        // Transform phase: run before decode so a hook can remove or inject a key
+        // before the strict argument decoder sees the arguments. In production,
+        // preDecodeRegistrations holds the mode concern's transform hook (strips the
+        // `mode` global modifier, injects sticky recall `answer` for moot_memory_search).
+        // Test code that replaces preDecodeRegistrations entirely still works because
+        // the field is internal var — the replacement overrides production hooks.
         // Construction fails only on duplicate concern names or positions —
         // programmer errors in the injected list — so try! is appropriate.
         let transformChain = try! AriaV2CallChain(registrations: preDecodeRegistrations)
