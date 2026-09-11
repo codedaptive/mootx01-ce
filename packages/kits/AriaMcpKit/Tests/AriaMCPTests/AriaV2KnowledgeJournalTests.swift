@@ -45,7 +45,7 @@ struct AriaV2KnowledgeJournalTests {
                 factID: factID, subject: "decision", predicate: "is", object: "ship",
                 sourceMemoryID: nil,
                 eventTime: ISO8601DateFormatter().date(from: "2026-09-08T00:00:00Z")!, state: "active"),
-            tunnels: [.init(tunnelID: tunnelID, fromID: sourceID, toID: nil, kind: "references")]
+            tunnels: [.init(tunnelID: tunnelID, fromID: sourceID, toID: nil, kind: "references", lifecycle: "active")]
         )
         let service = AriaV2KnowledgeJournalService(backend: backend, context: context)
 

@@ -212,6 +212,15 @@ public struct AriaV2KnowledgeTunnel: Sendable, Equatable {
     public let fromID: UUID?
     public let toID: UUID?
     public let kind: String
+    /// Where this edge sits on the review ladder: `active`, `proposed`,
+    /// `superseded` or `withdrawn`.
+    ///
+    /// Without it a caller cannot tell a user-confirmed link from an
+    /// unreviewed machine inference — the dreaming daemon and the
+    /// contradiction hunt both file `.proposed` edges on a timer, and an AI
+    /// reading connections would otherwise treat a guess as an established
+    /// fact.
+    public let lifecycle: String
 }
 
 public struct AriaV2KnowledgeFact: Sendable, Equatable {
@@ -397,7 +406,13 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
     private func visibleTunnels(_ candidates: [Tunnel], estate: Estate, ceiling: AdjectiveSensitivity, limit: Int) async throws -> [AriaV2KnowledgeTunnel] {
         let unique = Dictionary(grouping: candidates, by: \.id).values.compactMap(\.first).sorted { $0.id < $1.id }
         let rows = unique.compactMap { tunnel -> (Tunnel, UUID, UUID?, UUID?)? in
-            guard tunnel.adjectiveSensitivity.rawValue <= ceiling.rawValue,
+            // Connection surfaces report SETTLED edges only. v1 pushed this into
+            // SQL via activeTunnelsFrom/activeTunnelsTo; the Rust port filters
+            // here. Without it an unreviewed proposal filed by dreaming or the
+            // contradiction hunt reads as a confirmed link. Proposals are
+            // surfaced deliberately by the contradiction lens, not by this one.
+            guard tunnel.lifecycle == .active,
+                  tunnel.adjectiveSensitivity.rawValue <= ceiling.rawValue,
                   let tunnelID = UUID(uuidString: tunnel.id) else { return nil }
             let fromID = tunnel.sourceDrawerId.flatMap(UUID.init(uuidString:))
             let toID = tunnel.targetDrawerId.flatMap(UUID.init(uuidString:))
@@ -412,7 +427,8 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
             ($0.0.sourceDrawerId.map(visibleIDs.contains) ?? true) &&
             ($0.0.targetDrawerId.map(visibleIDs.contains) ?? true)
         }.prefix(limit).map { row in
-            .init(tunnelID: row.1, fromID: row.2, toID: row.3, kind: String(describing: row.0.kind))
+            .init(tunnelID: row.1, fromID: row.2, toID: row.3, kind: String(describing: row.0.kind),
+                  lifecycle: String(describing: row.0.lifecycle))
         }
     }
 
@@ -533,6 +549,9 @@ public struct AriaV2KnowledgeJournalService: Sendable {
     private static func tunnel(_ tunnel: AriaV2KnowledgeTunnel) -> JSONValue {
         var value: [String: JSONValue] = [
             "tunnel_id": .string(id(tunnel.tunnelID)), "kind": .string(tunnel.kind),
+            // Always emitted: a caller that cannot see the lifecycle cannot
+            // tell a confirmed link from an unreviewed machine proposal.
+            "lifecycle": .string(tunnel.lifecycle),
         ]
         if let fromID = tunnel.fromID { value["from_id"] = .string(id(fromID)) }
         if let toID = tunnel.toID { value["to_id"] = .string(id(toID)) }

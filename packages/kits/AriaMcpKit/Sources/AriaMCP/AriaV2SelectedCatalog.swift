@@ -830,7 +830,13 @@ enum AriaV2SelectedCatalog {
                     "exemplifies", "extends", "precedes", "references", "refines",
                     "relates", "responds_to", "supersedes", "supports", "validates",
                 ]),
-                "confidence": stringSchema(), "evidence": stringSchema(), "estate_id": uuidSchema(),
+                "confidence": stringSchema(), "evidence": stringSchema(),
+                // Default false, so an MCP-created link is ACTIVE — the caller
+                // was told to make it. `true` files it in the proposed lifecycle
+                // instead: the adjudication path, for a borderline candidate out
+                // of moot_hunt_contradictions that the user should settle.
+                "proposed": booleanSchema(),
+                "estate_id": uuidSchema(),
             ],
             required: ["from_id", "to_id", "relationship"], dataSchema: tunnelReceiptSchema()
         ),
@@ -843,7 +849,11 @@ enum AriaV2SelectedCatalog {
             properties: [
                 "tunnel_id": uuidSchema(),
                 "decision": enumSchema(["accept", "endorse", "reject"]),
-                "note": stringSchema(), "estate_id": uuidSchema(),
+                "note": stringSchema(),
+                // Defaults to "user". Edge activation is user-only, so a model
+                // reviewer passes its own id here and uses endorse or reject.
+                "reviewed_by": stringSchema(),
+                "estate_id": uuidSchema(),
             ],
             required: ["tunnel_id", "decision"], dataSchema: reviewTunnelDataSchema()
         ),
@@ -1511,8 +1521,11 @@ enum AriaV2SelectedCatalog {
                 "from_id": uuidSchema(),
                 "to_id": uuidSchema(),
                 "kind": stringSchema(),
+                // Always present. Distinguishes a confirmed edge from an
+                // unreviewed proposal filed by dreaming or the hunt.
+                "lifecycle": enumSchema(["active", "proposed", "superseded", "withdrawn"]),
             ]),
-            "required": .array([.string("tunnel_id"), .string("kind")]),
+            "required": .array([.string("tunnel_id"), .string("kind"), .string("lifecycle")]),
             "additionalProperties": .bool(false),
         ])
     }
@@ -1780,7 +1793,7 @@ enum AriaV2SelectedCatalog {
     private static func eraseMemoryDataSchema() -> JSONValue { orderedExactObjectSchema(["memory_id": uuidSchema(), "refused_sibling_memory_ids": uuidArraySchema()], required: ["memory_id", "refused_sibling_memory_ids"]) }
     private static func confirmMemoryDataSchema() -> JSONValue { orderedExactObjectSchema(["memory_id": uuidSchema(), "mutation": .object(["const": .string("confirm")])], required: ["memory_id", "mutation"]) }
     private static func moveMemoryDataSchema() -> JSONValue { orderedExactObjectSchema(["memory_id": uuidSchema(), "placement": placementSchema()], required: ["memory_id", "placement"]) }
-    private static func tunnelReceiptSchema() -> JSONValue { orderedExactObjectSchema(["tunnel_id": uuidSchema(), "from_id": uuidSchema(), "to_id": uuidSchema(), "kind": stringSchema()], required: ["tunnel_id", "kind"]) }
+    private static func tunnelReceiptSchema() -> JSONValue { orderedExactObjectSchema(["tunnel_id": uuidSchema(), "from_id": uuidSchema(), "to_id": uuidSchema(), "kind": stringSchema(), "lifecycle": enumSchema(["active", "proposed", "superseded", "withdrawn"])], required: ["tunnel_id", "kind", "lifecycle"]) }
     private static func reviewTunnelDataSchema() -> JSONValue {
         .object(["oneOf": .array([
             orderedExactObjectSchema(["tunnel_id": uuidSchema(), "new_endorser": booleanSchema(), "distinct_endorsers": nonnegativeIntegerSchema(), "contested": booleanSchema()], required: ["tunnel_id", "new_endorser", "distinct_endorsers", "contested"]),
