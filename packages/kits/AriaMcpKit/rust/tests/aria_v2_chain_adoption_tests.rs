@@ -1,7 +1,7 @@
 //! Integration-level adoption tests for the V2CallChain wiring.
 //!
-//! The GATE 1 chain-order proof (egress position 1 unoccupied, gate at 1 fires
-//! before coaching) lives in the in-crate unit test at
+//! The GATE 1 slot-reservation proof (egress position 1 unoccupied in the
+//! production registrations) lives in the in-crate unit test at
 //! `src/v2/chain_registry.rs #[cfg(test)]` because it requires access to the
 //! `pub(crate)` production factory.
 //!
@@ -44,13 +44,16 @@ fn make_live_dispatcher() -> Dispatcher {
 
 /// Returns true if the response carries a periodic coaching block.
 ///
-/// The block is identified by the presence of "Coaching" or the "🧠" emoji
-/// in the response text.  Both are rendered by PeriodicCoach::render_block.
+/// The block is identified by the rendered block marker `[Moot coaching`,
+/// which is the prefix emitted by `periodic_coach::render_block` on every
+/// coaching invocation.  Using the full literal prefix avoids false positives
+/// from tool output that happens to mention a coaching-related word (e.g.
+/// `moot_monitoring_status` naming a coaching setting in its output).
 fn has_coaching_block(response: &serde_json::Value) -> bool {
     let text = response["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or("");
-    text.contains("🧠") || text.contains("Coaching") || text.contains("coaching") || text.contains("Mode tips")
+    text.contains("[Moot coaching")
 }
 
 /// GATE 1 (integration, wiring): the egress transform fires at the default
