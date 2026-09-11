@@ -66,6 +66,21 @@ pub trait V2CoreMemoryService: Send + Sync {
     /// provenance/redaction gate to an absent and an inaccessible id.  The
     /// caller receives only authorized rows, so no existence oracle escapes
     /// through this v2 projection.
+    /// Mark surfaced rows as USED so the dreaming daemon's reward sweep can
+    /// assign reward 1.0 to their trace rows (DESIGN_TRACE_REWARD_2026-06-12).
+    ///
+    /// Defaulted to a no-op: a service with no estate behind it (the test
+    /// fakes) has no traces to reward. The estate-backed implementation does
+    /// the real work, and it is the ARIA layer that calls this — the
+    /// coordinator supplies `mark_recall_used` but never invokes it itself.
+    fn mark_dereferenced(
+        &self,
+        _context: &V2MemoryOperationContext,
+        _memory_ids: &[uuid::Uuid],
+        _ledger: &SurfacedRecallLedger,
+    ) {
+    }
+
     fn get_memories(
         &self,
         context: &V2MemoryOperationContext,
@@ -660,6 +675,13 @@ pub fn execute_memory_get(request: V2MemoryGetRequest, dependencies: &V2CoreMemo
         Ok(memories) if memories.is_empty() => Ok(V2MemoryFailure::not_found().render(MEMORY_GET_TOOL, &meta)),
         Ok(mut memories) => {
             for memory in &mut memories { memory.fetch = fetch(memory.memory_id); project_depth(memory, request.depth); }
+            // A get on a row this session surfaced is a dereference: the estate
+            // helped, and the reward sweep is how it learns that.
+            dependencies.service.mark_dereferenced(
+                &context,
+                &memories.iter().map(|memory| memory.memory_id).collect::<Vec<_>>(),
+                dependencies.surfaced_recall_ledger,
+            );
             success(MEMORY_GET_TOOL, &GetData { memories }, &meta, "memory get").map_err(jsonrpc_internal)
         }
         Err(failure) => Ok(failure.render(MEMORY_GET_TOOL, &meta)),
