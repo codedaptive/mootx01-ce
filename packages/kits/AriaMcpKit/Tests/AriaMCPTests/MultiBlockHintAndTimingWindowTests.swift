@@ -79,6 +79,14 @@ struct MultiBlockHintAndTimingWindowTests {
         }
     }
 
+    /// The `structuredContent.data` object of a tool-result JSONValue.
+    private func data(of result: JSONValue) -> [String: JSONValue]? {
+        guard case let .object(obj) = result,
+              case let .object(structured)? = obj["structuredContent"],
+              case let .object(data)? = structured["data"] else { return nil }
+        return data
+    }
+
     private func isError(of result: JSONValue) -> Bool {
         guard case let .object(obj) = result,
               case let .bool(flag)? = obj["isError"] else { return false }
@@ -93,6 +101,72 @@ struct MultiBlockHintAndTimingWindowTests {
     }
 
     // MARK: - Finding B: multi-block result + hint → all blocks survive
+
+    /// `return_id_map: true` must append a SECOND text block carrying the
+    /// id_map JSON, and absent must leave the reply at the single prose
+    /// receipt. The structured data carries `id_map` either way — the flag
+    /// gates the extra block only, for callers that cannot read
+    /// structuredContent.
+    ///
+    /// Rust twin: surface_selection_tests
+    /// v2_json_import_return_id_map_appends_a_second_text_block. Both ports
+    /// must emit byte-identical block text.
+    @Test("moot_json_import return_id_map appends a second text block")
+    func jsonImportReturnIDMapAppendsSecondBlock() async throws {
+        let (dispatcher, kit, handle) = try await makeVaultDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Two distinct seeds: re-importing one seed into the same estate is not
+        // a fresh write and the lower refuses it.
+        func seed(_ record: String) throws -> URL {
+            try tempSeedFile("""
+            {"format_version":1,"name":"idmap","records":[{"id":"\(record)","content":"id map seed \(record)","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"}]}
+            """)
+        }
+
+        // Absent return_id_map: exactly one block.
+        let plainSeed = try seed("plain")
+        defer { try? FileManager.default.removeItem(at: plainSeed) }
+        let plain = try await dispatcher.dispatch(
+            name: "moot_json_import",
+            arguments: .object(["path": .string(plainSeed.path)]))
+        #expect(!isError(of: plain), "plain import must succeed")
+        #expect(blocks(of: plain).count == 1,
+                "absent return_id_map must leave the reply at one block; got \(blocks(of: plain))")
+
+        // The structured data carries id_map even when the flag is absent.
+        let plainData = data(of: plain)
+        #expect(plainData?["id_map"] != nil,
+                "structured data must carry id_map even when the flag is absent")
+
+        // return_id_map:true: a second block whose text is the exact id_map JSON.
+        let mappedSeed = try seed("seed/mapped")
+        defer { try? FileManager.default.removeItem(at: mappedSeed) }
+        let mapped = try await dispatcher.dispatch(
+            name: "moot_json_import",
+            arguments: .object([
+                "path": .string(mappedSeed.path),
+                "return_id_map": .bool(true),
+            ]))
+        #expect(!isError(of: mapped), "mapped import must succeed")
+        let mappedBlocks = blocks(of: mapped)
+        #expect(mappedBlocks.count == 2,
+                "return_id_map:true must append a second block; got \(mappedBlocks)")
+
+        // Assert on the block's TEXT, not merely on the count: a count check
+        // passes even when the block carries the wrong payload. The record id
+        // carries a slash on purpose: .withoutEscapingSlashes must leave it bare,
+        // matching serde_json. An escaped \\/ here would be a port divergence.
+        guard case let .object(idMap)? = data(of: mapped)?["id_map"],
+              case let .string(drawerID)? = idMap["seed/mapped"] else {
+            Issue.record("id_map must map the seed record id to its drawer id")
+            return
+        }
+        #expect(drawerID == drawerID.lowercased(), "drawer ids are canonical lowercase")
+        #expect(mappedBlocks.count == 2 && mappedBlocks[1] == "{\"id_map\":{\"seed/mapped\":\"\(drawerID)\"}}",
+                "second block text must be the exact id_map JSON; got \(mappedBlocks.last ?? "none")")
+    }
+
 
     // MARK: - Finding B guard: error results stay untouched by the hint path
 
