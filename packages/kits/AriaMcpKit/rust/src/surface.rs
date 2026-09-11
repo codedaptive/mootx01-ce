@@ -512,6 +512,27 @@ pub(crate) fn execute(
     }
 }
 
+/// Renders a mutation outcome as the wire string for the `outcome` field.
+///
+/// `ErasedPartially` is handled explicitly because the Swift port hard-codes
+/// `"erased_partially"` (see `AriaV2MemoryMutations.swift:346`), while
+/// `format!("{:?}", …).to_lowercase()` produces `"erasedpartially"` — no
+/// separator — for a two-word variant.  Every other variant is a single word
+/// and renders correctly via Debug + lowercase.
+///
+/// The tunnel variants (`TunnelAccepted`, `TunnelEndorsed`, `TunnelRejected`)
+/// also have two components, but they are NOT exposed on this code path from
+/// Swift and their current wire values (`"tunnelaccepted"`, etc.) are part of
+/// the shipped Rust-only contract.  Changing them here would be an unmandated
+/// wire-value change.  If parity is ever required for those variants, update
+/// this function and the wire-contract docs at the same time.
+fn mutation_outcome_wire_value(outcome: crate::v2::memory_mutations::V2MemoryMutationOutcome) -> String {
+    match outcome {
+        crate::v2::memory_mutations::V2MemoryMutationOutcome::ErasedPartially => "erased_partially".to_owned(),
+        other => format!("{:?}", other).to_lowercase(),
+    }
+}
+
 fn execute_memory_mutation(
     request: MemoryMutationRequest,
     registry: &crate::estate_registry::EstateRegistry,
@@ -585,7 +606,7 @@ fn execute_memory_mutation(
                 }),
                 None => json!({
                     "operation": result.operation.tool_name(),
-                    "outcome": format!("{:?}", result.outcome).to_lowercase(),
+                    "outcome": mutation_outcome_wire_value(result.outcome),
                     "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
                     "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
                 }),
@@ -2304,5 +2325,205 @@ mod tests {
                 operation["name"].as_str() != Some("moot_vault_export")
             }));
         }
+    }
+
+    /// Gate: `ErasedPartially` renders as `"erased_partially"` (with underscore)
+    /// to match the Swift port wire value.  Before the fix the Debug-plus-lowercase
+    /// path produced `"erasedpartially"` (no separator).
+    ///
+    /// These tests FAIL against the original code (line 665 of the pre-fix surface.rs
+    /// returned `format!("{:?}", outcome).to_lowercase()` for every variant) and
+    /// PASS after the fix introduces `mutation_outcome_wire_value`.
+    #[test]
+    fn erased_partially_outcome_renders_with_underscore_matching_swift_port() {
+        // Pre-fix assertion failure text:
+        //   assertion `left == right` failed
+        //     left: "erasedpartially"
+        //    right: "erased_partially"
+        assert_eq!(
+            mutation_outcome_wire_value(
+                crate::v2::memory_mutations::V2MemoryMutationOutcome::ErasedPartially
+            ),
+            "erased_partially",
+            "ErasedPartially must render as \"erased_partially\" to match the Swift port"
+        );
+    }
+
+    /// Gate: a full erase must still emit `"erased"`, not `"erased_partially"`.
+    /// A careless fix that routes every erase through the explicit arm would
+    /// break this.
+    #[test]
+    fn erased_outcome_renders_as_erased_not_partially() {
+        assert_eq!(
+            mutation_outcome_wire_value(
+                crate::v2::memory_mutations::V2MemoryMutationOutcome::Erased
+            ),
+            "erased",
+            "Erased must render as \"erased\", not \"erased_partially\""
+        );
+    }
+
+    /// Gate: `execute_memory_mutation` emits `"erased_partially"` (with underscore)
+    /// in the actual JSON response for an erase whose outcome is `ErasedPartially`.
+    ///
+    /// This test exercises the emission path — line 686 in `execute_memory_mutation` —
+    /// not just the helper function `mutation_outcome_wire_value`.  Reverting line 686
+    /// to `format!("{:?}", result.outcome).to_lowercase()` (while leaving the helper
+    /// defined but unwired) produces `"erasedpartially"` (no separator) and causes
+    /// this assertion to fail.
+    ///
+    /// Setup: seed an accepted drawer (D1) and an active sibling (D2) in the same
+    /// lineage.  The audit gate refuses D1 during expunge, so erasing D2 yields
+    /// `ErasedPartially` and the response carries the partially-erased outcome.
+    #[test]
+    fn execute_memory_mutation_emits_erased_partially_for_emission_path() {
+        use locus_kit::adjectives::Trust;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::{CaptureFrame, MutationKind};
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2EraseMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        // Milliseconds — matches INIT_NOW used by InMemoryDrawerStore.
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        // Seed D1 (accepted) and D2 (active sibling in the same lineage).
+        // The audit gate refuses D1 during expunge (S-3: Accepted → Tombstoned
+        // is a forbidden transition), so erasing D2 yields ErasedPartially.
+        let d2_id: String = {
+            let coord = registry.coord.lock().expect("coord lock");
+
+            let d1 = coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "accepted anchor kept by audit gate during partial lineage expunge",
+                    CaptureChannel::Typed,
+                    "default",
+                    LatticeAnchor::udc("000"),
+                    "test",
+                    "test-embed-v1",
+                ),
+                NOW,
+            ).expect("capture d1");
+
+            coord.mutate(&handle, &d1.id, MutationKind::CorrectTrust(Trust::Canonical), None)
+                .expect("correct trust to canonical");
+            coord.mutate(&handle, &d1.id, MutationKind::Accept, None)
+                .expect("accept d1");
+
+            let mut d2_frame = CaptureFrame::new(
+                "active sibling to erase — triggers ErasedPartially because D1 is refused",
+                CaptureChannel::Typed,
+                "default",
+                LatticeAnchor::udc("000"),
+                "test",
+                "test-embed-v1",
+            );
+            d2_frame.lineage_id = Some(d1.lineage_id);
+
+            let d2 = coord.capture(&handle, d2_frame, NOW + 100)
+                .expect("capture d2");
+            d2.id.clone()
+        }; // Mutex guard dropped here before execute_memory_mutation re-acquires it.
+
+        let d2_uuid = Uuid::parse_str(&d2_id).expect("parse d2 uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        // This call drives line 686 inside execute_memory_mutation.
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                memory_id: d2_uuid,
+                confirmation: true,
+                reason: None,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 200,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("erase must succeed");
+
+        // The "outcome" field is at structuredContent.data.outcome in the
+        // v2 response envelope (see v2/render.rs: success wraps data inside
+        // structuredContent).  If line 686 is reverted to the old
+        // `format!("{:?}", result.outcome).to_lowercase()` path, the value
+        // here is "erasedpartially" (no underscore) and this assertion fails.
+        assert_eq!(
+            response["structuredContent"]["data"]["outcome"],
+            "erased_partially",
+            "execute_memory_mutation must emit \"erased_partially\" (with underscore) \
+             for ErasedPartially; a revert to format! debug+lowercase yields \"erasedpartially\""
+        );
+    }
+
+    /// Negative case: a full erase (no refused siblings) must emit `"erased"`,
+    /// not `"erased_partially"`.  Exercises the same emission path as the
+    /// partial-erase gate above.
+    #[test]
+    fn execute_memory_mutation_emits_erased_for_full_erase_emission_path() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2EraseMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let d1_id: String = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d1 = coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "memory with no accepted siblings — full erase expected",
+                    CaptureChannel::Typed,
+                    "default",
+                    LatticeAnchor::udc("000"),
+                    "test",
+                    "test-embed-v1",
+                ),
+                NOW,
+            ).expect("capture d1");
+            d1.id.clone()
+        };
+
+        let d1_uuid = Uuid::parse_str(&d1_id).expect("parse uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                memory_id: d1_uuid,
+                confirmation: true,
+                reason: None,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 200,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("full erase must succeed");
+
+        assert_eq!(
+            response["structuredContent"]["data"]["outcome"],
+            "erased",
+            "execute_memory_mutation must emit \"erased\" for a full erase with no refused siblings"
+        );
     }
 }
