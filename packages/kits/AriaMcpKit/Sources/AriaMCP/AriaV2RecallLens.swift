@@ -134,7 +134,17 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         case .recallShaped:
             let a = request.arguments; let f = try filter(a["filter"]?.stringValue)
             let preset = a["preset"]?.stringValue ?? "balanced"
-            guard RecallShape.presetNames.contains(preset) else { throw AriaV2InvalidArgument(path: "preset", message: "Unknown recall preset '\(preset)'.").jsonRPCError }
+            // Presets are a closed set, so the refusal names it. The message keeps
+            // the phrase the contract has always used and the list rides in
+            // `allowed` as well, since a caller reading either should be able to
+            // fix the call without a second round trip.
+            guard RecallShape.presetNames.contains(preset) else {
+                throw AriaV2InvalidArgument(
+                    path: "preset",
+                    message: "unknown preset '\(preset)'; valid presets: "
+                        + RecallShape.presetNames.sorted().joined(separator: ", "),
+                    allowed: RecallShape.presetNames.sorted()).jsonRPCError
+            }
             // Thread frontier_k through to the engine; absent means nil (engine default formula).
             let frontierK = a["frontier_k"]?.integerValue.map { Int($0) }
             let rows = try await ShapedRecall().run(input: .init(query: a["query"]!.stringValue!, preset: preset, filter: a["wing"]?.stringValue.map { .all([f, .inWing($0)]) } ?? f, limit: Int(a["limit"]?.integerValue ?? 20), frontierK: frontierK), estate: handle, kit: kit).matches
@@ -194,7 +204,11 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         if let wing = args["wing"]?.stringValue { scoped = .all([base, .inWing(wing)]) } else { scoped = base }
         let composition = args["composition"]?.stringValue
         if let composition, !NeuronKit.CompositionGrid.names.contains(composition) {
-            throw AriaV2InvalidArgument(path: "composition", message: "Unknown precise-recall composition '\(composition)'.", allowed: NeuronKit.CompositionGrid.names).jsonRPCError
+            throw AriaV2InvalidArgument(
+                path: "composition",
+                message: "unknown composition '\(composition)'; valid names: "
+                    + NeuronKit.CompositionGrid.names.sorted().joined(separator: ", "),
+                allowed: NeuronKit.CompositionGrid.names).jsonRPCError
         }
         let matches = try await PreciseRecall.run(kit: kit, handle: handle, query: query, filter: scoped, limit: limit, pool: pool, composition: composition)
         return try await projectedResult(
@@ -416,7 +430,20 @@ public struct AriaV2RecallLensService: Sendable {
         do {
             let outcome = try await authority.execute(request)
             return AriaV2Envelope.success(tool: request.operation.rawValue, effect: .read, data: outcome.data, meta: ["completeness": .string("incomplete")], compactText: outcome.compactText)
+        } catch let error as JSONRPCError {
+            // A bad argument is the CALLER's error and must reach them as one,
+            // with the path and the allowed values, so they can fix the call
+            // rather than retry it. This file already raises exactly that at
+            // :137 (unknown preset), :153 (unknown window), :193 (unknown
+            // composition, carrying the allowed list) and :209 (unknown
+            // filter) — a blanket catch here would flatten all four into
+            // "unavailable", which reads as an estate problem and invites a
+            // pointless retry.
+            throw error
         } catch {
+            // Anything else genuinely is the estate failing to serve the call.
+            // Absent and inaccessible deliberately collapse here, so the
+            // caller cannot use the refusal as an existence oracle.
             return AriaV2Envelope.refusal(tool: request.operation.rawValue, error: .init(code: "recall_unavailable", message: "The requested recall or lens operation is unavailable in the selected estate.", retryable: false))
         }
     }
