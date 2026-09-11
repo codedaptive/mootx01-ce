@@ -362,17 +362,28 @@ public struct AriaV2SearchResult: Sendable {
     /// the v1 S1 surface emits via ResultComposer.controlLines. Fakes default
     /// to false (no degradation on empty-estate test estates).
     public let degraded: Bool
+    /// False when the span rerank stage is not registered, which makes the
+    /// ranking lexical-only.
+    ///
+    /// Discrimination reads this and caps a `.high` verdict down to `.medium`:
+    /// a lexical-only ranking cannot justify high confidence, and reporting it
+    /// as high tells the caller to trust an ordering that no dense signal
+    /// informed. Defaults true so a fake that never sets it keeps the
+    /// ordinary, fully-ranked behaviour.
+    public let spanRerankRegistered: Bool
 
     public init(
         records: [(record: AriaV2MemoryRecord, score: Double)],
         answerBlock: GLKAnswerBlock?,
         totalCount: Int,
-        degraded: Bool = false
+        degraded: Bool = false,
+        spanRerankRegistered: Bool = true
     ) {
         self.records = records
         self.answerBlock = answerBlock
         self.totalCount = totalCount
         self.degraded = degraded
+        self.spanRerankRegistered = spanRerankRegistered
     }
 }
 
@@ -597,7 +608,11 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             // Propagate degradation signal from the recall director so the
             // operations layer can emit the "retrieval: degraded" compact text
             // control line. Mirrors ToolDispatch.runMemorySearch's degraded flag.
-            degraded: !result.degradedStages.isEmpty
+            degraded: !result.degradedStages.isEmpty,
+            // The span rerank stage's registration, so discrimination can cap
+            // a high verdict on a lexical-only ranking. Without this the
+            // operations layer has no way to know the dense lane was dark.
+            spanRerankRegistered: await kit.isSpanRerankRegistered(for: handle)
         )
     }
 
@@ -739,15 +754,26 @@ public struct AriaV2MemoryOperations: Sendable {
         // §1 before §3). Only low and medium are surfaced in v2 compact text
         // (high/single/not_found are silent). Mirrors the Rust v2 execute_memory_search
         // explain branch.
-        if request.explain {
-            let scores = visible.map { $0.score }
-            let disc = RecallDiscrimination.classify(scores)
-            switch disc {
-            case .low, .medium:
-                compactText += "\n" + RecallDiscrimination.resultLine(for: disc)
-            default:
-                break
-            }
+        // NOT gated behind `explain`. The discrimination line is a confidence
+        // signal the caller needs in order to judge the result it was just
+        // handed; hiding it until asked means the ordinary call gets a ranking
+        // with no indication of how much to trust it. v1 emitted it on every
+        // search and only for LOW and MEDIUM — high, single-result and
+        // not-found stay silent because there is nothing to warn about.
+        let scores = visible.map { $0.score }
+        var discrimination = RecallDiscrimination.classify(scores)
+        // A lexical-only ranking cannot support a high verdict. v1 applied the
+        // same cap; v2 could not, because nothing told it the span stage was
+        // unregistered, so it could report high confidence in an ordering no
+        // dense signal had informed.
+        if !result.spanRerankRegistered, discrimination == .high {
+            discrimination = .medium
+        }
+        switch discrimination {
+        case .low, .medium:
+            compactText += "\n" + RecallDiscrimination.resultLine(for: discrimination)
+        default:
+            break
         }
         // Degradation: append control line AFTER discrimination, matching the v1 S1
         // surface (ResultComposer.controlLines §3 follows §1). rrf on unionBest mode

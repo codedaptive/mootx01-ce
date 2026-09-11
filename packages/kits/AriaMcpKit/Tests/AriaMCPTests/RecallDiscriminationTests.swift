@@ -259,10 +259,21 @@ struct RecallDiscriminationTests {
         )
     }
 
-    /// Without explain, the moot_memory_search response must NOT contain a
-    /// "discrimination:" line — the gate is strictly opt-in so callers that do
-    /// not ask for it receive no extra tokens.
-    @Test func explainOmittedSuppressesDiscriminationLine() async throws {
+    /// CONTRACT REVERSED 2026-09-11. This case previously asserted that the
+    /// discrimination line was suppressed unless `explain` was passed, on the
+    /// grounds that callers who do not ask for it should not pay the tokens.
+    ///
+    /// That premise does not hold: the line is emitted for LOW and MEDIUM
+    /// only — high, single-result and not-found are silent — so it is not a
+    /// per-call cost, it is a warning that appears exactly when the ranking is
+    /// too weak to rely on. Gating it meant the ordinary caller received a
+    /// poor ranking with nothing saying so, which is the one case where the
+    /// signal is worth its tokens. v1 emitted it on every search under the
+    /// same confidence condition.
+    ///
+    /// So the assertion is inverted rather than deleted: a weak result must
+    /// carry its warning WITHOUT `explain`.
+    @Test func weakDiscriminationIsReportedWithoutExplain() async throws {
         let dispatcher = try await makeDispatcher()
         try await fileMemory(content: "discrimination-gate-test content alpha", location: "lab", dispatcher: dispatcher)
         try await fileMemory(content: "discrimination-gate-test content beta", location: "lab", dispatcher: dispatcher)
@@ -275,9 +286,11 @@ struct RecallDiscriminationTests {
             ])
         )
         let text = result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        // Three near-identical rows give a weak, indiscriminate ranking, so
+        // the warning must be present even though explain was not passed.
         #expect(
-            !text.contains("discrimination:"),
-            "explain omitted must NOT produce a discrimination line; got: \(text.prefix(400))"
+            text.contains("discrimination:"),
+            "a weak ranking must warn the caller without needing explain; got: \(text.prefix(400))"
         )
     }
 }
