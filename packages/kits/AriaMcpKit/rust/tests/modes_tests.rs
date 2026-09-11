@@ -532,7 +532,6 @@ fn golden_pin_template5_tie_fixture() {
 /// How it fails if reverted: unknown_hint() returns "hint: …", dispatcher wraps
 /// it as "hint: hint: …" — the double prefix appears and contains() returns true.
 #[test]
-#[ignore = "BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."]
 fn unknown_mode_wire_text_has_no_double_hint_prefix() {
     let dispatcher = make_dispatcher();
     // Use moot_estate_status with an unknown mode arg — the cheapest call that
@@ -633,7 +632,6 @@ fn answer_never_with_no_mode_is_unchanged() {
 ///
 /// Mirrors Swift test D2 `recallAutoE2eDispatcherPath`.
 #[test]
-#[ignore = "BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."]
 fn sticky_recall_auto_e2e_dispatcher() {
     // OBSTACLE 3: build_advisory (6th arg) was removed in v2A; pass 5 args only.
     let dispatcher = Dispatcher::new(
