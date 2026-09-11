@@ -57,10 +57,6 @@ pub(crate) enum SurfaceRequest {
     },
     VaultLifecycle(VaultLifecycleRequest),
     TranscriptRecall(crate::v2::transcript_recall::V2TranscriptRecallRequest),
-    FilePacket { args: BTreeMap<String, JsonValue>, estate_id: Option<Uuid> },
-    PacketGet { request: crate::v2::packets::GetPacketRequest, estate_id: Option<Uuid> },
-    PacketList { request: crate::v2::packets::ListPacketsRequest, estate_id: Option<Uuid> },
-    PacketLineage { request: crate::v2::packets::LineageRequest, estate_id: Option<Uuid> },
     MonitoringSet(crate::v2::monitoring_set::V2MonitoringSetRequest),
     MonitoringStatus,
 }
@@ -346,39 +342,6 @@ impl SelectedSurface {
                 "moot_memory_recall_transcript" => SurfaceRequest::TranscriptRecall(
                     crate::v2::transcript_recall::V2TranscriptRecallRequest::decode(&value)
                         .map_err(crate::v2::codec::V2InvalidArgument::into_jsonrpc_error)?),
-                "moot_file_packet" => {
-                    let packet_args = packet_json_args(args)?;
-                    crate::v2::packets::FilePacketRequest::decode(&packet_args, 0, None)
-                        .map_err(packet_decode_error)?;
-                    SurfaceRequest::FilePacket {
-                        args: args.clone(),
-                        estate_id: packet_estate_id(args)?,
-                    }
-                }
-                "moot_packet_get" => {
-                    let packet_args = packet_json_args(args)?;
-                    SurfaceRequest::PacketGet {
-                        request: crate::v2::packets::GetPacketRequest::decode(&packet_args)
-                            .map_err(packet_decode_error)?,
-                        estate_id: packet_estate_id(args)?,
-                    }
-                }
-                "moot_packet_list" => {
-                    let packet_args = packet_json_args(args)?;
-                    SurfaceRequest::PacketList {
-                        request: crate::v2::packets::ListPacketsRequest::decode(&packet_args)
-                            .map_err(packet_decode_error)?,
-                        estate_id: packet_estate_id(args)?,
-                    }
-                }
-                "moot_packet_lineage" => {
-                    let packet_args = packet_json_args(args)?;
-                    SurfaceRequest::PacketLineage {
-                        request: crate::v2::packets::LineageRequest::decode(&packet_args)
-                            .map_err(packet_decode_error)?,
-                        estate_id: packet_estate_id(args)?,
-                    }
-                }
                 "moot_monitoring_status" => {
                     if let Some((key, _)) = args.iter().next() {
                         return Err(invalid_argument(
@@ -424,9 +387,6 @@ impl SurfaceRequest {
             | SurfaceRequest::VaultLifecycle(VaultLifecycleRequest::Export(_))
             | SurfaceRequest::VaultLifecycle(VaultLifecycleRequest::Job(_))
             | SurfaceRequest::TranscriptRecall(_)
-            | SurfaceRequest::PacketGet { .. }
-            | SurfaceRequest::PacketList { .. }
-            | SurfaceRequest::PacketLineage { .. }
             | SurfaceRequest::MonitoringStatus => SurfaceEffect::Inspection,
             SurfaceRequest::FileMemory(_)
             | SurfaceRequest::Dream(_)
@@ -436,7 +396,6 @@ impl SurfaceRequest {
             | SurfaceRequest::KnowledgeJournal(KnowledgeJournalRequest::FileFact(_))
             | SurfaceRequest::KnowledgeJournal(KnowledgeJournalRequest::RetireFact(_))
             | SurfaceRequest::KnowledgeJournal(KnowledgeJournalRequest::WriteJournal(_))
-            | SurfaceRequest::FilePacket { .. }
             | SurfaceRequest::VaultLifecycle(VaultLifecycleRequest::Reindex(_))
             | SurfaceRequest::VaultLifecycle(VaultLifecycleRequest::ReclassifyFdc(_))
             | SurfaceRequest::VaultLifecycle(VaultLifecycleRequest::PalaceImport(_))
@@ -538,42 +497,6 @@ pub(crate) fn execute(
             execute_vault_lifecycle(request, registry, vault_ledger, &meta, now_millis),
         SurfaceRequest::TranscriptRecall(request) =>
             crate::v2::transcript_recall::execute(request, registry, &meta, now_millis),
-        SurfaceRequest::FilePacket { args, estate_id } => {
-            let packet_args = packet_json_args(&args)?;
-            let packet_meta = packet_meta(&meta, crate::v2::operation::V2OperationEffect::Write);
-            match crate::v2::packets::FilePacketRequest::decode(
-                &packet_args,
-                now_millis,
-                sensitivity_ledger.ceiling_sensitivity(now_millis),
-            ) {
-                Ok(request) => execute_packet(
-                    "moot_file_packet", estate_id, registry, sensitivity_ledger, now_millis,
-                    &packet_meta, "packet filed", |service| service.file(request),
-                ),
-                Err(error) => Ok(packet_refusal("moot_file_packet", error, &packet_meta)),
-            }
-        }
-        SurfaceRequest::PacketGet { request, estate_id } => {
-            let packet_meta = packet_meta(&meta, crate::v2::operation::V2OperationEffect::Read);
-            execute_packet(
-                "moot_packet_get", estate_id, registry, sensitivity_ledger, now_millis,
-                &packet_meta, "packet returned", |service| service.get(request),
-            )
-        }
-        SurfaceRequest::PacketList { request, estate_id } => {
-            let packet_meta = packet_meta(&meta, crate::v2::operation::V2OperationEffect::Read);
-            execute_packet(
-                "moot_packet_list", estate_id, registry, sensitivity_ledger, now_millis,
-                &packet_meta, "packets returned", |service| service.list(request),
-            )
-        }
-        SurfaceRequest::PacketLineage { request, estate_id } => {
-            let packet_meta = packet_meta(&meta, crate::v2::operation::V2OperationEffect::Read);
-            execute_packet(
-                "moot_packet_lineage", estate_id, registry, sensitivity_ledger, now_millis,
-                &packet_meta, "packet lineage returned", |service| service.lineage(request),
-            )
-        }
         SurfaceRequest::MonitoringSet(request) => {
             let write_meta = packet_meta(&meta, crate::v2::operation::V2OperationEffect::Write);
             crate::v2::monitoring_set::execute(request, monitoring_control, &write_meta)
@@ -2189,99 +2112,12 @@ fn memory_list_decode_error(error: crate::v2::memory_list::MemoryListError) -> J
     }
 }
 
-fn packet_json_args(
-    args: &BTreeMap<String, JsonValue>,
-) -> Result<BTreeMap<String, serde_json::Value>, JSONRPCError> {
-    args.iter()
-        .map(|(key, value)| {
-            serde_json::to_value(value)
-                .map(|value| (key.clone(), value))
-                .map_err(jsonrpc_internal)
-        })
-        .collect()
-}
-
-fn packet_estate_id(args: &BTreeMap<String, JsonValue>) -> Result<Option<Uuid>, JSONRPCError> {
-    crate::v2::codec::optional_uuid(args, "estate_id")
-        .map_err(crate::v2::codec::V2InvalidArgument::into_jsonrpc_error)
-}
-
-fn packet_decode_error(error: crate::v2::packets::PacketToolError) -> JSONRPCError {
-    crate::v2::codec::V2InvalidArgument::new(format!("$.{}", error.path), error.message)
-        .into_jsonrpc_error()
-}
-
 fn packet_meta(
     base: &crate::v2::render::V2ResultMeta,
     effect: crate::v2::operation::V2OperationEffect,
 ) -> crate::v2::render::V2ResultMeta {
     crate::v2::render::V2ResultMeta::incomplete(
         base.build_id.clone(), base.capability_digest.clone(), effect,
-    )
-}
-
-fn execute_packet<T: Serialize>(
-    tool: &str,
-    estate_id: Option<Uuid>,
-    registry: &crate::estate_registry::EstateRegistry,
-    sensitivity_ledger: &crate::sensitivity_grant_ledger::SensitivityGrantLedger,
-    now_millis: i64,
-    meta: &crate::v2::render::V2ResultMeta,
-    text: &str,
-    operation: impl FnOnce(
-        &crate::v2::packets::PacketToolService<'_>,
-    ) -> Result<T, crate::v2::packets::PacketToolError>,
-) -> Result<serde_json::Value, JSONRPCError> {
-    let estate = match estate_id {
-        None => &registry.default,
-        Some(id) if id == registry.default.estate_id => &registry.default,
-        Some(_) => return Ok(crate::v2::render::refusal(
-            tool,
-            &crate::v2::render::V2OperationalRefusal {
-                code: "estate_unavailable".to_owned(),
-                message: "The requested estate is not available to this caller.".to_owned(),
-                retryable: false,
-                recovery: None,
-            },
-            meta,
-        )),
-    };
-    let coordinator = match estate.coord.lock() {
-        Ok(coordinator) => coordinator,
-        Err(_) => return Ok(crate::v2::render::refusal(
-            tool,
-            &crate::v2::render::V2OperationalRefusal {
-                code: "estate_unavailable".to_owned(),
-                message: "The estate coordinator is unavailable.".to_owned(),
-                retryable: true,
-                recovery: None,
-            },
-            meta,
-        )),
-    };
-    let service = crate::v2::packets::PacketToolService::new(
-        &coordinator, &estate.handle, sensitivity_ledger, now_millis,
-    );
-    match operation(&service) {
-        Ok(result) => crate::v2::render::success(tool, &result, meta, text).map_err(jsonrpc_internal),
-        Err(error) => Ok(packet_refusal(tool, error, meta)),
-    }
-}
-
-fn packet_refusal(
-    tool: &str,
-    error: crate::v2::packets::PacketToolError,
-    meta: &crate::v2::render::V2ResultMeta,
-) -> serde_json::Value {
-    crate::v2::render::refusal(
-        tool,
-        &crate::v2::render::V2OperationalRefusal {
-            code: error.code.to_owned(),
-            message: error.message,
-            retryable: error.retryable,
-            recovery: None,
-        },
-        meta,
     )
 }
 
@@ -2334,7 +2170,7 @@ mod tests {
     fn selected_catalog_and_admission_match_each_other() {
         let surface = SelectedSurface::selected(false, true);
         {
-            assert_eq!(surface.catalog().as_array().unwrap().len(), 77);
+            assert_eq!(surface.catalog().as_array().unwrap().len(), 73);
             assert!(surface
                 .catalog()
                 .as_array()
@@ -2358,7 +2194,7 @@ mod tests {
                 .is_err());
 
             let enabled = SelectedSurface::selected(true, false);
-            assert_eq!(enabled.catalog().as_array().unwrap().len(), 84);
+            assert_eq!(enabled.catalog().as_array().unwrap().len(), 80);
             assert!(enabled.accepted_arg_keys("moot_vault_export").is_some());
             assert_ne!(surface.capability_digest(), enabled.capability_digest());
             let help = crate::v2::help::resolve_help(
@@ -2367,7 +2203,7 @@ mod tests {
             )
             .unwrap()
             .as_value();
-            assert_eq!(help["operations"].as_array().unwrap().len(), 77);
+            assert_eq!(help["operations"].as_array().unwrap().len(), 73);
             assert!(help["operations"].as_array().unwrap().iter().all(|operation| {
                 operation["name"].as_str() != Some("moot_vault_export")
             }));

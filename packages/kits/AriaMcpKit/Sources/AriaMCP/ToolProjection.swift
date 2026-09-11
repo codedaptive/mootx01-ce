@@ -25,7 +25,7 @@ import Foundation
 ///   timing_report; palace_import + json_import vault-gated). Estate-level
 ///   inspection and maintenance.
 ///
-/// Non-tier tools (federation, recipe, lens, vault, dataset, packet) are
+/// Non-tier tools (federation, recipe, lens, vault, dataset) are
 /// appended after the five tiers.
 ///
 /// ## Internal-infrastructure fields are never surfaced
