@@ -44,6 +44,11 @@ fn snapshot(mounted: bool) -> EstateDiagnosticsSnapshot {
         drains: vec![EstateDrain { name: "corpus_encode".to_owned(), state: EstateDrainState::Draining, pending: 4 }],
         rebuild: EstateRebuildState::Running,
         timing: EstateTiming { watermark_ms: 1_700_000_123_456, truncated: true },
+        recall_trace_count: Some(7),
+        sync_state: "local-only".to_owned(),
+        subjects_bearing: 1,
+        subjects_eligible: 2,
+        shared_content_migration: None,
         fdc_floor: None,
     }
 }
@@ -134,6 +139,13 @@ fn status_and_map_apply_cluster_a_and_public_bulk_ceiling() {
         "fact_count": 1,
         "fdc_recalculation": "missing",
         "drains": [{"name": "corpus_encode", "state": "draining", "pending": 4}],
+        // recall_trace_count is present because the fixture supplies one.
+        // shared_content_migration is ABSENT, which is the shape an estate
+        // that never ran detection returns — omitted, not null.
+        "recall_trace_count": 7,
+        "sync_state": "local-only",
+        "subjects_bearing": 1,
+        "subjects_eligible": 2,
     }));
 
     let map = service.map(request(), &context()).unwrap();
