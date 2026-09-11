@@ -128,24 +128,23 @@ pub(crate) fn aria_v2_production_registrations(
 
 #[cfg(test)]
 mod tests {
-    //! GATE 1: Chain order — egress position 1 is unoccupied in the production
-    //! registrations; a gate at position 1 fires before coaching and halts the
-    //! chain before coaching runs.
+    //! GATE 1: Slot reservation — egress position 1 is unoccupied in the
+    //! production registrations.  The discriminating assertions are the position
+    //! checks; the test fails when EGRESS_COACHING is set to 1.
 
     use super::*;
     use crate::surface::SurfaceRequest;
     use crate::v2::call_chain::{V2CallChain, V2EgressDecision, V2HaltReason};
     use crate::jsonrpc::JsonValue;
 
-    /// The production factory leaves egress position 1 unoccupied.
-    /// A test-double gate registered at egress position 1 alongside the
-    /// production registrations runs first and, when it fires, the chain
-    /// halts with the gate's sentinel — proving coaching never ran.
-    ///
-    /// This test fails if EGRESS_GATE_RESERVED collides with EGRESS_COACHING,
-    /// or if coaching's egress position is changed to 1.
+    /// The production factory leaves egress position 1 (the reserved exit-gate
+    /// slot) unoccupied.  The discriminating assertions are the position checks:
+    /// if EGRESS_COACHING is set to 1, the occupancy assertion fails because
+    /// coaching would then occupy the reserved slot.  The halt assertions are
+    /// retained because they cost nothing, but this is a slot-reservation gate,
+    /// not an ordering gate — it does not prove coaching did not run.
     #[test]
-    fn gate1_production_chain_leaves_egress_position1_unoccupied_and_gate_fires_before_coaching() {
+    fn gate1_production_registrations_leave_egress_slot1_unoccupied() {
         let session = Arc::new(ModeSessionState::new());
         let production = aria_v2_production_registrations(
             SurfaceRequest::MonitoringStatus,

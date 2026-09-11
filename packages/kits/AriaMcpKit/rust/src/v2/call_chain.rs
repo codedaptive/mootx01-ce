@@ -1,7 +1,7 @@
 //! ARIA v2 request-processing chain.
 //!
 //! This module implements [`V2CallChain`], the ARIA v2 pre/post processor:
-//! two ordered hook sequences (ingress before argument decode, egress after
+//! two ordered hook sequences (ingress before the handler, egress after
 //! handler return) that wrap a single v2 tool call.
 //!
 //! The name "call_chain" is deliberate.  "Door" is already taken in this kit:
@@ -217,10 +217,13 @@ pub struct V2EgressOutcome {
 /// The two hook chains (ingress and egress) run in ascending declared-position
 /// order; textual registration order has no effect on behaviour.
 ///
-/// **Ingress** runs before argument decode.  A hook receives the tool name and
+/// **Ingress** runs before the handler.  A hook receives the tool name and
 /// the raw arguments, may remove keys from the arguments (so no operation
 /// declares them and no accepted-key set changes), and may record state for
-/// delivery to its own egress hook only.
+/// delivery to its own egress hook only.  The invocation point is the caller's
+/// choice: key removal only reaches the decoder if the caller invokes ingress
+/// before decode.  The v2 dispatcher invokes ingress after decode, so no
+/// concern registered today may rely on key removal taking effect.
 ///
 /// **Egress** runs after the handler returns.  A hook receives the tool name,
 /// the current result, and any state its own ingress hook recorded.
