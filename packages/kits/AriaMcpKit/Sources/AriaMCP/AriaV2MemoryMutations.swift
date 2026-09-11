@@ -303,7 +303,7 @@ public struct AriaV2MemoryMutations: Sendable {
             return success(tool: "moot_update_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)), "mutation": .string(request.mutation),
             ]), text: "Updated memory \(id(request.memoryID)).")
-        } catch { return unavailable("moot_update_memory") }
+        } catch { return refusal("moot_update_memory", verb: request.mutation, error: error) }
     }
 
     public func withdraw(_ request: AriaV2WithdrawMemoryRequest) async throws -> JSONValue {
@@ -480,6 +480,27 @@ public struct AriaV2MemoryMutations: Sendable {
 
     private func unavailable(_ tool: String) -> JSONValue {
         AriaV2Envelope.refusal(tool: tool, error: .init(code: "mutation_unavailable", message: "The requested mutation is unavailable in the selected estate.", retryable: false))
+    }
+
+    /// A GATE REFUSAL is the estate saying no for a stated reason the caller
+    /// can act on — "cannot reject an active memory; contest or withdraw it
+    /// first" — and it is not the same thing as the estate being unavailable.
+    /// Collapsing both into one message leaves the caller with no idea whether
+    /// to change the call or give up.
+    ///
+    /// The phrase comes from the same translator the v1 surface used, which was
+    /// private to ToolDispatcher and therefore unreachable from here. When the
+    /// error is not a recognised gate transition nothing is invented: it falls
+    /// through to the generic refusal, so an internal failure never leaks its
+    /// wording to a caller.
+    private func refusal(_ tool: String, verb: String, error: any Error) -> JSONValue {
+        guard let phrase = ToolDispatcher.describeGateRejection(
+            verb: verb, reason: String(describing: error)) else {
+            return unavailable(tool)
+        }
+        return AriaV2Envelope.refusal(
+            tool: tool,
+            error: .init(code: "gate_refused", message: phrase, retryable: false))
     }
 
     private func id(_ value: UUID) -> String { AriaV2ArgumentDecoder.canonicalUUID(value) }
