@@ -343,6 +343,12 @@ pub struct V2MemoryMutationResult {
     pub memory_id: Option<Uuid>,
     pub tunnel_id: Option<Uuid>,
     pub tunnel_review: Option<V2TunnelReviewReceipt>,
+    /// IDs of lineage siblings the audit gate refused to tombstone. Empty for
+    /// a full erasure (outcome == Erased); non-empty for a partial erasure
+    /// (outcome == ErasedPartially). Lowercased at the CoordinatorMemoryMutationLower
+    /// boundary so callers do not need to normalize. Non-erase operations always
+    /// carry an empty vec.
+    pub refused_sibling_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,7 +360,10 @@ pub enum V2MemoryMutationError { Unavailable, OutcomeUnverified(V2MemoryMutation
 pub trait V2MemoryMutationLower: Send + Sync {
     fn mutate(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, mutation: &V2UpdateMutation, note: Option<&str>) -> Result<(), ()>;
     fn withdraw(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, reason: Option<&str>) -> Result<(), ()>;
-    fn erase(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, confirmation: bool, reason: Option<&str>) -> Result<bool, ()>;
+    /// Returns the IDs of lineage siblings the audit gate refused to tombstone
+    /// (lowercased). An empty vec means a full erasure; a non-empty vec means
+    /// a partial erasure. The caller must return `Err(())` for any estate error.
+    fn erase(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, confirmation: bool, reason: Option<&str>) -> Result<Vec<String>, ()>;
     fn move_memory(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, wing: &str, room: &str) -> Result<(), ()>;
     fn link(&self, admission: &V2MemoryMutationAdmission, request: &V2LinkMemoriesRequest) -> Result<Uuid, ()>;
     fn review(&self, admission: &V2MemoryMutationAdmission, tunnel_id: Uuid, decision: V2TunnelDecision, note: Option<&str>, reviewed_by: &str) -> Result<V2TunnelReviewReceipt, ()>;
@@ -376,8 +385,11 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn erase(&self, request: V2EraseMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::EraseMemory, request.estate_id)?;
-        let partial = self.lower.erase(&admitted, request.memory_id, request.confirmation, request.reason.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
-        self.finish(admitted, V2MemoryMutationOperation::EraseMemory, if partial { V2MemoryMutationOutcome::ErasedPartially } else { V2MemoryMutationOutcome::Erased }, Some(request.memory_id), None)
+        let refused_ids = self.lower.erase(&admitted, request.memory_id, request.confirmation, request.reason.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
+        let outcome = if refused_ids.is_empty() { V2MemoryMutationOutcome::Erased } else { V2MemoryMutationOutcome::ErasedPartially };
+        let mut result = self.finish(admitted, V2MemoryMutationOperation::EraseMemory, outcome, Some(request.memory_id), None)?;
+        result.refused_sibling_ids = refused_ids;
+        Ok(result)
     }
     pub fn confirm(&self, request: V2ConfirmMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::ConfirmMemory, request.estate_id)?;
@@ -409,7 +421,9 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     fn admit(&self, operation: V2MemoryMutationOperation, estate_id: Option<Uuid>) -> Result<V2MemoryMutationAdmission, V2MemoryMutationError> { self.authority.admit(operation, estate_id).map_err(|_| V2MemoryMutationError::Unavailable) }
     fn finish(&self, admission: V2MemoryMutationAdmission, operation: V2MemoryMutationOperation, outcome: V2MemoryMutationOutcome, memory_id: Option<Uuid>, tunnel_id: Option<Uuid>) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         self.authority.revalidate(&admission).map_err(|_| V2MemoryMutationError::OutcomeUnverified(operation))?;
-        Ok(V2MemoryMutationResult { operation, outcome, memory_id, tunnel_id, tunnel_review: None })
+        // refused_sibling_ids is set by the caller for erase operations; all other
+        // operations carry an empty vec.
+        Ok(V2MemoryMutationResult { operation, outcome, memory_id, tunnel_id, tunnel_review: None, refused_sibling_ids: Vec::new() })
     }
 }
 
@@ -426,9 +440,12 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
     fn withdraw(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, reason: Option<&str>) -> Result<(), ()> {
         self.coordinator.lock().map_err(|_| ())?.withdraw(&admission.estate_handle, &memory_id.to_string(), reason, admission.now_millis).map_err(|_| ())
     }
-    fn erase(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, confirmation: bool, reason: Option<&str>) -> Result<bool, ()> {
+    fn erase(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, confirmation: bool, reason: Option<&str>) -> Result<Vec<String>, ()> {
         let outcome = self.coordinator.lock().map_err(|_| ())?.expunge(&admission.estate_handle, &memory_id.to_string(), reason.unwrap_or(""), confirmation, admission.now_millis).map_err(|_| ())?;
-        Ok(!outcome.refused_sibling_ids.is_empty())
+        // D8: lowercase the ids at the lower boundary so every upstream layer
+        // receives a normalized form without re-normalizing. Mirrors the Swift
+        // `refusedSiblingIDs.map { $0.lowercased() }` at the same boundary.
+        Ok(outcome.refused_sibling_ids.iter().map(|s| s.to_lowercase()).collect())
     }
     fn move_memory(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, wing: &str, room: &str) -> Result<(), ()> {
         self.coordinator.lock().map_err(|_| ())?.reanchor(&admission.estate_handle, &memory_id.to_string(), Some(room), Some(wing), None).map_err(|_| ())

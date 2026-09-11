@@ -1,6 +1,8 @@
 import Foundation
 import GeniusLocusKit
 import LocusKit
+import CorpusKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 import Testing
@@ -440,5 +442,107 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
             #expect(error.code == JSONRPCErrorCode.methodNotFound,
                     "moot_recollect must produce code -32601; got code: \(error.code)")
         }
+    }
+
+    // MARK: - moot_erase_memory partial-expunge gate
+
+    /// Builds a CaptureFrame for the partial-erase gate test.
+    ///
+    /// Uses `.typed` channel with a deterministic lattice anchor.
+    /// No embedding model is required; the assertion targets the audit gate
+    /// at the DrawerStore layer, not the vector-recall lane.
+    private func captureFrameForPartialErase(content: String) -> CaptureFrame {
+        CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "partial-erase-gate",
+            latticeAnchor: .udc("000"),
+            addedBy: "partial-erase-gate",
+            embeddingModelID: "test-model-v1"
+        )
+    }
+
+    /// Gate: erasing a memory whose lineage contains an accepted sibling triggers the
+    /// audit gate (S-3: accepted → tombstoned is blocked) and MUST report a partial
+    /// verdict in the ARIA v2 response.
+    ///
+    /// Three assertions all must hold:
+    ///   1. outcome field is "erased_partially" (not "erased")
+    ///   2. refused_sibling_memory_ids is non-empty; every id is lowercase (D8)
+    ///   3. compact text does NOT say "Erased memory" unqualified
+    ///
+    /// D1 ruling: a partial erasure is a completed operation with a partial verdict;
+    /// isError stays false — the rows that were erased ARE gone.
+    ///
+    /// This test cannot pass on a stub that returns a generic "erased" success; the
+    /// expunge verb must reach the audit gate and return the refused IDs to the caller.
+    @Test func eraseMemoryPartialExpungeReportsErasedPartiallyOutcome() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Seed d1: capture, promote trust to canonical, then accept.
+        // The audit gate (S-3: accepted → tombstoned is blocked) will refuse to
+        // tombstone d1 when the expunge below walks the lineage.
+        let d1 = try await kit.capture(
+            handle,
+            captureFrameForPartialErase(
+                content: "accepted gate-sibling — audit refuses its tombstone"),
+            mode: .impatient)
+        try await kit.mutate(
+            handle,
+            MutateFrame(rowID: d1.id, kind: .correctTrust(.canonical)))
+        try await kit.mutate(
+            handle,
+            MutateFrame(rowID: d1.id, kind: .accept))
+
+        // Seed d2: same lineage as d1, stays active.
+        // Erasing d2 expunges the whole lineage; the gate refuses d1.
+        var d2Frame = captureFrameForPartialErase(
+            content: "active head to erase — its accepted sibling d1 will be refused")
+        d2Frame.lineageID = d1.lineageID
+        let d2 = try await kit.capture(handle, d2Frame, mode: .impatient)
+
+        // Erase d2 through the production ARIA v2 dispatcher.
+        let result = try await dispatcher.dispatch(
+            name: "moot_erase_memory",
+            arguments: .object([
+                "memory_id": .string(d2.id.lowercased()),
+                "confirmation": .bool(true),
+            ]))
+
+        // D1: partial erasure is a completed operation; isError must be false.
+        #expect(result.objectValue?["isError"] == .bool(false),
+                "partial erasure must not be an error (D1: completed with partial verdict); got: \(result)")
+
+        let d = try requireData(result, operation: "moot_erase_memory")
+
+        // Gate 1: outcome is "erased_partially", not "erased".
+        // A handler that discards the refused-sibling list from the expunge
+        // outcome would return "erased" here and fail this assertion.
+        #expect(d["outcome"] == .string("erased_partially"),
+                "partial expunge must report outcome erased_partially; got data: \(d)")
+
+        // Gate 2: refused sibling ID is listed and lowercase (D8).
+        let refused = try #require(
+            d["refused_sibling_memory_ids"]?.arrayValue,
+            "refused_sibling_memory_ids must be an array; got data: \(d)")
+        #expect(!refused.isEmpty,
+                "refused_sibling_memory_ids must be non-empty for a partial expunge; got: \(d)")
+        let refusedStr = try #require(
+            refused.first?.stringValue,
+            "first refused sibling id must be a string; got: \(refused)")
+        #expect(refusedStr == refusedStr.lowercased(),
+                "refused sibling ID must be lowercase per D8 ruling; got: \(refusedStr)")
+
+        // Gate 3: compact text must NOT say "Erased memory" unqualified.
+        // The text lives in content[0].text per AriaV2Envelope.success (the
+        // structuredContent envelope carries data, not the compact text).
+        // A partial erasure is an honest partial verdict; the word "Partially" must appear.
+        let text = result.objectValue?["content"]?
+            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        #expect(!text.hasPrefix("Erased memory"),
+                "partial erasure text must not say 'Erased memory' unqualified; got text: \(text)")
+        #expect(text.contains("Partially"),
+                "partial erasure text must say 'Partially'; got text: \(text)")
     }
 }
