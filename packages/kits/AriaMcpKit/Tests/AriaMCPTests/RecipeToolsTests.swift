@@ -752,7 +752,29 @@ struct RecipeToolsTests {
     /// The stopword validation guard present in v1 (RecipeTools.groundingTerms) is
     /// never reached on the v2 synthesize path. Awaiting a ruling.
     /// Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: v2 AriaV2OrchestrationLower.cueTerms (line 232) has no stopword filter; all-stopword query succeeds instead of throwing invalidParams"))
+    /// The guard itself, asserted in the shape v2 actually answers in. The
+    /// case below pins v1's transport (a thrown JSONRPCError) and is handed to
+    /// the conversion lane; this one makes sure the guard cannot be removed
+    /// unnoticed in the meantime.
+    @Test
+    func groundedSynthesisAllStopwordQueryIsRefusedAsInvalidArgument() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "gse-envelope"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_synthesize",
+            arguments: .object(["query": .string("what did they do")]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == true,
+                "a cue of nothing but stopwords must be refused, not answered from the whole estate")
+        let code = obj["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]?.stringValue
+        #expect(code == "invalid_argument",
+                "the refusal must tell the caller the cue was theirs to fix; got \(code ?? "nil")")
+    }
+
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED on a missing guard). The guard is restored: Swift cueTerms now drops stopwords and short fragments exactly as the Rust port always did, and a cue that grounds on nothing is refused rather than answered from the whole estate — v1's reason, that a caller who sent a cue must never receive an unscoped estate digest, still holds. What remains is v1's TRANSPORT: this case expects a thrown JSONRPCError and v2 answers with an invalid_argument envelope, which groundedSynthesisAllStopwordQueryIsRefusedAsInvalidArgument above asserts. Redirecting this assertion to the envelope is like-for-like. Do not delete; do not weaken to pass."))
     func testGroundedSynthesisAllStopwordQueryThrowsInvalidParams() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(

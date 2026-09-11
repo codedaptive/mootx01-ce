@@ -528,7 +528,27 @@ struct HTTPServerTests {
     /// ("must not error") cannot be satisfied with either key name in v2. Awaiting
     /// catalog decision on whether v2 should clamp or reject over-ceiling limit values.
     /// Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: v2 moot_read_journal uses 'limit' not 'last_n', and the v2 decoder rejects values above the 500 ceiling (throws invalidParams) rather than clamping silently. Pinned assertion 'must not error' cannot pass against v2 behavior. Awaiting catalog decision on clamp-vs-reject semantics. Do not delete; do not weaken to pass."))
+    /// The clamp itself, in v2's shape. `last_n` became `limit`, which stands
+    /// as reasonable normalisation, so the case below pins a name the strict
+    /// decoder no longer accepts and is handed to the conversion lane. This
+    /// one keeps the BEHAVIOUR covered meanwhile: over-ceiling clamps silently
+    /// rather than refusing, so a caller asking for 10_000 gets 500 instead of
+    /// nothing.
+    @Test
+    func readJournalOverCeilingLimitIsClampedSilently() async throws {
+        let dispatcher = try await makeDispatcher()
+        let (port, stop) = try startServing(dispatcher)
+        defer { stop() }
+
+        let body = #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_read_journal","arguments":{"limit":1000}}}"#
+        let result = try #require(httpRequest(port: port, method: "POST", body: body))
+        #expect(result.status == 200)
+        let json = try #require(try JSONSerialization.jsonObject(with: result.body) as? [String: Any])
+        #expect(json["result"] != nil,
+                "limit=1000 must clamp silently to the ceiling, not refuse; got: \(json)")
+    }
+
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED on reject-instead-of-clamp). The clamp is restored: an over-ceiling limit now clamps silently instead of throwing, and below one is still refused because a negative reaches SQLite as LIMIT -1 and returns every row. What remains is the ARGUMENT NAME — this case sends v1's `last_n`, and the rename to `limit` was ruled to stand as normalisation, so the strict decoder rejects the key before the clamp is reached. readJournalOverCeilingLimitIsClampedSilently above covers the behaviour. Renaming the argument in this case is like-for-like. Do not delete; do not weaken to pass."))
     func readJournalHugeLastNIsClamped() async throws {
         let dispatcher = try await makeDispatcher()
         let (port, stop) = try startServing(dispatcher)
