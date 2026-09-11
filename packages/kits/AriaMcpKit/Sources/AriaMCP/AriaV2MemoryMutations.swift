@@ -148,11 +148,17 @@ public struct AriaV2LinkMemoriesRequest: Sendable {
     public let relationship: String
     public let confidence: String?
     public let evidence: String?
+    /// False files an ACTIVE edge — the default, because a caller asked for
+    /// this link. True files it `.proposed` instead: the adjudication path,
+    /// where the caller judged a borderline candidate and records a reviewable
+    /// proposal rather than an immediately-active edge. The user settles it
+    /// through moot_review_tunnel.
+    public let proposed: Bool
     public let estateID: UUID?
 
     public init(arguments: JSONValue) throws {
         let decoder = try AriaV2ArgumentDecoder(arguments, allowedKeys: [
-            "from_id", "to_id", "relationship", "confidence", "evidence", "estate_id",
+            "from_id", "to_id", "relationship", "confidence", "evidence", "proposed", "estate_id",
         ])
         fromID = try decoder.requireUUID("from_id")
         toID = try decoder.requireUUID("to_id")
@@ -162,6 +168,7 @@ public struct AriaV2LinkMemoriesRequest: Sendable {
         relationship = try AriaV2UpdateMemoryRequest.nonEmpty(try decoder.requireString("relationship"), path: "relationship")
         confidence = try decoder.optionalString("confidence")
         evidence = try decoder.optionalString("evidence")
+        proposed = try decoder.optionalBoolean("proposed") ?? false
         estateID = try decoder.optionalUUID("estate_id")
         try _ = lowerKind()
     }
@@ -194,13 +201,27 @@ public struct AriaV2ReviewTunnelRequest: Sendable {
         case endorse
     }
 
+    /// The reviewer identity recorded in the review ledger. Defaults to
+    /// `"user"`; model reviewers pass their own id (e.g. "claude").
+    ///
+    /// Edge activation is user-only, so this is the argument the `accept`
+    /// gate reads. A model that wants to express a view uses `endorse` or
+    /// `reject`, both of which are reopenable; only a user settles an edge.
+    public static let userReviewer = "user"
+
     public let tunnelID: UUID
     public let decision: Decision
     public let note: String?
+    public let reviewedBy: String
     public let estateID: UUID?
 
+    /// True when the reviewer is the user rather than a model. Promotion of a
+    /// proposal to an active edge requires this; see `Decision.accept`.
+    public var isUserReviewer: Bool { reviewedBy == Self.userReviewer }
+
     public init(arguments: JSONValue) throws {
-        let decoder = try AriaV2ArgumentDecoder(arguments, allowedKeys: ["tunnel_id", "decision", "note", "estate_id"])
+        let decoder = try AriaV2ArgumentDecoder(
+            arguments, allowedKeys: ["tunnel_id", "decision", "note", "reviewed_by", "estate_id"])
         tunnelID = try decoder.requireUUID("tunnel_id")
         let rawDecision = try decoder.requireString("decision")
         guard let decision = Decision(rawValue: rawDecision) else {
@@ -208,7 +229,31 @@ public struct AriaV2ReviewTunnelRequest: Sendable {
         }
         self.decision = decision
         note = try decoder.optionalString("note")
+        reviewedBy = try Self.nonEmptyReviewer(decoder.optionalString("reviewed_by"))
         estateID = try decoder.optionalUUID("estate_id")
+        // Edge activation is user-only. Models endorse or reject; neither
+        // settles the edge, so a machine can never ratify another machine's
+        // inference. Checked at decode so the refusal names the argument.
+        guard decision != .accept || reviewedBy == Self.userReviewer else {
+            throw AriaV2InvalidArgument(
+                path: "reviewed_by",
+                message: "Edge activation is user-only: decision 'accept' requires reviewed_by "
+                    + "'user'. Model reviewers use 'endorse' or 'reject'.",
+                allowed: [Self.userReviewer]).jsonRPCError
+        }
+    }
+
+    /// An explicitly empty `reviewed_by` is a caller error, not a silent
+    /// fallback to the user identity — that would turn a typo into an edge
+    /// activation.
+    private static func nonEmptyReviewer(_ raw: String?) throws -> String {
+        guard let raw else { return userReviewer }
+        guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw AriaV2InvalidArgument(
+                path: "reviewed_by",
+                message: "Argument 'reviewed_by' must be a non-empty string.").jsonRPCError
+        }
+        return raw
     }
 }
 
@@ -319,13 +364,20 @@ public struct AriaV2MemoryMutations: Sendable {
                 targetWing: targetPlacement.wing, targetRoom: targetPlacement.room,
                 label: request.evidence ?? request.relationship, addedBy: context.serverIdentity,
                 sourceDrawerId: source.id, targetDrawerId: target.id,
-                kind: try request.lowerKind(), originClass: .derived
+                kind: try request.lowerKind(), originClass: .derived,
+                // Active unless the caller asked for the adjudication path.
+                lifecycle: request.proposed ? .proposed : .active
             ))
             guard let tunnelID = UUID(uuidString: tunnel.id) else { return unavailable("moot_link_memories") }
             return success(tool: "moot_link_memories", data: .object([
                 "tunnel_id": .string(id(tunnelID)), "from_id": .string(id(request.fromID)),
                 "to_id": .string(id(request.toID)), "kind": .string(request.relationship),
-            ]), text: "Linked memories \(id(request.fromID)) and \(id(request.toID)).")
+                // The caller must be able to tell an active edge from a
+                // proposal it just filed, without a second read.
+                "lifecycle": .string(request.proposed ? "proposed" : "active"),
+            ]), text: request.proposed
+                ? "Proposed a link between memories \(id(request.fromID)) and \(id(request.toID)); review it with moot_review_tunnel."
+                : "Linked memories \(id(request.fromID)) and \(id(request.toID)).")
         } catch { return unavailable("moot_link_memories") }
     }
 
@@ -342,13 +394,30 @@ public struct AriaV2MemoryMutations: Sendable {
             let label = storedTunnel?.label ?? ""
             switch request.decision {
             case .endorse:
-                let outcome = try await kit.endorseTunnel(in: handle, tunnelID: storedTunnelID, endorserID: context.callerID, tierLens: tierLens(for: label), now: context.now())
+                let outcome = try await kit.endorseTunnel(in: handle, tunnelID: storedTunnelID, endorserID: request.reviewedBy, tierLens: tierLens(for: label), now: context.now())
                 return success(tool: "moot_review_tunnel", data: .object([
                     "tunnel_id": .string(tunnelID), "new_endorser": .bool(outcome.newEndorser),
                     "distinct_endorsers": .integer(Int64(outcome.distinctEndorsers)), "contested": .bool(outcome.contested),
                 ]), text: "Endorsed tunnel \(tunnelID).")
+            case .reject where !request.isUserReviewer:
+                // A MODEL rejection is an objection, not a verdict. It withdraws
+                // only when no model endorsement stands; otherwise the tunnel
+                // stays `.proposed` and is marked contested so the user sees a
+                // disputed proposal rather than a silently buried one. Routing
+                // this to respondToTunnel would give a machine the permanence of
+                // a user rejection, whose pairs are never re-proposed.
+                let outcome = try await kit.objectToTunnel(
+                    in: handle, tunnelID: storedTunnelID, reviewerID: request.reviewedBy,
+                    tierLens: tierLens(for: label), now: context.now())
+                return success(tool: "moot_review_tunnel", data: .object([
+                    "tunnel_id": .string(tunnelID), "withdrawn": .bool(outcome.withdrawn),
+                    "contested": .bool(outcome.contested),
+                ]), text: "Recorded an objection to tunnel \(tunnelID).")
             case .accept, .reject:
-                try await estate.respondToTunnel(id: storedTunnelID, accept: request.decision == .accept, changedBy: context.callerID, reason: request.note)
+                // User verdicts only: `accept` is gated at decode, and a user
+                // `reject` withdraws permanently — those pairs are never
+                // re-proposed.
+                try await estate.respondToTunnel(id: storedTunnelID, accept: request.decision == .accept, changedBy: request.reviewedBy, reason: request.note)
                 return success(tool: "moot_review_tunnel", data: .object([
                     "tunnel_id": .string(tunnelID), "withdrawn": .bool(request.decision == .reject), "contested": .bool(false),
                 ]), text: "Reviewed tunnel \(tunnelID).")
