@@ -1628,10 +1628,36 @@ fn execute_synthesize(
 struct SelectedDreamAuthority<'a> { registry: &'a crate::estate_registry::EstateRegistry, now_millis: i64 }
 
 impl crate::v2::dream::V2DreamAuthority for SelectedDreamAuthority<'_> {
-    fn admit(&self, requested: Option<Uuid>) -> Result<crate::v2::dream::V2DreamAdmission, ()> {
+    fn admit(
+        &self,
+        requested: Option<Uuid>,
+        requested_now: Option<i64>,
+    ) -> Result<crate::v2::dream::V2DreamAdmission, crate::v2::dream::V2DreamAuthorityError> {
         let estate = &self.registry.default;
-        if requested.is_some_and(|id| id != estate.estate_id) { return Err(()); }
-        Ok(crate::v2::dream::V2DreamAdmission { estate_id: estate.estate_id, estate_handle: estate.handle.clone(), caller_binding: self.registry.server_identity.clone(), authorization_generation: "selected-v2-public".to_owned(), now_millis: self.now_millis })
+        if requested.is_some_and(|id| id != estate.estate_id) {
+            return Err(crate::v2::dream::V2DreamAuthorityError::Unavailable);
+        }
+        // Resolve effective cycle clock.  A caller-proposed instant is admitted
+        // when it falls within 24 hours of the authority clock; a further-future
+        // value would advance pruneRecallTraces beyond the safe 30-day horizon.
+        let effective_now = if let Some(proposed) = requested_now {
+            let ceiling_millis = self.now_millis + 24 * 3600 * 1_000;
+            if proposed > ceiling_millis {
+                return Err(crate::v2::dream::V2DreamAuthorityError::InvalidArgument(
+                    "Argument 'now' must not be more than 24 hours in the future.".to_owned(),
+                ));
+            }
+            proposed
+        } else {
+            self.now_millis
+        };
+        Ok(crate::v2::dream::V2DreamAdmission {
+            estate_id: estate.estate_id,
+            estate_handle: estate.handle.clone(),
+            caller_binding: self.registry.server_identity.clone(),
+            authorization_generation: "selected-v2-public".to_owned(),
+            now_millis: effective_now,
+        })
     }
     fn revalidate(&self, admission: &crate::v2::dream::V2DreamAdmission) -> Result<(), ()> {
         (admission.estate_id == self.registry.default.estate_id).then_some(()).ok_or(())
@@ -1646,6 +1672,14 @@ fn execute_dream(request: crate::v2::dream::V2DreamRequest, registry: &crate::es
         Ok(result) => Ok(crate::v2::render::refusal("moot_dream", &crate::v2::render::V2OperationalRefusal { code: format!("dream_{:?}", result.status).to_lowercase(), message: "The dreaming cycle did not complete.".to_owned(), retryable: true, recovery: None }, &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write))),
         Err(V2DreamError::Unavailable) => Ok(crate::v2::render::refusal("moot_dream", &crate::v2::render::V2OperationalRefusal { code: "dream_unavailable".to_owned(), message: "The selected estate could not complete its dreaming cycle.".to_owned(), retryable: true, recovery: None }, &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write))),
         Err(V2DreamError::OutcomeUnverified) => Ok(crate::v2::render::refusal("moot_dream", &crate::v2::render::V2OperationalRefusal { code: "outcome_unverified".to_owned(), message: "The dreaming outcome could not be revalidated.".to_owned(), retryable: false, recovery: None }, &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write))),
+        // Semantic range violation: caller-supplied now is too far in the future.
+        // Raise -32602 so the destructive pruneRecallTraces path is never reached.
+        Err(V2DreamError::InvalidArgument(message)) => {
+            use crate::v2::codec::V2InvalidArgument;
+            Err(V2InvalidArgument::new("now", message)
+                .correction("Provide a 'now' no more than 24 hours in the future.")
+                .into_jsonrpc_error())
+        }
     }
 }
 
