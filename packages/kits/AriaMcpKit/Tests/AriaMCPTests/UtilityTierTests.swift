@@ -54,7 +54,50 @@ struct UtilityTierTests {
     // moot_estate_status should regain a subject-debt field. Do not delete;
     // do not weaken to pass.
 
-    @Test(.disabled("BLOCKED: v2 moot_estate_status (AriaV2EstateDiagnostics.swift:191-221, AriaV2EstateStatusData at AriaV2EstateDiagnostics.swift:93-103) has no subject-debt field at all — the response is typed (memoryCount, factCount, drains, fdcRecalculation) with a generic compactText (AriaV2EstateDiagnostics.swift:402), not the v1 'subjects: X/Y (Z missing)' / 'memories: N active (M total)' text lines rendered only by the dead legacy runEstateStatus (ToolDispatch.swift:3503), unreachable from ToolDispatcher.dispatch(name:arguments:). Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. Do not delete; do not weaken to pass."))
+    /// The restored fields, asserted structurally. Three of them
+    /// (recall_trace_count, sync_state, shared_content_migration) were
+    /// reachable only from the v1 dispatch table and had no test at all in
+    /// either generation, which is how they went missing unnoticed.
+    @Test func estateStatusCarriesSubjectDebtAndDiagnosticFields() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "status-fields"))
+        let handle = try await kit.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "status-fields"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("a memory that carries a subject"),
+                "subject": .string("carries a subject"),
+                "location": .string("study"),
+            ]))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_status", arguments: .object([:]))
+        let data = try #require(
+            result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue)
+
+        #expect(data["subjects_eligible"]?.integerValue == 1,
+                "one non-empty memory is eligible for a subject")
+        #expect(data["subjects_bearing"]?.integerValue == 1,
+                "and it carries one, so the debt is zero")
+        // Always present: "local-only" when no sync engine is wired, never absent.
+        #expect(data["sync_state"]?.stringValue != nil)
+        // Omitted rather than zeroed when unreadable, so a present value is
+        // a real count and absence is not silently reported as an empty table.
+        if let traces = data["recall_trace_count"] {
+            #expect(traces.integerValue != nil)
+        }
+    }
+
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED on a missing field). The data is restored: moot_estate_status now carries subjects_bearing and subjects_eligible, plus recall_trace_count, sync_state and shared_content_migration, all four of which were reachable only through the v1 dispatch table. What this case still pins is v1 RENDERED TEXT -- \"subjects: 1/1 (0 missing)\", \"memories: 1 active (1 total)\", \"wings: ...\" -- and v2 answers structurally by ruling. estateStatusCarriesSubjectDebtAndDiagnosticFields below asserts the same facts against the structured payload. Redirecting these greps is like-for-like. Do not delete; do not weaken to pass."))
     func estateStatusShowsSubjectDebtOnMixedFixture() async throws {
         let kit = GeniusLocusKit()
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -126,7 +169,7 @@ struct UtilityTierTests {
     /// `estateStatusMemoryCountExcludesRestrictedRows` below; this block
     /// covers only the subject-debt counter and wing-naming assertions,
     /// which have no v2 field to redirect to.
-    @Test(.disabled("BLOCKED: same as estateStatusShowsSubjectDebtOnMixedFixture — v2 AriaV2EstateStatusData (AriaV2EstateDiagnostics.swift:93-103) has no subject-debt field and no wings text (wings moved to the separate moot_estate_map response, AriaV2EstateDiagnostics.swift:223-245). The v1 'subjects: 1/1 (0 missing)', 'memories: 1 active (1 total)', and 'wings: ...' text lines exist only on the dead legacy runEstateStatus (ToolDispatch.swift:3503), unreachable from ToolDispatcher.dispatch(name:arguments:). Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. The aggregate-exclusion half of this property is now covered by estateStatusMemoryCountExcludesRestrictedRows below; this block covers only the subject-debt counter and wing-naming assertions. Do not delete; do not weaken to pass."))
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED on a missing field). The data is restored: moot_estate_status now carries subjects_bearing and subjects_eligible, plus recall_trace_count, sync_state and shared_content_migration, all four of which were reachable only through the v1 dispatch table. What this case still pins is v1 RENDERED TEXT -- \"subjects: 1/1 (0 missing)\", \"memories: 1 active (1 total)\", \"wings: ...\" -- and v2 answers structurally by ruling. estateStatusCarriesSubjectDebtAndDiagnosticFields below asserts the same facts against the structured payload. Redirecting these greps is like-for-like. Do not delete; do not weaken to pass."))
     func estateStatusAggregatesExcludeRestrictedRows() async throws {
         let kit = GeniusLocusKit()
         let storage = InMemoryStorage(configuration: EstateConfiguration(
