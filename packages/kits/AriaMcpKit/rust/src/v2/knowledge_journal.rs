@@ -88,7 +88,17 @@ fn parse_rfc3339(value:&str,key:&str)->V2DecodeResult<i64>{
 /// unanchored and tunnels may be room-level.  Render wiring must preserve it
 /// rather than fabricate a UUID merely to satisfy a narrower row schema.
 #[derive(Debug,Clone,PartialEq,Eq)] pub struct V2KnowledgeFact { pub fact_id:Uuid,pub subject:String,pub predicate:String,pub object:String,pub source_memory_id:Option<Uuid>,pub event_time_millis:i64,pub state:String }
-#[derive(Debug,Clone,PartialEq,Eq)] pub struct V2KnowledgeTunnel { pub tunnel_id:Uuid,pub from_id:Option<Uuid>,pub to_id:Option<Uuid>,pub kind:String }
+#[derive(Debug,Clone,PartialEq,Eq)] pub struct V2KnowledgeTunnel {
+    pub tunnel_id:Uuid,
+    pub from_id:Option<Uuid>,
+    pub to_id:Option<Uuid>,
+    pub kind:String,
+    /// Where this edge sits on the review ladder: `active`, `proposed`,
+    /// `superseded` or `withdrawn`.  Dreaming and the contradiction hunt file
+    /// `.proposed` edges on a timer, so a caller without this cannot tell a
+    /// machine's guess from a user-confirmed link.
+    pub lifecycle:String,
+}
 #[derive(Debug,Clone,PartialEq,Eq)] pub struct V2JournalEntry { pub agent_name:String,pub entry:String,pub written_at_millis:i64 }
 #[derive(Debug,Clone,PartialEq,Eq)] pub enum V2KnowledgeJournalResult { Tunnels(Vec<V2KnowledgeTunnel>), Fact(V2KnowledgeFact), Facts(Vec<V2KnowledgeFact>), Retired{fact_id:Uuid}, JournalEntry(V2JournalEntry), JournalEntries(Vec<V2JournalEntry>) }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)] pub enum V2KnowledgeJournalError { Unavailable }
@@ -118,7 +128,7 @@ impl<A:V2KnowledgeJournalAuthority,L:V2KnowledgeJournalLower> V2KnowledgeJournal
 
 pub struct CoordinatorKnowledgeJournalLower{coordinator:Arc<Mutex<EstateCoordinator>>} impl CoordinatorKnowledgeJournalLower{pub fn new(coordinator:Arc<Mutex<EstateCoordinator>>)->Self{Self{coordinator}}}
 impl CoordinatorKnowledgeJournalLower {
-    fn visible_tunnels(&self,a:&V2KnowledgeJournalAdmission,tunnels:Vec<Tunnel>,limit:usize)->Result<Vec<V2KnowledgeTunnel>,()> { let c=self.coordinator.lock().map_err(|_|())?;let estate=c.estate_for(&a.estate_handle).map_err(|_|())?;let mut seen=BTreeSet::new();let mut rows=Vec::new();for t in tunnels {if !seen.insert(t.id.clone())||t.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){continue;} let endpoints=[t.source_drawer_id.as_deref(),t.target_drawer_id.as_deref()].into_iter().flatten().map(|id|estate.drawer_by_id(id).map_err(|_|())?.ok_or(())).collect::<Result<Vec<_>,()>>()?;if endpoints.iter().any(|drawer|drawer.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value()){continue;} let tid=Uuid::parse_str(&t.id).map_err(|_|())?;let from=t.source_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;let to=t.target_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;rows.push(V2KnowledgeTunnel{tunnel_id:tid,from_id:from,to_id:to,kind:format!("{:?}",t.kind)});if rows.len()==limit{break;}}Ok(rows) }
+    fn visible_tunnels(&self,a:&V2KnowledgeJournalAdmission,tunnels:Vec<Tunnel>,limit:usize)->Result<Vec<V2KnowledgeTunnel>,()> { let c=self.coordinator.lock().map_err(|_|())?;let estate=c.estate_for(&a.estate_handle).map_err(|_|())?;let mut seen=BTreeSet::new();let mut rows=Vec::new();for t in tunnels {if !seen.insert(t.id.clone())||t.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){continue;} let endpoints=[t.source_drawer_id.as_deref(),t.target_drawer_id.as_deref()].into_iter().flatten().map(|id|estate.drawer_by_id(id).map_err(|_|())?.ok_or(())).collect::<Result<Vec<_>,()>>()?;if endpoints.iter().any(|drawer|drawer.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value()){continue;} let tid=Uuid::parse_str(&t.id).map_err(|_|())?;let from=t.source_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;let to=t.target_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;rows.push(V2KnowledgeTunnel{tunnel_id:tid,from_id:from,to_id:to,kind:format!("{:?}",t.kind),lifecycle:format!("{:?}",t.lifecycle()).to_lowercase()});if rows.len()==limit{break;}}Ok(rows) }
     fn visible_fact(&self,a:&V2KnowledgeJournalAdmission,f:KGFact)->Result<Option<V2KnowledgeFact>,()> {if f.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){return Ok(None);}let source_memory_id=if f.source_drawer_id.is_empty(){None}else{let c=self.coordinator.lock().map_err(|_|())?;let estate=c.estate_for(&a.estate_handle).map_err(|_|())?;let d=estate.drawer_by_id(&f.source_drawer_id).map_err(|_|())?.ok_or(())?;if d.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){return Ok(None);}Some(Uuid::parse_str(&f.source_drawer_id).map_err(|_|())?)};let state=format!("{:?}",f.state());Ok(Some(V2KnowledgeFact{fact_id:Uuid::parse_str(&f.id).map_err(|_|())?,subject:f.subject,predicate:f.predicate,object:f.object,source_memory_id,event_time_millis:f.filed_at,state})) }
 }
 impl V2KnowledgeJournalLower for CoordinatorKnowledgeJournalLower {

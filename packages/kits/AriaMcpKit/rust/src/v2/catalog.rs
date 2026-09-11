@@ -628,8 +628,8 @@ fn remaining_data_schema(name: &str) -> Option<Value> {
             json!(["memory_id", "placement"]),
         )),
         "moot_link_memories" => Some(exact(
-            json!({"tunnel_id":uuid(),"from_id":uuid(),"to_id":uuid(),"kind":{"type":"string"}}),
-            json!(["tunnel_id", "kind"]),
+            json!({"tunnel_id":uuid(),"from_id":uuid(),"to_id":uuid(),"kind":{"type":"string"},"lifecycle":{"type":"string","enum":["active","proposed","superseded","withdrawn"]}}),
+            json!(["tunnel_id", "kind", "lifecycle"]),
         )),
         "moot_review_tunnel" => Some(
             json!({"oneOf":[exact(json!({"tunnel_id":uuid(),"new_endorser":{"type":"boolean"},"distinct_endorsers":count(),"contested":{"type":"boolean"}}),json!(["tunnel_id","new_endorser","distinct_endorsers","contested"])),exact(json!({"tunnel_id":uuid(),"withdrawn":{"type":"boolean"},"contested":{"type":"boolean"}}),json!(["tunnel_id","withdrawn","contested"]))]}),
@@ -1159,11 +1159,11 @@ fn memory_mutation_input_schema(name: &str) -> Value {
             json!(["memory_id", "wing", "room"]),
         ),
         "moot_link_memories" => (
-            json!({"from_id":uuid(),"to_id":uuid(),"relationship":{"type":"string","enum":["blocks","contradicts","covers","derives_from","elaborates","exemplifies","extends","precedes","references","refines","relates","responds_to","supersedes","supports","validates"]},"confidence":string(),"evidence":string(),"estate_id":uuid()}),
+            json!({"from_id":uuid(),"to_id":uuid(),"relationship":{"type":"string","enum":["blocks","contradicts","covers","derives_from","elaborates","exemplifies","extends","precedes","references","refines","relates","responds_to","supersedes","supports","validates"]},"confidence":string(),"evidence":string(),"proposed":{"type":"boolean"},"estate_id":uuid()}),
             json!(["from_id", "to_id", "relationship"]),
         ),
         "moot_review_tunnel" => (
-            json!({"tunnel_id":uuid(),"decision":{"type":"string","enum":["accept","endorse","reject"]},"note":string(),"estate_id":uuid()}),
+            json!({"tunnel_id":uuid(),"decision":{"type":"string","enum":["accept","endorse","reject"]},"note":string(),"reviewed_by":string(),"estate_id":uuid()}),
             json!(["tunnel_id", "decision"]),
         ),
         _ => unreachable!("only selected memory mutation names use this schema"),
@@ -1223,7 +1223,9 @@ fn knowledge_journal_data_schema(name: &str) -> Option<Value> {
     let uuid = || json!({"type":"string","format":"uuid"});
     // Room-level tunnel endpoints and unanchored facts are valid lower rows.
     // Their ID fields are optional rather than replaced with fabricated UUIDs.
-    let tunnel = || json!({"type":"object","properties":{"tunnel_id":uuid(),"from_id":uuid(),"to_id":uuid(),"kind":{"type":"string"}},"required":["tunnel_id","kind"],"additionalProperties":false});
+    // `lifecycle` is always present: a caller that cannot see it has no way to
+    // tell a confirmed link from an unreviewed machine proposal.
+    let tunnel = || json!({"type":"object","properties":{"tunnel_id":uuid(),"from_id":uuid(),"to_id":uuid(),"kind":{"type":"string"},"lifecycle":{"type":"string","enum":["active","proposed","superseded","withdrawn"]}},"required":["tunnel_id","kind","lifecycle"],"additionalProperties":false});
     let fact = || json!({"type":"object","properties":{"fact_id":uuid(),"subject":{"type":"string"},"predicate":{"type":"string"},"object":{"type":"string"},"source_memory_id":uuid(),"event_time":{"type":"string","format":"date-time"},"state":{"type":"string"}},"required":["fact_id","subject","predicate","object"],"additionalProperties":false});
     let journal = || json!({"type":"object","properties":{"agent_name":{"type":"string"},"entry":{"type":"string"},"written_at":{"type":"string","format":"date-time"}},"required":["agent_name","entry","written_at"],"additionalProperties":false});
     match name {
