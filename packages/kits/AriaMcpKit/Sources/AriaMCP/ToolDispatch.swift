@@ -25,6 +25,9 @@ import func NeuronKit.deriveTimings
 
 private struct DispatcherV2MemoryUsageLedger: AriaV2MemoryUsageLedger {
     let surfaced: SurfacedRecallLedger
+    let kit: GeniusLocusKit
+    let handle: EstateHandle
+    let posture: EstatePosture
 
     func recordSurfaced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
         _ = (estateID, callerID)
@@ -34,11 +37,54 @@ private struct DispatcherV2MemoryUsageLedger: AriaV2MemoryUsageLedger {
         )
     }
 
+    /// Mark a surfaced row as USED, so the dreaming daemon's reward sweep
+    /// assigns reward 1.0 to that drawer's trace rows
+    /// (DESIGN_TRACE_REWARD_2026-06-12).
+    ///
+    /// GeniusLocusKit supplies `markRecallUsed`; it does not call it. The
+    /// caller has always been this layer — a search records what it surfaced,
+    /// and a later dereference verb reports that the caller acted on it.
+    /// Without this call the reward signal is permanently zero and every
+    /// consumer of it — the dreaming reward sweep, Bradley-Terry, the solver
+    /// bandit — learns from an empty channel.
+    ///
+    /// Four conditions, each load-bearing and each inherited from the v1 path:
+    ///
+    ///   1. LIVE POSTURE ONLY. The ledger still records what a search surfaced,
+    ///      because that is session memory rather than estate state, but the
+    ///      reward mark is a persistent write and a frozen estate takes none.
+    ///   2. SURFACED IN THIS SESSION. An id the caller already knew is not a
+    ///      recall the estate helped with, so it earns no reward.
+    ///   3. BOTH STORAGE SPELLINGS. `markRecallUsed` matches trace rows by the
+    ///      stored drawer id, and the two portable estate writers disagree on
+    ///      UUID case. The ledger holds canonical lowercase; the estate may
+    ///      hold either.
+    ///   4. A FRESH WALL CLOCK, deliberately later than the dispatch instant.
+    ///      The retention window is [now - 30 days, now], and the RecallDirector
+    ///      stamps its trace rows from its own clock inside `kit.recall`, which
+    ///      runs AFTER this dispatch's instant was captured. Under load that
+    ///      recall can finish late enough that a trace row is newer than the
+    ///      dispatch instant, which would push it past the window's upper bound
+    ///      and match zero rows.
+    ///
+    /// Failures are silent: a reward-marking failure must never break the verb
+    /// the caller actually asked for.
     func recordDereferenced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
-        // The existing ledger records search surfacing. Reward marking remains
-        // owned by the established typed GLK path; this adapter does not invent
-        // a second session store or mutate recall state during a read.
-        _ = (memoryIDs, estateID, callerID, at)
+        _ = (estateID, callerID, at)
+        guard posture == .live else { return }
+        // Condition 4: current wall time, NOT the `at` instant threaded from
+        // dispatch. See the note above — this is not an oversight.
+        let rewardInstant = Date()
+        for memoryID in memoryIDs {
+            guard await surfaced.entry(
+                for: AriaV2ArgumentDecoder.canonicalUUID(memoryID)) != nil else { continue }
+            for spelling in AriaV2ArgumentDecoder.storageIdentitySpellings(memoryID) {
+                if let marked = try? await kit.markRecallUsed(
+                    handle, target: spelling, now: rewardInstant), marked > 0 {
+                    break
+                }
+            }
+        }
     }
 }
 
@@ -731,7 +777,8 @@ private extension ToolDispatcher {
                 now: { now },
                 maximumSensitivity: maximumSensitivity,
                 recallOrigin: posture == .frozen ? .internal : .external,
-                usageLedger: DispatcherV2MemoryUsageLedger(surfaced: recallLedger)
+                usageLedger: DispatcherV2MemoryUsageLedger(
+                    surfaced: recallLedger, kit: kit, handle: handle, posture: posture)
             )
         )
         let packetOperations = AriaV2PacketOperations(
