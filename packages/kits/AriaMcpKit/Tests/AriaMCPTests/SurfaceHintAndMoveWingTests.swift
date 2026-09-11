@@ -79,14 +79,18 @@ struct SurfaceHintAndMoveWingTests {
             "search must return at least one hit; got: \(searchText)"
         )
         // The no-results hint must NOT be present because results were returned.
-        // Hint text matches Rust coaching_engine.rs trigger 2.
+        // v2 hint text (capital N) from AriaV2Coach.swift:91 — asserting the
+        // case-sensitive form discriminates; the old lowercase check always passed
+        // even when the hint fired. AriaV2Envelope.applyHint (AriaV2Envelope.swift:93)
+        // appends "\nhint: " to content[0].text when a hint fires; its absence
+        // also proves no hint was appended.
         #expect(
-            !searchText.contains("no memories matched"),
+            !searchText.contains("No memories matched"),
             "No-results hint must not fire when search returned results; got: \(searchText)"
         )
         #expect(
-            !searchText.contains("broaden the query"),
-            "Broaden-query hint must not fire when search returned results; got: \(searchText)"
+            !searchText.contains("\nhint: "),
+            "No hint token must appear in compact text when results are present; got: \(searchText)"
         )
     }
 
@@ -110,13 +114,14 @@ struct SurfaceHintAndMoveWingTests {
             searchText.contains("found 0 candidate memories"),
             "zero-result search must report 0 memories; got: \(searchText)"
         )
-        // v2 compact text for zero results: "found 0 candidate memories"
-        // Coaching hints (if any) are in structuredContent, not the compact text.
-        // The essential property is that "found 0 candidate memories" is the prefix —
-        // the "O" bug was that non-zero results also triggered this prefix text.
+        // The no-results coaching hint IS in compact text, not only in structuredContent.
+        // AriaV2Envelope.applyHint (AriaV2Envelope.swift:88-93) appends "\nhint: " + hint
+        // to content[0].text. AriaV2Coach.hintForMemorySearch (AriaV2Coach.swift:89-93)
+        // fires on zero results with: "No memories matched. File content with
+        // moot_file_memory first, then search with a focused term."
         #expect(
-            searchText.hasPrefix("found 0 candidate memories"),
-            "zero-result search must use the 'found 0' prefix; got: \(searchText)"
+            searchText.contains("No memories matched"),
+            "No-results coaching hint must fire when search returned 0 hits; got: \(searchText)"
         )
     }
 
@@ -218,15 +223,68 @@ struct SurfaceHintAndMoveWingTests {
 
     // MARK: - Bug J (row 45): BLOCKED
 
-    // moveMemoryRoomOnlyWhenNoWing is BLOCKED in ARIA v2.
-    //
-    // v1 moot_move_memory accepted an optional `wing` argument so a room-only
-    // move was possible. In ARIA v2, AriaV2MoveMemoryRequest marks `wing` as
-    // REQUIRED (required: ["memory_id", "wing", "room"]). There is no room-only
-    // move path in v2. A caller that omits `wing` receives a decoder rejection.
-    //
-    // The test cannot be rewritten without weakening the assertion or inventing
-    // a path that does not exist — both are prohibited. Restoration is blocked
-    // pending a v2 spec decision: either add an optional-wing code path to
-    // moot_move_memory, or remove the room-only-move contract from the spec.
+    /// BLOCKED: AriaV2SelectedCatalog.swift:812-818 declares
+    /// `required: ["memory_id", "wing", "room"]` for moot_move_memory —
+    /// there is no room-only move path in v2. A caller that omits `wing`
+    /// receives a decoder rejection before the operation runs.
+    /// Awaiting a v2 spec decision: either add an optional-wing code path or
+    /// remove the room-only-move contract from the spec.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: AriaV2SelectedCatalog.swift:812-818 requires wing; no room-only move path exists in v2"))
+    func moveMemoryRoomOnlyWhenNoWing() async throws {
+        let dispatcher = try await makeDispatcher()
+
+        let fileResult = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("room-only move test payload unique lambda sigma"),
+                "subject": .string("room-only move test payload unique lambda sigma"),
+                "location": .string("old-room"),
+                "wing": .string("StableWing"),
+            ])
+        )
+        let fileText = text(of: fileResult)
+        #expect(fileText.contains("filed memory"), "file_memory must succeed")
+
+        let idPrefix = "filed memory "
+        guard let idRange = fileText.range(of: idPrefix) else {
+            Issue.record("Cannot find 'filed memory ' prefix in: \(fileText)")
+            return
+        }
+        let afterPrefix = String(fileText[idRange.upperBound...])
+        let memID = String(afterPrefix.prefix(while: { !$0.isWhitespace }))
+
+        // Move room only — no wing argument.
+        let moveResult = try await dispatcher.dispatch(
+            name: "moot_move_memory",
+            arguments: .object([
+                "id": .string(memID),
+                "location": .string("new-room"),
+            ])
+        )
+        let moveText = text(of: moveResult)
+        #expect(
+            moveText.contains("moved memory"),
+            "room-only move must succeed; got: \(moveText)"
+        )
+        // Result names only the room (wing path is not in the success text).
+        #expect(
+            moveText.contains("new-room"),
+            "move result must name the new room; got: \(moveText)"
+        )
+
+        // Memory must still be findable in the original wing.
+        let recall = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("room-only move test payload unique lambda"),
+                "wing": .string("StableWing"),
+            ])
+        )
+        let recallText = text(of: recall)
+        #expect(
+            !recallText.contains("found 0 candidate memories"),
+            "after room-only move, memory must still be in StableWing; got: \(recallText)"
+        )
+    }
 }

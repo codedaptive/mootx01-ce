@@ -173,7 +173,67 @@ struct MemoryGetTests {
             "response must contain the exact captured text verbatim; got: \(compact)")
     }
 
-    @Test func foundIncludesMetadataAndLinkedTunnelSummary() async throws {
+    /// v2 moot_memory_get depth:full carries full metadata in
+    /// structuredContent.data.memories[0]. Asserts each field as a key-and-value
+    /// pair from the decoded structure, not a substring of the stringified result —
+    /// substring checks can pass on argument echoes and unrelated keys.
+    @Test func foundIncludesMetadata() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "mg-metadata")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let source = try await seed("source memory", room: "mg-tests", in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_get", arguments: getArgs(id: source.id))
+        #expect(!isError(result), "found drawer must not be an error result; got: \(result)")
+
+        // Read key-and-value pairs from structuredContent.data.memories[0].
+        // AriaV2MemoryOperations.swift:785-801 builds this object for depth:full.
+        let sc = result.objectValue?["structuredContent"]?.objectValue
+        let firstMemory = sc?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue
+
+        // Placement: wing and room from placement subobject.
+        let placement = firstMemory?["placement"]?.objectValue
+        #expect(placement?["room"]?.stringValue == "mg-tests",
+            "room must be 'mg-tests' in placement.room; got: \(String(describing: placement))")
+
+        // Temporal fields: present and non-empty ISO8601 strings.
+        let filedAt = firstMemory?["filed_at"]?.stringValue
+        #expect(filedAt?.isEmpty == false,
+            "filed_at must be a non-empty date string; got: \(String(describing: filedAt))")
+        let eventTime = firstMemory?["event_time"]?.stringValue
+        #expect(eventTime?.isEmpty == false,
+            "event_time must be a non-empty date string; got: \(String(describing: eventTime))")
+
+        // Adjective-axis fields: each must be present and non-empty.
+        let state = firstMemory?["state"]?.stringValue
+        #expect(state?.isEmpty == false, "state must be present; got: \(String(describing: state))")
+        let trust = firstMemory?["trust"]?.stringValue
+        #expect(trust?.isEmpty == false, "trust must be present; got: \(String(describing: trust))")
+        // sensitivity reflects the .normal tier passed to seed().
+        let sensitivity = firstMemory?["sensitivity"]?.stringValue
+        #expect(sensitivity == "normal",
+            "sensitivity must reflect seed's .normal tier; got: \(String(describing: sensitivity))")
+        let exportability = firstMemory?["exportability"]?.stringValue
+        #expect(exportability?.isEmpty == false,
+            "exportability must be present; got: \(String(describing: exportability))")
+        let confirmation = firstMemory?["confirmation"]?.stringValue
+        #expect(confirmation?.isEmpty == false,
+            "confirmation must be present; got: \(String(describing: confirmation))")
+        // lineage_id is the v2 key (not lineage); must be a non-empty UUID string.
+        let lineageID = firstMemory?["lineage_id"]?.stringValue
+        #expect(lineageID?.isEmpty == false,
+            "lineage_id must be present; got: \(String(describing: lineageID))")
+    }
+
+    /// BLOCKED: v2 moot_memory_get (AriaV2MemoryOperations.swift:785-801) does
+    /// not include a tunnel summary in the depth:full record; tunnels are exposed
+    /// via moot_connection_search instead. The v1 assertions cannot be verified
+    /// against the v2 response shape. Awaiting a ruling.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: AriaV2MemoryOperations.swift:785-801 full() omits tunnels from depth:full; v1 tunnel summary is absent from v2 moot_memory_get"))
+    func foundIncludesLinkedTunnelSummary() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mg-metadata")
         let handle = try await openEstate(in: kit, owner: owner)
@@ -181,36 +241,24 @@ struct MemoryGetTests {
         let target = try await seed("target memory", room: "mg-tests", in: handle, kit: kit)
 
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-        // Link the two so the by-id fetch on `source` has a tunnel relationship.
-        // v2 uses relationship (not kind) in moot_link_memories.
+        // Link the two so the by-id fetch on `source` has a tunnel to summarize.
         let link = try await dispatcher.dispatch(
             name: "moot_link_memories",
             arguments: .object([
                 "from_id": .string(source.id),
                 "to_id": .string(target.id),
-                "relationship": .string("relates"),
+                "kind": .string("relates"),
             ])
         )
         #expect(!isError(link))
 
         let result = try await dispatcher.dispatch(
             name: "moot_memory_get", arguments: getArgs(id: source.id))
-        // v2 structured data carries full metadata; check via string representation.
-        let resultStr = "\(result)"
+        let body = try #require(text(of: result))
 
-        // Placement fields.
-        #expect(resultStr.contains("mg-tests"), "room must appear in placement; got: \(resultStr)")
-        // Temporal and state fields.
-        #expect(resultStr.contains("filed_at"), "filed_at must be present; got: \(resultStr)")
-        #expect(resultStr.contains("event_time"), "event_time must be present; got: \(resultStr)")
-        #expect(resultStr.contains("state"), "state must be present; got: \(resultStr)")
-        #expect(resultStr.contains("trust"), "trust must be present; got: \(resultStr)")
-        #expect(resultStr.contains("sensitivity"), "sensitivity must be present; got: \(resultStr)")
-        #expect(resultStr.contains("exportability"), "exportability must be present; got: \(resultStr)")
-        #expect(resultStr.contains("confirmation"), "confirmation must be present; got: \(resultStr)")
-        #expect(resultStr.contains("lineage"), "lineage must be present; got: \(resultStr)")
-        // Note: v2 moot_memory_get depth:full carries full metadata but not a
-        // tunnel summary block — tunnel counts are in moot_connection_search.
+        // Linked tunnel summary, same shape as moot_connection_search/map.
+        #expect(body.contains("tunnels: 1"))
+        #expect(body.contains(target.id), "the linked tunnel's target id must appear in the summary")
     }
 
     // MARK: - 2. Not-found: genuinely absent id
@@ -228,10 +276,10 @@ struct MemoryGetTests {
         #expect(isError(result),
             "a genuinely absent id must produce an error result, not a fabricated row")
         let msg = text(of: result) ?? ""
-        // v2 not-found message is generic ("No authorized memory matched…"); the
-        // specific id is not embedded in the compact text (it is in structuredContent).
-        #expect(msg.contains("memory") || msg.contains("authorized") || msg.contains("found"),
-            "not-found message must be informative; got: \(msg)")
+        // v2 not-found message from AriaV2MemoryOperations.swift:764-765 is generic;
+        // the specific id is not embedded in the compact text.
+        #expect(msg == "No authorized memory matched the requested reference.",
+            "not-found compact text must be the exact generic message; got: \(msg)")
     }
 
     // MARK: - 3. Containment gate: exists but must never leak through the by-id door
@@ -250,6 +298,20 @@ struct MemoryGetTests {
             name: "moot_memory_get", arguments: getArgs(id: secret.id))
         #expect(isError(result),
             "a restricted-sensitivity drawer must not be returned by the by-id door; got: \(result)")
+
+        // Identical shape to a genuinely absent id — the caller cannot distinguish
+        // "exists but gated" from "never existed." v2 contract: ToolDispatch.swift:2365
+        // states a gated row is "reported exactly like a genuinely absent id."
+        // Both paths reach AriaV2MemoryOperations.swift:763-765 with an empty
+        // authorized record list and emit the same generic refusal.
+        let absentResult = try await dispatcher.dispatch(
+            name: "moot_memory_get", arguments: getArgs(id: UUID().uuidString))
+        #expect(isError(absentResult),
+            "a genuinely absent id must also produce an error result")
+        let gatedText = text(of: result)
+        let absentText = text(of: absentResult)
+        #expect(gatedText == absentText,
+            "restricted-sensitivity refusal must be byte-identical to the absent-id refusal — caller cannot probe for existence. gated: \(gatedText ?? "nil"), absent: \(absentText ?? "nil")")
     }
 
     @Test func secretSensitivityDrawerIsReportedNotFound() async throws {
