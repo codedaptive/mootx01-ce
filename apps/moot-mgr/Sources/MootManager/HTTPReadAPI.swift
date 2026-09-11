@@ -172,11 +172,6 @@ public actor HTTPReadAPI {
     /// the gate (see the SECURITY BOUNDARY block) — admin is a privileged write.
     private let admin: EstateAdmin?
 
-    /// Work-packet read engine. Optional: nil when no estate path is configured
-    /// on this host. `/api/packets*` degrades to `pending:true` when nil.
-    /// FAB5-K1 Packets pane.
-    private let packetsEngine: PacketsEngine?
-
     /// The TCP port requested on 127.0.0.1 (0 = OS-assigned).
     private let requestedPort: UInt16
 
@@ -235,8 +230,6 @@ public actor HTTPReadAPI {
     ///                    for a read-only/observer host (admin verbs then report
     ///                    "not available"). Defaulted so existing call sites are
     ///                    unchanged.
-    ///   - packetsEngine: Work-packet read engine. nil when no estate path is
-    ///                    configured; `/api/packets*` then returns pending:true.
     public init(
         manager: MootManager,
         port: UInt16,
@@ -244,7 +237,6 @@ public actor HTTPReadAPI {
         startInstant: Date,
         clock: @escaping @Sendable () -> Date = { Date() },
         admin: EstateAdmin? = nil,
-        packetsEngine: PacketsEngine? = nil,
         maxConnections: Int? = nil
     ) {
         self.manager = manager
@@ -253,7 +245,6 @@ public actor HTTPReadAPI {
         self.startInstant = startInstant
         self.clock = clock
         self.admin = admin
-        self.packetsEngine = packetsEngine
         // Use the explicit override when provided (tests); otherwise read the env
         // var / default inside MootMgrConnGate.init.
         if let cap = maxConnections {
@@ -481,47 +472,6 @@ public actor HTTPReadAPI {
             // Display only — no alerting, no general query surface (D6 boundary).
             let estate = Self.queryValue("estate", in: request.query)
             return await jsonResponse { try await self.manager.perfHealthPayload(estate: estate) }
-        case ("GET", "/api/packets"):
-            // Exportable work packets list. Applies Filter.exportable at recall
-            // layer — non-exportable (.private_) packets are silently absent.
-            // Degrades to pending:true when no PacketsEngine is configured.
-            return await jsonResponse {
-                guard let engine = self.packetsEngine else {
-                    return PacketsPayload(pending: true, packets: [])
-                }
-                return try await engine.list()
-            }
-        case ("GET", let path) where path.hasPrefix("/api/packets/") && path.hasSuffix("/lineage"):
-            // Lineage links for a single exportable work packet.
-            // 404 when absent, non-exportable, or no engine configured.
-            // `nil` return from PacketsEngine maps to 404 (no distinguishing signal).
-            let drawerID = String(path.dropFirst("/api/packets/".count).dropLast("/lineage".count))
-            guard !drawerID.isEmpty, let engine = self.packetsEngine else { return .notFound }
-            do {
-                guard let payload = try await engine.lineage(drawerID: drawerID) else {
-                    return .notFound
-                }
-                let data = try APIJSON.encode(payload)
-                return .json(status: 200, body: data)
-            } catch {
-                logger.error("packets lineage error: \(String(describing: error))")
-                return .json(status: 500, body: Data(#"{"error":"internal"}"#.utf8))
-            }
-        case ("GET", let path) where path.hasPrefix("/api/packets/"):
-            // Single exportable work packet detail.
-            // 404 when absent, non-exportable, or no engine configured.
-            let drawerID = String(path.dropFirst("/api/packets/".count))
-            guard !drawerID.isEmpty, let engine = self.packetsEngine else { return .notFound }
-            do {
-                guard let payload = try await engine.fetch(drawerID: drawerID) else {
-                    return .notFound
-                }
-                let data = try APIJSON.encode(payload)
-                return .json(status: 200, body: data)
-            } catch {
-                logger.error("packets fetch error: \(String(describing: error))")
-                return .json(status: 500, body: Data(#"{"error":"internal"}"#.utf8))
-            }
         case ("POST", let path) where path.hasPrefix("/api/control/"):
             return await handleControl(request)
         case ("GET", let path):
