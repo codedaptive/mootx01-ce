@@ -49,7 +49,7 @@ struct UpgradeCommand: AsyncParsableCommand {
               mootx01 upgrade --check
 
             Use --backfill-only to run only the estate migration steps
-            (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record
+            (schema 10 → 20 and 19 → 20, kg_facts identity, shared-content reclaim, whole-record
             vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim)
             against the estate --db selects (the active estate when absent), then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
@@ -92,7 +92,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
 
-    /// Run ONLY the estate migration steps: schema 10 → 19, kg_facts
+    /// Run ONLY the estate migration steps: schema 10 → 20 and 19 → 20, kg_facts
     /// identity, shared-content reclaim, whole-record vacuum, ssc facts, dense
     /// pooling convergence, span encode, and vector reclaim. Intended for
     /// scripted and benchmark estates, which the caller names with
@@ -115,7 +115,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// last (deletes what nothing serves any more).
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the estate migration steps (schema 10 → 19, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
+        help: "Run only the estate migration steps (schema 10 → 20 and 19 → 20, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -199,7 +199,7 @@ struct UpgradeCommand: AsyncParsableCommand {
 
         // --backfill-only: headless estate convergence for scripted and
         // benchmark estates. Runs only the eight estate migration
-        // steps (schema 10 → 19, kg_facts identity, shared-content reclaim,
+        // steps (schema 10 → 20 and 19 → 20, kg_facts identity, shared-content reclaim,
         // whole-record vacuum, ssc facts, dense pooling convergence, span
         // encode, vector reclaim) against the estate the catalog selected
         // above. No network, no download, no plugin
@@ -462,20 +462,22 @@ struct UpgradeCommand: AsyncParsableCommand {
         offerEstateEncryptionIfNeeded(estate: estate, home: home)
     }
 
-    /// Schema 10 → 19 (ENCODER_RERANK_CONTRACT §12): the one product schema
-    /// migration. Reads the LocusKit ledger row RAW, before any schema open,
-    /// and decides with `LocusKitSchema.upgradePath(storedVersion:)`:
-    /// 10 (CE 1.0.35/1.0.37) → open the LocusKit schema, which applies the
-    /// single v10 → v19 hop; 19 → nothing; no row → fresh; anything else →
-    /// REFUSE, naming the version found, and return false so the caller
-    /// skips every later step. The refusal must come first because
-    /// PersistenceKit's runner stamps the declared version whenever no
-    /// ladder entry matches: any later step's open would mark an estate at
-    /// 11–18 as 19 with none of the v19 objects in place. Pre-release development
-    /// estates at 18 are moved by the surgery script, never by this command.
+    /// Schema upgrade: the one product schema migration. Reads the LocusKit
+    /// ledger row RAW, before any schema open, and decides with
+    /// `LocusKitSchema.upgradePath(storedVersion:)`:
+    ///   - 10 (CE 1.0.35/1.0.37) → open the schema, which applies the
+    ///     v10 → v19 → v20 ladder in two hops.
+    ///   - 19 → open the schema, which applies the single v19 → v20 hop.
+    ///   - no row → fresh; anything else → REFUSE, naming the version found,
+    ///     and return false so the caller skips every later step.
+    /// The refusal must come first because PersistenceKit's runner stamps the
+    /// declared version whenever no ladder entry matches: any later step's open
+    /// would mark an estate at 11–18 as 20 with none of the v20 objects in
+    /// place. Pre-release development estates at 11–18 are moved to a supported
+    /// version by the schema surgery script, never by this command.
     ///
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
-    /// Returns `true` when the estate is at 19 afterwards (or absent).
+    /// Returns `true` when the estate is at 20 afterwards (or absent).
     @discardableResult
     /// The identity key store an upgrade step opens the estate with. The
     /// catalog decided what kind of estate this is and the kind decides every
@@ -490,7 +492,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     private func runSchemaUpgrade(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
         let estateURL = estate.databaseURL
-        // Absent estate means first run — serve creates new estates at 19.
+        // Absent estate means first run — serve creates new estates at 20.
         guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
         let encryption: EstateEncryptionConfig
         do {
@@ -518,7 +520,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                     print("""
                           ✗ schema upgrade refused: this estate is at LocusKit schema \(found).
                             This build upgrades schema \(LocusKitSchema.supportedUpgradeFloor) (CE 1.0.35/1.0.37) and serves schema \(LocusKitSchema.version); nothing was changed.
-                            A pre-release development estate at 11–18 is moved to 19 by the schema surgery script, not by this build; a newer estate needs a newer build.
+                            A pre-release development estate at 11–18 is moved to a supported version by the schema surgery script, not by this build; a newer estate needs a newer build.
                         """)
                     await storage.close()
                     return false
@@ -534,7 +536,11 @@ struct UpgradeCommand: AsyncParsableCommand {
                         await storage.close()
                         return false
                     }
-                    print("  ✓ schema: LocusKit \(from) → \(after) (encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution)")
+                    let v20Objects = "twelve kg_facts extraction columns, fact_extractor_models"
+                    let hopObjects = from == 19
+                        ? v20Objects
+                        : "encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution; \(v20Objects)"
+                    print("  ✓ schema: LocusKit \(from) → \(after) (\(hopObjects))")
                 }
                 await storage.close()
                 return true
@@ -814,7 +820,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 )
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 // Migration writes the activation key: a CE 1.0.x estate arrives
-                // at 19 with no `embedding_provider`, and only `provision` and
+                // at 20 with no `embedding_provider`, and only `provision` and
                 // this upgrade step ever write it (Bob's ruling, 2026-09-06).
                 // Written before wiring so this open already activates the
                 // encoder; the next serve open does the same.
@@ -970,10 +976,10 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     /// Models whose vector rows `mootx01 upgrade` reclaims: the dense
     /// distributional families the Encoder Rerank Program took dark
-    /// (`MOOTX01_DENSE_FAMILIES` off). Their rows serve nothing at 19.
+    /// (`MOOTX01_DENSE_FAMILIES` off). Their rows serve nothing at 19 or 20.
     static let retiredDenseFamilyModelIDs = ["lsa-v1", "nmf-v1", "ppmi-v1", "fdc-v1"]
 
-    /// Reclaim the vector rows nothing serves at schema 19 (ENCODER_RERANK
+    /// Reclaim the vector rows nothing serves at schema 20 (ENCODER_RERANK
     /// CONTRACT §12): every row of the retired dense families and every row
     /// at a non-serving generation, then a VACUUM when anything was deleted.
     /// Opened through GeniusLocusKit first for the same ledger-id reason as
