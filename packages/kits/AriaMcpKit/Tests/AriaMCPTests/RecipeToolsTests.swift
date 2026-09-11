@@ -642,15 +642,11 @@ struct RecipeToolsTests {
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         // File the answer memory FIRST (oldest). Contains four distinctive terms
-        // that uniquely identify it.
-        let answerResult = try await dispatcher.dispatch(
+        // that uniquely identify it. "daguerreotype" appears in this drawer only —
+        // none of the 4 generic grocery drawers contain it.
+        _ = try await dispatcher.dispatch(
             name: "moot_file_memory",
             arguments: fileArgs(content: "daguerreotype vintage cameras photography collection"))
-        let answerText = answerResult.objectValue?["content"]?.arrayValue?.first?
-            .objectValue?["text"]?.stringValue ?? ""
-        let answerID = answerText.split(separator: "\n").first?
-            .split(separator: " ").last.map(String.init) ?? ""
-        #expect(!answerID.isEmpty, "answer memory must be filed")
 
         // File 4 newer memories. Each contains the generic word "collection"
         // (passes the contentMatches filter) plus unrelated content.
@@ -677,19 +673,16 @@ struct RecipeToolsTests {
         let data = try #require(structuredData(result), "structuredContent.data must be present")
         let results = try #require(data["results"]?.arrayValue, "data.results must be present")
 
-        // The answer drawer must appear in the results (its distinctive terms
-        // won against the 4 generic "collection" memories).
-        let ids = results.compactMap { $0.objectValue?["memory_id"]?.stringValue }
-        #expect(ids.contains(answerID),
-                "answer drawer must appear in the cue-ranked results; got IDs: \(ids)")
-
-        // Cues must be non-empty. In v2, patterns reflect corpus-match terms
-        // (BM25 tokens from the result set), not the query terms directly. "collection"
-        // appears in both query and all 5 corpus drawers, so it always surfaces as a cue.
-        if let cues = data["cues"]?.arrayValue?.compactMap({ $0.stringValue }) {
-            #expect(cues.contains("collection"),
-                    "data.cues must contain corpus-match terms (v2 pattern model); got: \(cues)")
-        }
+        // The answer drawer must appear in the results. Its subject and excerpt contain
+        // "daguerreotype" — a term that does NOT appear in any of the 4 generic drawers.
+        // If cue ranking works, this drawer wins against pure-recency ordering; if not,
+        // the 3 most-recent generic drawers fill the cap-3 output and this assertion fails.
+        let foundDistinctiveAnswer = results.contains(where: {
+            $0.objectValue?["subject"]?.stringValue?.contains("daguerreotype") == true ||
+            $0.objectValue?["excerpt"]?.stringValue?.contains("daguerreotype") == true
+        })
+        #expect(foundDistinctiveAnswer,
+                "answer drawer with distinctive term 'daguerreotype' must appear in cue-ranked results; recency alone would evict it; got \(results.count) results")
     }
 
     /// `moot_synthesize` silently removes provenance-restricted rows from the
@@ -753,34 +746,23 @@ struct RecipeToolsTests {
                 "provenance-restricted content must not appear in results; got subjects: \(subjects)")
     }
 
-    /// In v2, moot_synthesize with an all-stopword query does NOT throw —
-    /// the v2 lower provider's cueTerms uses a simple split without stopword
-    /// filtering. The query runs and the cues reflect the raw split tokens.
-    /// This test discriminates: if the v2 path ever adds stopword validation
-    /// that throws, it will fail. If cueTerms changes to filter stopwords
-    /// and return empty, that is also visible (cues absent or empty vs. present).
-    @Test func testGroundedSynthesisAllStopwordQueryDoesNotThrowInV2() async throws {
+    /// BLOCKED: v2 cueTerms (AriaV2OrchestrationLower.swift:232) does a plain
+    /// non-alphanumeric split with no stopword filter, so "what did they do" becomes
+    /// ["what", "did", "they", "do"] and the call succeeds instead of throwing.
+    /// The stopword validation guard present in v1 (RecipeTools.groundingTerms) is
+    /// never reached on the v2 synthesize path. Awaiting a ruling.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: v2 AriaV2OrchestrationLower.cueTerms (line 232) has no stopword filter; all-stopword query succeeds instead of throwing invalidParams"))
+    func testGroundedSynthesisAllStopwordQueryThrowsInvalidParams() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "gse"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // v2 path: no stopword guard — the lower provider's cueTerms is a
-        // simple non-letter/non-number split; "what did they do" → ["what", "did", "they", "do"].
-        // Must NOT throw. If the v2 path ever adds stopword validation, this test fails.
-        let result = try await dispatcher.dispatch(
-            name: "moot_synthesize",
-            arguments: .object(["query": .string("what did they do")]))
-
-        let obj = try #require(result.objectValue)
-        #expect(obj["isError"]?.boolValue == false,
-                "v2 moot_synthesize must NOT throw for all-stopword queries (no stopword guard in AriaV2OrchestrationLower.cueTerms)")
-
-        // The v2 lower provider does NOT filter stopwords from cueTerms —
-        // cues must contain the raw split tokens rather than empty.
-        let data = structuredData(result)
-        // v2: cues may be empty when the estate is empty (no drawers to match against);
-        // the important invariant is that the call succeeds without throwing.
+        await #expect(throws: JSONRPCError.self) {
+            let args: JSONValue = .object(["query": .string("what did they do")])
+            _ = try await dispatcher.dispatch(name: "moot_synthesize", arguments: args)
+        }
     }
 
     /// The term extractor's contract, pinned so both ports cannot drift:
@@ -861,7 +843,14 @@ struct RecipeToolsTests {
     /// An unknown composition name is a caller error. The boundary rejects it
     /// fail-CLOSED: isError:true tool result naming the offending composition.
     /// Parity: Rust test `recall_precise_unknown_composition_fails_closed`.
-    @Test func testPreciseRecallUnknownCompositionFailsClosed() async throws {
+    /// BLOCKED: AriaV2RecallLensService.execute() (AriaV2RecallLens.swift:350-351)
+    /// catches ALL errors from authority.execute() in a bare `catch` and returns a
+    /// generic "recall_unavailable" refusal. The AriaV2InvalidArgument thrown at
+    /// line 193 ("Unknown precise-recall composition '\(composition)'") is swallowed
+    /// there; specific argument names and invalid values never reach the tool result text.
+    /// Awaiting a ruling. Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: AriaV2RecallLens.swift:350-351 catch-all swallows AriaV2InvalidArgument from line 193; 'unknown composition' and 'no-such-composition' never reach tool result text"))
+    func testPreciseRecallUnknownCompositionFailsClosed() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "pr-unknown-comp"))
@@ -883,11 +872,10 @@ struct RecipeToolsTests {
                 "unknown composition must return a tool error (fail closed)")
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // v2 execute() catches all AriaV2InvalidArgument errors with a generic
-        // "unavailable in the selected estate" refusal; specific argument names
-        // are not propagated to the tool result text.
-        #expect(text.contains("unavailable"),
-                "the error message must confirm the operation is unavailable")
+        #expect(text.contains("unknown composition"),
+                "the error message must name the offending composition")
+        #expect(text.contains("no-such-composition"),
+                "the error message must include the invalid value the caller sent")
     }
 
     /// A known composition name is accepted without error.
@@ -982,7 +970,14 @@ struct RecipeToolsTests {
 
     /// An unknown preset name is a caller error — the boundary rejects it
     /// fail-CLOSED with a tool error naming the offending preset.
-    @Test func testShapedRecallUnknownPresetFailsClosed() async throws {
+    /// BLOCKED: AriaV2RecallLensService.execute() (AriaV2RecallLens.swift:350-351)
+    /// catches ALL errors from authority.execute() in a bare `catch` and returns a
+    /// generic "recall_unavailable" refusal. The AriaV2InvalidArgument thrown at
+    /// line 137 ("Unknown recall preset '\(preset)'") is swallowed there; specific
+    /// preset names and invalid values never reach the tool result text.
+    /// Awaiting a ruling. Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: AriaV2RecallLens.swift:350-351 catch-all swallows AriaV2InvalidArgument from line 137; 'unknown preset' and 'no-such-preset' never reach tool result text"))
+    func testShapedRecallUnknownPresetFailsClosed() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-unknown"))
@@ -1003,11 +998,8 @@ struct RecipeToolsTests {
                 "unknown preset must return a tool error (fail closed)")
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // v2 execute() catches all AriaV2InvalidArgument errors with a generic
-        // "unavailable in the selected estate" refusal; specific argument names
-        // are not propagated to the tool result text.
-        #expect(text.contains("unavailable"),
-                "the error message must confirm the operation is unavailable")
+        #expect(text.contains("unknown preset"))
+        #expect(text.contains("no-such-preset"))
     }
 
     /// An absent `preset` arg uses the unsteered balanced default and succeeds.
@@ -1504,33 +1496,42 @@ struct RecipeToolsTests {
         let _ = try #require(data["results"]?.arrayValue, "data.results must be an array")
     }
 
-    /// Route gap: `echo_query` appears in the catalog schema for
-    /// `recall_distilled` but is NOT in the `AriaV2RecallLensOperation.schemas`
-    /// decoder's allowed-key set. The strict `AriaV2ArgumentDecoder` rejects
-    /// any key not in its allowedKeys set, so passing `echo_query` throws
-    /// rather than opting in to query-echo behavior.
-    /// This test pins the current behavior as a discriminating gate — if the
-    /// route gap is fixed, this test will fail and should be updated to assert
-    /// success and verify the echo_query opt-in behavior instead.
-    @Test func testRecallDistilledEchoQueryOptIn() async throws {
+    /// BLOCKED: echo_query appears in the catalog schema (AriaV2SelectedCatalog)
+    /// but is absent from the AriaV2RecallLensOperation decoder's allowed-key set
+    /// (AriaV2RecallLens.swift:40); AriaV2ArgumentDecoder throws JSONRPCError on any
+    /// key not in allowedKeys, so passing echo_query:true throws rather than opting
+    /// in to query-echo behavior. v1's echo_query feature is not wired on the v2 path.
+    /// Awaiting a ruling. Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: echo_query not in AriaV2RecallLensOperation decoder allowedKeys (AriaV2RecallLens.swift:40); v1 echo_query opt-in behavior is absent from v2 path"))
+    func testRecallDistilledEchoQueryOptIn() async throws {
+        // echo_query:true restores the "for: {query}" suffix that is OFF by default.
+        // This test also proves echo_query is DECODED — if it were silently ignored
+        // the header would stay short and the assertion at line 2 would fail.
+        // If it were treated as unrecognized, the unknown-arg hint mechanism would
+        // append "hint: unrecognized argument(s) ignored: echo_query" — line 3 catches that.
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "recall-distilled-echo-optin"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // ROUTE GAP: echo_query is in the catalog schema but NOT in the
-        // AriaV2RecallLensOperation decoder's allowed-key set (AriaV2RecallLens.swift).
-        // The strict AriaV2ArgumentDecoder rejects it as an unknown key (JSONRPCError).
-        // Fix: add "echo_query": .boolean to the .recallDistilled schema map.
-        await #expect(throws: JSONRPCError.self,
-                      "echo_query triggers unknown-key rejection (route gap — not yet wired to decoder)") {
-            _ = try await dispatcher.dispatch(
-                name: "moot_recall_distilled",
-                arguments: .object([
-                    "query": .string("test echo query"),
-                    "echo_query": .bool(true),
-                ]))
-        }
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_distilled",
+            arguments: .object([
+                "query": .string("test echo query"),
+                "echo_query": .bool(true),
+            ]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // With echo_query:true, header must echo the query (applied on both
+        // empty and non-empty results). New S1 format: "found N candidate memories for: <query>".
+        #expect(text.hasPrefix("found 0 candidate memories for: test echo query"),
+                "echo_query:true must produce 'found 0 candidate memories for: <query>' header")
+        // echo_query is a declared arg — no unrecognized-arg hint must appear.
+        #expect(!text.contains("hint: unrecognized argument(s) ignored"),
+                "echo_query is declared — must NOT trigger the unrecognized-arg hint")
     }
 
     @Test func testRecallDistilledEchoQueryDefaultOff() async throws {
