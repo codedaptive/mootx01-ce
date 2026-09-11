@@ -59,6 +59,14 @@ impl<'a> SelectedEstateDiagnosticsAuthority<'a> {
             // Populated by the Status arm via get_meta; left None for all
             // other operations (Ping, Map) which do not need the FDC floor.
             fdc_floor: None,
+            // Same rule for the rest: the Status arm fills these, and the
+            // operations that do not report them leave the base values. A
+            // None trace count means "not read", never "no traces".
+            recall_trace_count: None,
+            sync_state: "local-only".to_owned(),
+            subjects_bearing: 0,
+            subjects_eligible: 0,
+            shared_content_migration: None,
         }
     }
 
@@ -171,9 +179,34 @@ impl EstateDiagnosticsAuthority for SelectedEstateDiagnosticsAuthority<'_> {
             // drain, rebuild, or audit read to this arm.
             EstateDiagnosticsOperation::Ping => {}
             EstateDiagnosticsOperation::Status => {
-                snapshot.memories = coord
+                let status_drawers = coord
                     .all_drawers(handle)
-                    .map_err(|error| Self::map_error("estate status", error))?
+                    .map_err(|error| Self::map_error("estate status", error))?;
+                // Subject debt over the sensitivity-visible, non-empty set.
+                // Empty content is not eligible for a subject, so it is left
+                // out of both sides rather than counted as permanent debt.
+                let eligible: Vec<_> = status_drawers
+                    .iter()
+                    .filter(|drawer| {
+                        drawer.tombstoned_at.is_none()
+                            && drawer.adjective_sensitivity().is_bulk_exportable()
+                            && !drawer.content.is_empty()
+                    })
+                    .collect();
+                snapshot.subjects_eligible = eligible.len() as u64;
+                snapshot.subjects_bearing = eligible
+                    .iter()
+                    .filter(|drawer| drawer.subject.is_some())
+                    .count() as u64;
+                // Best-effort, all three: a diagnostics read must not fail
+                // because one field could not be gathered.
+                snapshot.recall_trace_count =
+                    coord.count_recall_traces(handle).ok().map(|count| count as u64);
+                snapshot.sync_state = coord
+                    .sync_state_token(handle)
+                    .ok()
+                    .unwrap_or_else(|| "local-only".to_owned());
+                snapshot.memories = status_drawers
                     .into_iter()
                     .filter(|drawer| drawer.tombstoned_at.is_none())
                     .map(|drawer| DiagnosticsMemory {
