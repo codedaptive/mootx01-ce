@@ -68,7 +68,7 @@ pub fn run(
 
     // --backfill-only, or a transient estate: estate-only convergence for
     // scripted and benchmark estates. Runs the estate migration steps (schema
-    // 10 → 19, manifest refresh, kg_facts identity, shared-content reclaim,
+    // 10 → 20 and 19 → 20, manifest refresh, kg_facts identity, shared-content reclaim,
     // whole-record vacuum, ssc facts, dense pooling convergence, span encode,
     // vector reclaim) against the selected estate, then exits. No network, no
     // prompts; each step quiesces the daemon only when a live resident serves
@@ -290,20 +290,23 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
     }
 }
 
-/// Schema 10 → 19 (ENCODER_RERANK_CONTRACT §12): the one product schema
-/// migration. Reads the LocusKit ledger row RAW, before any schema open, and
-/// decides with `locus_kit::schema::upgrade_path`: 10 (CE 1.0.35/1.0.37) →
-/// open the LocusKit schema, which applies the single v10 → v19 hop; 19 →
-/// nothing; no row → fresh; anything else → REFUSE, naming the version
-/// found, and return false so the caller skips every later step. The refusal
-/// must come first because persistence-kit's runner stamps the declared
-/// version whenever no ladder entry matches: any later step's open would mark
-/// an estate at 11–18 as 19 with none of the v19 objects in place. Pre-release
-/// development estates at 18 are moved by the surgery script, never by this
-/// command. Twin of Swift `UpgradeCommand.runSchemaUpgrade`.
+/// Schema upgrade: the one product schema migration. Reads the LocusKit ledger
+/// row RAW, before any schema open, and decides with
+/// `locus_kit::schema::upgrade_path`:
+///   - 10 (CE 1.0.35/1.0.37) → open the schema, which applies the
+///     v10 → v19 → v20 ladder in two hops.
+///   - 19 → open the schema, which applies the single v19 → v20 hop.
+///   - no row → fresh; anything else → REFUSE, naming the version found,
+///     and return false so the caller skips every later step.
+/// The refusal must come first because persistence-kit's runner stamps the
+/// declared version whenever no ladder entry matches: any later step's open
+/// would mark an estate at 11–18 as 20 with none of the v20 objects in place.
+/// Pre-release development estates at 11–18 are moved to a supported version
+/// by the schema surgery script, never by this command.
+/// Twin of Swift `UpgradeCommand.runSchemaUpgrade`.
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
-/// Returns `true` when the estate is at 19 afterwards (or absent).
+/// Returns `true` when the estate is at 20 afterwards (or absent).
 fn run_schema_upgrade(record: &EstateRecord) -> bool {
     use locus_kit::schema::{self, SchemaUpgradePath};
     use persistence_kit::sqlite::SqliteStorage;
@@ -311,7 +314,7 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
     use uuid::Uuid;
 
     let estate = record.database_path();
-    // Absent estate means first run — serve creates new estates at 19.
+    // Absent estate means first run — serve creates new estates at 20.
     if !estate.exists() {
         return true;
     }
@@ -335,7 +338,7 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                     .map_err(|e| e.to_string())?;
                 let outcome = match schema::upgrade_path(stored) {
                     SchemaUpgradePath::Unsupported { found } => Err(format!(
-                        "refused: this estate is at LocusKit schema {found}.\n    This build upgrades schema {} (CE 1.0.35/1.0.37) and serves schema {}; nothing was changed.\n    A pre-release development estate at 11–18 is moved to 19 by the schema surgery script, not by this build; a newer estate needs a newer build.",
+                        "refused: this estate is at LocusKit schema {found}.\n    This build upgrades schema {} (CE 1.0.35/1.0.37) and serves schema {}; nothing was changed.\n    A pre-release development estate at 11–18 is moved to a supported version by the schema surgery script, not by this build; a newer estate needs a newer build.",
                         schema::SUPPORTED_UPGRADE_FLOOR,
                         schema::SCHEMA_VERSION
                     )),
@@ -358,9 +361,13 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                                 schema::SCHEMA_VERSION
                             ))
                         } else {
-                            Ok(format!(
-                                "LocusKit {from} → {after} (encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution)"
-                            ))
+                            let v20_objects = "twelve kg_facts extraction columns, fact_extractor_models";
+                            let hop_objects = if from == 19 {
+                                v20_objects.to_string()
+                            } else {
+                                format!("encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution; {v20_objects}")
+                            };
+                            Ok(format!("LocusKit {from} → {after} ({hop_objects})"))
                         }
                     }
                 };
@@ -679,7 +686,7 @@ fn run_span_encode_backfill(record: &EstateRecord) -> bool {
                 let store = SqliteDrawerStore::from_path(&estate.display().to_string(), now, None, 5.0)
                     .map_err(|e| e.to_string())?;
                 // Migration writes the activation key: a CE 1.0.x estate arrives
-                // at 19 with no `embedding_provider`, and only `provision` and
+                // at 20 with no `embedding_provider`, and only `provision` and
                 // this upgrade step ever write it (Bob's ruling, 2026-09-06).
                 // The next serve open reads it and activates the encoder.
                 // Swift twin: UpgradeCommand.runSpanEncodeBackfill →
@@ -732,7 +739,7 @@ fn run_span_encode_backfill(record: &EstateRecord) -> bool {
 
 /// Models whose vector rows `mootx01 upgrade` reclaims: the dense
 /// distributional families the Encoder Rerank Program took dark
-/// (`dense-families` feature off). Their rows serve nothing at 19.
+/// (`dense-families` feature off). Their rows serve nothing at 19 or 20.
 /// Vacuum the whole-record float rows (`vectors` kind 1) and the `hnsw_graph`
 /// rows nothing serves any more (GENIUSLOCUSKIT_SPEC I-26). The 1.6 → 1.7
 /// capsule does the work inside the registry's migration chain when the
@@ -849,7 +856,7 @@ fn whole_record_row_counts(path: &str, now: i64) -> Result<(usize, usize), Strin
 
 const RETIRED_DENSE_FAMILY_MODEL_IDS: [&str; 4] = ["lsa-v1", "nmf-v1", "ppmi-v1", "fdc-v1"];
 
-/// Reclaim the vector rows nothing serves at schema 19 (ENCODER_RERANK
+/// Reclaim the vector rows nothing serves at schema 20 (ENCODER_RERANK
 /// CONTRACT §12): every row of the retired dense families and every row at a
 /// non-serving generation, then a VACUUM when anything was deleted. Opened
 /// through the registry's maintenance path first for the same ledger-id
