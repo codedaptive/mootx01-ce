@@ -59,6 +59,47 @@ struct SchemaUpgradeTests {
         ]
     )
 
+    /// The schema-19 shape of the tables the v19 → v20 hop modifies: drawers
+    /// with the v12 subject trio and the v19 ssc_facts column; kg_facts with the
+    /// v13 identity trio but none of the v20 extraction columns. Used to prove
+    /// the hop preserves pre-existing rows and stamps the declared defaults on
+    /// all twelve new columns.
+    private static let schema19 = SchemaDeclaration(
+        kitID: "LocusKit",
+        version: 19,
+        tables: [
+            TableDeclaration(name: "drawers", columns: [
+                .text("id"), .text("content"), .text("parent_node_id"),
+                .text("sourceFile", nullable: true), .int("chunkIndex", nullable: true),
+                .text("addedBy"), .timestamp("filedAt"), .timestamp("eventTime", nullable: true),
+                .text("embeddingModelID"), .timestamp("tombstonedAt", nullable: true),
+                .text("removedByBatch", nullable: true),
+                .bitmap("provenance"), .bitmap("adjectiveBitmap"), .bitmap("operationalBitmap"),
+                ColumnDeclaration(name: "lineageID", type: .text, nullable: false, defaultValue: .text("")),
+                ColumnDeclaration(name: "udcCode", type: .text, nullable: false, defaultValue: .text("")),
+                .text("udcFacets", nullable: true), .text("wikidataQID", nullable: true),
+                .text("wikidataQidsSecondary", nullable: true), .json("ext", nullable: true),
+                .text("keyID", nullable: true), .blob("content_hash", nullable: true),
+                .blob("content_fingerprint", nullable: true),
+                // v12: subject trio added by the v10 → v19 hop.
+                .text("subject", nullable: true),
+                .text("subject_pipeline_version", nullable: true),
+                .timestamp("subject_at", nullable: true),
+                // v19: enrichment column added by the v10 → v19 hop.
+                .text("ssc_facts", nullable: true),
+            ], primaryKey: ["id"]),
+            TableDeclaration(name: "kg_facts", columns: [
+                .text("id"), .text("subject"), .text("predicate"), .text("object"),
+                .text("sourceDrawerID"), .bitmap("adjectiveBitmap"), .bitmap("operationalBitmap"),
+                .bitmap("provenanceBitmap"), .timestamp("filedAt"), .json("ext", nullable: true),
+                // v13: identity trio added by the v10 → v19 hop.
+                ColumnDeclaration(name: "addedBy", type: .text, nullable: false, defaultValue: .text("")),
+                ColumnDeclaration(name: "foreignSourceKey", type: .text, nullable: false, defaultValue: .text("")),
+                ColumnDeclaration(name: "foreignRecordID", type: .text, nullable: false, defaultValue: .text("")),
+            ], primaryKey: ["id"]),
+        ]
+    )
+
     /// True when every column exists on `table`. Probed with an UPDATE whose
     /// predicate never matches: SQLite reads an unknown double-quoted
     /// identifier in a SELECT as a string literal and returns rows, so a
@@ -121,6 +162,84 @@ struct SchemaUpgradeTests {
                                          embeddingModelID: "test-v1", udcCode: "001"))
         let loaded = try #require(try await store.getDrawer(id: id))
         #expect(loaded.sscFacts == nil && !loaded.isSpanIndexed && !loaded.areFactsExtracted)
+        await storage.close()
+    }
+
+    @Test("a populated schema-19 estate lands at 20 preserving data and applying extraction schema defaults")
+    func schema19LandsAt20() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        let drawerID = "d-v19-1"
+        let factID   = "f-v19-1"
+
+        // 1. Stamp the database at schema 19 and insert one row in each table
+        //    using only the v19 columns — the twelve v20 extraction columns do
+        //    not exist yet in this fixture.
+        do {
+            let stamp = TestStorage.sqlite(url)
+            try await stamp.open(schema: Self.schema19)
+            #expect(try await stamp.currentSchemaVersion(for: "LocusKit") == 19)
+            _ = try await stamp.rowStore.insert(table: "drawers", values: [
+                "id": .text(drawerID), "content": .text("v19 drawer"),
+                "parent_node_id": .text("n1"), "addedBy": .text("test"),
+                "filedAt": .text("2024-01-01T00:00:00Z"), "embeddingModelID": .text("t1"),
+                "provenance": .int(0), "adjectiveBitmap": .int(0), "operationalBitmap": .int(0),
+                "lineageID": .text(""), "udcCode": .text(""),
+            ])
+            _ = try await stamp.rowStore.insert(table: "kg_facts", values: [
+                "id": .text(factID), "subject": .text("sky"), "predicate": .text("is"),
+                "object": .text("blue"), "sourceDrawerID": .text(drawerID),
+                "adjectiveBitmap": .int(0), "operationalBitmap": .int(0),
+                "provenanceBitmap": .int(0), "filedAt": .text("2024-01-01T00:00:00Z"),
+                "addedBy": .text(""), "foreignSourceKey": .text(""), "foreignRecordID": .text(""),
+            ])
+            // Confirm both rows landed before the hop.
+            #expect(try await stamp.rowStore.count(table: "drawers", where: nil) == 1)
+            #expect(try await stamp.rowStore.count(table: "kg_facts", where: nil) == 1)
+            await stamp.close()
+        }
+        // 2. Confirm the upgrade path routes v19 to a hop — the same decision the
+        //    upgrade command makes before opening the schema.
+        #expect(LocusKitSchema.upgradePath(storedVersion: 19) == .upgrade(from: 19))
+
+        // 3. Reopen through the full schema: applies the v19 → v20 hop.
+        let storage = TestStorage.sqlite(url)
+        try await storage.open(schema: LocusKitSchema.schema)
+
+        // a. Schema version is 20 after the hop.
+        #expect(try await storage.currentSchemaVersion(for: "LocusKit") == LocusKitSchema.version)
+        #expect(LocusKitSchema.version == 20)
+
+        // b. Both pre-existing rows survived the hop unchanged in count.
+        #expect(try await storage.rowStore.count(table: "drawers", where: nil) == 1)
+        #expect(try await storage.rowStore.count(table: "kg_facts", where: nil) == 1)
+
+        // c. All twelve new kg_facts extraction columns carry their declared
+        //    defaults on the pre-existing row.
+        let factRows = try await storage.rowStore.query(
+            table: "kg_facts", where: nil, orderBy: [], limit: nil, offset: nil)
+        let row = try #require(factRows.first)
+        // Text columns: declared DEFAULT ''.
+        #expect(row["evidenceQuote"] == .some(.text("")))
+        #expect(row["sourceDigest"] == .some(.text("")))
+        #expect(row["extractorProviderID"] == .some(.text("")))
+        #expect(row["extractorModelID"] == .some(.text("")))
+        #expect(row["extractorModelVersion"] == .some(.text("")))
+        #expect(row["extractionSchemaVersion"] == .some(.text("")))
+        #expect(row["searchProjection"] == .some(.text("")))
+        #expect(row["searchProjectionVersion"] == .some(.text("")))
+        // Int columns: declared DEFAULT -1.
+        #expect(row["evidenceStart"] == .some(.int(-1)))
+        #expect(row["evidenceEnd"] == .some(.int(-1)))
+        #expect(row["evidenceStartUTF8Byte"] == .some(.int(-1)))
+        #expect(row["evidenceEndUTF8Byte"] == .some(.int(-1)))
+
+        // d. fact_extractor_models was created by the hop and holds zero rows.
+        #expect(await columnsExist(storage, table: "fact_extractor_models", columns: ["recipe_id", "is_active"]))
+        #expect(try await storage.rowStore.count(table: "fact_extractor_models", where: nil) == 0)
+
+        // e. A value written at v19 into an existing column reads back unchanged.
+        #expect(row["predicate"] == .some(.text("is")))
         await storage.close()
     }
 
