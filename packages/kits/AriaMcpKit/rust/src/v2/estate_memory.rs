@@ -288,6 +288,37 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             result.hits.retain(|h| h.id != *anchor);
         }
 
+        // record a sensitivity_read_under_grant audit entry for each hit
+        // admitted PAST the substrate's default ceiling specifically because a
+        // grant is live. Only rows whose OWN adjective sensitivity is
+        // restricted/secret qualify — an elevated-or-below row would have
+        // been admitted regardless of any grant, so recording it here would
+        // misrepresent "read under grant" as having happened when it did
+        // not. Gated on `context.sensitivity_ceiling.is_some()` so a query
+        // with no live grant never emits. Mirrors the v1
+        // `run_memory_search` guard (interface_tools.rs) and Swift
+        // `AriaV2GeniusLocusMemoryBackend.search`. Runs on the anchor-excluded
+        // hit list, before the packager, matching v1's placement relative to
+        // its own packager call.
+        if context.sensitivity_ceiling.is_some() {
+            let mut coord = estate.coord.lock()
+                .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?;
+            for hit in &result.hits {
+                let Some(drawer) = hit.drawer.as_ref() else { continue };
+                match drawer.adjective_sensitivity() {
+                    AdjectiveSensitivity::Restricted | AdjectiveSensitivity::Secret => {
+                        let _ = coord.record_sensitivity_read_under_grant(
+                            &estate.handle,
+                            drawer.adjective_sensitivity(),
+                            &drawer.id,
+                            context.now_millis,
+                        );
+                    }
+                    AdjectiveSensitivity::Normal | AdjectiveSensitivity::Elevated => {}
+                }
+            }
+        }
+
         // PACKAGER: run the results packager for non-never modes. The Rust port has
         // no GroundedSynthesis (Swift-only seam), so composed_answer is always None.
         // The packager computes m1/m2/m3/m4 gate signals and the cliff cutoff; the
@@ -402,6 +433,35 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
                 selected.insert(memory_id, drawer);
             }
         }
+        // record a sensitivity_read_under_grant audit entry for each row
+        // that will actually be returned to the caller (unambiguous,
+        // requested, provenance-visible) whose OWN adjective sensitivity is
+        // restricted/secret and whose admission depended on a live grant.
+        // Mirrors v1 `run_memory_get`'s identical guard at all three of its
+        // depth call sites (interface_tools.rs) and Swift
+        // `AriaV2GeniusLocusMemoryBackend.get` — this v2 get path serves all
+        // three depths (subject, distilled, full) through one shared record
+        // path, so one audit site covers what v1 needed three for.
+        if context.sensitivity_ceiling.is_some() {
+            let mut coord = estate.coord.lock()
+                .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?;
+            for memory_id in &requested_order {
+                if ambiguous.contains(memory_id) { continue };
+                let Some(drawer) = selected.get(memory_id) else { continue };
+                match drawer.adjective_sensitivity() {
+                    AdjectiveSensitivity::Restricted | AdjectiveSensitivity::Secret => {
+                        let _ = coord.record_sensitivity_read_under_grant(
+                            &estate.handle,
+                            drawer.adjective_sensitivity(),
+                            &drawer.id,
+                            context.now_millis,
+                        );
+                    }
+                    AdjectiveSensitivity::Normal | AdjectiveSensitivity::Elevated => {}
+                }
+            }
+        }
+
         requested_order.iter().filter_map(|memory_id| {
             (!ambiguous.contains(memory_id)).then(|| selected.get(memory_id))
                 .flatten().map(|drawer| self.record(estate, drawer))
