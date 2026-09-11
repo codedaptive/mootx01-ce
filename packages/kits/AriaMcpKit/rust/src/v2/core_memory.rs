@@ -511,6 +511,20 @@ pub struct V2CompactMemory {
     pub fetch: V2FetchReference,
 }
 
+/// A single tunnel edge attached to a depth:full memory record.
+///
+/// Mirrors Swift `AriaV2TunnelRow`. `far_endpoint_id` is absent when the far
+/// side terminates at a room rather than a specific drawer. Serialised with
+/// `skip_serializing_if = "Option::is_none"` on `far_endpoint_id` so the key
+/// is absent rather than null, matching the Swift envelope convention.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct V2TunnelRow {
+    pub tunnel_id: String,
+    pub kind: String,
+    pub lifecycle: String,
+    #[serde(skip_serializing_if = "Option::is_none")] pub far_endpoint_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct V2Memory {
     #[serde(serialize_with = "serialize_uuid")]
@@ -527,6 +541,11 @@ pub struct V2Memory {
     #[serde(skip_serializing_if = "Option::is_none")] pub exportability: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub confirmation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub lineage_id: Option<String>,
+    /// Active linked tunnels for depth:full. Empty vec for depth:subject and
+    /// depth:distilled. Cleared by `project_depth` for non-full depths.
+    /// Serialised only when `depth == full`; `skip_serializing_if` on `Vec`
+    /// skips when empty so depth:subject/distilled records carry no tunnels key.
+    #[serde(skip_serializing_if = "Vec::is_empty")] pub tunnels: Vec<V2TunnelRow>,
     pub fetch: V2FetchReference,
 }
 
@@ -707,7 +726,22 @@ fn context_for(estate_id: Option<Uuid>, dependencies: &V2CoreMemoryDependencies<
 fn fetch(id: Uuid) -> V2FetchReference { fetch_id(&canonical_uuid(id)) }
 fn fetch_id(id: &str) -> V2FetchReference { V2FetchReference { tool: MEMORY_GET_TOOL, arguments: V2FetchArguments { memory_id: id.to_owned() } } }
 fn nonempty<'a>(value: &'a str, path: &str) -> V2DecodeResult<&'a str> { if value.is_empty() { Err(V2InvalidArgument::new(path, "must not be empty")) } else { Ok(value) } }
-fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) { match depth { V2MemoryDepth::Subject => { memory.distilled = None; memory.content = None; }, V2MemoryDepth::Distilled => memory.content = None, V2MemoryDepth::Full => {} } }
+fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) {
+    match depth {
+        V2MemoryDepth::Subject => {
+            memory.distilled = None;
+            memory.content = None;
+            // depth:subject carries no tunnel rows (mirrors Swift full() branch).
+            memory.tunnels.clear();
+        }
+        V2MemoryDepth::Distilled => {
+            memory.content = None;
+            // depth:distilled carries no tunnel rows.
+            memory.tunnels.clear();
+        }
+        V2MemoryDepth::Full => {}
+    }
+}
 fn serialize_uuid<S>(value: &Uuid, serializer: S) -> Result<S::Ok, S::Error> where S: serde::Serializer { serializer.serialize_str(&canonical_uuid(*value)) }
 fn jsonrpc_internal(error: serde_json::Error) -> JSONRPCError { JSONRPCError::new(crate::jsonrpc::JSONRPCErrorCode::INTERNAL_ERROR, error.to_string()) }
 fn meta_for(base: &V2ResultMeta, effect: super::operation::V2OperationEffect) -> V2ResultMeta { V2ResultMeta { build_id: base.build_id.clone(), capability_digest: base.capability_digest.clone(), effect, completeness: base.completeness.clone() } }
