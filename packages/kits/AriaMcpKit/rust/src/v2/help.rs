@@ -5,6 +5,19 @@ use super::codec::{optional_string, reject_unknown_fields, strict_object, V2Deco
 use super::operation::{V2DirectoryRecord, V2OperationDescriptor};
 use super::registry::V2EffectiveRegistry;
 
+/// The global-modifiers help entry returned in the moot_help directory payload.
+///
+/// Documented once here at the directory level. Absent from every per-tool input
+/// schema and per-operation help text (the documented-once contract). Byte-identical
+/// to Swift `AriaV2HelpService.globalModifiersHelpText`; pinned by
+/// `Tests/Conformance/global_modifiers_help_fixture.json` in both ports.
+pub const GLOBAL_MODIFIERS_HELP_TEXT: &str = "\
+mode \u{2014} global modifier applied at the ARIA door before every operation decodes its arguments.\n\
+Grammar: mode:\"Name\" sets the mode; mode:\"Name=Variant\" sets mode and variant; \
+a bare name clears any prior variant for that mode; the last declaration on a call wins.\n\
+Fail-open: an unknown mode name or variant is silently ignored and does not clobber existing sticky state.\n\
+Excluded (own mode in their input schema): moot_reclassify_fdc, moot_palace_import, moot_vault_import.";
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct V2HelpRequest { pub intent: Option<String>, pub tool: Option<String> }
 impl V2HelpRequest {
@@ -27,7 +40,15 @@ pub enum V2HelpResult {
 impl V2HelpResult {
     pub fn as_value(&self) -> Value {
         match self {
-            Self::Directory { operations, directory_records } => json!({"operations":operations.iter().map(operation_value).collect::<Vec<_>>(),"directory_records":directory_records.iter().map(directory_value).collect::<Vec<_>>() }),
+            // Global modifiers are documented once here at the directory level,
+            // absent from every per-tool input schema and per-operation help.
+            // Byte-identical to Swift globalModifiersHelpText; pinned by
+            // Tests/Conformance/global_modifiers_help_fixture.json.
+            Self::Directory { operations, directory_records } => json!({
+                "operations": operations.iter().map(operation_value).collect::<Vec<_>>(),
+                "directory_records": directory_records.iter().map(directory_value).collect::<Vec<_>>(),
+                "global_modifiers": GLOBAL_MODIFIERS_HELP_TEXT,
+            }),
             Self::Operation(operation) => json!({"operation":operation_value(operation)}),
             Self::Intent { intent, operations } => json!({"intent":intent,"operations":operations.iter().map(operation_value).collect::<Vec<_>>() }),
         }

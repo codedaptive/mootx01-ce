@@ -359,19 +359,53 @@ struct ModesDispatchTests {
                 "Wire text must not contain double 'hint: hint:' — unknownHint must return bare text")
     }
 
-    // MARK: - I. mode: arg in every tool's inputSchema
+    // MARK: - I. mode: global-modifier contract (documented once)
 
-    @Test("mode: argument is injected into every tool's inputSchema",
-          .disabled("BLOCKED: v2 tool schemas do not inject the mode argument; ToolProjection returns v2 schemas without mode. This is v1-only behavior. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    // v1 injected `mode` into every tool schema. The v2 ruling forbids that:
+    // `mode` is a global modifier stripped at the ARIA door before decode, absent
+    // from all per-tool input schemas except the handful that declare their own
+    // `mode` field (owner operations, read at runtime). The full grammar is
+    // documented once in the moot_help directory response under global_modifiers,
+    // and the session orientation payload names it.
+    @Test("v2 mode: global-modifier contract — no per-tool injection, moot_help documents once")
     func modeArgInEveryToolSchema() async throws {
-        let tools = ToolProjection.tools()
-        let missingMode = tools.filter { tool in
-            guard let schema = tool.inputSchema.objectValue,
-                  let props = schema["properties"]?.objectValue else { return true }
-            return props["mode"] == nil
+        let registry = AriaV2SelectedCatalog.registry(environment: [:])
+
+        // Owner operations: those whose catalog input schema declares a `mode` field
+        // for operational reasons (e.g. classification mode, import mode). The v2
+        // global-modifier contract says ALL other operations must not carry mode in
+        // their schema — mode is stripped at the ARIA door before decode.
+        //
+        // The allowedOwners set is read at runtime from the catalog so a new owner
+        // is detected rather than silently absorbed; if a new operation legitimately
+        // declares mode, add it to allowedOwners and document why.
+        let allowedOwners: Set<String> = [
+            "moot_reclassify_fdc",  // FDC mode: suspectOnly|all
+            "moot_palace_import",   // import mode: foreground|background (json import)
+            "moot_vault_import",    // import mode: foreground|background
+        ]
+
+        // Assertion 1: no operation outside the allowed owner set has mode in its schema.
+        let unexpectedWithMode = registry.operations.filter { op in
+            guard !allowedOwners.contains(op.publicName) else { return false }
+            return op.inputSchema.objectValue?["properties"]?.objectValue?["mode"] != nil
         }
-        #expect(missingMode.isEmpty,
-                "Tools missing mode: in schema: \(missingMode.map(\.name).joined(separator: ", "))")
+        #expect(unexpectedWithMode.isEmpty,
+                "v2 contract: only owner operations may have mode in their schema. Unexpected: \(unexpectedWithMode.map(\.publicName).joined(separator: ", "))")
+
+        // Assertion 2: moot_help directory response carries global_modifiers naming "mode".
+        let helpService = AriaV2HelpService(registry: registry)
+        let helpJSON = helpService.render(try AriaV2HelpRequest(arguments: .object([:])))
+        let globalModifiers = helpJSON.objectValue?["structuredContent"]?
+            .objectValue?["data"]?.objectValue?["global_modifiers"]?.stringValue
+        let modText = try #require(globalModifiers,
+            "moot_help directory must carry a global_modifiers key")
+        #expect(modText.contains("mode"),
+            "global_modifiers entry must describe the mode modifier")
+
+        // Assertion 3: session orientation protocol names mode.
+        #expect(ToolDispatcher.ARIASessionProtocol.contains("mode:"),
+            "ARIASessionProtocol must reference mode: so a fresh AI client knows the modifier exists")
     }
 }
 
