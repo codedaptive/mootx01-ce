@@ -1326,10 +1326,23 @@ enum AriaV2SelectedCatalog {
             let fact = orderedExactObjectSchema([
                 "subject": stringSchema(), "predicate": stringSchema(), "objects": stringArray,
             ], required: ["subject", "predicate", "objects"])
+            let tally = JSONValue.object(["type": .string("integer"), "minimum": .integer(0)])
+            // The totals count EVERY contradiction, including those whose rows
+            // are withheld; the withheld counts say how much of that total the
+            // caller cannot see. Without them a redacted contradiction is
+            // indistinguishable from no contradiction at all.
             return orderedExactObjectSchema([
                 "contradictsTunnels": .object(["type": .string("array"), "items": tunnel]),
                 "conflictingFacts": .object(["type": .string("array"), "items": fact]),
-            ], required: ["contradictsTunnels", "conflictingFacts"])
+                "totalContradictionCount": tally,
+                "totalConflictingFactGroupCount": tally,
+                "withheldContradictionCount": tally,
+                "withheldConflictingFactGroupCount": tally,
+            ], required: [
+                "conflictingFacts", "contradictsTunnels", "totalConflictingFactGroupCount",
+                "totalContradictionCount", "withheldConflictingFactGroupCount",
+                "withheldContradictionCount",
+            ])
         case .lensThemeWeather:
             let row = orderedExactObjectSchema(
                 ["category": stringSchema(), "momentum": numberSchema()],
