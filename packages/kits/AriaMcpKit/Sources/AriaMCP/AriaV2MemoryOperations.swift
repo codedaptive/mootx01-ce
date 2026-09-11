@@ -16,6 +16,19 @@ public struct AriaV2MemoryOperationContext: Sendable {
     public let maximumSensitivity: AdjectiveSensitivity
     public let recallOrigin: RecallOrigin
     public let usageLedger: any AriaV2MemoryUsageLedger
+    /// The un-collapsed sensitivity-grant ceiling, `nil` when no grant is
+    /// live. `maximumSensitivity` above is the value ALREADY collapsed to
+    /// `.elevated` when no grant is live (`sensitivityGrant ?? .elevated` at
+    /// the ToolDispatch construction site), so it cannot distinguish "no
+    /// grant" from "a grant that ceilings at elevated" — which is exactly
+    /// the distinction the sensitivity-read-under-grant audit needs to know
+    /// whether a restricted/secret row's admission depended on a live
+    /// grant. Carrying the Optional here (rather than a derived Bool) keeps
+    /// the same shape `AriaV2PacketOperations.grantCeiling` already
+    /// established for the identical problem. Defaults to `nil` so every
+    /// existing constructor (including the three test constructors) keeps
+    /// compiling unchanged.
+    public let grantCeiling: AdjectiveSensitivity?
 
     public init(
         estateID: UUID,
@@ -24,7 +37,8 @@ public struct AriaV2MemoryOperationContext: Sendable {
         now: @escaping @Sendable () -> Date = { Date() },
         maximumSensitivity: AdjectiveSensitivity = .elevated,
         recallOrigin: RecallOrigin = .external,
-        usageLedger: any AriaV2MemoryUsageLedger = AriaV2NoopMemoryUsageLedger()
+        usageLedger: any AriaV2MemoryUsageLedger = AriaV2NoopMemoryUsageLedger(),
+        grantCeiling: AdjectiveSensitivity? = nil
     ) {
         self.estateID = estateID
         self.callerID = callerID
@@ -33,6 +47,7 @@ public struct AriaV2MemoryOperationContext: Sendable {
         self.maximumSensitivity = maximumSensitivity
         self.recallOrigin = recallOrigin
         self.usageLedger = usageLedger
+        self.grantCeiling = grantCeiling
     }
 }
 
@@ -556,6 +571,30 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             ? result.hits
             : result.hits.filter { !anchorIDStrings.contains($0.id) }
 
+        // record a sensitivityReadUnderGrant audit entry for each hit that
+        // was admitted PAST the substrate's own default ceiling specifically
+        // because a grant is live. Only rows whose own adjective sensitivity
+        // is restricted/secret qualify — an elevated-or-below row would have
+        // been admitted regardless of any grant, so recording it here would
+        // misrepresent "read under grant" as having happened when it did
+        // not. Gated on `context.grantCeiling` being non-nil so a query with
+        // no live grant never emits. Mirrors ToolDispatch.runMemorySearch's
+        // identical guard exactly, including firing unconditionally on
+        // provenance (a v2-only redaction axis memory_search does not gate
+        // on, same as v1).
+        if context.grantCeiling != nil {
+            for hit in filteredHits {
+                guard let drawer = hit.drawer else { continue }
+                switch drawer.adjectiveSensitivity {
+                case .restricted, .secret:
+                    try? await kit.recordSensitivityReadUnderGrant(
+                        handle, tier: drawer.adjectiveSensitivity, drawerID: drawer.id, now: context.now())
+                case .normal, .elevated:
+                    continue
+                }
+            }
+        }
+
         // answer:always|auto — compose an answer via GroundedSynthesis, then route
         // through GLKResultsPackager. answer:never is the fast path (no gate math).
         // Mirrors the composition chain in ToolDispatch.runMemorySearch.
@@ -628,7 +667,26 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         let loaded = try await estate.getDrawers(ids: ids, matchingFrame: frame, hydrationLevel: .full)
         var records: [AriaV2MemoryRecord] = []
         for drawer in loaded.admissible {
-            records.append(try await record(for: drawer, authorized: Self.provenanceVisible(drawer.provenance)))
+            let authorized = Self.provenanceVisible(drawer.provenance)
+            // Same read-under-grant audit recording as search — gated on
+            // BOTH the ceiling having been lifted AND the drawer's own
+            // sensitivity actually being restricted/secret. Also gated on
+            // provenance visibility here (unlike search): v1 runMemoryGet's
+            // admissibleByID already excludes provenance-restricted/secret
+            // rows before its audit fires (ToolDispatch.swift:2584-2590), so
+            // a row this v2 path is about to redact via `authorized: false`
+            // must not be recorded as read — it was never actually visible
+            // to the caller.
+            if authorized, context.grantCeiling != nil {
+                switch drawer.adjectiveSensitivity {
+                case .restricted, .secret:
+                    try? await kit.recordSensitivityReadUnderGrant(
+                        handle, tier: drawer.adjectiveSensitivity, drawerID: drawer.id, now: context.now())
+                case .normal, .elevated:
+                    break
+                }
+            }
+            records.append(try await record(for: drawer, authorized: authorized))
         }
         return records
     }
