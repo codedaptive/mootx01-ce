@@ -15,12 +15,14 @@
 // describe_gate_rejection helper in AriaMcpKit/rust/src/interface_tools.rs.
 //
 // v2 note: moot_update_memory now routes through AriaV2MemoryMutations.update(),
-// which has an inner catch that returns "The requested mutation is unavailable in
-// the selected estate." for ALL errors including gate violations. The specific
-// gate-rejection phrases ("cannot reject an active memory", etc.) are therefore
-// not surfaced by the v2 moot_update_memory path. Tests that previously asserted
-// specific gate phrases now assert the v2 generic "unavailable" phrase, which is
-// the actionable signal the v2 surface provides.
+// which has an inner catch at AriaV2MemoryMutations.swift:253 that returns
+// "The requested mutation is unavailable in the selected estate." for ALL errors
+// including gate violations. The specific gate-rejection phrases
+// ("cannot reject an active memory", "already rejected", etc.) are therefore
+// not surfaced by the v2 moot_update_memory path. The two tests that assert
+// specific gate phrases (activeRejectEmitsActionableMessage and
+// rejectedRejectEmitsActionableMessage) are BLOCKED pending a ruling on whether
+// the v2 inner catch should propagate gate-specific messages.
 
 import Testing
 import Foundation
@@ -120,18 +122,18 @@ struct GateRejectionMessageTests {
 
     // MARK: - Tests
 
-    /// active + reject → tool error with actionable message.
-    ///
-    /// Active → Reject is not in the automaton transition table; the gate
-    /// returns BasisViolation(IllegalTransition(Active, Reject)).
-    /// In v2, AriaV2MemoryMutations.update() catches all gate violations via
-    /// its inner catch and returns the generic "unavailable" message.
-    @Test func activeRejectEmitsActionableMessage() async throws {
+    /// BLOCKED: AriaV2MemoryMutations.update() inner catch at
+    /// AriaV2MemoryMutations.swift:253 returns `unavailable("moot_update_memory")`
+    /// for ALL errors including gate violations, swallowing the specific gate
+    /// phrase "cannot reject an active memory". The catch arm is:
+    ///   `} catch { return unavailable("moot_update_memory") }`
+    /// Awaiting a ruling. Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: AriaV2MemoryMutations.swift:253 inner catch returns the generic unavailable() message for ALL update errors, swallowing the specific gate phrase \"cannot reject an active memory\""))
+    func activeRejectEmitsActionableMessage() async throws {
         let dispatcher = try await makeDispatcher()
         let id = try await fileActiveMemory(dispatcher)
         let result = try await updateMemory(dispatcher, id: id, mutation: "reject")
-        // v2 generic phrase from unavailable() — no specific gate message surfaced.
-        assertGateRejection(result, expectedPhrase: "unavailable")
+        assertGateRejection(result, expectedPhrase: "cannot reject an active memory")
     }
 
     /// Smoke test: verify the full reject dispatch path does not crash.
@@ -152,13 +154,14 @@ struct GateRejectionMessageTests {
         #expect(isError, "active → reject must produce a tool error; got: \(result)")
     }
 
-    /// rejected + reject → tool error with actionable message.
-    ///
-    /// A memory that is already in the Rejected state cannot be rejected again.
-    /// This test drives a memory to Rejected via the legal Contested → Reject
-    /// path, then attempts a second Reject and asserts the v2 "unavailable"
-    /// message is returned with no internal Swift type names.
-    @Test func rejectedRejectEmitsActionableMessage() async throws {
+    /// BLOCKED: AriaV2MemoryMutations.update() inner catch at
+    /// AriaV2MemoryMutations.swift:253 returns `unavailable("moot_update_memory")`
+    /// for ALL errors including gate violations, swallowing the specific gate
+    /// phrase "already rejected". The catch arm is:
+    ///   `} catch { return unavailable("moot_update_memory") }`
+    /// Awaiting a ruling. Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: AriaV2MemoryMutations.swift:253 inner catch returns the generic unavailable() message for ALL update errors, swallowing the specific gate phrase \"already rejected\""))
+    func rejectedRejectEmitsActionableMessage() async throws {
         let dispatcher = try await makeDispatcher()
         let id = try await fileActiveMemory(dispatcher)
         // Move to Contested (Active → Contest is legal).
@@ -170,9 +173,9 @@ struct GateRejectionMessageTests {
         let rejectedIsSuccess = rejectResult.objectValue?["isError"]?.boolValue == false
         #expect(rejectedIsSuccess, "reject must succeed on contested row; got: \(rejectResult)")
 
-        // Rejected → Reject is illegal; gate violation → v2 "unavailable" message.
+        // Rejected → Reject is illegal; gate violation → v1 expected "already rejected".
         let result = try await updateMemory(dispatcher, id: id, mutation: "reject")
-        assertGateRejection(result, expectedPhrase: "unavailable")
+        assertGateRejection(result, expectedPhrase: "already rejected")
     }
 
     /// Non-gate error (missing id) must NOT produce gate-rejection text.
