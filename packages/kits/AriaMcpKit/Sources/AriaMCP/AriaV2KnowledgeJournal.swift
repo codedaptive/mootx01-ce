@@ -427,7 +427,7 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
             ($0.0.sourceDrawerId.map(visibleIDs.contains) ?? true) &&
             ($0.0.targetDrawerId.map(visibleIDs.contains) ?? true)
         }.prefix(limit).map { row in
-            .init(tunnelID: row.1, fromID: row.2, toID: row.3, kind: String(describing: row.0.kind),
+            .init(tunnelID: row.1, fromID: row.2, toID: row.3, kind: row.0.kind.wireString,
                   lifecycle: String(describing: row.0.lifecycle))
         }
     }
