@@ -287,6 +287,60 @@ struct SensitivityUnlockIntegrationTests {
         #expect(log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }.isEmpty)
     }
 
+    // MARK: - v2 surface (dispatcher.dispatch) read-under-grant audit — the shipped entry point
+    //
+    // The four `...via...EmitsAuditEntry`/`DoesNotEmitAuditEntry` cases above
+    // call `dispatcher.runMemorySearch` / `dispatcher.runMemoryGet` directly —
+    // the dark v1 runners, which the shipped `dispatcher.dispatch(name:
+    // arguments:)` v2 surface never reaches (V2_RESTORE_A). This case drives
+    // the identical scenario through `dispatch(name:arguments:)`, the entry
+    // point the live server actually calls for `moot_memory_search` and
+    // `moot_memory_get`, proving the audit fires on the real v2 code path
+    // rather than only on the retired v1 one.
+
+    @Test("v2 dispatch: reading a restricted drawer under a live grant emits a sensitivityReadUnderGrant audit entry, via moot_memory_search and via moot_memory_get at every depth")
+    func v2DispatchRestrictedReadUnderGrantEmitsAuditEntries() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "unlock-owner-v2")
+        let handle = try await openEstate(in: kit, owner: owner)
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
+
+        // moot_memory_search — v2 arg name is the same "query" key v1 uses.
+        let searchDrawer = try await seed(
+            "v2-audit-search-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
+        _ = try await dispatcher.dispatch(
+            name: "moot_memory_search", arguments: .object(["query": .string("v2-audit-search-marker")]))
+
+        // moot_memory_get — v2 arg name is "memory_id" (not "id"). The v2 get
+        // path serves subject/distilled/full through one shared record fetch
+        // (AriaV2MemoryOperations.swift's `depth` only changes the response
+        // projection, not the read), so each of the three depth calls below
+        // fetches and audits the SAME row independently once per request.
+        let getDrawer = try await seed(
+            "v2-audit-get-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
+        for depth in ["subject", "distilled", "full"] {
+            let result = try await dispatcher.dispatch(
+                name: "moot_memory_get",
+                arguments: .object(["memory_id": .string(getDrawer.id), "depth": .string(depth)]))
+            #expect(!isError(result), "depth:\(depth) must find the drawer under a live grant")
+        }
+
+        let log = try await kit.auditLog(for: handle)
+        let entries = log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }
+        let searchEntries = entries.filter { $0.rowID == UUID(uuidString: searchDrawer.id) }
+        let getEntries = entries.filter { $0.rowID == UUID(uuidString: getDrawer.id) }
+        #expect(searchEntries.count == 1,
+            "one v2 moot_memory_search hit on a restricted row under grant must emit exactly one audit entry")
+        #expect(searchEntries.first?.fieldPath == "restricted")
+        #expect(getEntries.count == 3,
+            "three v2 moot_memory_get depth calls on the same restricted row must each independently emit an audit entry")
+        for entry in getEntries {
+            #expect(entry.fieldPath == "restricted")
+        }
+    }
+
     // MARK: - isSensitivityFilter classifier (the grant-injection suppression check)
 
     /// Direct unit coverage of `ToolDispatcher.isSensitivityFilter`, the
