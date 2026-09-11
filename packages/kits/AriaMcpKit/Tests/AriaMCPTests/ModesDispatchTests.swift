@@ -58,29 +58,44 @@ struct ModesDispatchTests {
 
     // MARK: - A. Unknown mode name: fail-open, hint appended
 
-    @Test("Unknown mode name is accepted, not invalidParams, and appends a hint",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Unknown mode name is accepted, not invalidParams, and appends a hint")
     func unknownModeNameIsFailOpen() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         // Should NOT throw. If it throws invalidParams, the test fails.
-        let text = try await dispatchEstateStatus(dispatcher, mode: "Quantum")
+        // Converted from v1 shape: v2 compact text does not contain "estate:" / "protocol:" /
+        // "memories:", so the original content assertion is replaced with envelope + operation
+        // assertions that discriminate pass from fail without widening to any-success string.
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_status",
+            arguments: .object(["mode": .string("Quantum")]))
+        // The envelope must be a success result, not an error envelope.
+        let isErrorFlag = result.objectValue?["isError"]?.boolValue ?? false
+        #expect(!isErrorFlag, "fail-open: unknown mode name must produce a success envelope, not isError")
+        // The compact text must name the operation (pins the v2 success shape specifically).
+        let text = result.firstTextContent ?? ""
+        #expect(text.contains("moot_estate_status"), "v2 success text must name the operation")
         // A hint line must appear for the unknown mode name.
         #expect(text.contains("hint:") || text.contains("Unknown mode"))
-        // The response still has the estate status content (not an error object).
-        #expect(text.contains("estate:") || text.contains("protocol:") || text.contains("memories:"))
     }
 
     // MARK: - B. Unknown variant: fail-open, hint appended
 
-    @Test("Unknown variant in known mode is accepted, not invalidParams, and appends a hint",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Unknown variant in known mode is accepted, not invalidParams, and appends a hint")
     func unknownVariantIsFailOpen() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         // "Recall=Telepathy" — recognized mode, unrecognized variant.
-        let text = try await dispatchEstateStatus(dispatcher, mode: "Recall=Telepathy")
+        // Converted from v1 shape: same reasoning as unknownModeNameIsFailOpen above.
+        let result = try await dispatcher.dispatch(
+            name: "moot_estate_status",
+            arguments: .object(["mode": .string("Recall=Telepathy")]))
+        // The envelope must be a success result, not an error envelope.
+        let isErrorFlag = result.objectValue?["isError"]?.boolValue ?? false
+        #expect(!isErrorFlag, "fail-open: unknown variant must produce a success envelope, not isError")
+        // The compact text must name the operation (pins the v2 success shape specifically).
+        let text = result.firstTextContent ?? ""
+        #expect(text.contains("moot_estate_status"), "v2 success text must name the operation")
         // Should NOT throw. Hint line expected.
         #expect(text.contains("hint:") || text.contains("Unknown variant") || text.contains("Recall"))
-        #expect(text.contains("estate:") || text.contains("protocol:") || text.contains("memories:"))
     }
 
     // MARK: - C. Regression: answer:"never" shape unchanged when no mode declared
@@ -112,8 +127,7 @@ struct ModesDispatchTests {
 
     // MARK: - D. Recall=Auto stickies answer:auto session default
 
-    @Test("Recall=Auto on one call sets answer:auto sticky; next search call without explicit answer uses auto default",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Recall=Auto on one call sets answer:auto sticky; next search call without explicit answer uses auto default")
     func recallAutoSetsAnswerAutoSticky() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         // Declare Recall=Auto via estate_status (cheap; no side effects).
@@ -156,8 +170,7 @@ struct ModesDispatchTests {
     /// place, `signals:` appears only on the auto/always path, not on the never path.
     ///
     /// Parity: mirrors Rust test `sticky_recall_auto_e2e_dispatcher`.
-    @Test("Sticky Recall=Auto: search call without explicit answer arg must emit signals: line (packager path gate)",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Sticky Recall=Auto: search call without explicit answer arg must emit signals: line (packager path gate)")
     func recallAutoE2eDispatcherPath() async throws {
         let (dispatcher, _) = try await makeDispatcher()
 
@@ -196,8 +209,7 @@ struct ModesDispatchTests {
 
     // MARK: - E. Last-declared mode wins
 
-    @Test("Second mode declaration replaces first in sticky state",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Second mode declaration replaces first in sticky state")
     func lastDeclaredWins() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         _ = try await dispatchEstateStatus(dispatcher, mode: "Filing")
@@ -209,8 +221,7 @@ struct ModesDispatchTests {
 
     // MARK: - F. Bare mode name clears variant
 
-    @Test("Bare mode name clears any prior variant for that mode",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Bare mode name clears any prior variant for that mode")
     func bareModeNameClearsVariant() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         // Set a variant first.
@@ -229,8 +240,7 @@ struct ModesDispatchTests {
 
     // MARK: - G. Per-call answer: arg overrides sticky
 
-    @Test("Per-call answer:never overrides a Recall=Auto sticky",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Per-call answer:never overrides a Recall=Auto sticky")
     func perCallAnswerOverridesSticky() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         // Set Recall=Auto sticky.
@@ -310,8 +320,7 @@ struct ModesDispatchTests {
     ///
     /// How it fails if reverted: recordCall sets stickyDeclaration = m for any m,
     /// so the unknown "Quantum" would overwrite "Recall=Auto" and the assert fires.
-    @Test("Unrecognized mode declaration does not clobber valid sticky state",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Unrecognized mode declaration does not clobber valid sticky state")
     func unknownModeDoesNotClobberStickyState() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         // Declare a valid mode first.
@@ -339,8 +348,7 @@ struct ModesDispatchTests {
     ///
     /// Note: the static ARIA protocol block contains "Watch for hint: lines…" so
     /// the total count of "hint:" in the response is 2 when correct (protocol + hint).
-    @Test("Unknown mode wire text must not contain double 'hint: hint:' prefix",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("Unknown mode wire text must not contain double 'hint: hint:' prefix")
     func unknownModeNoDoubleHintPrefix() async throws {
         let (dispatcher, _) = try await makeDispatcher()
         let text = try await dispatchEstateStatus(dispatcher, mode: "QuantumNonExistentMode")
@@ -417,8 +425,7 @@ struct ProvisionedModesConfigDispatchTests {
     /// the provisioned config, stickyEnabled remains true (spec default) and
     /// declarations WOULD be stored, so stickyDeclaration would be non-nil
     /// and the #expect fires.
-    @Test("P1: provisioned sticky_enabled=false — mode declaration accepted but not stored",
-          .disabled("BLOCKED: v2 decode rejects the mode argument (v2/codec.rs reject_unknown_fields). Awaiting a catalog decision. Do not delete; do not weaken to pass."))
+    @Test("P1: provisioned sticky_enabled=false — mode declaration accepted but not stored")
     func provisionedStickyEnabledFalseDeclarationNotStored() async throws {
         let (dispatcher, _) = try await makeProvisionedDispatcher(
             stickyEnabled: false,
