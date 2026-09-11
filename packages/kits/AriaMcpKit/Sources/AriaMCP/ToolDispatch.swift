@@ -91,21 +91,42 @@ private struct DispatcherV2MemoryUsageLedger: AriaV2MemoryUsageLedger {
 private struct DispatcherV2DreamAuthority: AriaV2Dream.Authority {
     let handle: EstateHandle
     let callerBinding: String
+    /// Authority-owned wall clock.  A caller-proposed `now` is admitted only if
+    /// it falls within a 24-hour window ahead of this instant; out-of-range
+    /// values are refused as -32602 before destructive paths are reached.
     let now: Date
 
-    func admit(requestedEstateID: UUID?) async -> Result<AriaV2Dream.Admission, AriaV2Dream.Failure> {
+    func admit(
+        requestedEstateID: UUID?,
+        requestedNow: Date?
+    ) async -> Result<AriaV2Dream.Admission, AriaV2Dream.Failure> {
         guard requestedEstateID == nil || requestedEstateID == handle.estateUUID else {
             return .failure(.refusal(.init(
                 code: "estate_unavailable",
                 message: "The requested estate is not available to this caller.",
                 retryable: false)))
         }
+        // Resolve the effective cycle clock.  A caller-proposed instant is
+        // accepted when it is at most 24 hours ahead of the authority clock;
+        // a further-future value would advance pruneRecallTraces(olderThan:)
+        // beyond the 30-day horizon and silently erase recall traces.
+        let effectiveNow: Date
+        if let proposed = requestedNow {
+            let ceiling = now.addingTimeInterval(24 * 3600)
+            guard proposed <= ceiling else {
+                return .failure(.invalidArgument(
+                    "Argument 'now' must not be more than 24 hours in the future."))
+            }
+            effectiveNow = proposed
+        } else {
+            effectiveNow = now
+        }
         return .success(.init(
             estateID: handle.estateUUID,
             handle: handle,
             callerBinding: callerBinding,
             authorizationGeneration: "selected-v2-public",
-            now: now))
+            now: effectiveNow))
     }
 
     func revalidate(_ admission: AriaV2Dream.Admission) async -> Result<Void, AriaV2Dream.Failure> {
