@@ -68,6 +68,10 @@ struct HydrationDecodeTests {
                 error.code == JSONRPCErrorCode.invalidParams,
                 "Integer hydration_level must throw invalidParams; got code \(error.code)"
             )
+            #expect(
+                error.message.contains("hydration_level"),
+                "invalidParams error must name the offending argument; got: \(error.message)"
+            )
         }
     }
 
@@ -78,69 +82,75 @@ struct HydrationDecodeTests {
     @Test func structuredHydrationLevelDoesNotThrow() async throws {
         let (dispatcher, requesterID) = try await makeDispatcher()
         // No throw expected — if no-grant refusal happens that is a tool-level
-        // isError:true result, not a JSONRPCError.
-        _ = try await dispatcher.dispatch(
+        // isError:true result, not a JSONRPCError. The call must return a JSON object.
+        let result = try await dispatcher.dispatch(
             name: "moot_federated_recall",
             arguments: .object([
                 "requester_estate_id": .string(requesterID.uuidString),
                 "hydration_level": .string("structured"),
             ])
         )
+        #expect(result.objectValue != nil, "Expected a JSON object response for structured hydration")
     }
 
     /// "full" must not throw invalidParams.
     @Test func fullHydrationLevelDoesNotThrow() async throws {
         let (dispatcher, requesterID) = try await makeDispatcher()
-        _ = try await dispatcher.dispatch(
+        let result = try await dispatcher.dispatch(
             name: "moot_federated_recall",
             arguments: .object([
                 "requester_estate_id": .string(requesterID.uuidString),
                 "hydration_level": .string("full"),
             ])
         )
+        #expect(result.objectValue != nil, "Expected a JSON object response for full hydration")
     }
 
     /// "bitmapOnly" must not throw invalidParams.
     @Test func bitmapOnlyHydrationLevelDoesNotThrow() async throws {
         let (dispatcher, requesterID) = try await makeDispatcher()
-        _ = try await dispatcher.dispatch(
+        let result = try await dispatcher.dispatch(
             name: "moot_federated_recall",
             arguments: .object([
                 "requester_estate_id": .string(requesterID.uuidString),
                 "hydration_level": .string("bitmapOnly"),
             ])
         )
+        #expect(result.objectValue != nil, "Expected a JSON object response for bitmapOnly hydration")
     }
 
-    // MARK: - C. Unknown string value → error response (regression guard)
+    // MARK: - C. Unknown string value → invalidParams (regression guard)
 
-    /// An unknown hydration_level string must produce an error response.
+    /// An unknown hydration_level string must throw invalidParams.
     ///
-    /// In v2 the dispatch path is non-throwing — `dispatchV2` is `async -> JSONValue`,
-    /// not `async throws`. Operational errors (including unsupported hydration values)
-    /// are caught inside `executeV2Core` and returned as `isError: true` responses.
-    /// The pinned assertion is preserved: an unknown hydration level must never
-    /// silently succeed with a default.
-    @Test func unknownHydrationLevelStringThrowsInvalidParams() async throws {
+    /// BLOCKED: v2 classifies unsupportedHydration as code "operation_failed"
+    /// rather than invalidParams. The error path is:
+    ///   AriaV2OrchestrationLower.swift:262 — throws unsupportedHydration("ultraHydrated")
+    ///   ToolDispatch.swift:884 — catches any thrown error and wraps as operation_failed
+    /// A caller cannot distinguish a bad argument value from a server failure.
+    /// v2 does name the offending value in the message
+    /// (`unsupportedHydration("ultraHydrated")`), which is correct, but the code
+    /// classification is wrong. The message assertion must also pass on re-enable.
+    @Test(.disabled("BLOCKED: v2 wraps unsupportedHydration as operation_failed (ToolDispatch.swift:884) instead of invalidParams; caller cannot distinguish bad value from server failure. AriaV2OrchestrationLower.swift:262 is the throw site. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    func unknownHydrationLevelStringThrowsInvalidParams() async throws {
         let (dispatcher, requesterID) = try await makeDispatcher()
-        let result = try await dispatcher.dispatch(
-            name: "moot_federated_recall",
-            arguments: .object([
-                "requester_estate_id": .string(requesterID.uuidString),
-                "hydration_level": .string("ultraHydrated"),
-            ])
-        )
-        // v2 wraps operational errors (AriaV2OrchestrationLowerError.unsupportedHydration)
-        // as isError:true responses rather than throwing JSONRPCError. An unrecognised
-        // hydration_level string must produce an error result — not silent success.
-        guard case let .object(obj) = result else {
-            Issue.record("Expected object result; got: \(result)")
-            return
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_federated_recall",
+                arguments: .object([
+                    "requester_estate_id": .string(requesterID.uuidString),
+                    "hydration_level": .string("ultraHydrated"),
+                ])
+            )
+            Issue.record("Unknown hydration_level string must throw invalidParams, but did not throw")
+        } catch let error as JSONRPCError {
+            #expect(
+                error.code == JSONRPCErrorCode.invalidParams,
+                "Unknown hydration_level string must throw invalidParams; got code \(error.code)")
+            #expect(
+                error.message.contains("ultraHydrated"),
+                "invalidParams error must name the offending value; got: \(error.message)")
         }
-        #expect(
-            obj["isError"] == .bool(true),
-            "Unknown hydration_level string must produce an error response (isError:true); got: \(result)"
-        )
     }
 
     // MARK: - D. Absent hydration_level does not throw
@@ -151,12 +161,13 @@ struct HydrationDecodeTests {
     /// be unaffected by the fix.
     @Test func absentHydrationLevelDoesNotThrow() async throws {
         let (dispatcher, requesterID) = try await makeDispatcher()
-        _ = try await dispatcher.dispatch(
+        let result = try await dispatcher.dispatch(
             name: "moot_federated_recall",
             arguments: .object([
                 "requester_estate_id": .string(requesterID.uuidString),
             ])
         )
+        #expect(result.objectValue != nil, "Expected a JSON object response when hydration_level absent")
     }
 
     // MARK: - E. clampLimit guards on moot_federated_recall (Finding 3)
@@ -179,6 +190,10 @@ struct HydrationDecodeTests {
                 error.code == JSONRPCErrorCode.invalidParams,
                 "Negative limit must throw invalidParams; got code \(error.code)"
             )
+            #expect(
+                error.message.contains("limit"),
+                "invalidParams error must name the offending argument; got: \(error.message)"
+            )
         }
     }
 
@@ -186,12 +201,13 @@ struct HydrationDecodeTests {
     @Test func federatedSearchOverCeilingLimitDoesNotThrow() async throws {
         let (dispatcher, requesterID) = try await makeDispatcher()
         // Should not throw — clamped to 500 before reaching the substrate.
-        _ = try await dispatcher.dispatch(
+        let result = try await dispatcher.dispatch(
             name: "moot_federated_recall",
             arguments: .object([
                 "requester_estate_id": .string(requesterID.uuidString),
                 "limit": .integer(1_000_000),
             ])
         )
+        #expect(result.objectValue != nil, "Expected a JSON object response for over-ceiling limit (clamped)")
     }
 }

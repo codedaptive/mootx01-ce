@@ -100,47 +100,50 @@ struct AriaV2OrchestrationLowerTests {
         let source = try await kit.open(
             storage: sourceStorage, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: true)
-        // Source grants whole-estate read to the requester.
-        _ = try await kit.issueGrant(source, GrantOptions(
+        // Source grants whole-estate read to the requester; capture the receipt
+        // so we can assert the exact grantID returned by the lower engine.
+        let grant = try await kit.issueGrant(source, GrantOptions(
             granteeEstateID: requester.estateUUID,
-            scope: .wholeEstate))
-        // Plant distinguishable content into the source estate.
+            scope: .wholeEstate,
+            custodyMode: .mediated,
+            lifetime: .permanent
+        ))
         _ = try await kit.capture(source, CaptureFrame(
             content: "peer-only-v2-federation-row",
             channel: .typed,
             room: "aria-v2-federation",
             latticeAnchor: .udc("004"),
             addedBy: "aria-v2-orchestration-lower-tests",
-            embeddingModelID: "test-model-v1"))
-        // Dispatcher: requester is primary; source is a registered peer.
-        let dispatcher = ToolDispatcher(kit: kit, handle: requester)
-            .registering(source)
-        let result = try await dispatcher.dispatch(
-            name: "moot_federated_recall",
-            arguments: .object([
-                "requester_estate_id": .string(requester.estateUUID.uuidString),
+            embeddingModelID: "test-model-v1",
+            subject: "peer-only-v2-federation-row"
+        ))
+
+        // Drive the lower engine directly so the receipt fields (sourceEstateID,
+        // requesterEstateID, grantID) are visible without JSON round-tripping.
+        let provider = AriaV2GeniusLocusOrchestrationProvider(
+            kit: kit, handle: requester, federationSources: [requester, source])
+        let data = try await provider.federatedSearch(
+            AriaV2FederatedSearchRequest(arguments: .object([
+                "filter": .string("unconfirmed"),
                 "hydration_level": .string("full"),
-            ])
+            ])),
+            context: .init(
+                estateID: requester.estateUUID,
+                serverIdentity: "aria-v2-test",
+                sessionID: "federation-test"
+            )
         )
-        // Extract results from structuredContent.data.results.
-        // The compact text is just an operation-complete message; the payload
-        // lives in structuredContent (AriaV2Envelope.success shape).
-        guard case let .object(obj) = result,
-              case let .object(sc)? = obj["structuredContent"],
-              case let .object(data)? = sc["data"],
-              case let .array(results)? = data["results"]
-        else {
-            Issue.record("Unexpected result shape: \(result)")
-            return
-        }
-        let excerpts = results.compactMap { item -> String? in
-            guard case let .object(mem) = item,
-                  case let .string(text)? = mem["excerpt"] else { return nil }
-            return text
-        }
+
+        // Receipt fields: the lower engine must identify the exact source estate,
+        // requester estate, and grant that authorised the search.
+        #expect(data.sourceEstateID == source.estateUUID)
+        #expect(data.requesterEstateID == requester.estateUUID)
+        #expect(data.grantID == grant.grant.id)
+        // Content: the planted row must appear in the results via excerpt
+        // (compactMemory populates excerpt from drawer.content, not context).
         #expect(
-            excerpts.contains { $0.contains("peer-only-v2-federation-row") },
-            "federated recall must surface content from the peer estate; excerpts: \(excerpts)")
+            data.results.contains { $0.excerpt?.contains("peer-only-v2-federation-row") == true },
+            "federated recall must surface content from the peer estate; results: \(data.results)")
     }
 
     @Test("a federation response carries the lower engine grant identity")
