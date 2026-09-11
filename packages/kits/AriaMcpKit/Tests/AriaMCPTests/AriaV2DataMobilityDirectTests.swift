@@ -295,6 +295,104 @@ struct AriaV2DataMobilityDirectTests {
             }
         }
     }
+
+    // MARK: - ITEM 1: mode case-insensitivity — reclassify_fdc and palace_import
+
+    /// reclassify_fdc must accept mode values regardless of case.
+    /// Fails if the decoder rejects "ALL" as an unknown value instead of
+    /// normalising it to "all" before the enum match.
+    @Test("reclassify_fdc accepts mode in any case")
+    func reclassifyFdcModeIsCaseInsensitive() throws {
+        let upper = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_reclassify_fdc", arguments: .object(["mode": .string("ALL")]))
+        if case .reclassifyFDC(_, _, let mode, _) = upper {
+            #expect(mode == "all", "uppercase ALL must normalise to all")
+        } else {
+            Issue.record("Expected .reclassifyFDC case")
+        }
+
+        let mixed = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_reclassify_fdc", arguments: .object(["mode": .string("SuspectOnly")]))
+        if case .reclassifyFDC(_, _, let mode, _) = mixed {
+            #expect(mode == "suspectOnly", "mixed-case SuspectOnly must normalise to suspectOnly")
+        } else {
+            Issue.record("Expected .reclassifyFDC case")
+        }
+    }
+
+    /// palace_import must accept mode values regardless of case.
+    /// Fails if the decoder rejects "BACKGROUND" as an unknown value instead of
+    /// normalising it via lowercased() before the ImportMode init.
+    @Test("palace_import accepts mode in any case")
+    func palaceImportModeIsCaseInsensitive() throws {
+        let upper = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_palace_import",
+            arguments: .object([
+                "palace_path": .string("/tmp/palace"),
+                "mode": .string("BACKGROUND"),
+            ]))
+        if case .palaceImport(_, let mode, _) = upper {
+            #expect(mode == .background, "uppercase BACKGROUND must decode to .background")
+        } else {
+            Issue.record("Expected .palaceImport case")
+        }
+
+        let mixedFg = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_palace_import",
+            arguments: .object([
+                "palace_path": .string("/tmp/palace"),
+                "mode": .string("Foreground"),
+            ]))
+        if case .palaceImport(_, let mode, _) = mixedFg {
+            #expect(mode == .foreground, "mixed-case Foreground must decode to .foreground")
+        } else {
+            Issue.record("Expected .palaceImport case")
+        }
+    }
+
+    // MARK: - ITEM 2: return_id_map — decoder must accept the key without rejection
+
+    /// moot_json_import must accept return_id_map without an unknown-key error.
+    /// Fails if the allowedKeys set on the decoder does not include "return_id_map",
+    /// which would cause a -32602 error for any caller supplying the key.
+    @Test("moot_json_import accepts return_id_map without error")
+    func jsonImportReturnIDMapIsAccepted() throws {
+        // true path: key is present and true
+        let withMap = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_json_import",
+            arguments: .object([
+                "path": .string("/tmp/seed.json"),
+                "return_id_map": .bool(true),
+            ]))
+        if case .jsonImport(_, _, let returnIDMap) = withMap {
+            #expect(returnIDMap == true, "return_id_map:true must set returnIDMap to true")
+        } else {
+            Issue.record("Expected .jsonImport case")
+        }
+
+        // false path: key is present and false
+        let withoutMap = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_json_import",
+            arguments: .object([
+                "path": .string("/tmp/seed.json"),
+                "return_id_map": .bool(false),
+            ]))
+        if case .jsonImport(_, _, let returnIDMap) = withoutMap {
+            #expect(returnIDMap == false, "return_id_map:false must set returnIDMap to false")
+        } else {
+            Issue.record("Expected .jsonImport case")
+        }
+
+        // absent path: defaults to false
+        let absent = try AriaV2DataMobilityRequest.decode(
+            tool: "moot_json_import",
+            arguments: .object(["path": .string("/tmp/seed.json")]))
+        if case .jsonImport(_, _, let returnIDMap) = absent {
+            #expect(returnIDMap == false, "absent return_id_map must default to false")
+        } else {
+            Issue.record("Expected .jsonImport case")
+        }
+    }
 }
 
 private struct RefusingAuthority: AriaV2DataMobilityAuthority {

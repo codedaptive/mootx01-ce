@@ -319,6 +319,73 @@ fn v2_recall_recipe_family_is_selected_and_strict_before_legacy_dispatch() {
 }
 
 #[test]
+fn v2_json_import_return_id_map_appends_a_second_text_block() {
+    // The catalog advertises return_id_map on moot_json_import. This proves the
+    // live v2 path honours it: true appends a second content block carrying the
+    // id_map JSON, absent leaves the reply at the single prose receipt.
+    //
+    // Two distinct seeds, because re-importing one seed into the same estate is
+    // not a fresh write and the lower refuses it.
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+    let write_seed = |record: &str| {
+        let path = std::env::temp_dir().join(format!("aria-v2-idmap-{}.json", uuid::Uuid::new_v4()));
+        fs::write(&path, format!(
+            r#"{{"format_version":1,"name":"idmap","records":[{{"id":"{record}","content":"id map seed {record}","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"}}]}}"#
+        )).expect("write id_map seed");
+        path
+    };
+
+    // Absent return_id_map: exactly one content block, the prose receipt.
+    let plain_seed = write_seed("plain");
+    let plain = call(&dispatcher, "moot_json_import", serde_json::json!({
+        "path": plain_seed.display().to_string(),
+    }));
+    let _ = fs::remove_file(&plain_seed);
+    assert_eq!(plain["result"]["isError"], false, "{plain}");
+    let plain_content = plain["result"]["content"].as_array().expect("content array");
+    assert_eq!(
+        plain_content.len(), 1,
+        "absent return_id_map must leave the reply at one block; got {plain_content:?}",
+    );
+
+    // The structured data carries id_map either way — the flag gates the block only.
+    let structured_id_map = &plain["result"]["structuredContent"]["data"]["id_map"];
+    assert!(
+        structured_id_map.is_object(),
+        "structured data must carry id_map even when the flag is absent; got {structured_id_map}",
+    );
+
+    // return_id_map:true: a second block whose text is the exact id_map JSON.
+    let mapped_seed = write_seed("seed/mapped");
+    let with_map = call(&dispatcher, "moot_json_import", serde_json::json!({
+        "path": mapped_seed.display().to_string(),
+        "return_id_map": true,
+    }));
+    let _ = fs::remove_file(&mapped_seed);
+    assert_eq!(with_map["result"]["isError"], false, "{with_map}");
+    let content = with_map["result"]["content"].as_array().expect("content array");
+    assert_eq!(
+        content.len(), 2,
+        "return_id_map:true must append a second block; got {content:?}",
+    );
+    assert_eq!(content[1]["type"], "text");
+
+    // Assert on the block's TEXT, not merely on the array length: a length check
+    // passes even when the block carries the wrong payload. The record id carries
+    // a slash on purpose: serde_json must leave it unescaped, matching Swift's
+    // .withoutEscapingSlashes. An escaped \\/ here would be a port divergence.
+    let drawer_id = with_map["result"]["structuredContent"]["data"]["id_map"]["seed/mapped"]
+        .as_str().expect("id_map must map the seed record id to its drawer id").to_owned();
+    assert_eq!(drawer_id, drawer_id.to_lowercase(), "drawer ids are canonical lowercase");
+    let expected = format!("{{\"id_map\":{{\"seed/mapped\":\"{drawer_id}\"}}}}");
+    assert_eq!(
+        content[1]["text"].as_str().expect("second block must be text"),
+        expected,
+        "second block text must be the exact id_map JSON",
+    );
+}
+
+#[test]
 fn v2_vault_lifecycle_uses_the_selected_estate_and_dispatcher_job_ledger() {
     let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
     let vault = std::env::temp_dir().join(format!("aria-v2-vault-{}", uuid::Uuid::new_v4()));

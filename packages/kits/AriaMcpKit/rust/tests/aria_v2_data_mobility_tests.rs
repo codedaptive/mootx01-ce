@@ -183,3 +183,73 @@ fn vault_terminal_receipt_keeps_the_minted_job_uuid_and_export_evidence() {
         exported_at: "2026-09-08T00:00:00Z".to_owned(),
     }));
 }
+
+// ---------------------------------------------------------------------------
+// ITEM 1: mode case-insensitivity — reclassify_fdc and palace_import
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reclassify_fdc_mode_is_case_insensitive() {
+    // "ALL" must decode to All without error; fails if the decoder doesn't
+    // call to_lowercase() before the enum match.
+    let upper = V2ReclassifyFdcRequest::decode(&arguments([
+        ("mode", JsonValue::String("ALL".to_owned())),
+    ])).unwrap();
+    assert_eq!(upper.mode, V2FdcReclassifyMode::All,
+        "uppercase ALL must decode to All; got {:?}", upper.mode);
+
+    // "SuspectOnly" (mixed case) must decode to SuspectOnly.
+    let mixed = V2ReclassifyFdcRequest::decode(&arguments([
+        ("mode", JsonValue::String("SuspectOnly".to_owned())),
+    ])).unwrap();
+    assert_eq!(mixed.mode, V2FdcReclassifyMode::SuspectOnly,
+        "mixed-case SuspectOnly must decode to SuspectOnly; got {:?}", mixed.mode);
+}
+
+#[test]
+fn palace_import_mode_is_case_insensitive() {
+    // "BACKGROUND" must decode to Background without error; fails if the
+    // decoder doesn't call to_lowercase() before the enum match.
+    let upper = V2PalaceImportRequest::decode(&arguments([
+        ("palace_path", JsonValue::String("/tmp/palace".to_owned())),
+        ("mode", JsonValue::String("BACKGROUND".to_owned())),
+    ])).unwrap();
+    assert_eq!(upper.mode, Some(V2ImportMode::Background),
+        "uppercase BACKGROUND must decode to Background; got {:?}", upper.mode);
+
+    // "Foreground" (title case) must decode to Foreground.
+    let title = V2PalaceImportRequest::decode(&arguments([
+        ("palace_path", JsonValue::String("/tmp/palace".to_owned())),
+        ("mode", JsonValue::String("Foreground".to_owned())),
+    ])).unwrap();
+    assert_eq!(title.mode, Some(V2ImportMode::Foreground),
+        "title-case Foreground must decode to Foreground; got {:?}", title.mode);
+}
+
+// ---------------------------------------------------------------------------
+// ITEM 2: return_id_map — decoder must accept the key without rejection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_import_accepts_return_id_map() {
+    // return_id_map:true must decode without error; fails if the key is not
+    // in the strict_object allow-list, which would produce a V2DecodeError.
+    let with_map = V2JsonImportRequest::decode(&arguments([
+        ("path", JsonValue::String("/tmp/seed.json".to_owned())),
+        ("return_id_map", JsonValue::Bool(true)),
+    ])).expect("return_id_map:true must be accepted");
+    assert!(with_map.return_id_map, "return_id_map:true must set return_id_map to true");
+
+    // return_id_map:false must also be accepted.
+    let without_map = V2JsonImportRequest::decode(&arguments([
+        ("path", JsonValue::String("/tmp/seed.json".to_owned())),
+        ("return_id_map", JsonValue::Bool(false)),
+    ])).expect("return_id_map:false must be accepted");
+    assert!(!without_map.return_id_map, "return_id_map:false must set return_id_map to false");
+
+    // Absent return_id_map must default to false.
+    let absent = V2JsonImportRequest::decode(&arguments([
+        ("path", JsonValue::String("/tmp/seed.json".to_owned())),
+    ])).expect("absent return_id_map must default cleanly");
+    assert!(!absent.return_id_map, "absent return_id_map must default to false");
+}
