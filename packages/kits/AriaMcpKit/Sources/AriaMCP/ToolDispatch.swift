@@ -281,6 +281,13 @@ public struct ToolDispatcher: Sendable {
     /// Shared by every value-semantic dispatcher derived from this session.
     let v2MemoryListCursorSession: AriaV2MemoryListCursorSession
 
+    /// Transform-phase registrations injected before argument decode.
+    ///
+    /// In production this is always empty — no concern removes keys before decode.
+    /// Test code populates it to prove the transform phase strips a decoder-rejected
+    /// key before AriaSurfaceDecoder sees the arguments.
+    internal var preDecodeRegistrations: [AriaV2ChainRegistration] = []
+
     /// Construct a single-estate dispatcher. `handle` is registered as
     /// the sole addressable estate and is the default target for calls
     /// that omit `estateID`. This is the v1.0 path; every existing
@@ -596,8 +603,21 @@ public struct ToolDispatcher: Sendable {
                 message: "Unknown tool: \(name)"
             )
         }
-        let request = try AriaSurfaceDecoder.decode(name: name, arguments: args)
-        return await dispatchV2(request, rawArguments: args)
+
+        // Transform phase: run before decode so a hook can remove a key the
+        // strict argument decoder rejects. The production registration list is
+        // empty; hooks arrive only through preDecodeRegistrations (test seam).
+        // Construction fails only on duplicate concern names or positions —
+        // programmer errors in the injected list — so try! is appropriate.
+        let transformChain = try! AriaV2CallChain(registrations: preDecodeRegistrations)
+        let transformOutcome = await transformChain.runTransform(
+            toolName: name,
+            arguments: .object(args)
+        )
+        let transformedArgs = transformOutcome.arguments.objectValue ?? args
+
+        let request = try AriaSurfaceDecoder.decode(name: name, arguments: transformedArgs)
+        return await dispatchV2(request, rawArguments: transformedArgs)
     }
 }
 
@@ -608,14 +628,15 @@ private extension ToolDispatcher {
     /// §12.5 coaching session counter, dispatches to `executeV2Core`, and applies
     /// any coaching hint and periodic coaching block before returning.
     ///
-    /// FACT C choke point: the call chain's ingress hook calls `recordCall` and
-    /// its egress hook injects coaching, both here, covering every v2 operation.
+    /// The record (ingress) phase runs after the frozen guard and after decode.
+    /// Counting sits there because a frozen refusal is not a call and a decode
+    /// failure is not a call. The transform phase runs in dispatch() before
+    /// decode so a hook can remove a key the strict decoder rejects.
     /// Do not inject per-arm inside `executeV2Core`.
     ///
-    /// `rawArguments` is the decoded `[String: JSONValue]` map from the outer
-    /// `dispatch(name:arguments:)` call, forwarded so the ingress chain receives
-    /// a well-formed value. Argument mutations the ingress chain returns are not
-    /// consumed at this call site because decode has already run.
+    /// `rawArguments` is the `[String: JSONValue]` map after the transform phase,
+    /// forwarded so the record (ingress) chain receives the same arguments that
+    /// the decoder accepted.
     private func dispatchV2(
         _ request: AriaSurfaceRequest,
         rawArguments: [String: JSONValue]
@@ -658,23 +679,19 @@ private extension ToolDispatcher {
         // a hard-coded list — `try!` follows the precedent at executeV2Core's
         // `try! AriaV2CapabilityDigest.digest`.
         //
-        // The ingress chain runs AFTER argument decode and AFTER the frozen
-        // guard above. That placement is intentional: the session counter must
-        // not advance when a frozen estate refuses a v2 mutation (the refusal
-        // returns above) and must not advance when argument decode fails (decode
-        // runs before dispatchV2 in dispatch(name:arguments:)). Moving the
-        // ingress invocation above the frozen guard would advance the counter
-        // on frozen refusals, changing when the periodic coaching block fires.
-        // This mission changes no behaviour, so the ingress chain runs where
-        // `recordCall` ran before — same position, now delegated to the hook.
+        // The record (ingress) chain runs after the frozen guard so the session
+        // counter does not advance on frozen refusals (which return above) or
+        // on decode failures (which throw before dispatchV2 is reached). The
+        // transform phase ran in dispatch() before decode; counting runs here
+        // because a refused call is not a call.
         let chain = try! AriaV2CallChain(
             registrations: ariaV2ProductionRegistrations(
                 request: request,
                 modeSessionState: modeSessionState
             )
         )
-        // Ingress: the coaching hook calls recordCall and returns arguments
-        // unchanged (see AriaV2ChainRegistry.swift for the placement invariant).
+        // Record phase: the coaching hook calls recordCall on admitted, decoded
+        // calls. Refused and decode-failed calls both return before this point.
         let ingressOutcome = await chain.runIngress(
             toolName: request.toolName,
             arguments: .object(rawArguments)

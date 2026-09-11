@@ -1,11 +1,14 @@
 //! Integration-level adoption tests for the V2CallChain wiring.
 //!
+//! The call chain has three phases with independent position spaces:
+//! transform (pre-decode), ingress/record (post-guard, post-decode), egress.
+//!
 //! The GATE 1 slot-reservation proof (egress position 1 unoccupied in the
 //! production registrations) lives in the in-crate unit test at
 //! `src/v2/chain_registry.rs #[cfg(test)]` because it requires access to the
 //! `pub(crate)` production factory.
 //!
-//! The GATE 2 ingress-placement proofs live in the in-crate module at
+//! The GATE 2 record-phase proofs live in the in-crate module at
 //! `src/dispatcher.rs #[cfg(test)]::frozen_command_tests`.
 //!
 //! This file proves the chain is WIRED into the running Dispatcher through
@@ -17,12 +20,16 @@
 //! returns a coaching block in the response text.  Without the egress
 //! transform the block never fires.
 //!
-//! GATE 2 (ingress placement): The 24th `moot_monitoring_status` call does
+//! GATE 2 (record-phase placement): The 24th `moot_monitoring_status` call does
 //! NOT carry a coaching block; the 25th DOES.  This proves `record_call`
-//! advanced the counter exactly once per admitted call — if ingress were
-//! never running, the counter stays at 0 and should_coach never fires at all.
-//! If ingress were running twice per call, coaching would fire at call 13,
-//! not 25.
+//! advanced the counter exactly once per admitted call — if the record phase
+//! were never running, the counter stays at 0 and should_coach never fires.
+//! If the record phase were running twice per call, coaching would fire at
+//! call 13, not 25.
+//!
+//! GATE 6 (transform wiring): A hook registered on the transform phase strips
+//! a decoder-rejected key before decode runs, and the call succeeds.  This
+//! test fails if the transform phase is not wired before decode.
 
 use aria_mcp::dispatcher::Dispatcher;
 use aria_mcp::estate_posture::EstatePosture;
@@ -84,15 +91,15 @@ fn gate5_chain_is_wired_egress_fires_coaching_block_at_call_25() {
     );
 }
 
-/// GATE 2 (integration, ingress once per call): the coaching block fires at
-/// exactly call 25, not earlier.  This proves `record_call` runs exactly once
-/// per admitted call.  If ingress ran twice per call the counter would hit 25
-/// after 13 calls; if it never ran the block never appears.
+/// GATE 2 (integration, record phase once per call): the coaching block fires
+/// at exactly call 25, not earlier.  This proves `record_call` runs exactly
+/// once per admitted call.  If the record phase ran twice per call the counter
+/// would hit 25 after 13 calls; if it never ran the block never appears.
 ///
-/// This is a subset of GATE 1 — the firing-at-25 assertion also implicitly
-/// proves once-per-call ingress.
+/// This is a subset of GATE 5 — the firing-at-25 assertion also implicitly
+/// proves once-per-call record-phase execution.
 #[test]
-fn gate2_ingress_fires_record_call_exactly_once_per_admitted_v2_call() {
+fn gate2_record_phase_fires_record_call_exactly_once_per_admitted_v2_call() {
     let dispatcher = make_live_dispatcher();
 
     // Calls 1–24: no coaching block yet.
@@ -100,7 +107,7 @@ fn gate2_ingress_fires_record_call_exactly_once_per_admitted_v2_call() {
         let resp = tools_call(&dispatcher, "moot_monitoring_status", serde_json::json!({}));
         assert!(
             !has_coaching_block(&resp),
-            "call {n}: early coaching block means ingress is running more than once per call"
+            "call {n}: early coaching block means the record phase is running more than once per call"
         );
     }
 
@@ -108,16 +115,17 @@ fn gate2_ingress_fires_record_call_exactly_once_per_admitted_v2_call() {
     let resp_25 = tools_call(&dispatcher, "moot_monitoring_status", serde_json::json!({}));
     assert!(
         has_coaching_block(&resp_25),
-        "call 25: missing coaching block means ingress is not running (counter never reached 25)"
+        "call 25: missing coaching block means the record phase is not running (counter never reached 25)"
     );
 }
 
-/// GATE 2 (integration, frozen): a frozen v2 mutation admitted through the
-/// frozen check does not trigger the coaching block even after 25 refusals.
+/// GATE 2 (integration, frozen): a frozen v2 mutation does not trigger the
+/// coaching block even after 25 refusals.
 ///
-/// This is the integration-level proof that ingress does not run on frozen
-/// refusals.  The in-crate `gate2_frozen_v2_mutation_refusal_leaves_session_counter_at_zero`
-/// test provides the counter-zero proof directly.
+/// This is the integration-level proof that the record phase does not run on
+/// frozen refusals.  The in-crate
+/// `gate2_frozen_v2_mutation_refusal_leaves_session_counter_at_zero` test
+/// provides the counter-zero proof directly.
 #[test]
 fn gate2_frozen_v2_mutations_do_not_feed_the_coaching_counter() {
     let frozen = Dispatcher::new(
@@ -144,7 +152,61 @@ fn gate2_frozen_v2_mutations_do_not_feed_the_coaching_counter() {
         // No coaching block on refused calls.
         assert!(
             !has_coaching_block(&resp),
-            "call {n}: coaching block on a frozen refusal means ingress ran before the frozen guard"
+            "call {n}: coaching block on a frozen refusal means the record phase ran before the frozen guard"
         );
     }
+}
+
+/// GATE 6 (integration, transform wiring): a hook on the transform phase strips
+/// a decoder-rejected key before decode runs, and the call succeeds.
+///
+/// `moot_file_memory`'s allowed-key set does not include "inject_key".  Without
+/// the transform phase the decoder sees the extra key and returns an invalidParams
+/// error.  With the transform phase wired before decode the hook removes the key
+/// and the call reaches the substrate cleanly.
+///
+/// This test fails when the transform phase is not wired before the surface
+/// decoder call in `tools_call`.
+#[test]
+fn gate6_transform_hook_strips_decoder_rejected_key_and_call_succeeds() {
+    use aria_mcp::v2::call_chain::{PreDecodeHook, V2ChainRegistration};
+
+    let mut dispatcher = make_live_dispatcher();
+
+    // Register a transform hook that removes "inject_key" before decode.
+    // "inject_key" is not in moot_file_memory's allowed-key set; the decoder
+    // rejects it with invalidParams if it arrives at the decode step.
+    // PreDecodeHook is Arc<dyn Fn> so registrations can be reused across
+    // multiple handle calls on a shared-reference dispatcher.
+    let hook: PreDecodeHook = std::sync::Arc::new(|_tool_name: &str, mut args: aria_mcp::jsonrpc::JsonValue| {
+        if let aria_mcp::jsonrpc::JsonValue::Object(ref mut map) = args {
+            map.remove("inject_key");
+        }
+        Ok(args)
+    });
+    dispatcher.pre_decode_registrations = vec![
+        V2ChainRegistration::new("inject-key-stripper")
+            .with_transform(1, hook),
+    ];
+
+    // Dispatch with the extra key present — without the transform wired this
+    // returns an invalidParams error; with it the call succeeds.
+    let resp = tools_call(
+        &dispatcher,
+        "moot_file_memory",
+        serde_json::json!({
+            "content": "gate6 transform proof",
+            "subject": "gate6-transform-proof",
+            "location": "gate6",
+            "inject_key": "must be stripped before decode",
+        }),
+    );
+
+    // The call must succeed: isError must be absent or false.
+    let is_error = resp["result"]["isError"].as_bool().unwrap_or(false);
+    assert!(
+        !is_error,
+        "transform hook must have stripped inject_key before decode; got {}",
+        resp
+    );
 }

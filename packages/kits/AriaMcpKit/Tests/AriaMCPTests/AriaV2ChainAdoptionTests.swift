@@ -21,17 +21,21 @@ private extension JSONValue {
 
 /// Adoption tests for the AriaV2CallChain wiring in ToolDispatch.
 ///
-/// Each gate discriminates a specific aspect of the adoption:
+/// The call chain has three phases with independent position spaces:
+/// transform (pre-decode), ingress/record (post-guard, post-decode), egress.
+///
+/// Each gate discriminates a specific aspect of the wiring:
 ///
 /// GATE 1 — slot reservation: egress position 1 is unoccupied in the
 ///           production registrations. The discriminating assertions are the
 ///           position checks; the test fails when egressCoaching is set to 1.
 ///
-/// GATE 2 — ingress placement: a frozen-estate v2 mutation refusal leaves the
-///           session call counter at zero; a malformed-argument call also
-///           leaves the counter at zero. These tests fail when the ingress
-///           invocation is moved above the frozen guard or above decode, not
-///           against the pre-adoption baseline.
+/// GATE 2 — record phase placement: a frozen-estate v2 mutation refusal leaves
+///           the session call counter at zero; a malformed-argument call also
+///           leaves the counter at zero. The record phase runs after the frozen
+///           guard and after decode, so neither advances the counter. These
+///           tests fail when the record phase is moved above the frozen guard
+///           or above decode.
 ///
 /// GATE 3 — golden fixture untouched (proved via git diff --stat, not tested
 ///           here; see report).
@@ -41,6 +45,10 @@ private extension JSONValue {
 /// GATE 5 — egress wiring: the coaching block appears at call 25 and not
 ///           before. This test fails if the egress chain invocation is removed
 ///           from dispatchV2.
+///
+/// GATE 6 — transform wiring: a hook registered on the transform phase strips
+///           a decoder-rejected key before decode runs, and the call succeeds.
+///           This test fails if the transform phase is not wired before decode.
 @Suite("AriaV2ChainAdoptionTests")
 struct AriaV2ChainAdoptionTests {
 
@@ -146,13 +154,14 @@ struct AriaV2ChainAdoptionTests {
             "egress result must be the gate's halt payload, got \(egressOutcome.result)")
     }
 
-    // MARK: - GATE 2: Ingress placement
+    // MARK: - GATE 2: Record phase placement
 
-    /// A frozen-estate v2 MUTATION refusal returns before the ingress chain
-    /// runs. The session call counter must remain at zero.
+    /// A frozen-estate v2 MUTATION refusal returns before the record (ingress)
+    /// phase runs. The session call counter must remain at zero.
     ///
-    /// This test fails if the ingress chain is moved above the frozen guard
-    /// in dispatchV2 (the counter would advance to 1 on the refused call).
+    /// The record phase runs after the frozen guard. Moving it above the guard
+    /// would advance the counter on frozen refusals, changing when the periodic
+    /// coaching block fires.
     @Test func gate2FrozenV2MutationRefusalLeavesSessionCounterAtZero() async throws {
         let (frozen, kit, handle) = try await makeDispatcher(frozen: true)
         defer { Task { try? await kit.close(handle) } }
@@ -173,7 +182,7 @@ struct AriaV2ChainAdoptionTests {
                 .objectValue?["code"] == .string("estate_frozen"))
 
         // The session counter must be zero: the frozen guard returned before
-        // the ingress hook could call recordCall.
+        // the record phase could call recordCall.
         let snap = await frozen.modeSessionState.snapshot
         #expect(snap.totalCalls == 0,
             "frozen v2 mutation refusal must not advance the session counter; got \(snap.totalCalls)")
@@ -182,8 +191,8 @@ struct AriaV2ChainAdoptionTests {
     /// A malformed-argument call on a live v2 name rejects at decode time,
     /// before dispatchV2 is reached. The session call counter must remain at zero.
     ///
-    /// This test fails if the ingress chain were moved above the decode step
-    /// (the counter would advance before the decode error is returned).
+    /// The record phase runs after decode. Moving it above decode would advance
+    /// the counter before the decode error is returned.
     @Test func gate2MalformedArgumentsLeaveSessionCounterAtZero() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
@@ -233,5 +242,58 @@ struct AriaV2ChainAdoptionTests {
         let text25 = result25.firstTextContent ?? ""
         #expect(text25.contains("[Moot coaching"),
             "call 25: coaching block must appear at the default cadence of 25 calls")
+    }
+
+    // MARK: - GATE 6: Transform wiring
+
+    /// A transform hook registered before decode can strip a key the strict
+    /// argument decoder rejects, and the call succeeds.
+    ///
+    /// moot_file_memory's allowed-key set does not include "inject_key". Without
+    /// the transform phase the decoder sees the extra key and throws invalidParams.
+    /// With the transform phase wired before decode the hook removes the key and
+    /// the call reaches the substrate cleanly.
+    ///
+    /// This test fails when the transform phase is not wired before the
+    /// AriaSurfaceDecoder.decode call in dispatch(name:arguments:).
+    @Test func gate6TransformHookStripsDecoderRejectedKeyAndCallSucceeds() async throws {
+        let (baseDispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        var dispatcher = baseDispatcher
+
+        // Register a transform hook that removes "inject_key" before decode.
+        // "inject_key" is not in moot_file_memory's allowed-key set; the decoder
+        // rejects it with invalidParams if it arrives at the decode step.
+        dispatcher.preDecodeRegistrations = [
+            AriaV2ChainRegistration(
+                concernName: "inject-key-stripper",
+                transform: (
+                    position: 1,
+                    hook: { _, args in
+                        guard case .object(var dict) = args else { return args }
+                        dict.removeValue(forKey: "inject_key")
+                        return .object(dict)
+                    }
+                )
+            )
+        ]
+
+        // Dispatch with the extra key present — without the transform wired this
+        // throws JSONRPCError.invalidParams; with it the call succeeds.
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("gate6 transform proof"),
+                "subject": .string("gate6-transform-proof"),
+                "location": .string("gate6"),
+                "inject_key": .string("must be stripped before decode"),
+            ])
+        )
+
+        // The call must succeed: isError must be absent or false.
+        if let isError = result.objectValue?["isError"] {
+            #expect(isError == .bool(false),
+                "expected successful call result but got isError=\(isError)")
+        }
     }
 }

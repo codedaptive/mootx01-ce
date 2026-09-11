@@ -174,6 +174,13 @@ pub struct Dispatcher {
     /// Tests set this via `with_memory_tool_enabled` so no env mutation is needed.
     /// Mirrors Swift `ToolDispatcher.memoryToolEnabled`.
     memory_tool_enabled: bool,
+    /// Pre-decode transform registrations injected before argument decode.
+    ///
+    /// In production this is always empty — no concern removes keys before decode.
+    /// Test code populates it to prove the transform phase strips a decoder-rejected
+    /// key before the surface decoder sees the arguments.
+    /// Mirrors Swift `ToolDispatcher.preDecodeRegistrations`.
+    pub pre_decode_registrations: Vec<crate::v2::call_chain::V2ChainRegistration>,
 }
 
 impl Dispatcher {
@@ -256,6 +263,9 @@ impl Dispatcher {
             // Set from the same resolved value used to build tools/list above,
             // so the catalog and the intercept gate start in agreement.
             memory_tool_enabled: mem_enabled,
+            // Empty in production; populated by test code to prove the transform
+            // phase strips a decoder-rejected key before the surface decoder runs.
+            pre_decode_registrations: Vec::new(),
         }
     }
 
@@ -483,12 +493,42 @@ impl Dispatcher {
             );
         }
 
+        // Transform phase: run before decode so a hook can remove a key the
+        // strict argument decoder rejects.  The production registration list is
+        // empty; hooks arrive only through pre_decode_registrations (test seam).
+        // Construction fails only on duplicate concern names or positions —
+        // programmer errors in the injected list — so expect is appropriate.
+        // Pre-decode registrations are always empty in production; test code
+        // populates them to inject a transform hook before decode.
+        // `clone_transform_only` copies the Arc-wrapped hook, leaving ingress
+        // and egress None — only the transform phase is exercised here.
+        let transform_chain = crate::v2::call_chain::V2CallChain::new(
+            self.pre_decode_registrations
+                .iter()
+                .map(|r| r.clone_transform_only())
+                .collect(),
+        ).expect("pre_decode_registrations: duplicate concern name or position");
+        let transform_outcome = transform_chain.run_transform(
+            name,
+            JsonValue::Object(args_map.clone()),
+        );
+        // On error the prior arguments carry forward; the outcome always yields
+        // the best available set of arguments.
+        // Extract the BTreeMap from the transform outcome, falling back to the
+        // original args when the transform returned a non-object value.
+        let effective_args = match transform_outcome.arguments {
+            JsonValue::Object(m) => m,
+            _ => args_map.clone(),
+        };
+
         // Surface admission: decode the typed v2 request before frozen policy
-        // is evaluated. A name absent from the v2 catalog is rejected here
-        // (METHOD_NOT_FOUND below) — `dispatch::route_tool` is never reached
-        // from this handler; it is a v1 test-helper path called directly by
-        // the integration suites, not by the running server.
-        if let Some(request) = self.surface.decode(name, &args_map)? {
+        // is evaluated.  The decoder receives the transform-phase output so a
+        // pre-decode hook can strip a key the strict decoder rejects.
+        // A name absent from the v2 catalog is rejected here (METHOD_NOT_FOUND
+        // below) — `dispatch::route_tool` is never reached from this handler;
+        // it is a v1 test-helper path called directly by the integration suites,
+        // not by the running server.
+        if let Some(request) = self.surface.decode(name, &effective_args)? {
             // Stable typed effect drives posture before the request clock or
             // any session/estate state changes.
             if request.effect() == crate::surface::SurfaceEffect::Mutation
@@ -536,21 +576,16 @@ impl Dispatcher {
             // the same infallible-programmer-error convention used elsewhere in
             // this codebase (e.g. capability_digest construction).
             //
-            // The ingress chain runs AFTER argument decode and AFTER the frozen
-            // guard above. That placement is intentional: the session counter
-            // must not advance when a frozen estate refuses a v2 mutation (the
-            // refusal returns above) and must not advance when argument decode
-            // fails (decode runs before this branch in tools_call). Moving the
-            // ingress invocation above the frozen guard would advance the counter
-            // on frozen refusals, changing when the periodic coaching block fires.
-            // This adoption changes no behaviour — the ingress hook calls
-            // record_call at the same point it was called inline before.
+            // The record (ingress) chain runs after the frozen guard so the
+            // session counter does not advance on frozen refusals (which return
+            // above) or on decode failures (which return before this branch).
+            // The transform phase ran before decode; counting runs here because
+            // a refused call is not a call.
             //
             // The request is cloned for the egress closure capture. The original
             // is moved into surface::execute below; the clone carries the decoded
             // argument data the coaching engine needs to check triggers (e.g.
-            // query length for moot_memory_search). This is the same clone that
-            // existed as `coaching_request` before the adoption.
+            // query length for moot_memory_search).
             let chain = crate::v2::call_chain::V2CallChain::new(
                 crate::v2::chain_registry::aria_v2_production_registrations(
                     request.clone(),
@@ -558,14 +593,11 @@ impl Dispatcher {
                 )
             ).expect("chain construction fails only on programmer error in hard-coded registrations");
 
-            // Ingress: the coaching hook calls record_call so the session
-            // counter advances exactly here — after preferences apply and after
-            // the frozen guard, before execute. Arguments are returned unchanged
-            // by the coaching concern; the return value is not consumed here
-            // because surface::execute takes the decoded typed request, not the
-            // JsonValue args. The ingress outcome is threaded to run_egress so
-            // each concern's optional ingress-state is delivered to its egress.
-            let ingress_outcome = chain.run_ingress(name, JsonValue::Object(args_map));
+            // Record phase: the coaching hook calls record_call on admitted,
+            // decoded calls.  Refused and decode-failed calls both return before
+            // this point.  The ingress outcome is threaded to run_egress so each
+            // concern's optional ingress-state is delivered to its egress hook.
+            let ingress_outcome = chain.run_ingress(name, JsonValue::Object(effective_args.clone()));
 
             let now_millis = crate::dispatch::bench_clock_now();
             let result = crate::surface::execute(
@@ -583,7 +615,7 @@ impl Dispatcher {
 
             // Egress: hint injection and periodic coaching block run inside the
             // coaching egress transform (see chain_registry.rs). The chain halts
-            // at the first gate that fires; no gate registers in this mission.
+            // at the first gate that fires; no gate registers in production.
             let egress_outcome = chain.run_egress(name, result, &ingress_outcome);
             return Ok(egress_outcome.result);
         }
@@ -712,19 +744,20 @@ mod frozen_command_tests {
         );
     }
 
-    // MARK: - GATE 2: Ingress placement (v2 choke point)
+    // MARK: - GATE 2: Record phase placement (v2 choke point)
 
-    /// A frozen-estate v2 MUTATION refusal returns before the ingress chain
-    /// runs.  The session call counter must remain at zero.
+    /// A frozen-estate v2 MUTATION refusal returns before the record phase runs.
+    /// The session call counter must remain at zero.
     ///
     /// `moot_file_memory` is the Rust twin of the Swift GATE 2 case.  It is a
     /// v2 mutation — the frozen guard fires inside the `if let Some(request)`
-    /// branch, above the chain build and ingress invocation.  The session
+    /// branch, above the chain build and record-phase invocation.  The session
     /// counter must not advance.
     ///
     /// This test fails if the chain build or `chain.run_ingress` is moved above
     /// the `is_frozen()` guard in `tools_call` (the counter would advance to 1
-    /// on the refused call).
+    /// on the refused call, because the record phase would have run before the
+    /// guard could reject the call).
     #[test]
     fn gate2_frozen_v2_mutation_refusal_leaves_session_counter_at_zero() {
         // Live estate, frozen posture — moot_file_memory is a mutation.
@@ -754,7 +787,7 @@ mod frozen_command_tests {
             "frozen v2 mutation must carry code estate_frozen; got {response}"
         );
 
-        // The ingress hook (record_call) must not have run.
+        // The record-phase hook (record_call) must not have run.
         assert_eq!(
             frozen.mode_session_state.snapshot().total_calls,
             0,
