@@ -845,28 +845,37 @@ extension LensToolsTests {
     }
 }
 
-// MARK: - PR-05 Part B: dense-row golden tests (byte-identical renderer)
+// MARK: - PR-05 Part B: dense-row structured field tests
 
 extension LensToolsTests {
 
-    /// Golden test: `moot_lens_trust_synthesis` row strings match
-    /// `ResultComposer.renderS2Row` byte-for-byte. Both paths (the lens and the
-    /// test) route through `RecipeTools.s2RowsByID` — identical inputs must
-    /// produce identical strings.
+    /// Value-equality gate: `moot_lens_trust_synthesis` dense rows carry the
+    /// drawer's actual subject, bestSpan and eventTime for admissible drawers.
     ///
-    /// Gate test: `moot_lens_trust_synthesis` dense rows carry structured fields
-    /// (subject, bestSpan, eventTime) for admissible drawers. Previously blocked
-    /// because v2 returned plain id strings; now enabled after dense-row hydration
-    /// was added to `AriaV2LensLower.lensTrustSynthesis`.
-    @Test func trustSynthesisDenseRowsMatchRenderer() async throws {
+    /// Expected values are derived independently from the drawer itself (via
+    /// the estate) using the same field mapping `AriaV2LensLower.trustData`
+    /// applies, then compared field-by-field against the dispatch response.
+    /// Non-nil assertions are not sufficient — only value equality proves the
+    /// gate is not trivially satisfied by a sentinel like "-".
+    @Test func trustSynthesisDenseRowsCarryStructuredFields() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ts-golden"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Capture a drawer with a known subject that surfaces in trust_synthesis.
+        // Capture a drawer with known content that surfaces in trust_synthesis.
         let id = try await capture(kit, handle,
             content: "golden trust memory", room: "study")
+
+        // Derive expected values independently from the stored drawer.
+        // AriaV2LensLower.trustData uses drawer.subject ?? "-" and
+        // drawer.content for bestSpan (empty content → "-").
+        let estate = try await kit.estate(for: handle)
+        let fetched = try await estate.getDrawers(ids: [id], hydrationLevel: .structured)
+        let drawer = try #require(fetched.first, "captured drawer must be retrievable from estate")
+        let expectedSubject = drawer.subject ?? "-"
+        let expectedBestSpan = drawer.content.isEmpty ? "-" : drawer.content
+        let expectedEventTime = ResultComposer.iso8601(drawer.eventTime)
 
         let result = try await dispatcher.dispatch(
             name: "moot_lens_trust_synthesis",
@@ -876,21 +885,25 @@ extension LensToolsTests {
         let rankedRows = try #require(body["rankedIDs"]?.arrayValue)
         // Find the row for the captured drawer.
         let match = rankedRows.first { $0.objectValue?["id"]?.stringValue == id.lowercased() }
-        let row = try #require(match, "captured drawer must appear in rankedIDs")
-        // Admissible row must carry all three dense fields.
-        #expect(row.objectValue?["subject"] != nil,
-            "admissible row must carry a subject field")
-        #expect(row.objectValue?["bestSpan"] != nil,
-            "admissible row must carry a bestSpan field")
-        #expect(row.objectValue?["eventTime"] != nil,
-            "admissible row must carry an eventTime field")
+        let row = try #require(match?.objectValue, "captured drawer must appear in rankedIDs")
+
+        // Value equality against independently derived expected values.
+        #expect(row["id"]?.stringValue == id.lowercased(),
+            "row id must equal the captured drawer id; got: \(String(describing: row["id"]))")
+        #expect(row["subject"]?.stringValue == expectedSubject,
+            "row subject must equal drawer.subject ?? \"-\"; expected: \(expectedSubject), got: \(String(describing: row["subject"]))")
+        #expect(row["bestSpan"]?.stringValue == expectedBestSpan,
+            "row bestSpan must equal drawer content; expected: \(expectedBestSpan), got: \(String(describing: row["bestSpan"]))")
+        #expect(row["eventTime"]?.stringValue == expectedEventTime,
+            "row eventTime must equal ISO-8601 event time; expected: \(expectedEventTime), got: \(String(describing: row["eventTime"]))")
     }
 
-    /// Gate test: `moot_lens_keystones` dense rows carry structured fields
-    /// (subject, bestSpan, eventTime) for admissible drawers. Previously blocked
-    /// because v2 returned raw {id, centrality} pairs; now enabled after dense-row
-    /// hydration was added to `AriaV2LensLower.lensKeystones`.
-    @Test func keystonesDenseRowsMatchRenderer() async throws {
+    /// Value-equality gate: `moot_lens_keystones` dense rows carry the
+    /// hub drawer's actual subject, bestSpan and eventTime.
+    ///
+    /// Expected values are derived independently from the drawer itself and
+    /// compared field-by-field against the dispatch response.
+    @Test func keystonesDenseRowsCarryStructuredFields() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ks-golden"))
@@ -907,6 +920,14 @@ extension LensToolsTests {
             try await addTunnel(kit, handle, wing: "study", src: hubID, tgt: spokeID)
         }
 
+        // Derive expected values from the stored hub drawer.
+        let estate = try await kit.estate(for: handle)
+        let fetched = try await estate.getDrawers(ids: [hubID], hydrationLevel: .structured)
+        let hubDrawer = try #require(fetched.first, "hub drawer must be retrievable from estate")
+        let expectedSubject = hubDrawer.subject ?? "-"
+        let expectedBestSpan = hubDrawer.content.isEmpty ? "-" : hubDrawer.content
+        let expectedEventTime = ResultComposer.iso8601(hubDrawer.eventTime)
+
         let result = try await dispatcher.dispatch(
             name: "moot_lens_keystones",
             arguments: .object(["wing": .string("study")]))
@@ -917,14 +938,17 @@ extension LensToolsTests {
         let hubRow = keystones.first {
             $0.objectValue?["id"]?.stringValue == hubID.lowercased()
         }
-        let hub = try #require(hubRow, "hub drawer must appear in keystones")
-        // Admissible row must carry all three dense fields.
-        #expect(hub.objectValue?["subject"] != nil,
-            "hub row must carry a subject field")
-        #expect(hub.objectValue?["bestSpan"] != nil,
-            "hub row must carry a bestSpan field")
-        #expect(hub.objectValue?["eventTime"] != nil,
-            "hub row must carry an eventTime field")
+        let hub = try #require(hubRow?.objectValue, "hub drawer must appear in keystones")
+
+        // Value equality against independently derived expected values.
+        #expect(hub["id"]?.stringValue == hubID.lowercased(),
+            "hub id must equal the captured drawer id; got: \(String(describing: hub["id"]))")
+        #expect(hub["subject"]?.stringValue == expectedSubject,
+            "hub subject must equal drawer.subject ?? \"-\"; expected: \(expectedSubject), got: \(String(describing: hub["subject"]))")
+        #expect(hub["bestSpan"]?.stringValue == expectedBestSpan,
+            "hub bestSpan must equal drawer content; expected: \(expectedBestSpan), got: \(String(describing: hub["bestSpan"]))")
+        #expect(hub["eventTime"]?.stringValue == expectedEventTime,
+            "hub eventTime must equal ISO-8601 event time; expected: \(expectedEventTime), got: \(String(describing: hub["eventTime"]))")
     }
 
     /// Sensitivity gate: a restricted drawer that ranks as a keystone yields
