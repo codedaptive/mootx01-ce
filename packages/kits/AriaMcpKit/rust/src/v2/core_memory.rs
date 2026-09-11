@@ -541,11 +541,14 @@ pub struct V2Memory {
     #[serde(skip_serializing_if = "Option::is_none")] pub exportability: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub confirmation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub lineage_id: Option<String>,
-    /// Active linked tunnels for depth:full. Empty vec for depth:subject and
-    /// depth:distilled. Cleared by `project_depth` for non-full depths.
-    /// Serialised only when `depth == full`; `skip_serializing_if` on `Vec`
-    /// skips when empty so depth:subject/distilled records carry no tunnels key.
-    #[serde(skip_serializing_if = "Vec::is_empty")] pub tunnels: Vec<V2TunnelRow>,
+    /// Active linked tunnels for depth:full. `None` for depth:subject and
+    /// depth:distilled — set to None by `project_depth` so those projections
+    /// carry no tunnels key at all. `Some([])` for depth:full with no linked
+    /// tunnels — the key is always present at full depth, matching Swift's
+    /// unconditional array assignment at AriaV2MemoryOperations.swift:996-1010.
+    /// `skip_serializing_if = "Option::is_none"` ensures the key is absent
+    /// for non-full depths and present (even as []) at full depth.
+    #[serde(skip_serializing_if = "Option::is_none")] pub tunnels: Option<Vec<V2TunnelRow>>,
     pub fetch: V2FetchReference,
 }
 
@@ -735,15 +738,21 @@ fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) {
         V2MemoryDepth::Subject => {
             memory.distilled = None;
             memory.content = None;
-            // depth:subject carries no tunnel rows (mirrors Swift full() branch).
-            memory.tunnels.clear();
+            // depth:subject carries no tunnels key. Setting to None causes
+            // skip_serializing_if = "Option::is_none" to omit the key entirely,
+            // matching Swift which only emits tunnels inside the depth == .full
+            // branch at AriaV2MemoryOperations.swift:996.
+            memory.tunnels = None;
         }
         V2MemoryDepth::Distilled => {
             memory.content = None;
-            // depth:distilled carries no tunnel rows.
-            memory.tunnels.clear();
+            // depth:distilled carries no tunnels key — same rationale as Subject.
+            memory.tunnels = None;
         }
-        V2MemoryDepth::Full => {}
+        V2MemoryDepth::Full => {
+            // depth:full always emits the tunnels key. tunnels is already
+            // Some(vec) from record(); no change needed here.
+        }
     }
 }
 fn serialize_uuid<S>(value: &Uuid, serializer: S) -> Result<S::Ok, S::Error> where S: serde::Serializer { serializer.serialize_str(&canonical_uuid(*value)) }

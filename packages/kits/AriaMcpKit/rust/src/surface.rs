@@ -609,6 +609,11 @@ fn execute_memory_mutation(
                     "outcome": mutation_outcome_wire_value(result.outcome),
                     "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
                     "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
+                    // Always present: empty array on full erase, populated on
+                    // partial erase (accepted lineage siblings refused erasure).
+                    // Mirrors Swift AriaV2MemoryMutations.swift:347 which emits
+                    // this key unconditionally regardless of erasure completeness.
+                    "refused_sibling_memory_ids": result.refused_sibling_ids,
                 }),
             },
             &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write),
