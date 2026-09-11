@@ -113,7 +113,7 @@ struct DreamAssociatesDispatchTests {
     /// pairs with small Hamming distance; at least one pair is written.
     ///
     /// The response must contain the `associationsWritten:` line with N>0.
-    @Test(.disabled("BLOCKED: moot_dream v2 rejects associates and now args — AriaV2ArgumentDecoder allows only estate_id. Step-3.5 associates surface not ported to v2. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    @Test
     func dreamAssociatesAllWritesOnSimilarPair() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
@@ -133,32 +133,24 @@ struct DreamAssociatesDispatchTests {
             ]))
 
         guard case let .object(obj) = result,
-              let isError = obj["isError"],
-              case let .bool(error) = isError, !error,
-              case let .array(content)? = obj["content"],
-              case let .object(first)? = content.first,
-              case let .string(text)? = first["text"]
+              let isErrorVal = obj["isError"],
+              case let .bool(isError) = isErrorVal, !isError
         else {
-            Issue.record("Unexpected result shape: \(result)")
+            Issue.record("Unexpected result shape or error: \(result)")
             return
         }
 
-        // Step 3.5 must appear in the response with N>0 associations written.
-        // The line shape is: `associationsWritten: N (probed: P, deduplicated: D)`
-        #expect(
-            text.contains("associationsWritten:"),
-            "associates=all must produce the associationsWritten report line; response:\n\(text)")
+        // v2 puts structured fields in structuredContent.data, not the text body.
+        let data = try #require(
+            obj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "structuredContent.data must be present in a successful v2 response")
 
-        // Verify the written count is positive (at least one proximity pair found).
-        let lines = text.components(separatedBy: "\n")
-        if let assocLine = lines.first(where: { $0.hasPrefix("associationsWritten:") }) {
-            // Parse `associationsWritten: N (probed: P, deduplicated: D)`
-            let parts = assocLine.components(separatedBy: " ")
-            let writtenStr = parts.count > 1 ? parts[1] : "0"
-            let written = Int(writtenStr) ?? 0
-            #expect(written > 0,
-                    "associationsWritten count must be > 0; got line: \(assocLine)")
-        }
+        // associationsWritten must be present and > 0 — at least one proximity
+        // pair was found among the planted similar sentences.
+        let written = try #require(data["associationsWritten"]?.integerValue,
+                                   "associates=all must produce associationsWritten in data")
+        #expect(written > 0,
+                "associationsWritten must be > 0 for high-overlap pairs; got \(written)")
     }
 
     // MARK: - Test 2 — associates=off skips the step entirely
@@ -166,7 +158,7 @@ struct DreamAssociatesDispatchTests {
     /// When `associates=off` is passed, step 3.5 is entirely bypassed — the
     /// `assocLine` variable is never set so `associationsWritten:` does NOT appear
     /// in the response body regardless of estate content.
-    @Test(.disabled("BLOCKED: moot_dream v2 rejects associates and now args — AriaV2ArgumentDecoder allows only estate_id. Step-3.5 associates surface not ported to v2. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    @Test
     func dreamAssociatesOffSkipsStep() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "dream-assoc-off-test")
@@ -187,18 +179,21 @@ struct DreamAssociatesDispatchTests {
             ]))
 
         guard case let .object(obj) = result,
-              case let .array(content)? = obj["content"],
-              case let .object(first)? = content.first,
-              case let .string(text)? = first["text"]
+              let isErrorVal = obj["isError"],
+              case let .bool(isError) = isErrorVal, !isError
         else {
-            Issue.record("Unexpected result shape: \(result)")
+            Issue.record("Unexpected result shape or error: \(result)")
             return
         }
 
-        // The associates=off branch must leave no trace in the response.
+        // v2 puts structured fields in structuredContent.data; associates=off
+        // means the sweep was skipped so associationsWritten must be absent.
+        let data = try #require(
+            obj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "structuredContent.data must be present in a successful v2 response")
         #expect(
-            !text.contains("associationsWritten:"),
-            "associates=off must not produce the associationsWritten line; response:\n\(text)")
+            data["associationsWritten"] == nil,
+            "associates=off must not produce associationsWritten in data")
     }
 
     // MARK: - Test 3 — associates=all is bounded (cap holds)
@@ -213,14 +208,13 @@ struct DreamAssociatesDispatchTests {
     ///
     /// Parity: `dream_all_mode_uses_bounded_probe_limit_not_unlimited` in Rust
     /// `dispatch_tests.rs`.
-    @Test(.disabled("BLOCKED: moot_dream v2 rejects associates and now args — AriaV2ArgumentDecoder allows only estate_id. Step-3.5 associates surface not ported to v2. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    @Test
     func dreamAssociatesAllUsesBoundedProbeNotUnlimited() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
 
         // Plant two items with similar content — guarantees the VectorStore
-        // has at least two indexed rows so step 3.5 runs and the `probed:`
-        // line appears in the response.
+        // has at least two indexed rows so step 3.5 runs.
         try await file("boundary test: probe limit constant is ten thousand", via: dispatcher)
         try await file("boundary check: probe limit constant is ten thousand items", via: dispatcher)
 
@@ -233,38 +227,24 @@ struct DreamAssociatesDispatchTests {
 
         guard case let .object(obj) = result,
               let isErrorVal = obj["isError"],
-              case let .bool(isError) = isErrorVal, !isError,
-              case let .array(content)? = obj["content"],
-              case let .object(first)? = content.first,
-              case let .string(text)? = first["text"]
+              case let .bool(isError) = isErrorVal, !isError
         else {
             Issue.record("Unexpected result shape: \(result)")
             return
         }
 
-        // When any associations are written (or probed), the report line appears.
-        // Parse `probed: P` from `associationsWritten: N (probed: P, deduplicated: D)`.
-        // With 2 items the probed count must be 2 — well under 10_000.
-        // If `dreamAssociateAllModeMaxProbe` were nil/unbounded, this path would
-        // still produce probed=2 here; the cap holds structurally because the
-        // constant is now explicit (tested by unit coverage of the constant value).
-        if let assocLine = text.components(separatedBy: "\n")
-                .first(where: { $0.hasPrefix("associationsWritten:") }) {
-            // Parse probed count from "associationsWritten: N (probed: P, deduplicated: D)"
-            if let probePrefix = assocLine.range(of: "probed: "),
-               let commaSuffix = assocLine.range(
-                   of: ",", range: probePrefix.upperBound..<assocLine.endIndex) {
-                let probeStr = String(
-                    assocLine[probePrefix.upperBound..<commaSuffix.lowerBound])
-                    .trimmingCharacters(in: .whitespaces)
-                if let probed = Int(probeStr) {
-                    // probed must be <= dreamAssociateAllModeMaxProbe (10_000).
-                    // With only 2 estate items this is trivially satisfied, but
-                    // the test documents the contract: "all" is bounded, not nil.
-                    #expect(probed <= 10_000,
-                            "associates=all probe count must be <= 10_000 (the named cap); got \(probed)")
-                }
-            }
+        // v2 puts structured fields in structuredContent.data.
+        // associationsNonUniqueProbes carries the probed count.  With 2 items
+        // the count must be <= 10_000 (dreamAssociateAllModeMaxProbe).
+        let data = try #require(
+            obj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "structuredContent.data must be present in a successful v2 response")
+        if let probes = data["associationsNonUniqueProbes"]?.integerValue {
+            // probes must be <= allModeMaxProbe (10_000); with only 2 estate
+            // items this is trivially satisfied, but the test documents the
+            // contract: "all" is bounded by a named constant, not nil.
+            #expect(probes <= 10_000,
+                    "associates=all probe count must be <= 10_000; got \(probes)")
         }
     }
 
@@ -275,7 +255,7 @@ struct DreamAssociatesDispatchTests {
     /// on a fresh estate and asserts the step completes without error — the
     /// compile-time constant is verified by reading the source (structural,
     /// not behavioral). The behavioral cap is exercised by Test 3 above.
-    @Test(.disabled("BLOCKED: moot_dream v2 rejects associates and now args — AriaV2ArgumentDecoder allows only estate_id. Step-3.5 associates surface not ported to v2. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    @Test
     func dreamAllModeMaxProbeConstantIsDocumented() async throws {
         // This test is a marker: the behavioral enforcement is that `assocProbeLimit`
         // in runDream is now always `Int` (never `Int?`), preventing the nil path
