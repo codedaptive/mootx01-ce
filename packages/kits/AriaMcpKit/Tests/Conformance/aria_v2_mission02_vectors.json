@@ -1149,6 +1149,9 @@
             "evidence": {
               "type": "string"
             },
+            "proposed": {
+              "type": "boolean"
+            },
             "estate_id": {
               "type": "string",
               "format": "uuid"
@@ -1243,6 +1246,9 @@
               ]
             },
             "note": {
+              "type": "string"
+            },
+            "reviewed_by": {
               "type": "string"
             },
             "estate_id": {
