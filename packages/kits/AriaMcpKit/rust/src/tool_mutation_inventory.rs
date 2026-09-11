@@ -31,8 +31,7 @@
 /// opt-in `memory` adapter's create, str_replace and insert file at the
 /// ceiling without an argument (`memory_adapter`).
 pub const ADDITIVE_WRITE_TOOLS: &[&str] =
-    &["moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories",
-      "moot_file_packet"];
+    &["moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories"];
 
 /// Mutations of existing state: something already committed changes shape,
 /// is superseded, moves, or a background process alters estate-wide
@@ -110,8 +109,6 @@ pub const FROZEN_READ_TOOLS: &[&str] = &[
     "moot_help",
     // Transcript recall (reads session transcript, no estate writes).
     "moot_memory_recall_transcript",
-    // Work packet reads (no estate mutation).
-    "moot_packet_get", "moot_packet_lineage", "moot_packet_list",
     // Monitoring status: read-only telemetry report (moot_monitoring_set is a mutation).
     "moot_monitoring_status",
     // Recipe reads: catalogs and the recall family.
@@ -143,7 +140,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every tool name dispatchable by a live serve: the 84 v2 catalog tools
+    /// Every tool name dispatchable by a live serve: the 80 v2 catalog tools
     /// (vault-on) plus the command-classified adapters that are not in the
     /// catalog but are reachable through the dispatch layer's command routing.
     fn reachable() -> HashSet<String> {

@@ -30,7 +30,6 @@ pub mod lens_lower;
 pub mod operation;
 pub mod orchestration;
 pub mod orchestration_lower;
-pub mod packets;
 pub mod registry;
 pub mod render;
 pub mod transcript_recall;

@@ -25,10 +25,6 @@ enum AriaOperation: String, Sendable {
     case factTimeline
     case writeJournal
     case readJournal
-    case filePacket
-    case packetGet
-    case packetList
-    case packetLineage
     case monitoringSet
     case monitoringStatus
     case estatePing
@@ -66,9 +62,9 @@ enum AriaOperation: String, Sendable {
 
     var effect: Effect {
         switch self {
-        case .help, .memorySearch, .memoryList, .memoryGet, .transcriptRecall, .typedRecall, .synthesize, .migrationRun, .federatedRecall, .huntContradictions, .connectionSearch, .connectionMap, .factSearch, .factTimeline, .readJournal, .packetGet, .packetList, .packetLineage, .monitoringStatus, .estatePing, .estateStatus, .estateMap, .drainStatus, .rebuildStatus, .timingReport, .listLenses, .listRecipes, .vaultExport, .vaultJob, .datasetQuery, .datasetStats, .vaultStatus:
+        case .help, .memorySearch, .memoryList, .memoryGet, .transcriptRecall, .typedRecall, .synthesize, .migrationRun, .federatedRecall, .huntContradictions, .connectionSearch, .connectionMap, .factSearch, .factTimeline, .readJournal, .monitoringStatus, .estatePing, .estateStatus, .estateMap, .drainStatus, .rebuildStatus, .timingReport, .listLenses, .listRecipes, .vaultExport, .vaultJob, .datasetQuery, .datasetStats, .vaultStatus:
             return .inspection
-        case .fileMemory, .dream, .migrationConfirm, .proposeContradictions, .fileFact, .retireFact, .writeJournal, .filePacket, .monitoringSet, .updateMemory, .withdrawMemory, .eraseMemory, .confirmMemory, .moveMemory, .linkMemories, .reviewTunnel, .vaultImport, .reindex, .reclassifyFDC, .palaceImport, .jsonImport, .fileDataset, .vaultReconcile:
+        case .fileMemory, .dream, .migrationConfirm, .proposeContradictions, .fileFact, .retireFact, .writeJournal, .monitoringSet, .updateMemory, .withdrawMemory, .eraseMemory, .confirmMemory, .moveMemory, .linkMemories, .reviewTunnel, .vaultImport, .reindex, .reclassifyFDC, .palaceImport, .jsonImport, .fileDataset, .vaultReconcile:
             return .mutation
         }
     }
@@ -98,10 +94,6 @@ enum AriaSurfaceRequest: Sendable {
     case factTimeline(AriaV2FactTimelineRequest)
     case writeJournal(AriaV2WriteJournalRequest)
     case readJournal(AriaV2ReadJournalRequest)
-    case filePacket(AriaV2PacketFileRequest)
-    case packetGet(AriaV2PacketGetRequest)
-    case packetList(AriaV2PacketListRequest)
-    case packetLineage(AriaV2PacketLineageRequest)
     case monitoringSet(AriaV2MonitoringSet.Request)
     case monitoringStatus(AriaV2MonitoringInspection.Request)
     case estatePing(AriaV2EstateDiagnosticsRequest)
@@ -145,10 +137,6 @@ enum AriaSurfaceRequest: Sendable {
         case .factTimeline: return .factTimeline
         case .writeJournal: return .writeJournal
         case .readJournal: return .readJournal
-        case .filePacket: return .filePacket
-        case .packetGet: return .packetGet
-        case .packetList: return .packetList
-        case .packetLineage: return .packetLineage
         case .monitoringSet: return .monitoringSet
         case .monitoringStatus: return .monitoringStatus
         case .estatePing: return .estatePing
@@ -208,10 +196,6 @@ enum AriaSurfaceRequest: Sendable {
         case .factTimeline: return AriaV2KnowledgeJournalOperation.factTimeline.rawValue
         case .writeJournal: return AriaV2KnowledgeJournalOperation.writeJournal.rawValue
         case .readJournal: return AriaV2KnowledgeJournalOperation.readJournal.rawValue
-        case .filePacket: return AriaV2PacketFileRequest.toolName
-        case .packetGet: return AriaV2PacketGetRequest.toolName
-        case .packetList: return AriaV2PacketListRequest.toolName
-        case .packetLineage: return AriaV2PacketLineageRequest.toolName
         case .monitoringSet: return AriaV2MonitoringSet.toolName
         case .monitoringStatus: return AriaV2MonitoringInspection.toolName
         case .estatePing: return AriaV2EstateDiagnosticOperation.estatePing.rawValue
@@ -320,14 +304,6 @@ enum AriaSurfaceDecoder {
             return .writeJournal(try AriaV2WriteJournalRequest(arguments: object))
         case AriaV2KnowledgeJournalOperation.readJournal.rawValue:
             return .readJournal(try AriaV2ReadJournalRequest(arguments: object))
-        case AriaV2PacketFileRequest.toolName:
-            return .filePacket(try AriaV2PacketFileRequest(arguments: object))
-        case AriaV2PacketGetRequest.toolName:
-            return .packetGet(try AriaV2PacketGetRequest(arguments: object))
-        case AriaV2PacketListRequest.toolName:
-            return .packetList(try AriaV2PacketListRequest(arguments: object))
-        case AriaV2PacketLineageRequest.toolName:
-            return .packetLineage(try AriaV2PacketLineageRequest(arguments: object))
         case AriaV2MonitoringSet.toolName:
             return .monitoringSet(try AriaV2MonitoringSet.Request(arguments: object))
         case AriaV2MonitoringInspection.toolName:

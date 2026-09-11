@@ -563,102 +563,6 @@ enum AriaV2SelectedCatalog {
             dataSchema: journalEntriesDataSchema()
         ),
         descriptor(
-            identity: "file_packet",
-            name: AriaV2PacketFileRequest.toolName,
-            effect: .write,
-            description: "File a structured work packet and retain its durable drawer identity.",
-            intents: ["file packet", "record work packet"],
-            properties: [
-                "objective": nonEmptyStringSchema(),
-                "sources": .object([
-                    "type": .string("array"),
-                    "items": .object([
-                        "type": .string("object"),
-                        "properties": .object([
-                            "description": nonEmptyStringSchema(),
-                            "kind": nonEmptyStringSchema(),
-                            "uri": stringSchema(),
-                        ]),
-                        "required": .array([.string("description")]),
-                        "additionalProperties": .bool(false),
-                    ]),
-                ]),
-                "claims": .object([
-                    "type": .string("array"),
-                    "items": .object([
-                        "type": .string("object"),
-                        "properties": .object([
-                            "statement": nonEmptyStringSchema(),
-                            "confidence": .object([
-                                "type": .string("number"),
-                                "minimum": .integer(0),
-                                "maximum": .integer(1),
-                            ]),
-                            "supportingSourceIDs": .object([
-                                "type": .string("array"),
-                                "items": stringSchema(),
-                            ]),
-                        ]),
-                        "required": .array([.string("statement")]),
-                        "additionalProperties": .bool(false),
-                    ]),
-                ]),
-                "uncertainties": stringArraySchema(),
-                "next_steps": stringArraySchema(),
-                "model": nonEmptyStringSchema(),
-                "agent": nonEmptyStringSchema(),
-                "sensitivity": enumSchema(["normal", "elevated", "restricted", "secret"]),
-                "lineage_links": .object([
-                    "type": .string("array"),
-                    "items": .object([
-                        "type": .string("object"),
-                        "properties": .object([
-                            "kind": enumSchema(["derivesFrom", "respondsTo"]),
-                            "targetPacketID": uuidSchema(),
-                        ]),
-                        "required": .array([.string("kind"), .string("targetPacketID")]),
-                        "additionalProperties": .bool(false),
-                    ]),
-                ]),
-                "wing": nonEmptyStringSchema(),
-                "estate_id": uuidSchema(),
-            ],
-            required: ["objective", "model", "agent"], dataSchema: packetFileDataSchema()
-        ),
-        descriptor(
-            identity: "packet_get",
-            name: AriaV2PacketGetRequest.toolName,
-            effect: .read,
-            description: "Fetch one authorized work packet by its durable drawer UUID.",
-            intents: ["get packet", "fetch work packet"],
-            properties: ["drawer_id": uuidSchema(), "wing": nonEmptyStringSchema(), "estate_id": uuidSchema()],
-            required: ["drawer_id"], dataSchema: packetGetDataSchema()
-        ),
-        descriptor(
-            identity: "packet_list",
-            name: AriaV2PacketListRequest.toolName,
-            effect: .read,
-            description: "List authorized work packets in newest-first capture order.",
-            intents: ["list packets", "list work packets"],
-            properties: [
-                "limit": .object(["type": .string("integer"), "minimum": .integer(1), "maximum": .integer(100)]),
-                "wing": nonEmptyStringSchema(), "estate_id": uuidSchema(),
-            ], dataSchema: packetListDataSchema()
-        ),
-        descriptor(
-            identity: "packet_lineage",
-            name: AriaV2PacketLineageRequest.toolName,
-            effect: .read,
-            description: "Trace authorized packet antecedents breadth-first from a durable drawer UUID.",
-            intents: ["packet lineage", "trace work packet"],
-            properties: [
-                "drawer_id": uuidSchema(),
-                "max_depth": .object(["type": .string("integer"), "minimum": .integer(1), "maximum": .integer(50)]),
-                "wing": nonEmptyStringSchema(), "estate_id": uuidSchema(),
-            ],
-            required: ["drawer_id"], dataSchema: packetLineageDataSchema()
-        ),
-        descriptor(
             identity: "monitoring_set",
             name: AriaV2MonitoringSet.toolName,
             effect: .write,
@@ -1628,35 +1532,6 @@ enum AriaV2SelectedCatalog {
         ])])
     }
 
-    private static func packetFileDataSchema() -> JSONValue {
-        orderedExactObjectSchema([
-            "drawer_id": uuidSchema(), "packet_id": uuidSchema(), "schema_version": positiveIntegerSchema(),
-            "objective": stringSchema(), "sources": nonnegativeIntegerSchema(), "claims": nonnegativeIntegerSchema(),
-            "uncertainties": nonnegativeIntegerSchema(), "next_steps": nonnegativeIntegerSchema(),
-            "lineage_links": nonnegativeIntegerSchema(), "sensitivity": enumSchema(["normal", "elevated", "restricted", "secret"]),
-        ], required: ["drawer_id", "packet_id", "schema_version", "objective", "sources", "claims", "uncertainties", "next_steps", "lineage_links", "sensitivity"])
-    }
-
-    private static func packetSchema() -> JSONValue {
-        let source = orderedExactObjectSchema(["id": uuidSchema(), "description": stringSchema(), "uri": stringSchema(), "kind": stringSchema()], required: ["id", "description", "kind"])
-        let claim = orderedExactObjectSchema(["id": uuidSchema(), "statement": stringSchema(), "confidence": numberSchema(), "supporting_source_ids": uuidArraySchema()], required: ["id", "statement", "confidence", "supporting_source_ids"])
-        let provenance = orderedExactObjectSchema(["model": stringSchema(), "agent": stringSchema(), "created_at": dateSchema(), "updated_at": dateSchema()], required: ["model", "agent", "created_at", "updated_at"])
-        let link = orderedExactObjectSchema(["kind": enumSchema(["derivesFrom", "respondsTo"]), "target_packet_id": uuidSchema()], required: ["kind", "target_packet_id"])
-        return orderedExactObjectSchema([
-            "drawer_id": uuidSchema(), "packet_id": uuidSchema(), "schema_version": positiveIntegerSchema(), "future_schema": booleanSchema(),
-            "objective": stringSchema(), "sources": .object(["type": .string("array"), "items": source]),
-            "claims": .object(["type": .string("array"), "items": claim]), "uncertainties": stringArraySchema(),
-            "next_steps": stringArraySchema(), "provenance": provenance,
-            "lineage_links": .object(["type": .string("array"), "items": link]),
-        ], required: ["drawer_id", "packet_id", "schema_version", "future_schema", "objective", "sources", "claims", "uncertainties", "next_steps", "provenance", "lineage_links"])
-    }
-
-    private static func packetGetDataSchema() -> JSONValue { orderedExactObjectSchema(["packet": packetSchema()], required: ["packet"]) }
-    private static func packetListDataSchema() -> JSONValue {
-        let summary = orderedExactObjectSchema(["drawer_id": uuidSchema(), "packet_id": uuidSchema(), "objective": stringSchema(), "model": stringSchema(), "agent": stringSchema(), "lineage_count": nonnegativeIntegerSchema()], required: ["drawer_id", "packet_id", "objective", "model", "agent", "lineage_count"])
-        return orderedExactObjectSchema(["packets": .object(["type": .string("array"), "items": summary]), "total": nonnegativeIntegerSchema()], required: ["packets", "total"])
-    }
-    private static func packetLineageDataSchema() -> JSONValue { orderedExactObjectSchema(["root": uuidSchema(), "antecedents": uuidArraySchema(), "count": nonnegativeIntegerSchema()], required: ["root", "antecedents", "count"]) }
     private static func monitoringSetDataSchema() -> JSONValue { orderedExactObjectSchema(["monitoring": enumSchema(["enabled", "disabled"])], required: ["monitoring"]) }
     private static func monitoringStatusDataSchema() -> JSONValue { orderedExactObjectSchema(["monitoring": enumSchema(["enabled", "disabled", "unavailable"])], required: ["monitoring"]) }
 
