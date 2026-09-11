@@ -39,10 +39,12 @@ impl V2MemoryMutationAuthority for Authority {
 struct Lower {
     calls: Arc<Mutex<Vec<&'static str>>>,
     updates: Arc<Mutex<Vec<(V2UpdateMutation, Option<String>)>>>,
-    partial_erase: bool,
+    /// IDs to return as refused siblings on erase. Empty vec → full erasure
+    /// (Erased outcome); non-empty → partial erasure (ErasedPartially outcome).
+    refused_ids: Vec<String>,
 }
 impl Default for Lower {
-    fn default() -> Self { Self { calls: Arc::new(Mutex::new(Vec::new())), updates: Arc::new(Mutex::new(Vec::new())), partial_erase: false } }
+    fn default() -> Self { Self { calls: Arc::new(Mutex::new(Vec::new())), updates: Arc::new(Mutex::new(Vec::new())), refused_ids: Vec::new() } }
 }
 impl V2MemoryMutationLower for Lower {
     fn mutate(&self, _: &V2MemoryMutationAdmission, _: Uuid, mutation: &V2UpdateMutation, note: Option<&str>) -> Result<(), ()> {
@@ -51,7 +53,7 @@ impl V2MemoryMutationLower for Lower {
         Ok(())
     }
     fn withdraw(&self, _: &V2MemoryMutationAdmission, _: Uuid, _: Option<&str>) -> Result<(), ()> { self.calls.lock().unwrap().push("withdraw"); Ok(()) }
-    fn erase(&self, _: &V2MemoryMutationAdmission, _: Uuid, _: bool, _: Option<&str>) -> Result<bool, ()> { self.calls.lock().unwrap().push("erase"); Ok(self.partial_erase) }
+    fn erase(&self, _: &V2MemoryMutationAdmission, _: Uuid, _: bool, _: Option<&str>) -> Result<Vec<String>, ()> { self.calls.lock().unwrap().push("erase"); Ok(self.refused_ids.clone()) }
     fn move_memory(&self, _: &V2MemoryMutationAdmission, _: Uuid, _: &str, _: &str) -> Result<(), ()> { self.calls.lock().unwrap().push("move"); Ok(()) }
     fn link(&self, _: &V2MemoryMutationAdmission, _: &V2LinkMemoriesRequest) -> Result<Uuid, ()> { self.calls.lock().unwrap().push("link"); Ok(uuid(TUNNEL)) }
     fn review(&self, _: &V2MemoryMutationAdmission, _: Uuid, decision: V2TunnelDecision, _: Option<&str>, _: &str) -> Result<V2TunnelReviewReceipt, ()> {
@@ -168,7 +170,7 @@ fn requests_match_the_frozen_operation_keys_and_reject_unknowns() {
 #[test]
 fn typed_service_has_stable_operation_identity_and_outcomes() {
     let authority = Authority::default();
-    let lower = Lower { partial_erase: true, ..Lower::default() };
+    let lower = Lower { refused_ids: vec!["sibling-id-abc".to_owned()], ..Lower::default() };
     let calls = Arc::clone(&lower.calls);
     let service = V2MemoryMutationService::new(authority, lower);
     let erased = service.erase(V2EraseMemoryRequest {
@@ -177,6 +179,7 @@ fn typed_service_has_stable_operation_identity_and_outcomes() {
     assert_eq!(erased.operation.tool_name(), ERASE_MEMORY_TOOL);
     assert_eq!(erased.outcome, V2MemoryMutationOutcome::ErasedPartially);
     assert_eq!(erased.memory_id, Some(uuid(MEMORY)));
+    assert_eq!(erased.refused_sibling_ids, vec!["sibling-id-abc"]);
 
     let linked = service.link(V2LinkMemoriesRequest { from_id: uuid(MEMORY), to_id: uuid(TUNNEL), relationship: "contradicts".to_owned(), confidence: None, evidence: None, estate_id: None }).unwrap();
     assert_eq!(linked.operation.tool_name(), LINK_MEMORIES_TOOL);
@@ -221,6 +224,49 @@ fn erase_confirmation_rejections_do_not_call_lower() {
         assert_eq!(error.path, "$.confirmation");
         assert!(calls.lock().unwrap().is_empty(), "invalid confirmation reached lower erase");
     }
+}
+
+/// Gate: a partial erasure (refused siblings present) must produce
+/// ErasedPartially, name the refused ids, and must NOT produce Erased.
+///
+/// Red: neuter the verdict by replacing `refused_ids.is_empty()` logic with
+/// `true` and the outcome becomes Erased — this test fails on the verdict
+/// assertion. Green: the trait carries the ids and the service sets ErasedPartially.
+#[test]
+fn partial_erase_verdict_is_erased_partially_with_refused_ids_lowercase() {
+    // Seed a lower that returns one refused sibling id in lowercase form.
+    // The service must (a) choose ErasedPartially when refused_ids is non-empty,
+    // and (b) carry the exact refused ids into the result.
+    let sibling_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    let lower = Lower { refused_ids: vec![sibling_id.to_owned()], ..Lower::default() };
+    let service = V2MemoryMutationService::new(Authority::default(), lower);
+
+    let result = service.erase(V2EraseMemoryRequest {
+        memory_id: uuid(MEMORY), confirmation: true, reason: Some("partial-erase-gate".to_owned()), estate_id: None,
+    }).unwrap();
+
+    // Assertion 1: verdict is partial.
+    assert_eq!(result.outcome, V2MemoryMutationOutcome::ErasedPartially,
+        "a non-empty refused_ids must produce ErasedPartially, not {:?}", result.outcome);
+
+    // Assertion 2: refused id is listed and lowercase.
+    assert_eq!(result.refused_sibling_ids, vec![sibling_id],
+        "refused id must be carried through verbatim");
+    assert!(result.refused_sibling_ids.iter().all(|s| s == &s.to_lowercase()),
+        "refused ids must be lowercase; got {:?}", result.refused_sibling_ids);
+
+    // Assertion 3 (structural): a full erasure with no refused ids must NOT
+    // produce ErasedPartially. This isolates the discriminant so the gate
+    // cannot pass by accident (e.g. always returning ErasedPartially).
+    let full_lower = Lower::default();
+    let full_service = V2MemoryMutationService::new(Authority::default(), full_lower);
+    let full_result = full_service.erase(V2EraseMemoryRequest {
+        memory_id: uuid(MEMORY), confirmation: true, reason: None, estate_id: None,
+    }).unwrap();
+    assert_eq!(full_result.outcome, V2MemoryMutationOutcome::Erased,
+        "an empty refused_ids must produce Erased, not {:?}", full_result.outcome);
+    assert!(full_result.refused_sibling_ids.is_empty(),
+        "a full erasure must carry no refused ids");
 }
 
 #[test]
