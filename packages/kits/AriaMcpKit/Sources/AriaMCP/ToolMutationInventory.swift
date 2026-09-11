@@ -34,14 +34,10 @@ public enum ToolMutationInventory {
     /// grant is live an omitted sensitivity files at the grant's tier and a
     /// lower explicit tier is refused (`ToolDispatcher.runFileMemory`), so
     /// an allow-tier write cannot downgrade material recalled under a grant.
-    /// `moot_file_packet` follows the same rule (`PacketTools.runFilePacket`),
-    /// and the opt-in `memory` adapter's create, str_replace and insert file
+    /// The opt-in `memory` adapter's create, str_replace and insert also file
     /// at the ceiling without an argument (`MemoryToolAdapter`).
     public static let additiveWriteTools: Set<String> = [
         "moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories",
-        // Work-packet filing (the Swift-only packet surface, PacketTools):
-        // captures a new structuredJSON drawer; nothing committed changes.
-        "moot_file_packet",
         // Contradiction resolution: settles proposed contradiction tunnel
         // lifecycle records (transitions PROPOSED → SETTLED). Creates or
         // updates tunnel records without removing any prior content.
@@ -151,7 +147,5 @@ public enum ToolMutationInventory {
         "moot_vault_status", "moot_vault_job",
         // Dataset reads.
         "moot_dataset_query", "moot_dataset_stats",
-        // Work-packet reads (the Swift-only packet surface).
-        "moot_packet_get", "moot_packet_list", "moot_packet_lineage",
     ]
 }

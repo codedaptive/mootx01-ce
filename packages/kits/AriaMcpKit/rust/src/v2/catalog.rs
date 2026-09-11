@@ -89,28 +89,6 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                     "Resolve explicitly selected contradiction candidates without rerunning analysis.",
                     &["Resolve explicitly selected contradiction candidates without rerunning analysis."],
                     json!({"type":"object","properties":{"analysis_ref":{"type":"string","minLength":1},"candidate_ids":{"type":"array","minItems":1,"maxItems":1000,"uniqueItems":true,"items":{"type":"string","minLength":1}},"estate_id":{"type":"string","format":"uuid"}},"required":["analysis_ref","candidate_ids"],"additionalProperties":false})),
-                descriptor("file_packet", "moot_file_packet", V2OperationEffect::Write,
-                    "File a structured work packet and retain its durable drawer identity.",
-                    &["file packet", "record work packet"],
-                    json!({"type":"object","properties":{
-                        "objective":{"type":"string","minLength":1},
-                        "sources":{"type":"array","items":{"type":"object","properties":{
-                            "description":{"type":"string","minLength":1},"kind":{"type":"string","minLength":1},"uri":{"type":"string"}},
-                            "required":["description"],"additionalProperties":false}},
-                        "claims":{"type":"array","items":{"type":"object","properties":{
-                            "statement":{"type":"string","minLength":1},"confidence":{"type":"number","minimum":0,"maximum":1},
-                            "supportingSourceIDs":{"type":"array","items":{"type":"string"}}},
-                            "required":["statement"],"additionalProperties":false}},
-                        "uncertainties":{"type":"array","items":{"type":"string"}},
-                        "next_steps":{"type":"array","items":{"type":"string"}},
-                        "model":{"type":"string","minLength":1},"agent":{"type":"string","minLength":1},
-                        "sensitivity":{"type":"string","enum":["normal","elevated","restricted","secret"]},
-                        "lineage_links":{"type":"array","items":{"type":"object","properties":{
-                            "kind":{"type":"string","enum":["derivesFrom","respondsTo"]},
-                            "targetPacketID":{"type":"string","format":"uuid"}},
-                            "required":["kind","targetPacketID"],"additionalProperties":false}},
-                        "wing":{"type":"string","minLength":1},"estate_id":{"type":"string","format":"uuid"}},
-                        "required":["objective","model","agent"],"additionalProperties":false})),
                 descriptor("help", "moot_help", V2OperationEffect::Read,
                     "Discover the callable operations in this incomplete ARIA v2 build or inspect one exact operation.",
                     &["help", "discover tools"],
@@ -347,27 +325,6 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                 descriptor_with_features("vault_job", "moot_vault_job", V2OperationEffect::Read,
                     "Fetch the status of one vault job. Returns running, complete, or failed status with progress details.",
                     &["Fetch the status of one vault job."], data_mobility_input_schema("moot_vault_job"), &["vault"]),
-                descriptor("packet_get", "moot_packet_get", V2OperationEffect::Read,
-                    "Fetch one authorized work packet by its durable drawer UUID.",
-                    &["get packet", "fetch work packet"],
-                    json!({"type":"object","properties":{
-                        "drawer_id":{"type":"string","format":"uuid"},"wing":{"type":"string","minLength":1},
-                        "estate_id":{"type":"string","format":"uuid"}},
-                        "required":["drawer_id"],"additionalProperties":false})),
-                descriptor("packet_lineage", "moot_packet_lineage", V2OperationEffect::Read,
-                    "Trace authorized packet antecedents breadth-first from a durable drawer UUID.",
-                    &["packet lineage", "trace work packet"],
-                    json!({"type":"object","properties":{
-                        "drawer_id":{"type":"string","format":"uuid"},"wing":{"type":"string","minLength":1},
-                        "max_depth":{"type":"integer","minimum":1,"maximum":50},
-                        "estate_id":{"type":"string","format":"uuid"}},
-                        "required":["drawer_id"],"additionalProperties":false})),
-                descriptor("packet_list", "moot_packet_list", V2OperationEffect::Read,
-                    "List authorized work packets in newest-first capture order.",
-                    &["list packets", "list work packets"],
-                    json!({"type":"object","properties":{
-                        "wing":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1,"maximum":100},
-                        "estate_id":{"type":"string","format":"uuid"}},"additionalProperties":false})),
             ],
             directory_records: Vec::new(),
         },
@@ -404,7 +361,6 @@ fn tool_annotations(operation: &V2OperationDescriptor) -> Value {
             | "file_fact"
             | "write_journal"
             | "file_dataset"
-            | "file_packet"
             | "propose_contradictions"
     );
     let open_world = matches!(
@@ -718,83 +674,9 @@ fn remaining_data_schema(name: &str) -> Option<Value> {
             json!({"monitoring":{"type":"string","enum":["enabled","disabled","unavailable"]}}),
             json!(["monitoring"]),
         )),
-        "moot_file_packet" => Some(exact(
-            json!({"drawer_id":uuid(),"packet_id":uuid(),"schema_version":{"type":"integer","minimum":1},"objective":{"type":"string"},"sources":count(),"claims":count(),"uncertainties":count(),"next_steps":count(),"lineage_links":count(),"sensitivity":{"type":"string","enum":["normal","elevated","restricted","secret"]}}),
-            json!([
-                "drawer_id",
-                "packet_id",
-                "schema_version",
-                "objective",
-                "sources",
-                "claims",
-                "uncertainties",
-                "next_steps",
-                "lineage_links",
-                "sensitivity"
-            ]),
-        )),
-        "moot_packet_get" => Some(exact(json!({"packet":packet_schema()}), json!(["packet"]))),
-        "moot_packet_list" => {
-            let summary = exact(
-                json!({"drawer_id":uuid(),"packet_id":uuid(),"objective":{"type":"string"},"model":{"type":"string"},"agent":{"type":"string"},"lineage_count":count()}),
-                json!([
-                    "drawer_id",
-                    "packet_id",
-                    "objective",
-                    "model",
-                    "agent",
-                    "lineage_count"
-                ]),
-            );
-            Some(exact(
-                json!({"packets":{"type":"array","items":summary},"total":count()}),
-                json!(["packets", "total"]),
-            ))
-        }
-        "moot_packet_lineage" => Some(exact(
-            json!({"root":uuid(),"antecedents":{"type":"array","items":uuid()},"count":count()}),
-            json!(["root", "antecedents", "count"]),
-        )),
         "moot_help" => Some(help_data_schema()),
         _ => None,
     }
-}
-
-fn packet_schema() -> Value {
-    let uuid = || json!({"type":"string","format":"uuid"});
-    let exact = |properties, required| json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
-    let source = exact(
-        json!({"id":uuid(),"description":{"type":"string"},"uri":{"type":"string"},"kind":{"type":"string"}}),
-        json!(["id", "description", "kind"]),
-    );
-    let claim = exact(
-        json!({"id":uuid(),"statement":{"type":"string"},"confidence":{"type":"number"},"supporting_source_ids":{"type":"array","items":uuid()}}),
-        json!(["id", "statement", "confidence", "supporting_source_ids"]),
-    );
-    let provenance = exact(
-        json!({"model":{"type":"string"},"agent":{"type":"string"},"created_at":{"type":"string","format":"date-time"},"updated_at":{"type":"string","format":"date-time"}}),
-        json!(["model", "agent", "created_at", "updated_at"]),
-    );
-    let link = exact(
-        json!({"kind":{"type":"string","enum":["derivesFrom","respondsTo"]},"target_packet_id":uuid()}),
-        json!(["kind", "target_packet_id"]),
-    );
-    exact(
-        json!({"drawer_id":uuid(),"packet_id":uuid(),"schema_version":{"type":"integer","minimum":1},"future_schema":{"type":"boolean"},"objective":{"type":"string"},"sources":{"type":"array","items":source},"claims":{"type":"array","items":claim},"uncertainties":{"type":"array","items":{"type":"string"}},"next_steps":{"type":"array","items":{"type":"string"}},"provenance":provenance,"lineage_links":{"type":"array","items":link}}),
-        json!([
-            "drawer_id",
-            "packet_id",
-            "schema_version",
-            "future_schema",
-            "objective",
-            "sources",
-            "claims",
-            "uncertainties",
-            "next_steps",
-            "provenance",
-            "lineage_links"
-        ]),
-    )
 }
 
 fn help_data_schema() -> Value {

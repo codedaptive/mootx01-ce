@@ -181,7 +181,7 @@ public struct AriaV2OperationDescriptor: Sendable, Equatable {
     private var wireAnnotations: JSONValue {
         let additiveWrites: Set<String> = [
             "file_memory", "link_memories", "file_fact", "write_journal",
-            "file_dataset", "file_packet", "propose_contradictions",
+            "file_dataset", "propose_contradictions",
         ]
         let openWorldOperations: Set<String> = [
             "palace_import", "json_import", "vault_export", "vault_import",
