@@ -26,7 +26,7 @@ Replace angle-bracket placeholders with the user's values or actual returned ide
 | Authorized JSON import | `moot_json_import` | `{"path":"<source path>"}`, then follow its readiness references. |
 | Find contradictory stored claims | `moot_hunt_contradictions` | `{}`; this analyzes without filing proposals. |
 
-For recorded task continuity without a packet identity, search the relevant plan or decision and use `moot_read_journal`. For an unfamiliar specialized analysis, discover the appropriate lens through `moot_help`.
+For recorded task continuity, search the relevant plan or decision and use `moot_read_journal`. For an unfamiliar specialized analysis, discover the appropriate lens through `moot_help`.
 
 Transcript recall retrieves answer-bearing sessions; it does not fetch a conversation by an invented session ID. Its reranker remains experimentally qualified. If required models or fresh spans are unavailable, report the refusal. General search is not an equivalent successful transcript result.
 
@@ -36,7 +36,7 @@ For a complete inventory, follow each `next_cursor` until `has_more` is false an
 
 ## Read typed results
 
-Success data is in `structuredContent.data`. Compact results contain excerpts, not hidden full bodies. Fetch full context only when needed. Preserve the distinction between `memory_id`, `fact_id`, `dataset_id`, `handle_memory_id`, packet `id`, and packet `drawer_id`; use returned references rather than converting one kind into another.
+Success data is in `structuredContent.data`. Compact results contain excerpts, not hidden full bodies. Fetch full context only when needed. Preserve the distinction between `memory_id`, `fact_id`, `dataset_id`, and `handle_memory_id`; use returned references rather than converting one kind into another.
 
 Follow `next_cursor` while `has_more` is true, retaining the same scope. A stale or expired cursor requires restarting enumeration. Do not claim a partial inventory is complete.
 
