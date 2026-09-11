@@ -618,12 +618,24 @@ impl CoordinatorRecallLensLower {
         request: &V2RecallLensRequest,
     ) -> Result<V2RecallLensResult, ()> {
         let memory_uuid = required_uuid(request, "memory_id")?;
-        let memory_id = memory_uuid.to_string();
+        let canonical = memory_uuid.hyphenated().to_string();
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let estate = coordinator
             .estate_for(&admission.estate_handle)
             .map_err(|_| ())?;
-        let drawer = estate.drawer_by_id(&memory_id).map_err(|_| ())?.ok_or(())?;
+        // Both storage spellings. Public v2 ids are canonical lowercase while
+        // the estate may hold the native uppercase form, so a single-spelling
+        // lookup resolves nothing on an estate written by the other port.
+        let (memory_id, drawer) = [canonical.clone(), canonical.to_uppercase()]
+            .into_iter()
+            .find_map(|spelling| {
+                estate
+                    .drawer_by_id(&spelling)
+                    .ok()
+                    .flatten()
+                    .map(|drawer| (spelling, drawer))
+            })
+            .ok_or(())?;
         if drawer.tombstoned_at.is_some()
             || matches!(
                 drawer.adjective_sensitivity(),
