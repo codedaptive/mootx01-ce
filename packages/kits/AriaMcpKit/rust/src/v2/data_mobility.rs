@@ -139,7 +139,16 @@ pub struct V2ReclassifyFdcRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2PalaceImportRequest { pub palace_path: String, pub mode: Option<V2ImportMode>, pub estate_id: Option<Uuid> }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct V2JsonImportRequest { pub path: String, pub estate_id: Option<Uuid> }
+pub struct V2JsonImportRequest {
+    pub path: String,
+    pub estate_id: Option<Uuid>,
+    /// When true the MCP reply should carry a second text block holding
+    /// `{"id_map":{"<record id>":"<drawer id>"}}` alongside the prose receipt.
+    /// The structured data always carries `id_map`; this flag serves text-only
+    /// callers. Matches v1 `interface_tools.rs:4605` and the catalog advertisement
+    /// in `catalog.rs:1037`. The second block is emitted by the surface layer.
+    pub return_id_map: bool,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct V2FileDatasetRequest {
     pub name: String,
@@ -179,8 +188,11 @@ impl V2ReclassifyFdcRequest {
         let o = strict_object(value, ["estate_id", "apply", "mode", "limit"])?;
         // Mode: exactly "suspectOnly" or "all". No case-folding — v2 is strict.
         // An unrecognised mode value is an invalid-argument refusal per data contract §2.
-        let mode = match optional_string(o, "mode")? {
-            None | Some("suspectOnly") => V2FdcReclassifyMode::SuspectOnly,
+        // Case-insensitive: "ALL", "SuspectOnly", "SUSPECTONLY" etc. resolve like v1.
+        // Lowercased before matching so any capitalisation of "suspectOnly" or "all"
+        // reaches the correct variant. Canonical form is preserved in the enum value.
+        let mode = match optional_string(o, "mode")?.map(|s| s.to_lowercase()).as_deref() {
+            None | Some("suspectonly") => V2FdcReclassifyMode::SuspectOnly,
             Some("all") => V2FdcReclassifyMode::All,
             Some(s) => return Err(V2InvalidArgument::new("$.mode",
                 format!("must be \"suspectOnly\" or \"all\"; received {s}"))),
@@ -207,7 +219,8 @@ impl V2ReclassifyFdcRequest {
 impl V2PalaceImportRequest {
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
         let o = strict_object(value, ["palace_path", "mode", "estate_id"])?;
-        let mode = match optional_string(o, "mode")? {
+        // Case-insensitive: "FOREGROUND", "Background", etc. resolve like v1.
+        let mode = match optional_string(o, "mode")?.map(|s| s.to_lowercase()).as_deref() {
             None => None,
             Some("foreground") => Some(V2ImportMode::Foreground),
             Some("background") => Some(V2ImportMode::Background),
@@ -216,7 +229,19 @@ impl V2PalaceImportRequest {
         Ok(Self { palace_path: required_string(o, "palace_path")?.to_owned(), mode, estate_id: optional_uuid(o, "estate_id")? })
     }
 }
-impl V2JsonImportRequest { pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> { let o = strict_object(value, ["path", "estate_id"])?; Ok(Self { path: required_string(o, "path")?.to_owned(), estate_id: optional_uuid(o, "estate_id")? }) } }
+impl V2JsonImportRequest {
+    pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
+        // return_id_map accepted alongside path and estate_id; matches catalog
+        // advertisement at catalog.rs:1037 and v1 interface_tools.rs:4605.
+        let o = strict_object(value, ["path", "estate_id", "return_id_map"])?;
+        let return_id_map = optional_bool(o, "return_id_map")?.unwrap_or(false);
+        Ok(Self {
+            path: required_string(o, "path")?.to_owned(),
+            estate_id: optional_uuid(o, "estate_id")?,
+            return_id_map,
+        })
+    }
+}
 impl V2FileDatasetRequest {
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
         let o = strict_object(value, ["name", "location", "columns", "rows", "csv_path", "wing", "sensitivity", "estate_id"])?;

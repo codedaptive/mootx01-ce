@@ -13,7 +13,7 @@ public enum AriaV2DataMobilityRequest: Sendable {
     case reindex(estateID: UUID?)
     case reclassifyFDC(estateID: UUID?, apply: Bool, mode: String, limit: Int?)
     case palaceImport(path: String, mode: ImportMode, estateID: UUID?)
-    case jsonImport(path: String, estateID: UUID?)
+    case jsonImport(path: String, estateID: UUID?, returnIDMap: Bool)
     case fileDataset(name: String, location: String, columns: [JSONValue]?, rows: [JSONValue]?, csvPath: String?, wing: String?, sensitivity: String?, estateID: UUID?)
     case datasetQuery(datasetID: UUID, whereClause: JSONValue?, orderBy: [JSONValue]?, limit: Int?, columns: [JSONValue]?, estateID: UUID?)
     case datasetStats(datasetID: UUID, column: String?, estateID: UUID?)
@@ -32,14 +32,18 @@ public enum AriaV2DataMobilityRequest: Sendable {
         case "moot_reclassify_fdc":
             let d = try decoder(arguments, ["estate_id", "apply", "mode", "limit"])
             let apply = try d.optionalBoolean("apply") ?? false
-            // mode: only "suspectOnly" or "all" are accepted; unrecognised value
-            // is an invalid-argument refusal, not a silent fallback to default.
+            // mode: "suspectOnly" or "all" accepted case-insensitively; v1 lowercased
+            // before comparing and v2 matches that so callers are not punished for
+            // capitalisation differences. Unrecognised value is a refusal, not a
+            // silent fallback. Canonical form is preserved: "all" or "suspectOnly".
             let modeStr: String
             if let raw = try d.optionalString("mode") {
-                guard raw == "suspectOnly" || raw == "all" else {
+                switch raw.lowercased() {
+                case "all": modeStr = "all"
+                case "suspectonly": modeStr = "suspectOnly"
+                default:
                     throw invalid("mode", "mode must be \"suspectOnly\" or \"all\".")
                 }
-                modeStr = raw
             } else {
                 modeStr = "suspectOnly"
             }
@@ -60,11 +64,20 @@ public enum AriaV2DataMobilityRequest: Sendable {
                 limit: limit)
         case "moot_palace_import":
             let d = try decoder(arguments, ["palace_path", "mode", "estate_id"])
-            let raw = try d.optionalString("mode") ?? ImportMode.foreground.rawValue
+            // Case-insensitive: "FOREGROUND", "Background", etc. resolve like v1.
+            // ImportMode.rawValue is already lowercase, so lowercasing the input
+            // before init(rawValue:) is sufficient for any capitalisation.
+            let raw = (try d.optionalString("mode") ?? ImportMode.foreground.rawValue).lowercased()
             guard let mode = ImportMode(rawValue: raw) else { throw invalid("mode", "mode must be foreground or background.") }
             return .palaceImport(path: try text(d, "palace_path"), mode: mode, estateID: try d.optionalUUID("estate_id"))
         case "moot_json_import":
-            let d = try decoder(arguments, ["path", "estate_id"]); return .jsonImport(path: try text(d, "path"), estateID: try d.optionalUUID("estate_id"))
+            // return_id_map: when true the reply carries a second text block holding
+            // {"id_map":{"<record id>":"<drawer id>"}}. Off by default — the ordinary
+            // caller wants the one-line receipt. Matches v1 ToolDispatch.swift:4408 and
+            // the catalog advertisement in AriaV2SelectedCatalog.swift:966.
+            let d = try decoder(arguments, ["path", "estate_id", "return_id_map"])
+            let returnIDMap = try d.optionalBoolean("return_id_map") ?? false
+            return .jsonImport(path: try text(d, "path"), estateID: try d.optionalUUID("estate_id"), returnIDMap: returnIDMap)
         case "moot_file_dataset":
             let d = try decoder(arguments, ["name", "location", "columns", "rows", "csv_path", "wing", "sensitivity", "estate_id"])
             let columns = try optionalArray(d, "columns"); let rows = try optionalArray(d, "rows")
@@ -326,7 +339,7 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
             )
             return palaceOutcome(report)
 
-        case .jsonImport(let path, _):
+        case .jsonImport(let path, _, _):
             let report = try await JsonImportBridge(kit: kit).importSeed(
                 at: URL(fileURLWithPath: path),
                 into: handle,
@@ -972,7 +985,7 @@ private extension AriaV2DataMobilityRequest {
         switch self {
         case .reindex(let estateID): return estateID
         case .reclassifyFDC(let estateID, _, _, _): return estateID
-        case .palaceImport(_, _, let estateID), .jsonImport(_, let estateID): return estateID
+        case .palaceImport(_, _, let estateID), .jsonImport(_, let estateID, _): return estateID
         case .fileDataset(_, _, _, _, _, _, _, let estateID): return estateID
         case .datasetQuery(_, _, _, _, _, let estateID), .datasetStats(_, _, let estateID): return estateID
         case .vaultExport(_, _, let estateID), .vaultImport(_, _, let estateID): return estateID
@@ -994,7 +1007,15 @@ public struct AriaV2DataMobility: Sendable {
     public func execute(_ request: AriaV2DataMobilityRequest) async throws -> JSONValue {
         do {
             let outcome = try await authority.execute(request)
-            return AriaV2Envelope.success(tool: request.tool, effect: request.effect, data: outcome.data, meta: ["completeness": .string("incomplete")], compactText: outcome.compactText)
+            var result = AriaV2Envelope.success(tool: request.tool, effect: request.effect, data: outcome.data, meta: ["completeness": .string("incomplete")], compactText: outcome.compactText)
+            // return_id_map: append a second text block holding the id_map JSON when the
+            // caller asked for it. The structured data already carries id_map always;
+            // this second block serves text-only callers that cannot read structuredContent.
+            // Block shape matches v1: {"id_map":{"<record id>":"<drawer id>",…}}.
+            if case .jsonImport(_, _, let returnIDMap) = request, returnIDMap {
+                result = Self.appendIDMapBlock(result, from: outcome.data)
+            }
+            return result
         } catch let failure as AriaV2DataMobilityLower.Failure {
             switch failure {
             case .refusal(let refusal):
@@ -1003,5 +1024,32 @@ public struct AriaV2DataMobility: Sendable {
         } catch {
             return AriaV2Envelope.refusal(tool: request.tool, error: .init(code: "mobility_unavailable", message: "The requested data-mobility operation is unavailable in the selected estate.", retryable: false))
         }
+    }
+
+    /// Append a second content text block carrying `{"id_map":{…}}` to a v2 envelope
+    /// result.  Used by `moot_json_import` when `return_id_map=true`.
+    ///
+    /// The envelope already carries `data.id_map` in `structuredContent`; this second
+    /// block serves text-only callers that cannot read structuredContent.  Its shape
+    /// is wire-identical to v1 `ToolDispatcher.textResultBlocks(_:)` call at line 4461.
+    ///
+    /// Returns the original result unchanged when the id_map cannot be extracted or
+    /// serialized; both conditions signal a programmer error (data contract violation)
+    /// so the receipt is still delivered without the second block rather than failing.
+    private static func appendIDMapBlock(_ result: JSONValue, from data: JSONValue) -> JSONValue {
+        guard case .object(var responseObj) = result,
+              case .array(var content) = responseObj["content"],
+              case .object(let dataObj) = data,
+              let idMapValue = dataObj["id_map"] else { return result }
+
+        let mapObject = JSONValue.object(["id_map": idMapValue])
+        guard let rawData = try? JSONSerialization.data(
+                withJSONObject: mapObject.foundationObject,
+                options: [.sortedKeys, .withoutEscapingSlashes]),
+              let mapJSON = String(data: rawData, encoding: .utf8) else { return result }
+
+        content.append(.object(["type": .string("text"), "text": .string(mapJSON)]))
+        responseObj["content"] = .array(content)
+        return .object(responseObj)
     }
 }
