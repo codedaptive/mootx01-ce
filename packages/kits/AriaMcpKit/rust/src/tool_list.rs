@@ -44,7 +44,7 @@ pub fn accepted_arg_keys(name: &str) -> Option<std::collections::HashSet<String>
 ///
 /// Delegates to `crate::v2::catalog::selected_tools()` which reads
 /// `vault_enabled()` to decide whether to include the vault-gated tools.
-/// Returns 84 tools when vault is on (the default) or 77 tools when
+/// Returns 80 tools when vault is on (the default) or 73 tools when
 /// `MOOTX01_VAULT=0`.
 pub fn build_tool_list() -> serde_json::Value {
     crate::v2::catalog::selected_tools()
