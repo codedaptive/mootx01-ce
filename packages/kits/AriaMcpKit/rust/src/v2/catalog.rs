@@ -475,7 +475,11 @@ fn output_schema(name: &str, effect: V2OperationEffect) -> Value {
         "surface_version":{"const":"v2"},"tool":{"const":name},
         "data":data_schema,
         "meta":{"type":"object","properties":{"completeness":{"const":"incomplete"},"effect":{"const":effect}},
-            "required":["completeness","effect"],"additionalProperties":true}},
+            "required":["completeness","effect"],"additionalProperties":true},
+        // hint: optional sibling of data and meta, inserted by the hint
+        // applier. Declared because additionalProperties is false, which would
+        // otherwise make every hinted response violate its advertised schema.
+        "hint":{"type":"string"}},
         "required":["surface_version","tool","data","meta"],"additionalProperties":false})
 }
 
@@ -1131,15 +1135,33 @@ fn knowledge_journal_data_schema(name: &str) -> Option<Value> {
 
 fn cognition_catalog_data_schema(name: &str) -> Option<Value> {
     match name {
+        // name and description are required in every row (terse and verbose).
+        // input_schema and output_schema are optional declared properties:
+        // verbose rows include them; terse rows omit them. Both are declared
+        // so that additionalProperties:false does not forbid the verbose
+        // extras — the constraint is "only declared keys allowed", not
+        // "all declared keys required".
         "moot_list_lenses" => Some(json!({"type":"object","properties":{
             "tools":{"type":"array","items":{"type":"object","properties":{
                 "name":{"type":"string"},
                 "description":{"type":"string"},
-                "input_schema":{"type":"object","additionalProperties":true}
-            },"required":["description","input_schema","name"],"additionalProperties":false}}
+                "input_schema":{"type":"object","additionalProperties":true},
+                "output_schema":{"type":"object","additionalProperties":true}
+            },"required":["description","name"],"additionalProperties":false}}
         },"required":["tools"],"additionalProperties":false})),
+        // name, version, and description are required in every row.
+        // required_capabilities is an optional declared property:
+        // verbose rows include it; terse rows omit it.
+        // Note: the prior schema used a dangling $ref (#/definitions/recipe)
+        // with no definitions block; that was unconstrained and is replaced
+        // by an explicit inline schema here.
         "moot_list_recipes" => Some(json!({"type":"object","properties":{
-            "recipes":{"type":"array","items":{"$ref":"#/definitions/recipe"}}
+            "recipes":{"type":"array","items":{"type":"object","properties":{
+                "name":{"type":"string"},
+                "version":{"type":"string"},
+                "description":{"type":"string"},
+                "required_capabilities":{"type":"array","items":{"type":"string"}}
+            },"required":["description","name","version"],"additionalProperties":false}}
         },"required":["recipes"],"additionalProperties":false})),
         _ => None,
     }
