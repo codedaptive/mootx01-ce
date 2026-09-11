@@ -11,21 +11,43 @@ use uuid::Uuid;
 
 use crate::jsonrpc::JsonValue;
 
-use super::codec::{optional_uuid, strict_object, V2DecodeResult};
+use super::codec::{optional_string, optional_uuid, strict_object, V2DecodeResult};
 
 pub const DREAM_TOOL: &str = "moot_dream";
 
-/// V2 accepts only the canonical selected-estate selector.  The authority owns
-/// the cycle clock; a caller cannot smuggle a second clock through the request.
+/// V2 admits a caller-proposed cycle clock and an association sweep mode in
+/// addition to the estate selector.  Both new fields are optional, preserving
+/// backwards-compatibility with callers that supply only `estate_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2DreamRequest {
     pub estate_id: Option<Uuid>,
+    /// Caller-proposed cycle clock as milliseconds since epoch.  Parsed from
+    /// an ISO 8601 UTC string; `None` when the argument is absent.  The
+    /// authority enforces a 24-hour future ceiling before admitting the instant.
+    pub now_millis: Option<i64>,
+    /// Association sweep mode: `"all"` = full-estate pass
+    /// (`DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE`), `"off"` = skip the sweep
+    /// entirely, `None` = default cadence (`DEFAULT_PROBE_LIMIT`).
+    pub associates: Option<String>,
 }
 
 impl V2DreamRequest {
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
-        let object = strict_object(value, ["estate_id"])?;
-        Ok(Self { estate_id: optional_uuid(object, "estate_id")? })
+        let object = strict_object(value, ["estate_id", "now", "associates"])?;
+        let now_millis = if let Some(s) = optional_string(object, "now")? {
+            let epoch = crate::recipe_tools::parse_iso8601_to_epoch(s).ok_or_else(|| {
+                super::codec::V2InvalidArgument::new("now", "Argument 'now' must be a valid ISO 8601 date-time string.")
+                    .correction("Provide 'now' in the format YYYY-MM-DDTHH:MM:SSZ.")
+            })?;
+            Some(epoch)
+        } else {
+            None
+        };
+        Ok(Self {
+            estate_id: optional_uuid(object, "estate_id")?,
+            now_millis,
+            associates: optional_string(object, "associates")?.map(|s| s.to_owned()),
+        })
     }
 }
 
@@ -40,8 +62,25 @@ pub struct V2DreamAdmission {
     pub now_millis: i64,
 }
 
+/// Error variants the authority or service can produce.  `InvalidArgument`
+/// maps to JSON-RPC -32602 (never a refusal envelope); `Unavailable` and
+/// `OutcomeUnverified` map to operational refusal envelopes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V2DreamAuthorityError {
+    Unavailable,
+    /// Caller-supplied argument is structurally valid but semantically out of
+    /// range (e.g. `now` more than 24 hours in the future).  The service
+    /// converts this to a thrown -32602 error so destructive paths are never
+    /// reached with an out-of-range clock.
+    InvalidArgument(String),
+}
+
 pub trait V2DreamAuthority: Send + Sync {
-    fn admit(&self, requested_estate_id: Option<Uuid>) -> Result<V2DreamAdmission, ()>;
+    fn admit(
+        &self,
+        requested_estate_id: Option<Uuid>,
+        requested_now: Option<i64>,
+    ) -> Result<V2DreamAdmission, V2DreamAuthorityError>;
     fn revalidate(&self, admission: &V2DreamAdmission) -> Result<(), ()>;
 }
 
@@ -68,8 +107,15 @@ pub struct V2DreamCycleReceipt {
     pub below_threshold: u64,
     pub contradictions_proposed: u64,
     pub contradiction_candidates_borderline: u64,
+    /// Absent rather than null when the step did not run. The declared dream
+    /// data schema types these three as nonnegative integers and leaves them
+    /// out of `required`, so a null would violate the contract while an absent
+    /// key conforms. Swift omits them; skipping keeps the two ports byte-equal.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subjects_backfilled: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub associations_written: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub associations_non_unique_probes: Option<u64>,
 }
 
@@ -104,10 +150,13 @@ pub struct V2DreamResult {
     pub cycle: Option<V2DreamCycleReceipt>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum V2DreamError {
     Unavailable,
     OutcomeUnverified,
+    /// Caller-supplied argument is out of range.  Converts to -32602, never
+    /// a refusal envelope.
+    InvalidArgument(String),
 }
 
 /// Direct lower seam.  It accepts typed authority output and returns a typed
@@ -174,9 +223,26 @@ impl V2DreamLower for V2GeniusLocusDreamLower {
                 &admission.estate_handle, "minilm-v6", 500, None, 64, admission.now_millis,
             )
             .map_err(|_| ())?;
-        let association = coordinator
-            .associate_sweep(&admission.estate_handle, Some(50), admission.now_millis)
-            .map_err(|_| ())?;
+
+        // Resolve association sweep probe limit from the `associates` mode:
+        //   "all"  → full-estate pass, bounded by DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE
+        //   "off"  → skip the sweep entirely; associations fields are absent
+        //   None   → default cadence (DEFAULT_PROBE_LIMIT, 50 probes)
+        let associates_mode = request.associates.as_deref().map(str::to_lowercase);
+        let (associations_written, associations_non_unique_probes) =
+            if associates_mode.as_deref() == Some("off") {
+                (None, None)
+            } else {
+                let probe_limit: usize = if associates_mode.as_deref() == Some("all") {
+                    crate::recipe_tools::DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE_PUB
+                } else {
+                    genius_locus_kit::brain::signals::vector_similarity::VectorSimilaritySignal::DEFAULT_PROBE_LIMIT
+                };
+                let sweep = coordinator
+                    .associate_sweep(&admission.estate_handle, Some(probe_limit), admission.now_millis)
+                    .map_err(|_| ())?;
+                (Some(sweep.written as u64), Some(sweep.non_unique_probes as u64))
+            };
         let subjects_backfilled = if coordinator
             .subject_producer_pipeline(&admission.estate_handle)
             .is_some()
@@ -207,8 +273,8 @@ impl V2DreamLower for V2GeniusLocusDreamLower {
             contradictions_proposed: hunt.proposed.len() as u64,
             contradiction_candidates_borderline: hunt.borderline.len() as u64,
             subjects_backfilled,
-            associations_written: Some(association.written as u64),
-            associations_non_unique_probes: Some(association.non_unique_probes as u64),
+            associations_written,
+            associations_non_unique_probes,
         }))
     }
 }
@@ -224,7 +290,12 @@ impl<A, L> V2DreamService<A, L> {
 
 impl<A: V2DreamAuthority, L: V2DreamLower> V2DreamService<A, L> {
     pub fn execute(&self, request: V2DreamRequest) -> Result<V2DreamResult, V2DreamError> {
-        let admission = self.authority.admit(request.estate_id).map_err(|_| V2DreamError::Unavailable)?;
+        let admission = self.authority
+            .admit(request.estate_id, request.now_millis)
+            .map_err(|e| match e {
+                V2DreamAuthorityError::Unavailable => V2DreamError::Unavailable,
+                V2DreamAuthorityError::InvalidArgument(msg) => V2DreamError::InvalidArgument(msg),
+            })?;
         let outcome = self.lower.run(&admission, &request).map_err(|_| V2DreamError::Unavailable)?;
         self.authority.revalidate(&admission).map_err(|_| V2DreamError::OutcomeUnverified)?;
         Ok(V2DreamResult { status: outcome.status(), cycle: outcome.receipt().cloned() })
@@ -247,8 +318,16 @@ mod tests {
     #[derive(Clone)]
     struct Authority { admission: V2DreamAdmission }
     impl V2DreamAuthority for Authority {
-        fn admit(&self, requested: Option<Uuid>) -> Result<V2DreamAdmission, ()> {
-            if requested.is_none() || requested == Some(self.admission.estate_id) { Ok(self.admission.clone()) } else { Err(()) }
+        fn admit(
+            &self,
+            requested: Option<Uuid>,
+            _requested_now: Option<i64>,
+        ) -> Result<V2DreamAdmission, V2DreamAuthorityError> {
+            if requested.is_none() || requested == Some(self.admission.estate_id) {
+                Ok(self.admission.clone())
+            } else {
+                Err(V2DreamAuthorityError::Unavailable)
+            }
         }
         fn revalidate(&self, _: &V2DreamAdmission) -> Result<(), ()> { Ok(()) }
     }
@@ -272,9 +351,195 @@ mod tests {
             authorization_generation: "generation".to_owned(), now_millis: 0,
         };
         let service = V2DreamService::new(Authority { admission }, Lower(V2DreamSourceOutcome::AlreadyRunning));
-        let result = service.execute(V2DreamRequest { estate_id: None }).expect("status result");
+        let result = service.execute(V2DreamRequest { estate_id: None, now_millis: None, associates: None }).expect("status result");
         assert_eq!(result.status, V2DreamStatus::AlreadyRunning);
         assert_eq!(result.cycle, None);
+    }
+
+    /// Records how many times the lower ran, so a test can prove the service
+    /// never reached it. The dreaming cycle prunes recall traces at the
+    /// admitted instant minus thirty days, so "the lower did not run" is the
+    /// assertion that proves an out-of-range clock cannot destroy anything.
+    struct CountingLower {
+        calls: Arc<Mutex<usize>>,
+        seen_now: Arc<Mutex<Option<i64>>>,
+    }
+    impl V2DreamLower for CountingLower {
+        fn run(
+            &self,
+            admission: &V2DreamAdmission,
+            _: &V2DreamRequest,
+        ) -> Result<V2DreamSourceOutcome, ()> {
+            *self.calls.lock().unwrap() += 1;
+            *self.seen_now.lock().unwrap() = Some(admission.now_millis);
+            Ok(V2DreamSourceOutcome::Completed(V2DreamCycleReceipt {
+                candidates_considered: 0,
+                proposals_emitted: Vec::new(),
+                suppressed_duplicates: 0,
+                below_threshold: 0,
+                contradictions_proposed: 0,
+                contradiction_candidates_borderline: 0,
+                subjects_backfilled: None,
+                associations_written: None,
+                associations_non_unique_probes: None,
+            }))
+        }
+    }
+
+    /// Refuses every admission with an out-of-range argument, standing in for
+    /// `SelectedDreamAuthority` rejecting a `now` beyond the 24-hour ceiling.
+    struct RefusingAuthority;
+    impl V2DreamAuthority for RefusingAuthority {
+        fn admit(
+            &self,
+            _: Option<Uuid>,
+            _: Option<i64>,
+        ) -> Result<V2DreamAdmission, V2DreamAuthorityError> {
+            Err(V2DreamAuthorityError::InvalidArgument(
+                "Argument 'now' must not be more than 24 hours in the future.".to_owned(),
+            ))
+        }
+        fn revalidate(&self, _: &V2DreamAdmission) -> Result<(), ()> { Ok(()) }
+    }
+
+    /// Admits the caller's instant when one is supplied and its own otherwise,
+    /// mirroring the resolve step in `SelectedDreamAuthority::admit`.
+    struct AdmittingAuthority { admission: V2DreamAdmission }
+    impl V2DreamAuthority for AdmittingAuthority {
+        fn admit(
+            &self,
+            _: Option<Uuid>,
+            requested_now: Option<i64>,
+        ) -> Result<V2DreamAdmission, V2DreamAuthorityError> {
+            let mut admitted = self.admission.clone();
+            if let Some(proposed) = requested_now { admitted.now_millis = proposed; }
+            Ok(admitted)
+        }
+        fn revalidate(&self, _: &V2DreamAdmission) -> Result<(), ()> { Ok(()) }
+    }
+
+    fn test_admission() -> V2DreamAdmission {
+        let store: Arc<dyn locus_kit::drawer_store::DrawerStore> = Arc::new(
+            locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(0, None).expect("store"),
+        );
+        let mut coordinator = EstateCoordinator::new();
+        let handle = coordinator
+            .open(store, locus_kit::estate_types::OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        V2DreamAdmission {
+            estate_id: Uuid::nil(),
+            estate_handle: handle,
+            caller_binding: "caller".to_owned(),
+            authorization_generation: "generation".to_owned(),
+            now_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// An out-of-range argument short-circuits before the lower. The call count
+    /// is the load-bearing half: it proves the destructive dreaming cycle is
+    /// unreachable with a rejected clock, rather than merely that the caller
+    /// saw an error. Swift twin: `nowFarFutureRefused`.
+    #[test]
+    fn service_invalid_argument_never_reaches_the_lower() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let seen_now = Arc::new(Mutex::new(None));
+        let service = V2DreamService::new(
+            RefusingAuthority,
+            CountingLower { calls: Arc::clone(&calls), seen_now: Arc::clone(&seen_now) },
+        );
+
+        let error = service
+            .execute(V2DreamRequest {
+                estate_id: None,
+                now_millis: Some(1_900_000_000_000),
+                associates: None,
+            })
+            .expect_err("an out-of-range now must not succeed");
+
+        assert!(
+            matches!(error, V2DreamError::InvalidArgument(_)),
+            "the authority's InvalidArgument must stay an InvalidArgument, not become Unavailable: {error:?}"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(), 0,
+            "the lower must not run when the clock is out of range"
+        );
+        assert_eq!(
+            *seen_now.lock().unwrap(), None,
+            "no instant may reach the lower on a refused admission"
+        );
+    }
+
+    /// The instant the lower stamps is the one the caller proposed, not the
+    /// authority's own clock. Asserting the value rather than the absence of an
+    /// error is what catches the argument being decoded and then dropped.
+    #[test]
+    fn service_stamps_the_admitted_caller_instant() {
+        let proposed = 1_600_000_000_000i64;
+        let calls = Arc::new(Mutex::new(0usize));
+        let seen_now = Arc::new(Mutex::new(None));
+        let service = V2DreamService::new(
+            AdmittingAuthority { admission: test_admission() },
+            CountingLower { calls: Arc::clone(&calls), seen_now: Arc::clone(&seen_now) },
+        );
+
+        service
+            .execute(V2DreamRequest {
+                estate_id: None,
+                now_millis: Some(proposed),
+                associates: None,
+            })
+            .expect("an in-range now must complete");
+
+        assert_eq!(*calls.lock().unwrap(), 1, "the lower must run for an admitted instant");
+        assert_eq!(
+            *seen_now.lock().unwrap(), Some(proposed),
+            "the lower must stamp the caller's instant, not the authority's clock"
+        );
+    }
+
+    /// With no `now`, the authority's own instant is what reaches the lower.
+    /// This is the no-regression half: admitting the argument must not change
+    /// behaviour for callers that never send one.
+    #[test]
+    fn service_falls_back_to_the_authority_instant_when_now_is_absent() {
+        let admission = test_admission();
+        let authority_now = admission.now_millis;
+        let calls = Arc::new(Mutex::new(0usize));
+        let seen_now = Arc::new(Mutex::new(None));
+        let service = V2DreamService::new(
+            AdmittingAuthority { admission },
+            CountingLower { calls: Arc::clone(&calls), seen_now: Arc::clone(&seen_now) },
+        );
+
+        service
+            .execute(V2DreamRequest { estate_id: None, now_millis: None, associates: None })
+            .expect("an absent now must complete");
+
+        assert_eq!(*calls.lock().unwrap(), 1, "the lower must run when now is absent");
+        assert_eq!(
+            *seen_now.lock().unwrap(), Some(authority_now),
+            "an absent now must leave the authority's instant in place"
+        );
+    }
+
+    /// The two probe bounds the `associates` branch selects between. The mode
+    /// resolution lives inside `V2GeniusLocusDreamLower::run`, which reaches
+    /// `associate_sweep` through a concrete coordinator with no seam to
+    /// intercept the argument, so the value actually passed is not assertable.
+    /// Pinning the constants catches the bounds themselves drifting, which is
+    /// the part that would silently make a documented depth a lie.
+    #[test]
+    fn associates_mode_selects_the_documented_probe_bounds() {
+        assert_eq!(
+            crate::recipe_tools::DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE_PUB, 10_000,
+            "all-mode sweeps to v1's documented 10_000 probes"
+        );
+        assert_eq!(
+            genius_locus_kit::brain::signals::vector_similarity::VectorSimilaritySignal::DEFAULT_PROBE_LIMIT,
+            50,
+            "the default cadence stays at 50 probes"
+        );
     }
 
     #[test]
