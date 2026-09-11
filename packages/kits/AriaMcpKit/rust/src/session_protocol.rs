@@ -14,7 +14,7 @@ pub const ARIA_SESSION_PROTOCOL: &str = "\n\nprotocol:\
 \n  \u{2014} Call moot_list_lenses to see available cognition tools.\
 \n  \u{2014} Add teachme:true to any tool to learn it before using it.\
 \n  \u{2014} Watch for hint: lines in responses \u{2014} they contain coaching for better results.\
-\n  \u{2014} Declare a mode with mode:\"Recall=Auto\" on any tool call to set the session default.\
+\n  \u{2014} Declare a mode with mode:\"Recall=Auto\" on any call to set the session default; full global-modifiers grammar in moot_help directory.\
 \n  \u{2014} File memories: moot_file_memory (content + subject + location required).\
 \n  \u{2014} Search memories: moot_memory_search (query required).\
 \n  \u{2014} Write journal entries: moot_write_journal after meaningful sessions.\
