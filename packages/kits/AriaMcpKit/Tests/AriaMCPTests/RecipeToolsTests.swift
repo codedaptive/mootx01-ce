@@ -1831,7 +1831,7 @@ struct RecipeToolsSecurityTests {
 
     // MARK: - Dream future-now guard
 
-    @Test func dreamFarFutureNowThrowsInvalidParams() async throws {
+    @Test func dreamFarFutureNowReturnsInvalidArgumentRefusal() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(in: kit)
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
@@ -1841,11 +1841,22 @@ struct RecipeToolsSecurityTests {
         let formatter = ISO8601DateFormatter()
         let farFutureStr = formatter.string(from: farFuture)
 
-        await #expect(throws: JSONRPCError.self) {
-            _ = try await dispatcher.dispatch(
-                name: "moot_dream",
-                arguments: .object(["now": .string(farFutureStr)]))
+        // executeV2Core catches thrown JSONRPCErrors and wraps them in a refusal
+        // envelope; the far-future guard therefore returns an isError:true result
+        // rather than throwing at the transport level.  Both forms communicate
+        // "caller error, not retryable" to the caller.
+        let result = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object(["now": .string(farFutureStr)]))
+        guard case let .object(obj) = result,
+              case .bool(true)? = obj["isError"],
+              let code = obj["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]
+        else {
+            Issue.record("Expected isError:true refusal envelope; got: \(result)")
+            return
         }
+        #expect(code == .string("invalid_argument"),
+                "far-future now must produce invalid_argument refusal; got code: \(code)")
     }
 
     @Test func dreamNowWithinCeilingIsAccepted() async throws {

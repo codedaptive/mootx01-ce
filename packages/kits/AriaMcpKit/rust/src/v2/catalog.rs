@@ -185,7 +185,7 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                 descriptor("dream", "moot_dream", V2OperationEffect::Write,
                     "Run one on-demand maintenance and dreaming cycle.",
                     &["Run one on-demand maintenance and dreaming cycle."],
-                    json!({"type":"object","properties":{"estate_id":{"type":"string","format":"uuid"}},"required":[],"additionalProperties":false})),
+                    json!({"type":"object","properties":{"associates":{"type":"string"},"estate_id":{"type":"string","format":"uuid"},"now":{"type":"string"}},"required":[],"additionalProperties":false})),
                 descriptor("migration_run", "moot_migration_run", V2OperationEffect::Read,
                     "Evaluate migration plans and return candidates for a separate confirmation.",
                     &["Evaluate migration plans and return candidates for a separate confirmation."],
