@@ -219,7 +219,7 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
     let dispatcher = v2_dispatcher(Arc::clone(&probe));
     let list = tool_list(&dispatcher);
     let tools = list["result"]["tools"].as_array().expect("tools list");
-    assert_eq!(tools.len(), 84, "selected callable roster count");
+    assert_eq!(tools.len(), 80, "selected callable roster count");
     assert!(tools.iter().all(|tool| tool.get("annotations").is_some()));
     let annotations = |name: &str| {
         tools.iter().find(|tool| tool["name"] == name)
@@ -239,9 +239,9 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
     }));
     assert_eq!(tools.iter().map(|tool| tool["name"].as_str().unwrap()).collect::<Vec<_>>(), vec![
         "moot_confirm_memory", "moot_connection_map", "moot_connection_search", "moot_dataset_query", "moot_dataset_stats", "moot_drain_status", "moot_dream", "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
-        "moot_fact_search", "moot_fact_timeline", "moot_federated_recall", "moot_file_dataset", "moot_file_fact", "moot_file_memory", "moot_file_packet", "moot_help", "moot_hunt_contradictions", "moot_json_import", "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts", "moot_lens_constellation", "moot_lens_contradiction", "moot_lens_divergence", "moot_lens_drift", "moot_lens_free_association", "moot_lens_keystones", "moot_lens_latent_themes", "moot_lens_moment", "moot_lens_node_motion", "moot_lens_overlap", "moot_lens_partial_cue", "moot_lens_precedence", "moot_lens_rhythm", "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis", "moot_link_memories", "moot_list_lenses", "moot_list_recipes",
+        "moot_fact_search", "moot_fact_timeline", "moot_federated_recall", "moot_file_dataset", "moot_file_fact", "moot_file_memory", "moot_help", "moot_hunt_contradictions", "moot_json_import", "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts", "moot_lens_constellation", "moot_lens_contradiction", "moot_lens_divergence", "moot_lens_drift", "moot_lens_free_association", "moot_lens_keystones", "moot_lens_latent_themes", "moot_lens_moment", "moot_lens_node_motion", "moot_lens_overlap", "moot_lens_partial_cue", "moot_lens_precedence", "moot_lens_rhythm", "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis", "moot_link_memories", "moot_list_lenses", "moot_list_recipes",
         "moot_memory_get", "moot_memory_list", "moot_memory_recall_transcript", "moot_memory_search", "moot_migration_confirm", "moot_migration_run", "moot_monitoring_set",
-        "moot_monitoring_status", "moot_move_memory", "moot_packet_get", "moot_packet_lineage", "moot_packet_list", "moot_palace_import", "moot_propose_contradictions",
+        "moot_monitoring_status", "moot_move_memory", "moot_palace_import", "moot_propose_contradictions",
         "moot_read_journal", "moot_rebuild_status", "moot_recall_connected", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped", "moot_recall_temporal", "moot_recall_vague", "moot_recall_walk", "moot_reclassify_fdc", "moot_reindex", "moot_retire_fact", "moot_review_tunnel", "moot_synthesize", "moot_timing_report", "moot_update_memory", "moot_vault_export", "moot_vault_import", "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory", "moot_write_journal",
     ]);
     for name in [
@@ -556,7 +556,7 @@ fn v2_files_searches_gets_and_explains_through_typed_handlers() {
     assert_eq!(help["result"]["isError"], false, "{help}");
     let data=&help["result"]["structuredContent"]["data"];
     let operations=data["operations"].as_array().unwrap();
-    assert_eq!(operations.len(), 84);
+    assert_eq!(operations.len(), 80);
     assert!(data["directory_records"].is_array());
     let keys=operations[0].as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>();
     assert_eq!(keys,["description","effect","id","input_schema","intents","name","output_schema"].into_iter().map(str::to_owned).collect());
