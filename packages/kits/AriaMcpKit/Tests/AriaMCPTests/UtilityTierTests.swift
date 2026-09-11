@@ -23,6 +23,15 @@ struct UtilityTierTests {
         return s
     }
 
+    /// v2 diagnostics carry their typed payload in `structuredContent.data`
+    /// (AriaV2EstateDiagnostics.swift:421-430), not in the rendered
+    /// `content[0].text`, which is now only a generic compact summary. Used
+    /// by `estateStatusMemoryCountExcludesRestrictedRows` to pin the exact
+    /// `memory_count` field.
+    private func data(of result: JSONValue) -> [String: JSONValue]? {
+        result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+    }
+
     // MARK: - estate_status subject-debt counter — BLOCKED (v2 dropped the field)
     //
     // v1's `moot_estate_status` rendered free text ("subjects: X/Y (Z
@@ -111,8 +120,13 @@ struct UtilityTierTests {
     /// v2 reshape: BLOCKED, same reason as `estateStatusShowsSubjectDebtOnMixedFixture`
     /// above — no subject-debt field, and no `wings:` text (wing listing now
     /// lives only in the separate `moot_estate_map` response,
-    /// AriaV2EstateDiagnostics.swift:223-245).
-    @Test(.disabled("BLOCKED: same as estateStatusShowsSubjectDebtOnMixedFixture — v2 AriaV2EstateStatusData (AriaV2EstateDiagnostics.swift:93-103) has no subject-debt field and no wings text (wings moved to the separate moot_estate_map response, AriaV2EstateDiagnostics.swift:223-245). The v1 'subjects: 1/1 (0 missing)', 'memories: 1 active (1 total)', and 'wings: ...' text lines exist only on the dead legacy runEstateStatus (ToolDispatch.swift:3503), unreachable from ToolDispatcher.dispatch(name:arguments:). Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. Do not delete; do not weaken to pass."))
+    /// AriaV2EstateDiagnostics.swift:223-245). The aggregate-exclusion half
+    /// of this property — restricted rows must not count toward
+    /// `memory_count` — is now covered live by
+    /// `estateStatusMemoryCountExcludesRestrictedRows` below; this block
+    /// covers only the subject-debt counter and wing-naming assertions,
+    /// which have no v2 field to redirect to.
+    @Test(.disabled("BLOCKED: same as estateStatusShowsSubjectDebtOnMixedFixture — v2 AriaV2EstateStatusData (AriaV2EstateDiagnostics.swift:93-103) has no subject-debt field and no wings text (wings moved to the separate moot_estate_map response, AriaV2EstateDiagnostics.swift:223-245). The v1 'subjects: 1/1 (0 missing)', 'memories: 1 active (1 total)', and 'wings: ...' text lines exist only on the dead legacy runEstateStatus (ToolDispatch.swift:3503), unreachable from ToolDispatcher.dispatch(name:arguments:). Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. The aggregate-exclusion half of this property is now covered by estateStatusMemoryCountExcludesRestrictedRows below; this block covers only the subject-debt counter and wing-naming assertions. Do not delete; do not weaken to pass."))
     func estateStatusAggregatesExcludeRestrictedRows() async throws {
         let kit = GeniusLocusKit()
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -178,6 +192,58 @@ struct UtilityTierTests {
                 "wing listing must not name a wing known only from restricted rows; got: \(body)")
         #expect(body.contains("wings: \(LocusKit.defaultWingName)"),
                 "the visible row's wing must still be listed; got: \(body)")
+    }
+
+    /// Live coverage for the aggregate-exclusion half of the property
+    /// blocked whole on `estateStatusAggregatesExcludeRestrictedRows`
+    /// (above). `AriaV2EstateDiagnostics.status`
+    /// (AriaV2EstateDiagnostics.swift:191-215) computes `memoryCount` from
+    /// `drawers.filter { $0.tombstonedAt == nil &&
+    /// $0.adjectiveSensitivity.isBulkExportable }` — the same sensitivity
+    /// ceiling v1's `memories: N active (M total)` line proved. Blocking
+    /// the whole legacy case left that property with zero coverage
+    /// anywhere in the suite; this case pins it directly against the typed
+    /// v2 `memory_count` field so a regression that let restricted rows
+    /// back into the count fails the suite.
+    @Test func estateStatusMemoryCountExcludesRestrictedRows() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "xu-count"))
+        let handle = try await kit.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "xu-count"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // One visible, normal-sensitivity row in the default wing.
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("Visible row with a subject."),
+                "subject": .string("Visible row: carries a subject."),
+                "location": .string("count-tests"),
+            ]))
+
+        // One restricted row, in a wing of its own — must not count.
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("Restricted row with a subject."),
+                "subject": .string("Restricted row: carries a subject."),
+                "location": .string("count-hidden"),
+                "wing": .string("Count Hidden Wing"),
+                "sensitivity": .string("restricted"),
+            ]))
+
+        let status = try await dispatcher.dispatch(
+            name: "moot_estate_status", arguments: .object([:]))
+        let memoryCount = data(of: status)?["memory_count"]
+
+        #expect(memoryCount == .integer(1),
+                "memory_count must exclude the restricted row; got \(String(describing: memoryCount))")
     }
 
     // MARK: - list_lenses terse/verbose — BLOCKED (v2 verbose arg is a no-op)
