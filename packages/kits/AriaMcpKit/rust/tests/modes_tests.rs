@@ -335,29 +335,74 @@ fn non_recall_mode_produces_no_answer_override() {
                "Non-Recall mode must not set an answer override");
 }
 
-// MARK: - G. mode: arg in every tool's inputSchema
+// MARK: - G. mode: global-modifier contract (documented once)
 
+// v1 injected `mode` into every tool schema. The v2 ruling forbids that: `mode` is
+// a global modifier stripped at the ARIA door before decode, absent from all
+// per-tool input schemas except owner operations that declare their own `mode`
+// field. The grammar is documented once in the moot_help directory response under
+// global_modifiers, and the session orientation payload names it.
 #[test]
-#[ignore = "BLOCKED: v2 tool schemas do not inject the mode argument; build_tool_list returns v2 schemas without mode. This is v1-only behavior. Awaiting catalog decision. Do not delete; do not weaken to pass."]
 fn mode_arg_in_every_tool_schema() {
-    let tools = build_tool_list();
-    let tools_arr = tools.as_array().expect("build_tool_list must return an array");
-    let missing: Vec<&str> = tools_arr
-        .iter()
-        .filter(|tool| {
-            tool.get("inputSchema")
-                .and_then(|s| s.get("properties"))
-                .and_then(|p| p.as_object())
-                .map(|props| !props.contains_key("mode"))
-                .unwrap_or(true)
-        })
-        .filter_map(|tool| tool.get("name").and_then(|n| n.as_str()))
-        .collect();
+    use aria_mcp::v2::{
+        catalog::selected_registry,
+        help::{resolve_help, V2HelpRequest, GLOBAL_MODIFIERS_HELP_TEXT},
+    };
+    use aria_mcp::session_protocol::ARIA_SESSION_PROTOCOL;
 
+    let registry = selected_registry();
+
+    // Owner operations: those whose catalog input schema declares a `mode` field
+    // for operational reasons (classification mode, import mode). The v2
+    // global-modifier contract says ALL other operations must not carry mode in
+    // their schema — mode is stripped at the ARIA door before decode.
+    let allowed_owners: std::collections::HashSet<&str> = [
+        "moot_reclassify_fdc",  // FDC mode: suspectOnly|all
+        "moot_palace_import",   // import mode: foreground|background (json import)
+        "moot_vault_import",    // import mode: foreground|background
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    // Assertion 1: no operation outside the allowed owner set has mode in its schema.
+    let unexpected_with_mode: Vec<&str> = registry
+        .operations()
+        .filter(|op| !allowed_owners.contains(op.public_name.as_str()))
+        .filter(|op| {
+            op.input_schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|props| props.contains_key("mode"))
+                .unwrap_or(false)
+        })
+        .map(|op| op.public_name.as_str())
+        .collect();
     assert!(
-        missing.is_empty(),
-        "Tools missing 'mode' in schema: {}",
-        missing.join(", ")
+        unexpected_with_mode.is_empty(),
+        "v2 contract: only owner operations may have mode in their schema. Unexpected: {}",
+        unexpected_with_mode.join(", ")
+    );
+
+    // Assertion 2: moot_help directory response carries global_modifiers naming "mode".
+    let request = V2HelpRequest { intent: None, tool: None };
+    let result = resolve_help(&registry, &request).expect("resolve_help must return a directory");
+    let dir_value = result.as_value();
+    let global_modifiers = dir_value["global_modifiers"]
+        .as_str()
+        .expect("moot_help directory must carry a global_modifiers key");
+    assert!(
+        global_modifiers.contains("mode"),
+        "global_modifiers entry must describe the mode modifier"
+    );
+    // Byte-identity with the constant (same as fixture check below).
+    assert_eq!(global_modifiers, GLOBAL_MODIFIERS_HELP_TEXT,
+        "help directory global_modifiers must equal GLOBAL_MODIFIERS_HELP_TEXT");
+
+    // Assertion 3: session orientation protocol names mode.
+    assert!(
+        ARIA_SESSION_PROTOCOL.contains("mode:"),
+        "ARIA_SESSION_PROTOCOL must reference mode: so a fresh AI client knows the modifier exists"
     );
 }
 
@@ -858,27 +903,29 @@ fn provisioned_coaching_calls_two_fires_on_call_two() {
 /// BLOCKED: `aria_mcp::teachme_guides` is a v1-only surface with no v2 equivalent.
 /// `moot_help` is the v2 discovery surface but does not expose a static guide string
 /// to assert byte-identity against; it returns dynamic content.
+
+/// Gate: `GLOBAL_MODIFIERS_HELP_TEXT` must be byte-identical to the shared
+/// fixture `Tests/Conformance/global_modifiers_help_fixture.json`.
 ///
-/// Original intent: verify `modes_teachme_guide()` is byte-identical to
-/// `Tests/Conformance/modes_teachme_guide_fixture.json`.
+/// Converted from a v1 teachme guide byte-identity check (v1 `modes_teachme_guide()`
+/// had no v2 equivalent) to a v2 global-modifier help entry check.
+/// Both ports read the same fixture so a parity break between Swift and Rust is
+/// caught here alongside the Swift twin in `SessionProtocolTests.swift`.
 ///
-/// Converted from `#[cfg(any())]` to `#[ignore]` so the test is COMPILED, VISIBLE,
-/// and COUNTED as ignored rather than silently absent from every count.
-/// When a v2 guide surface with a stable byte output is added, restore the
-/// fixture assertion against its output.
-/// Do NOT delete this test; do NOT weaken to pass.
+/// How it fails if reverted: any edit to `GLOBAL_MODIFIERS_HELP_TEXT` or the fixture
+/// without updating both → assert fires; also fires if this port's text diverges
+/// from the fixture the Swift test passes, surfacing a parity break.
 #[test]
-#[ignore = "BLOCKED: teachme_guides is a v1-only module with no v2 equivalent; moot_help is the v2 discovery surface but exposes no static guide string."]
 fn modes_teachme_guide_byte_identity() {
-    /*
-    // Original body, verbatim from commit 07a81609a:
+    use aria_mcp::v2::help::GLOBAL_MODIFIERS_HELP_TEXT;
+
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR must be set during cargo test");
     // CARGO_MANIFEST_DIR = .../AriaMcpKit/rust
     let fixture_path = Path::new(&manifest_dir)
         .parent()
         .unwrap()
-        .join("Tests/Conformance/modes_teachme_guide_fixture.json");
+        .join("Tests/Conformance/global_modifiers_help_fixture.json");
 
     let data = fs::read_to_string(&fixture_path)
         .unwrap_or_else(|e| panic!("Failed to read fixture at {}: {}", fixture_path.display(), e));
@@ -888,15 +935,11 @@ fn modes_teachme_guide_byte_identity() {
 
     let expected = parsed.get("expected")
         .and_then(|v| v.as_str())
-        .expect("modes_teachme_guide_fixture.json must have an 'expected' string field");
-
-    let actual = aria_mcp::teachme_guides::modes_teachme_guide();
+        .expect("global_modifiers_help_fixture.json must have an 'expected' string field");
 
     assert_eq!(
-        actual, expected,
-        "modes_teachme_guide() must be byte-identical to the shared fixture.\n\
-         Actual length: {}\nExpected length: {}",
-        actual.len(), expected.len()
+        GLOBAL_MODIFIERS_HELP_TEXT, expected,
+        "GLOBAL_MODIFIERS_HELP_TEXT must be byte-identical to the shared fixture.\n         Actual length: {}\nExpected length: {}",
+        GLOBAL_MODIFIERS_HELP_TEXT.len(), expected.len()
     );
-    */
 }
