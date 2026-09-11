@@ -778,19 +778,9 @@ private extension ToolDispatcher {
                 maximumSensitivity: maximumSensitivity,
                 recallOrigin: posture == .frozen ? .internal : .external,
                 usageLedger: DispatcherV2MemoryUsageLedger(
-                    surfaced: recallLedger, kit: kit, handle: handle, posture: posture),
-                // Carry the un-collapsed grant ceiling (not `maximumSensitivity`,
-                // which is already `sensitivityGrant ?? .elevated` above and so
-                // cannot distinguish "no grant" from "a grant that ceilings at
-                // elevated") so the sensitivity-read-under-grant audit can tell
-                // whether a restricted/secret row's admission actually depended
-                // on a live grant. Same precedent as `packetOperations` below.
-                grantCeiling: sensitivityGrant
+                    surfaced: recallLedger, kit: kit, handle: handle, posture: posture)
             )
         )
-        let packetOperations = AriaV2PacketOperations(
-            kit: kit, handle: handle, context: memoryOperations.context,
-            grantCeiling: sensitivityGrant)
         let knowledgeJournal = AriaV2KnowledgeJournalService(
             backend: AriaV2GeniusLocusKnowledgeJournalBackend(kit: kit, handle: handle),
             context: memoryOperations.context)
@@ -920,14 +910,6 @@ private extension ToolDispatcher {
                 return try await knowledgeJournal.writeJournal(request)
             case .readJournal(let request):
                 return try await knowledgeJournal.readJournal(request)
-            case .filePacket(let packetRequest):
-                return try await packetOperations.file(packetRequest)
-            case .packetGet(let packetRequest):
-                return try await packetOperations.get(packetRequest)
-            case .packetList(let packetRequest):
-                return try await packetOperations.list(packetRequest)
-            case .packetLineage(let packetRequest):
-                return try await packetOperations.lineage(packetRequest)
             case .monitoringSet(let monitoringRequest):
                 let result = await AriaV2MonitoringSet.execute(
                     monitoringRequest, monitoringControl: monitoringControl)
