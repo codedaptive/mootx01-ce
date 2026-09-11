@@ -354,8 +354,11 @@ impl V2OrchestrationProvider for SelectedOrchestrationLower<'_> {
         frame.ordering = Ordering::ByCaptureTimeDesc;
         frame.limit = Some(limit);
         let cues = request.query.as_deref().map(Self::grounding_terms).unwrap_or_default();
+        // A caller who SENT a cue must never receive an unscoped estate
+        // digest: answering from the whole estate returns something that reads
+        // like an answer to the question asked, which is worse than a refusal.
         if request.query.is_some() && cues.is_empty() {
-            return Err(V2OrchestrationFailure::LowerUnavailable);
+            return Err(V2OrchestrationFailure::InvalidCue);
         }
         let now_millis = Self::now_millis();
         let coordinator = self.registry.default.coord.lock().map_err(|_| V2OrchestrationFailure::EstateUnavailable)?;

@@ -293,6 +293,10 @@ pub trait V2OrchestrationProvider: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum V2OrchestrationFailure {
     EstateUnavailable,
+    /// The CALLER's cue was unusable — every token a stopword or too short to
+    /// ground on. Distinct from the unavailable variants because retrying the
+    /// same call cannot help; the caller must send a different cue.
+    InvalidCue,
     UnverifiedCleanup,
     LowerUnavailable,
     UnknownBranch,
