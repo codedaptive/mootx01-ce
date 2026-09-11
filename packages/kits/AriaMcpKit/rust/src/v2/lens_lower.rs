@@ -61,6 +61,9 @@ pub struct CoordinatorRecallLensLower {
     coordinator: Arc<Mutex<EstateCoordinator>>,
 }
 
+/// Three years in milliseconds, matching the v1 window ceiling.
+const MAXIMUM_WINDOW_MILLIS: i64 = (3.0 * 365.25 * 24.0 * 60.0 * 60.0 * 1000.0) as i64;
+
 impl CoordinatorRecallLensLower {
     pub fn new(coordinator: Arc<Mutex<EstateCoordinator>>) -> Self {
         Self { coordinator }
@@ -1084,6 +1087,12 @@ impl CoordinatorRecallLensLower {
         if start > end {
             return Err(());
         }
+        // A window spanning decades scans the entire corpus and exhausts
+        // memory. Three years, matching the v1 ceiling, which survived into v2
+        // only inside the unreachable v1 dispatch table.
+        if end.saturating_sub(start) > MAXIMUM_WINDOW_MILLIS {
+            return Err(());
+        }
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let output = run_moment(
             &coordinator,
@@ -1175,6 +1184,12 @@ impl CoordinatorRecallLensLower {
         let start = parse_iso8601_millis(required_string(request, "windowStart")?).ok_or(())?;
         let end = parse_iso8601_millis(required_string(request, "windowEnd")?).ok_or(())?;
         if start > end {
+            return Err(());
+        }
+        // A window spanning decades scans the entire corpus and exhausts
+        // memory. Three years, matching the v1 ceiling, which survived into v2
+        // only inside the unreachable v1 dispatch table.
+        if end.saturating_sub(start) > MAXIMUM_WINDOW_MILLIS {
             return Err(());
         }
         let target = TemporalFieldCoord::new(
