@@ -239,6 +239,11 @@ impl Dispatcher {
                 arr.push(memory_tool_schema());
             }
         }
+        // Create the mode session state as a local Arc first so we can share it
+        // between the struct field and the pre-decode registration factory.
+        // In Rust struct literals, one field cannot reference another being
+        // initialized in the same expression.
+        let mode_session_state = Arc::new(ModeSessionState::new());
         Dispatcher {
             registry,
             server_name: name.to_owned(),
@@ -258,14 +263,18 @@ impl Dispatcher {
             // Spec defaults: sticky_enabled = true, coaching_calls_x = 25.
             // Overridden on the first tool call by provisioned_modes_config
             // read from the default estate's manifest (apply_preferences).
-            mode_session_state: Arc::new(ModeSessionState::new()),
+            mode_session_state: Arc::clone(&mode_session_state),
             posture: EstatePosture::from_process_environment(),
             // Set from the same resolved value used to build tools/list above,
             // so the catalog and the intercept gate start in agreement.
             memory_tool_enabled: mem_enabled,
-            // Empty in production; populated by test code to prove the transform
-            // phase strips a decoder-rejected key before the surface decoder runs.
-            pre_decode_registrations: Vec::new(),
+            // In production, holds the mode concern's pre-decode transform hook
+            // (strips the `mode` global modifier, injects sticky recall `answer`
+            // for moot_memory_search).  Test code may replace this field entirely
+            // to exercise the transform phase with a custom hook.
+            pre_decode_registrations: crate::v2::chain_registry::aria_v2_pre_decode_registrations(
+                Arc::clone(&mode_session_state),
+            ),
         }
     }
 
@@ -493,15 +502,16 @@ impl Dispatcher {
             );
         }
 
-        // Transform phase: run before decode so a hook can remove a key the
-        // strict argument decoder rejects.  The production registration list is
-        // empty; hooks arrive only through pre_decode_registrations (test seam).
-        // Construction fails only on duplicate concern names or positions —
-        // programmer errors in the injected list — so expect is appropriate.
-        // Pre-decode registrations are always empty in production; test code
-        // populates them to inject a transform hook before decode.
-        // `clone_transform_only` copies the Arc-wrapped hook, leaving ingress
-        // and egress None — only the transform phase is exercised here.
+        // Transform phase: run before decode so a hook can remove or add a key
+        // before the strict argument decoder sees the arguments.  In production,
+        // pre_decode_registrations holds the mode concern's transform hook (strips
+        // the `mode` global modifier, injects sticky recall `answer` for
+        // moot_memory_search).  Test code that replaces pre_decode_registrations
+        // entirely still works because the field is pub — the replacement overrides
+        // production hooks.  Construction fails only on duplicate concern names or
+        // positions — programmer errors in the injected list — so expect is used.
+        // `clone_transform_only` copies the Arc-wrapped hook, leaving ingress and
+        // egress None — only the transform phase is exercised here.
         let transform_chain = crate::v2::call_chain::V2CallChain::new(
             self.pre_decode_registrations
                 .iter()
