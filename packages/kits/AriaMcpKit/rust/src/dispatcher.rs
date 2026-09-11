@@ -565,7 +565,7 @@ impl Dispatcher {
             // because surface::execute takes the decoded typed request, not the
             // JsonValue args. The ingress outcome is threaded to run_egress so
             // each concern's optional ingress-state is delivered to its egress.
-            let ingress_outcome = chain.run_ingress(name, JsonValue::Object(args_map.clone()));
+            let ingress_outcome = chain.run_ingress(name, JsonValue::Object(args_map));
 
             let now_millis = crate::dispatch::bench_clock_now();
             let result = crate::surface::execute(
