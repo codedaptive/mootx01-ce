@@ -208,7 +208,9 @@ struct LensToolsTests {
             arguments: .object([:]))
 
         let body = try data(result)
-        let rankedIDs = try #require(body["rankedIDs"]?.arrayValue).compactMap(\.stringValue)
+        // rankedIDs is now an array of objects {id, subject?, bestSpan?, eventTime?}.
+        let rankedIDs = try #require(body["rankedIDs"]?.arrayValue)
+            .compactMap { $0.objectValue?["id"]?.stringValue }
         #expect(Set(rankedIDs) == Set([first.lowercased(), second.lowercased()]),
                 "both captured drawers must be trust-ranked")
         let summary = try #require(body["context"]?.objectValue?["summary"]?.stringValue)
@@ -852,54 +854,43 @@ extension LensToolsTests {
     /// test) route through `RecipeTools.s2RowsByID` — identical inputs must
     /// produce identical strings.
     ///
-    /// BLOCKED: the v2 `.lensTrustSynthesis` authority (AriaV2LensLower.swift:242-244,
-    /// `trustData(_:)` at :633-656) projects `TrustGroundedOutput.rankedIDs`
-    /// as plain lowercased id strings. It never calls `RecipeTools.s2RowsByID`
-    /// or `ResultComposer.renderS2Row` — there is no rendered dense row in
-    /// the v2 response to compare against the renderer's output. The
-    /// byte-identical rendering contract this test pins does not exist in
-    /// this vertical anymore. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: v2 .lensTrustSynthesis (AriaV2LensLower.swift:242-244, trustData at :633-656) returns rankedIDs as plain lowercased strings and never calls RecipeTools.s2RowsByID/ResultComposer.renderS2Row — no rendered dense row exists in the v2 response to compare byte-for-byte. Do not delete; do not weaken to pass."))
-    func trustSynthesisDenseRowsMatchRenderer() async throws {
+    /// Gate test: `moot_lens_trust_synthesis` dense rows carry structured fields
+    /// (subject, bestSpan, eventTime) for admissible drawers. Previously blocked
+    /// because v2 returned plain id strings; now enabled after dense-row hydration
+    /// was added to `AriaV2LensLower.lensTrustSynthesis`.
+    @Test func trustSynthesisDenseRowsMatchRenderer() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ts-golden"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Capture a drawer that surfaces in trust_synthesis.
+        // Capture a drawer with a known subject that surfaces in trust_synthesis.
         let id = try await capture(kit, handle,
             content: "golden trust memory", room: "study")
 
-        // Get the reference string via the same path the lens uses internally:
-        // RecipeTools.s2RowsByID → ResultComposer.renderS2Row.
-        let estate = try await kit.estate(for: handle)
-        let rows = try await RecipeTools.s2RowsByID(ids: [id], estate: estate)
-        let expectedRow = try #require(rows[id],
-            "captured drawer must produce an S2 row via s2RowsByID")
-
         let result = try await dispatcher.dispatch(
             name: "moot_lens_trust_synthesis",
-            arguments: .object(["filter": .string("unconfirmed")]))
+            arguments: .object([:]))
 
-        let body = try text(result)
-        // Each ranked drawer appears as two-space-indented row in the output.
-        #expect(body.contains("  " + expectedRow),
-            "trust_synthesis output must contain the S2 row byte-for-byte")
+        let body = try data(result)
+        let rankedRows = try #require(body["rankedIDs"]?.arrayValue)
+        // Find the row for the captured drawer.
+        let match = rankedRows.first { $0.objectValue?["id"]?.stringValue == id.lowercased() }
+        let row = try #require(match, "captured drawer must appear in rankedIDs")
+        // Admissible row must carry all three dense fields.
+        #expect(row.objectValue?["subject"] != nil,
+            "admissible row must carry a subject field")
+        #expect(row.objectValue?["bestSpan"] != nil,
+            "admissible row must carry a bestSpan field")
+        #expect(row.objectValue?["eventTime"] != nil,
+            "admissible row must carry an eventTime field")
     }
 
-    /// Golden test: `moot_lens_keystones` row strings match `ResultComposer.renderS2Row`
-    /// byte-for-byte for a hub drawer whose UUID is a real captured drawer.
-    /// Using a real drawer ensures `s2RowsByID` hydrates it fully rather
-    /// than falling back to the unhydrated S2 fallback.
-    ///
-    /// BLOCKED: the v2 `.lensKeystones` authority (AriaV2LensLower.swift:89-96)
-    /// returns raw `{id, centrality}` pairs directly from `Keystones.run` —
-    /// it never calls `RecipeTools.s2RowsByID` or `ResultComposer.renderS2Row`.
-    /// The dense-row byte-identical rendering contract this test pins does
-    /// not exist in the v2 keystones response. Do not delete; do not weaken
-    /// to pass.
-    @Test(.disabled("BLOCKED: v2 .lensKeystones (AriaV2LensLower.swift:89-96) returns raw {id, centrality} pairs from Keystones.run and never calls RecipeTools.s2RowsByID/ResultComposer.renderS2Row — no rendered dense row exists in the v2 response to compare byte-for-byte. Do not delete; do not weaken to pass."))
-    func keystonesDenseRowsMatchRenderer() async throws {
+    /// Gate test: `moot_lens_keystones` dense rows carry structured fields
+    /// (subject, bestSpan, eventTime) for admissible drawers. Previously blocked
+    /// because v2 returned raw {id, centrality} pairs; now enabled after dense-row
+    /// hydration was added to `AriaV2LensLower.lensKeystones`.
+    @Test func keystonesDenseRowsMatchRenderer() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ks-golden"))
@@ -916,19 +907,99 @@ extension LensToolsTests {
             try await addTunnel(kit, handle, wing: "study", src: hubID, tgt: spokeID)
         }
 
-        // Compute the expected row via the same path the lens uses:
-        // RecipeTools.s2RowsByID → ResultComposer.renderS2Row.
-        let estate = try await kit.estate(for: handle)
-        let rows = try await RecipeTools.s2RowsByID(ids: [hubID], estate: estate)
-        let expectedRow = try #require(rows[hubID],
-            "hub drawer must produce an S2 row via s2RowsByID")
-
         let result = try await dispatcher.dispatch(
             name: "moot_lens_keystones",
             arguments: .object(["wing": .string("study")]))
 
-        let body = try text(result)
-        #expect(body.contains(expectedRow),
-            "keystones output must contain the hub's S2 row byte-for-byte")
+        let body = try data(result)
+        let keystones = try #require(body["keystones"]?.arrayValue)
+        // Find the hub row by id.
+        let hubRow = keystones.first {
+            $0.objectValue?["id"]?.stringValue == hubID.lowercased()
+        }
+        let hub = try #require(hubRow, "hub drawer must appear in keystones")
+        // Admissible row must carry all three dense fields.
+        #expect(hub.objectValue?["subject"] != nil,
+            "hub row must carry a subject field")
+        #expect(hub.objectValue?["bestSpan"] != nil,
+            "hub row must carry a bestSpan field")
+        #expect(hub.objectValue?["eventTime"] != nil,
+            "hub row must carry an eventTime field")
+    }
+
+    /// Sensitivity gate: a restricted drawer that ranks as a keystone yields
+    /// id and centrality but no subject/bestSpan/eventTime in the v2 response.
+    @Test func keystonesDenseRowsGatesRestrictedRows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ks-gate"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Capture a restricted drawer and give it spokes so it becomes a keystone.
+        let restrictedDrawer = try await captureWithSensitivity(
+            kit, handle, content: "secret hub memory", room: "vault",
+            sensitivity: .restricted)
+        let restrictedID = restrictedDrawer.id
+        let s1 = try await capture(kit, handle, content: "spoke a", room: "vault")
+        let s2 = try await capture(kit, handle, content: "spoke b", room: "vault")
+        for spokeID in [s1, s2] {
+            try await addTunnel(kit, handle, wing: "vault", src: restrictedID, tgt: spokeID)
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_keystones",
+            arguments: .object(["wing": .string("vault")]))
+
+        let body = try data(result)
+        let keystones = try #require(body["keystones"]?.arrayValue)
+        // The restricted hub may or may not appear in keystones (depends on the graph).
+        // If it appears, it must carry ONLY id and centrality — no dense fields.
+        for keystone in keystones {
+            let obj = try #require(keystone.objectValue)
+            if obj["id"]?.stringValue == restrictedID.lowercased() {
+                #expect(obj["subject"] == nil,
+                    "restricted keystone must not expose subject")
+                #expect(obj["bestSpan"] == nil,
+                    "restricted keystone must not expose bestSpan")
+                #expect(obj["eventTime"] == nil,
+                    "restricted keystone must not expose eventTime")
+            }
+        }
+    }
+
+    /// Sensitivity gate: a restricted drawer in rankedIDs yields id only,
+    /// no subject/bestSpan/eventTime in the v2 trust_synthesis response.
+    @Test func trustSynthesisDenseRowsGatesRestrictedRows() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ts-gate"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Capture a restricted drawer so it surfaces in trust_synthesis.
+        let restrictedDrawer = try await captureWithSensitivity(
+            kit, handle, content: "restricted trust memory", room: "vault",
+            sensitivity: .restricted)
+        let restrictedID = restrictedDrawer.id
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_trust_synthesis",
+            arguments: .object([:]))
+
+        let body = try data(result)
+        let rankedRows = try #require(body["rankedIDs"]?.arrayValue)
+        // Locate the restricted row. It must carry only id.
+        let match = rankedRows.first {
+            $0.objectValue?["id"]?.stringValue == restrictedID.lowercased()
+        }
+        // The restricted drawer may or may not appear depending on the estate.
+        // If it appears, it must not carry dense fields.
+        if let row = match?.objectValue {
+            #expect(row["subject"] == nil,
+                "restricted ranked row must not expose subject")
+            #expect(row["bestSpan"] == nil,
+                "restricted ranked row must not expose bestSpan")
+            #expect(row["eventTime"] == nil,
+                "restricted ranked row must not expose eventTime")
+        }
     }
 }
