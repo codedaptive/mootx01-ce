@@ -286,12 +286,19 @@ struct AriaV2DiagnosticsDispatchCoverageTests {
         defer { Task { try? await kit.close(handle) } }
 
         // winner_branch_id is required.  The decoder must throw JSONRPCError
-        // (invalidParams) before reaching the orchestration provider.
-        // A stub that silently ignores arguments and returns success would not
-        // throw, causing this test to fail.
-        await #expect(throws: JSONRPCError.self) {
+        // with code invalidParams (-32602) before reaching the orchestration provider.
+        // Asserting the specific error code discriminates against two failure modes
+        // that #expect(throws: JSONRPCError.self) would pass silently:
+        //   1. methodNotFound — the route was dropped from the v2 catalog entirely.
+        //   2. A stub returning success — would not throw at all.
+        do {
             _ = try await dispatcher.dispatch(
                 name: "moot_migration_confirm", arguments: .object([:]))
+            Issue.record("missing winner_branch_id must throw JSONRPCError invalidParams")
+        } catch let error as JSONRPCError {
+            #expect(
+                error.code == JSONRPCErrorCode.invalidParams,
+                "moot_migration_confirm must produce -32602 invalidParams for missing winner_branch_id; got code: \(error.code)")
         }
     }
 }
