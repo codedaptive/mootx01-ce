@@ -57,6 +57,15 @@ struct ModeSessionStateInner {
     coaching_calls_x: usize,
     /// The last-declared mode, or None.
     sticky_declaration: Option<ModeDeclaration>,
+    /// Transient slot bridging the pre-decode transform phase to the post-decode
+    /// ingress/egress hooks for the mode concern.
+    ///
+    /// Set by the transform hook in `aria_v2_pre_decode_registrations` (strips
+    /// `mode` from arguments, parses the declaration). Consumed by the mode ingress
+    /// hook (reads `unknown_hint` as per-concern state) and cleared by the coaching
+    /// ingress hook (calls `record_call` with the declaration). None when the
+    /// current call carried no `mode` argument or when the transform had a collision.
+    pending_declaration: Option<ModeDeclaration>,
     /// Total calls this session.
     total_call_count: usize,
     /// Calls per tool name.
@@ -76,6 +85,7 @@ impl ModeSessionStateInner {
             session_preference_bitmap: 0b01,
             coaching_calls_x: 25,
             sticky_declaration: None,
+            pending_declaration: None,
             total_call_count: 0,
             tool_call_counts: HashMap::new(),
             last_tool_name: None,
@@ -202,14 +212,45 @@ impl ModeSessionState {
     /// Return the current sticky Recall variant's answer mode raw value, or None
     /// when no sticky Recall=<variant> is set.
     ///
-    /// Called by `Dispatcher::tools_call` to override the `answer` arg default
-    /// before dispatching `moot_memory_search`.
+    /// Called by the mode concern's pre-decode transform hook in
+    /// `aria_v2_pre_decode_registrations` to inject `answer` into `moot_memory_search`
+    /// arguments when the per-call `answer` arg is absent.
     pub fn sticky_recall_answer_mode(&self) -> Option<&'static str> {
         let inner = self.inner.lock().expect("ModeSessionState lock poisoned");
         inner.sticky_declaration
             .as_ref()
             .and_then(|d| d.recognized_recall_variant())
             .map(|v| v.answer_mode_raw_value())
+    }
+
+    // MARK: - Pending declaration (transform → ingress stash)
+
+    /// Store a mode declaration parsed in the pre-decode transform phase, to be
+    /// consumed by the post-decode ingress hooks in `aria_v2_production_registrations`.
+    ///
+    /// Called by the mode concern's transform hook. The mode ingress hook reads it;
+    /// the coaching ingress hook clears it after calling `record_call`.
+    pub fn set_pending_declaration(&self, decl: Option<ModeDeclaration>) {
+        let mut inner = self.inner.lock().expect("ModeSessionState lock poisoned");
+        inner.pending_declaration = decl;
+    }
+
+    /// Return a clone of the pending declaration, or `None` when absent.
+    ///
+    /// Called by the mode ingress hook (position 5) and the coaching ingress hook
+    /// (position 10) in `aria_v2_production_registrations`.
+    pub fn pending_declaration(&self) -> Option<ModeDeclaration> {
+        let inner = self.inner.lock().expect("ModeSessionState lock poisoned");
+        inner.pending_declaration.clone()
+    }
+
+    /// Clear the pending declaration after it has been consumed by the ingress hooks.
+    ///
+    /// Called by the coaching ingress hook (position 10) in
+    /// `aria_v2_production_registrations` after reading the declaration for `record_call`.
+    pub fn clear_pending_declaration(&self) {
+        let mut inner = self.inner.lock().expect("ModeSessionState lock poisoned");
+        inner.pending_declaration = None;
     }
 
     /// Override the coaching cadence. Used by tests to trigger coaching quickly
