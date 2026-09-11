@@ -123,6 +123,11 @@ public struct AriaV2HelpService: Sendable {
                         "callable_tools": .array(record.callableTools.map(JSONValue.string)),
                     ])
                 }),
+                // Global modifiers are documented once here at the directory level,
+                // absent from every per-tool input schema and per-operation help.
+                // Byte-identical to the Rust GLOBAL_MODIFIERS_HELP_TEXT constant;
+                // pinned by Tests/Conformance/global_modifiers_help_fixture.json.
+                "global_modifiers": .string(Self.globalModifiersHelpText),
             ])
         }
         return AriaV2Envelope.success(
@@ -149,4 +154,17 @@ public struct AriaV2HelpService: Sendable {
             "intents": .array(operation.help.intents.map(JSONValue.string)),
         ])
     }
+
+    /// The global-modifiers help entry returned in the moot_help directory payload.
+    ///
+    /// Documented once here at the directory level. Absent from every per-tool input
+    /// schema and per-operation help text (the documented-once contract). Byte-identical
+    /// to the Rust `GLOBAL_MODIFIERS_HELP_TEXT` constant; pinned by
+    /// `Tests/Conformance/global_modifiers_help_fixture.json` in both ports.
+    static let globalModifiersHelpText: String =
+        "mode \u{2014} global modifier applied at the ARIA door before every operation decodes its arguments.\n" +
+        "Grammar: mode:\"Name\" sets the mode; mode:\"Name=Variant\" sets mode and variant; " +
+        "a bare name clears any prior variant for that mode; the last declaration on a call wins.\n" +
+        "Fail-open: an unknown mode name or variant is silently ignored and does not clobber existing sticky state.\n" +
+        "Excluded (own mode in their input schema): moot_reclassify_fdc, moot_palace_import, moot_vault_import."
 }
