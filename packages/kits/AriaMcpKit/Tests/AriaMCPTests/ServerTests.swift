@@ -287,6 +287,44 @@ struct ServerTests {
 
     // MARK: - tools/call: live verb with nonexistent ID surfaces as result-isError
 
+    /// `moot_erase_memory` for a memory ID with no matching drawer must return
+    /// a tool-call result with isError=true (not a JSON-RPC protocol error) so
+    /// AI clients can handle the failure gracefully.
+    ///
+    /// v2 reshape: `AriaV2EraseMemoryRequest.init` decodes `memory_id` via
+    /// `decoder.requireUUID`, so a non-UUID string (v1 used the bare string
+    /// "nonexistent-row-id") is rejected at the argument-decode boundary with
+    /// invalidParams before reaching the business-logic path this case targets.
+    /// A syntactically valid, freshly-generated UUID that matches no drawer in
+    /// the estate reaches the same "not found" refusal path v1 exercised —
+    /// `memoryMutations.erase` catches the lookup failure in `storedMemoryID`
+    /// and returns `unavailable("moot_erase_memory")`, an `AriaV2Envelope.refusal`
+    /// with isError:true (AriaV2MemoryMutations.swift:368-382).
+    @Test func testEraseMemoryForNonexistentIDReturnsIsError() async throws {
+        let dispatcher = try await makeDispatcher()
+        let nonexistentID = UUID().uuidString
+        let request = JSONRPCRequest(
+            id: .integer(20),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_erase_memory"),
+                "arguments": .object([
+                    "memory_id": .string(nonexistentID),
+                    "reason": .string("test erasure of nonexistent row"),
+                    "confirmation": .bool(true),
+                ]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_erase_memory returned JSON-RPC error: \(response.payload)")
+            return
+        }
+        let object = try #require(result.objectValue)
+        #expect(object["isError"] == .bool(true))
+    }
+
     // MARK: - tools/call: unknown tool
 
     @Test func testUnknownToolReturnsMethodNotFoundError() async throws {
@@ -354,6 +392,58 @@ struct ServerTests {
     /// so we test the override path by constructing a `ToolDispatcher` with
     /// an explicit `buildSerial` value (the same codepath the env override
     /// drives at server startup).
+    ///
+    /// v2 reshape: `moot_estate_ping` no longer renders "pong: estate ... —
+    /// build <serial>" into `content[0].text`. The live v2 path
+    /// (`ToolDispatcher.dispatch` → `estateDiagnostics.ping(arguments:)`,
+    /// ToolDispatch.swift:848-849) is `AriaV2EstateDiagnostics.ping`
+    /// (AriaV2EstateDiagnostics.swift:326-338), whose `compactText` is the
+    /// generic "moot_estate_ping completed for estate <uuid>."
+    /// (AriaV2EstateDiagnostics.swift:402) — the serial is carried only in
+    /// `structuredContent.data.build_serial`
+    /// (AriaV2EstateDiagnostics.swift:410-418, `AriaV2EstatePingData.json`).
+    /// `buildSerial` IS still threaded end to end (ToolDispatch.swift:713
+    /// passes it into `AriaV2EstateDiagnosticsContext`), so the behavior
+    /// converts — the assertion moves from text to the structured field
+    /// that now carries it. The dead legacy runner `runEstatePing`
+    /// (ToolDispatch.swift:3850, still containing the old "build \(serial)"
+    /// text) is unreachable from `ToolDispatcher.dispatch(name:arguments:)`:
+    /// its only caller, `InterfaceTools.dispatch`, has zero call sites in
+    /// Sources/.
+    @Test func testEstatePingHonorsBuildSerialOverride() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-serial-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        // Inject a known serial to simulate MOOTX01_BUILD_SERIAL=ABC123.
+        let knownSerial = "ABC123"
+        let tooling = ToolDispatcher(kit: kit, handle: handle, buildSerial: knownSerial)
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+
+        let request = JSONRPCRequest(
+            id: .integer(61),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_estate_ping"),
+                "arguments": .object([:]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("estate_ping returned error: \(response.payload)")
+            return
+        }
+        // The known serial must appear verbatim in the structured data field.
+        let data = result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        #expect(data?["build_serial"] == .string(knownSerial),
+                "estate_ping must echo the injected serial 'ABC123' in structuredContent.data.build_serial; got: \(String(describing: data?["build_serial"]))")
+    }
 
     // MARK: - Version-skew advisory
 
@@ -361,6 +451,44 @@ struct ServerTests {
     /// and `moot_estate_status` surface it verbatim under a `version_skew:`
     /// line. The default (`nil`) case is covered implicitly by every other
     /// test in this file — none of them mention "version_skew".
+    ///
+    /// v2 reshape: BLOCKED — see the `.disabled` case below.
+    @Test(.disabled("BLOCKED: v2 moot_estate_ping/moot_estate_status never read ToolDispatcher.versionSkewAdvisory at all. The production path (ToolDispatch.swift:848-851, estateDiagnostics.ping/status) is AriaV2EstateDiagnostics backed by AriaV2EstateDiagnosticsContext (AriaV2EstateDiagnostics.swift:12-41), which has no version-skew field, and ToolDispatch.swift:705-714 does not pass versionSkewAdvisory into that context at all. The only code that renders 'version_skew: <advisory>' is the dead legacy runEstateStatus/runEstatePing (ToolDispatch.swift:3621-3622, 3863-3864), unreachable from ToolDispatcher.dispatch(name:arguments:) — their only caller InterfaceTools.dispatch has zero call sites in Sources/. Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. Do not delete; do not weaken to pass."))
+    func testVersionSkewAdvisorySurfacesInPingAndStatus() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-skew-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        let advisory = "plugin 1.0.15 expects binary ≥ 1.0.15; binary is 1.0.11 — run `mootx01 upgrade`"
+        let tooling = ToolDispatcher(kit: kit, handle: handle, versionSkewAdvisory: advisory)
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+
+        for toolName in ["moot_estate_ping", "moot_estate_status"] {
+            let request = JSONRPCRequest(
+                id: .integer(62),
+                method: "tools/call",
+                params: .object([
+                    "name": .string(toolName),
+                    "arguments": .object([:]),
+                ])
+            )
+            let rawResponse = await dispatcher.handle(request)
+            let response = try #require(rawResponse)
+            guard case .result(let result) = response.payload else {
+                Issue.record("\(toolName) returned error: \(response.payload)")
+                continue
+            }
+            let content = try #require(result.objectValue?["content"]?.arrayValue)
+            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+            #expect(text.contains("version_skew: \(advisory)"),
+                    "\(toolName) must surface the injected version-skew advisory; got: \(text)")
+        }
+    }
 
     /// The default (no advisory injected) case must not mention
     /// `version_skew` at all — the field is opt-in, not a fixed empty slot.
@@ -395,6 +523,47 @@ struct ServerTests {
     /// the field out entirely, mirroring version_skew's opt-in shape. The
     /// no-provider default is covered implicitly by every other test in
     /// this file — none of them mention "update_available".
+    ///
+    /// v2 reshape: BLOCKED — see the `.disabled` case below.
+    @Test(.disabled("BLOCKED: v2 moot_estate_ping/moot_estate_status never read ToolDispatcher.updateAdvisoryProvider at all. Same wiring gap as testVersionSkewAdvisorySurfacesInPingAndStatus: AriaV2EstateDiagnosticsContext (AriaV2EstateDiagnostics.swift:12-41) carries no update-advisory field, and ToolDispatch.swift:705-714 does not pass updateAdvisoryProvider into it. The only code path that renders 'update_available: <line>' is the dead legacy runEstateStatus/runEstatePing (ToolDispatch.swift:3624-3630, 3870), unreachable from ToolDispatcher.dispatch(name:arguments:) via the dead InterfaceTools.dispatch. Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. Do not delete; do not weaken to pass."))
+    func testUpdateAdvisorySurfacesInPingAndStatus() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-update-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        let line = "v9.9.9 is available (installed 1.0.33) — upgrade with `mootx01 upgrade`"
+        let tooling = ToolDispatcher(
+            kit: kit, handle: handle,
+            updateAdvisoryProvider: { line }
+        )
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
+
+        for toolName in ["moot_estate_ping", "moot_estate_status"] {
+            let request = JSONRPCRequest(
+                id: .integer(64),
+                method: "tools/call",
+                params: .object([
+                    "name": .string(toolName),
+                    "arguments": .object([:]),
+                ])
+            )
+            let rawResponse = await dispatcher.handle(request)
+            let response = try #require(rawResponse)
+            guard case .result(let result) = response.payload else {
+                Issue.record("\(toolName) returned error: \(response.payload)")
+                continue
+            }
+            let content = try #require(result.objectValue?["content"]?.arrayValue)
+            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+            #expect(text.contains("update_available: \(line)"),
+                    "\(toolName) must surface the provider's update advisory; got: \(text)")
+        }
+    }
 
     /// A wired provider that answers nil (the common up-to-date case) must
     /// leave `update_available` out entirely — opt-in field, never an empty
@@ -651,6 +820,27 @@ struct ServerFirstPartyProductToolTests {
         }
         #expect(error.code == JSONRPCErrorCode.methodNotFound)
         #expect(await spy.calls.isEmpty)
+    }
+
+    /// v2 reshape: BLOCKED — see the `.disabled` case below.
+    @Test(.disabled("BLOCKED: v2 Server.swift no longer consults firstPartyHandler at all. toolsList() (Server.swift:412-416) unconditionally returns self.tools ('The v2 catalog is the complete visible surface... the dispatcher rejects them') and toolsCall() (Server.swift:440-469) unconditionally falls through to `tooling` (throwing methodNotFound when tooling is nil, per the community-only init at Server.swift:182-193) — neither path ever calls firstPartyHandler.isFirstPartyTool or reads firstPartyToolList/firstPartyIdentity. Verified at runtime: with an attached identity, listedNames(authenticated) returns [] (not [\"fulcrum.context.read\"]) and the tools/call for the product tool returns methodNotFound, not a result. The dynamic first-party product-tool routing this case tests has been unwired from v2's dispatch surface entirely. Do not delete; do not weaken to pass."))
+    func firstPartyDispatchRoutesProductTools() async throws {
+        let spy = FirstPartyToolHandlerSpy()
+        let authenticated = dispatcher(spy).withFirstPartyIdentity(identity())
+        #expect(try await listedNames(authenticated) == ["fulcrum.context.read"])
+        let response = try #require(await authenticated.handle(JSONRPCRequest(
+            id: .integer(3), method: "tools/call",
+            params: .object([
+                "name": .string("fulcrum.context.read"),
+                "arguments": .object(["outline": .string("life")]),
+            ])
+        )))
+        guard case .result(let value) = response.payload else {
+            Issue.record("first-party product call did not return a result")
+            return
+        }
+        #expect(value.objectValue?["source"]?.stringValue == "product")
+        #expect(await spy.calls == ["fulcrum.context.read"])
     }
 
     @Test("publicLane strips product tools even from an identity-bearing dispatcher")
