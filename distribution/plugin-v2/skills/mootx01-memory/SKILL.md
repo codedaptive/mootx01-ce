@@ -25,7 +25,6 @@ Replace angle-bracket placeholders with the user's values or actual returned ide
 | Exact wording, identifiers, paths, or versions | `moot_recall_precise` | `{"query":"<exact wording>"}`; use get when the memory UUID is known. |
 | Sources connected from a known memory | `moot_connection_search` | `{"memory_id":"<memory UUID>","direction":"outgoing"}`. |
 | Memories within a supplied date range | `moot_recall_temporal` | `{"query":"<topic>","window":"tight","grab":"dated","from":"<start timestamp>","to":"<end timestamp>"}`. |
-| A predecessor packet with a known drawer identity | `moot_packet_get` | `{"drawer_id":"<packet drawer UUID>"}`. |
 | Complete memory inventory | `moot_memory_list` | `{"wing":"<wing>"}`, then follow every returned continuation cursor. |
 | Rows from a known dataset | `moot_dataset_query` | `{"dataset_id":"<dataset UUID>"}` plus the requested typed predicate, order and columns. |
 | Authorized durable capture | `moot_file_memory` | `{"content":"<content>","subject":"<subject>","location":"<room>"}`; use the requested placement or a suitable room name. |
