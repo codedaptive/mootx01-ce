@@ -588,6 +588,7 @@ mod tests {
                 &V2JsonImportRequest {
                     path: missing.display().to_string(),
                     estate_id: None,
+                    return_id_map: false,
                 },
             ),
             Err(()),
@@ -600,7 +601,7 @@ mod tests {
         let lower = DirectDataMobilityLower::new(&registry);
         let path = std::env::temp_dir().join(format!("aria-v2-json-retry-{}.json", Uuid::new_v4()));
         std::fs::write(&path, "{not-json").expect("write malformed seed");
-        let request = V2JsonImportRequest { path: path.display().to_string(), estate_id: None };
+        let request = V2JsonImportRequest { path: path.display().to_string(), estate_id: None, return_id_map: false };
         assert_eq!(lower.json_import(&admission(&registry), &request), Err(()));
         std::fs::write(&path, r#"{"format_version":1,"name":"retry","records":[{"id":"once","content":"corrected retry","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"}]}"#)
             .expect("write corrected seed");
