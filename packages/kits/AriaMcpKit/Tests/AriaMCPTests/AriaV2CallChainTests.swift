@@ -32,6 +32,7 @@ struct AriaV2CallChainTests {
         let args: JSONValue = .object(["query": .string("x")])
         let result: JSONValue = .string("original")
 
+        let transform = await chain.runTransform(toolName: "moot_memory_search", arguments: args)
         let ingress = await chain.runIngress(toolName: "moot_memory_search", arguments: args)
         let egress = await chain.runEgress(
             toolName: "moot_memory_search",
@@ -39,6 +40,8 @@ struct AriaV2CallChainTests {
             ingressOutcome: ingress
         )
 
+        #expect(transform.arguments == args)
+        #expect(transform.failures.isEmpty)
         #expect(ingress.arguments == args)
         #expect(egress.result == result)
         #expect(egress.halt == .none)
@@ -48,7 +51,10 @@ struct AriaV2CallChainTests {
 
     // MARK: 2
 
-    @Test func ingressStripsKeyAndTheDecoderNeverSeesIt() async throws {
+    // The transform phase runs before argument decode so a hook can remove a key
+    // the strict decoder rejects. The ingress (record) phase runs after decode
+    // and must not be used for pre-decode argument mutation.
+    @Test func transformStripsKeyAndTheDecoderNeverSeesIt() async throws {
         let rawArgs: JSONValue = .object(["query": .string("x"), "echo_query": .bool(true)])
 
         // Half 1: decode without the chain — must fail, error must name echo_query.
@@ -69,22 +75,22 @@ struct AriaV2CallChainTests {
             #expect(Bool(false), "Unexpected error type thrown by AriaV2ArgumentDecoder: \(error)")
         }
 
-        // Half 2: run ingress that strips echo_query, then decode — must succeed.
+        // Half 2: run transform that strips echo_query, then decode — must succeed.
         let chain = try AriaV2CallChain(registrations: [
             AriaV2ChainRegistration(
                 concernName: "echo-query-stripper",
-                ingress: (
+                transform: (
                     position: 10,
                     hook: { _, args in
-                        guard case .object(var dict) = args else { return (args, nil) }
+                        guard case .object(var dict) = args else { return args }
                         dict.removeValue(forKey: "echo_query")
-                        return (.object(dict), nil)
+                        return .object(dict)
                     }
                 )
             )
         ])
 
-        let outcome = await chain.runIngress(toolName: "moot_memory_search", arguments: rawArgs)
+        let outcome = await chain.runTransform(toolName: "moot_memory_search", arguments: rawArgs)
         // The stripped arguments must decode cleanly with only "query" allowed.
         let decoder = try AriaV2ArgumentDecoder(outcome.arguments, allowedKeys: ["query"])
         // If we reach this line, decode succeeded. Verify the retained key is there.
@@ -529,6 +535,29 @@ struct AriaV2CallChainTests {
                 AriaV2ChainRegistration(
                     concernName: "concern-b",
                     egress: (position: 10, hook: .transform({ _, r, _ in r }))
+                )
+            ])
+        }
+    }
+
+    // MARK: 15
+
+    // Each phase has its own position space. A collision within the transform
+    // phase is caught at chain construction, the same way ingress and egress
+    // collisions are caught.
+    @Test func duplicateTransformPositionsAreRejectedAtRegistration() throws {
+        #expect(
+            throws: AriaV2CallChainError.duplicateTransformPosition(10),
+            "Expected duplicateTransformPosition error"
+        ) {
+            try AriaV2CallChain(registrations: [
+                AriaV2ChainRegistration(
+                    concernName: "concern-a",
+                    transform: (position: 10, hook: { _, args in args })
+                ),
+                AriaV2ChainRegistration(
+                    concernName: "concern-b",
+                    transform: (position: 10, hook: { _, args in args })
                 )
             ])
         }
