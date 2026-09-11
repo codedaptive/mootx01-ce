@@ -194,10 +194,15 @@ struct AriaV2LensDispatchCoverageTests {
             name: "moot_lens_overlap",
             arguments: .object(["comparison_estate_id": .string("33333333-3333-4333-8333-333333333333")]))
         // CURRENT BEHAVIOUR: always isError:true (lower-authority refusal, not a throw).
-        // This assertion discriminates: it would FAIL if the wiring bug were fixed
-        // and overlap started succeeding — the test would then need updating to a
-        // happy-path assertion.
+        // The assertion on isError alone would pass if a stub handler returned any
+        // isError:true result — including one with a wrong error code.  Asserting the
+        // specific error code ensures the comparisonHandle() refusal path ran, not a
+        // different failure.
         #expect(isError(result), "overlap must return isError:true when comparisonHandles is empty (current behaviour); got: \(result)")
+        let errorCode = result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]?.stringValue
+        #expect(
+            errorCode == "lens_unavailable",
+            "overlap refusal must carry code lens_unavailable (comparisonHandle refusal path); got: \(String(describing: errorCode))")
     }
 
     // MARK: - Error paths (dispatch() throws for missing required args)
