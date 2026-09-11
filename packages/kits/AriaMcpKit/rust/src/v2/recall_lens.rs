@@ -985,10 +985,18 @@ pub fn execute_shaped_recall(
     let nodes = recipe_nodes(coordinator, handle, &drawers);
     let preset = request.optional_string("preset").unwrap_or("balanced");
     if !genius_locus_kit::recall::RecallShape::PRESET_NAMES.contains(&preset) {
-        return Err(V2PreciseRecallFailure::Invalid(V2InvalidArgument::new(
-            "$.preset",
-            "is not a known shaped-recall preset",
-        )));
+        // Presets are a closed set, so the refusal carries it. Composition, the
+        // sibling check in this file, already did; this one did not, leaving a
+        // caller with a name to guess rather than a list to pick from.
+        return Err(V2PreciseRecallFailure::Invalid(
+            V2InvalidArgument::new("$.preset", "is not a known shaped-recall preset")
+                .allowed(
+                    genius_locus_kit::recall::RecallShape::PRESET_NAMES
+                        .iter()
+                        .map(|name| (*name).to_owned()),
+                )
+                .correction("use one of the documented preset names"),
+        ));
     }
     // frontier_k: thread candidate-pool depth override through to the engine when supplied.
     // Absent means the engine default formula; the engine clamps to [64, 256] regardless.
