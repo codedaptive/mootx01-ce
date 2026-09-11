@@ -366,19 +366,49 @@ struct TunnelLifecycleDisclosureTests {
     // tunnels array in structuredContent.data.memories[0] must be empty
     // when only non-active-lifecycle tunnels are present.
     //
-    // Far endpoints in these tests are bare UUIDs (not real captured drawers).
-    // The lifecycle filter operates at the SQL layer and rejects non-active
-    // tunnels before the endpoint-resolution step, so the bare-UUID target does
-    // not affect which predicate eliminates the tunnel — it is excluded by
-    // lifecycle, not by endpoint invisibility.
+    // Far endpoints are REAL drawers captured at normal sensitivity (below the
+    // default elevated ceiling). This is load-bearing: a bare UUID that is not
+    // in the estate is dropped by the far-endpoint visibility check in
+    // loadTunnels regardless of lifecycle, so a bare-UUID test passes even when
+    // the lifecycle filter is deleted. A real normal-sensitivity far endpoint
+    // means the visibility check passes, and the only gate that can exclude the
+    // tunnel is the lifecycle filter — which is what these tests cover.
+    //
+    // Positive control: an active tunnel to the same real far endpoint DOES appear
+    // (proves the insert path reaches the code under test).
+
+    /// Positive control: an active tunnel to a real far endpoint appears in depth:full.
+    @Test("memory_get includes active tunnel to real far endpoint (FIND4, positive control)")
+    func memoryGetIncludesActiveTunnel() async throws {
+        let harness = try await makeHarness()
+        let drawer = try await captureDrawer(in: harness)
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-active", room: "find4/far", in: harness)
+        try await harness.estate.addTunnel(
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .active)
+        )
+
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
+        #expect(
+            tunnels?.isEmpty == false,
+            "active tunnel to a real far endpoint must appear in memory_get tunnels; got: \(String(describing: tunnels))"
+        )
+        let farID = tunnels?.first?.objectValue?["far_endpoint_id"]?.stringValue
+        #expect(
+            farID?.lowercased() == farEndpoint.id.lowercased(),
+            "tunnel far_endpoint_id must reference the real far endpoint; got: \(String(describing: farID))"
+        )
+    }
 
     @Test("memory_get excludes proposed tunnels from depth:full tunnel rows (FIND4, v2 structural)")
     func memoryGetExcludesProposedTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
-        let otherID = UUID().uuidString
+        // Real far endpoint at normal sensitivity — visibility check passes so
+        // only the lifecycle filter can drop the tunnel.
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-proposed", room: "find4/far", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .proposed)
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .proposed)
         )
 
         let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
@@ -393,9 +423,11 @@ struct TunnelLifecycleDisclosureTests {
     func memoryGetExcludesWithdrawnTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
-        let otherID = UUID().uuidString
+        // Real far endpoint at normal sensitivity — visibility check passes so
+        // only the lifecycle filter can drop the tunnel.
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-withdrawn", room: "find4/far", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .withdrawn)
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .withdrawn)
         )
 
         let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
@@ -410,9 +442,11 @@ struct TunnelLifecycleDisclosureTests {
     func memoryGetExcludesSupersededTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
-        let otherID = UUID().uuidString
+        // Real far endpoint at normal sensitivity — visibility check passes so
+        // only the lifecycle filter can drop the tunnel.
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-superseded", room: "find4/far", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .superseded)
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .superseded)
         )
 
         let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
