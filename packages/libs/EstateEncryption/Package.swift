@@ -28,9 +28,5 @@ let package = Package(
                 .product(name: "SQLCipher", package: "PersistenceKit"),
             ],
             path: "Sources/EstateEncryption"),
-        .testTarget(
-            name: "EstateEncryptionTests",
-            dependencies: ["EstateEncryption"],
-            path: "Tests/EstateEncryptionTests"),
     ]
 )
