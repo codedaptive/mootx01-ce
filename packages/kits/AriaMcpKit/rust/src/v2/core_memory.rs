@@ -629,8 +629,12 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
                     let cit = block.citation_ids.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
                     lines.push(format!("citations: {cit}"));
                 }
+                // Use {:?} (Debug format) for f64 to match Swift's shortest-form
+                // double representation: 1.0 → "1.0", 0.8 → "0.8".
+                // Rust's Display ({}) formats whole-number f64 without the
+                // decimal point (1.0 → "1"), which diverges from Swift's output.
                 lines.push(format!(
-                    "signals: margin={} lane_agreement={} dense_spread={} containment={}",
+                    "signals: margin={:?} lane_agreement={:?} dense_spread={:?} containment={}",
                     block.signals_m1, block.signals_m2, block.signals_m3, block.signals_m4,
                 ));
                 format!("{}\n{}", lines.join("\n"), found_part)
