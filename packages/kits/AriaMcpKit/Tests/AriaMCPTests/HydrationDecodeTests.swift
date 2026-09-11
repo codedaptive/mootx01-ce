@@ -131,7 +131,7 @@ struct HydrationDecodeTests {
     /// v2 does name the offending value in the message
     /// (`unsupportedHydration("ultraHydrated")`), which is correct, but the code
     /// classification is wrong. The message assertion must also pass on re-enable.
-    @Test(.disabled("BLOCKED: v2 wraps unsupportedHydration as operation_failed (ToolDispatch.swift:884) instead of invalidParams; caller cannot distinguish bad value from server failure. AriaV2OrchestrationLower.swift:262 is the throw site. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED on error class). The class is fixed: a bad argument value no longer reports as operation_failed. ToolDispatch.swift now answers a syntax error with a distinct `invalid_argument` refusal carrying the offending argument, its value and retryable:false, so the caller can tell \"I wrote the call wrong\" from \"the estate is unavailable\". What this case still wants is the v1 TRANSPORT — a thrown JSONRPCError — and v2 answers structurally through the envelope instead, which is the shape the sibling cases testShapedRecallUnknownPresetFailsClosed and testPreciseRecallUnknownCompositionFailsClosed already assert. Note v1 was inconsistent here: bad preset returned an isError envelope while bad hydration_level threw. Redirecting this assertion to the envelope is a like-for-like conversion and belongs to the conversion lane. Do not delete; do not weaken to pass."))
     func unknownHydrationLevelStringThrowsInvalidParams() async throws {
         let (dispatcher, requesterID) = try await makeDispatcher()
         do {
