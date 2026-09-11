@@ -267,6 +267,73 @@ struct MemoryGetTests {
             "far_endpoint_id must reference the linked target drawer; got: \(String(describing: farID))")
     }
 
+    /// Disclosure gate: tunnel to a restricted far endpoint is withheld when
+    /// no grant is active, and appears when a restricted grant is live.
+    ///
+    /// Two cases, both asserted:
+    ///   1. No grant — restricted far endpoint: the tunnel is withheld entirely;
+    ///      far_endpoint_id is absent because the whole tunnel row is absent.
+    ///   2. Restricted grant — same far endpoint: the tunnel appears with far_endpoint_id.
+    ///
+    /// Gate discipline: `#require` on the source drawer row ensures assertions
+    /// run even when the tunnels array is empty — zero assertions would not
+    /// prove anything.
+    @Test func tunnelDisclosureGatesRestrictedFarEndpoint() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "mg-tunnel-disclosure")
+        let handle = try await openEstate(in: kit, owner: owner)
+        let source = try await seed("source for disclosure gate", room: "mg-disclosure", in: handle, kit: kit)
+        // Far endpoint is restricted — above the default elevated ceiling.
+        let restricted = try await seed("restricted far endpoint", room: "mg-disclosure",
+            sensitivity: .restricted, in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        // Link source → restricted so the tunnel is filed.
+        let link = try await dispatcher.dispatch(
+            name: "moot_link_memories",
+            arguments: .object([
+                "from_id": .string(source.id),
+                "to_id": .string(restricted.id),
+                "relationship": .string("relates"),
+            ])
+        )
+        #expect(!isError(link), "link must succeed; the far endpoint exists in the estate")
+
+        // Case 1 — no grant.
+        // The far endpoint's sensitivity (.restricted) exceeds the default ceiling
+        // (.elevated), so loadTunnels drops the tunnel entirely.
+        // The source drawer IS found (verify with #require so the assertion runs).
+        let noGrantResult = try await dispatcher.dispatch(
+            name: "moot_memory_get", arguments: getArgs(id: source.id))
+        let sc1 = noGrantResult.objectValue?["structuredContent"]?.objectValue
+        let firstMemory1 = try #require(
+            sc1?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue,
+            "source drawer must be found even with no grant")
+        let tunnels1 = firstMemory1["tunnels"]?.arrayValue
+        // The restricted far endpoint causes the tunnel to be withheld entirely.
+        #expect(tunnels1?.isEmpty == true,
+            "tunnel to a restricted far endpoint must be withheld when no grant is active; got: \(String(describing: tunnels1))")
+
+        // Case 2 — restricted grant active.
+        // With a grant the ceiling rises to .restricted, the far endpoint becomes
+        // visible, and the tunnel appears with its far_endpoint_id.
+        let now = Date()
+        await dispatcher.sensitivityUnlockLedger.grantRestricted(now: now, calendar: .current)
+
+        let grantResult = try await dispatcher.dispatch(
+            name: "moot_memory_get", arguments: getArgs(id: source.id))
+        let sc2 = grantResult.objectValue?["structuredContent"]?.objectValue
+        let firstMemory2 = try #require(
+            sc2?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue,
+            "source drawer must be found with a restricted grant")
+        let tunnels2 = firstMemory2["tunnels"]?.arrayValue
+        let tunnel = try #require(tunnels2?.first?.objectValue,
+            "tunnel to the restricted far endpoint must appear under a restricted grant; got: \(String(describing: tunnels2))")
+        let farID = tunnel["far_endpoint_id"]?.stringValue
+        #expect(farID?.lowercased() == restricted.id.lowercased(),
+            "far_endpoint_id must reference the restricted far endpoint under a grant; got: \(String(describing: farID))")
+    }
+
     // MARK: - 2. Not-found: genuinely absent id
 
     @Test func notFoundThrowsStandardStructuredError() async throws {
