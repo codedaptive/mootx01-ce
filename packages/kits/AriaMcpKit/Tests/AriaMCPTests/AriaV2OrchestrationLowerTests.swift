@@ -79,11 +79,16 @@ struct AriaV2OrchestrationLowerTests {
     }
 
     /// Drives `moot_federated_recall` through `ToolDispatcher` with a real grant
-    /// in place. Verifies that content planted in the source estate surfaces in
-    /// `structuredContent.data.results[*].excerpt` — the dispatcher path, not the
-    /// lower provider seam. The v1 test drove `provider.federatedSearch()` directly;
-    /// the v2 conversion uses `ToolDispatcher.registering(_:)` to register the
-    /// source, then dispatches through the production tool surface.
+    /// in place. Verifies that the grant receipt fields (source_estate_id,
+    /// requester_estate_id, grant_id) appear in `structuredContent.data`, and
+    /// that content planted in the source estate surfaces in
+    /// `structuredContent.data.results[*].excerpt`.
+    ///
+    /// Uses `ToolDispatcher.registering(_:)` to wire the source estate into
+    /// the dispatcher's internal federation map, then dispatches through
+    /// `ToolDispatcher.dispatch(name:arguments:)` — the production tool surface.
+    /// `AriaV2FederatedSearchData.json` serialises the receipt fields as
+    /// snake_case canonical (lowercase) UUID strings in `structuredContent.data`.
     @Test("federated lower returns an actual registered peer grant receipt")
     func federatedLowerUsesAuthorizedPeer() async throws {
         let kit = GeniusLocusKit()
@@ -100,8 +105,8 @@ struct AriaV2OrchestrationLowerTests {
         let source = try await kit.open(
             storage: sourceStorage, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: true)
-        // Source grants whole-estate read to the requester; capture the receipt
-        // so we can assert the exact grantID returned by the lower engine.
+        // Source grants whole-estate read to the requester; capture the grant id
+        // so we can assert the exact grant_id surfaced in structuredContent.data.
         let grant = try await kit.issueGrant(source, GrantOptions(
             granteeEstateID: requester.estateUUID,
             scope: .wholeEstate,
@@ -118,32 +123,40 @@ struct AriaV2OrchestrationLowerTests {
             subject: "peer-only-v2-federation-row"
         ))
 
-        // Drive the lower engine directly so the receipt fields (sourceEstateID,
-        // requesterEstateID, grantID) are visible without JSON round-tripping.
-        let provider = AriaV2GeniusLocusOrchestrationProvider(
-            kit: kit, handle: requester, federationSources: [requester, source])
-        let data = try await provider.federatedSearch(
-            AriaV2FederatedSearchRequest(arguments: .object([
+        // Route through the production dispatcher. registering(source) wires the
+        // source estate into the dispatcher's federation map so the orchestration
+        // provider receives it as a federation source. The dispatcher path (not the
+        // lower provider seam) is what live MCP clients exercise.
+        let dispatcher = ToolDispatcher(kit: kit, handle: requester).registering(source)
+        let result = try await dispatcher.dispatch(
+            name: "moot_federated_recall",
+            arguments: .object([
                 "filter": .string("unconfirmed"),
                 "hydration_level": .string("full"),
-            ])),
-            context: .init(
-                estateID: requester.estateUUID,
-                serverIdentity: "aria-v2-test",
-                sessionID: "federation-test"
-            )
-        )
+            ]))
 
-        // Receipt fields: the lower engine must identify the exact source estate,
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let data = try #require(
+            obj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "structuredContent.data must be present for moot_federated_recall")
+
+        // Receipt fields: the dispatcher must propagate the exact source estate,
         // requester estate, and grant that authorised the search.
-        #expect(data.sourceEstateID == source.estateUUID)
-        #expect(data.requesterEstateID == requester.estateUUID)
-        #expect(data.grantID == grant.grant.id)
-        // Content: the planted row must appear in the results via excerpt
-        // (compactMemory populates excerpt from drawer.content, not context).
+        // AriaV2FederatedSearchData.json serialises these as lowercase UUID strings.
+        #expect(data["source_estate_id"]?.stringValue == source.estateUUID.uuidString.lowercased(),
+                "source_estate_id must match the source estate UUID")
+        #expect(data["requester_estate_id"]?.stringValue == requester.estateUUID.uuidString.lowercased(),
+                "requester_estate_id must match the requester estate UUID")
+        #expect(data["grant_id"]?.stringValue == grant.grant.id.uuidString.lowercased(),
+                "grant_id must match the issued grant UUID")
+
+        // Content: the planted row must appear in a result excerpt (compactMemory
+        // populates excerpt from drawer.content, not context).
+        let results = try #require(data["results"]?.arrayValue, "data.results must be an array")
         #expect(
-            data.results.contains { $0.excerpt?.contains("peer-only-v2-federation-row") == true },
-            "federated recall must surface content from the peer estate; results: \(data.results)")
+            results.contains { $0.objectValue?["excerpt"]?.stringValue?.contains("peer-only-v2-federation-row") == true },
+            "federated recall must surface content from the peer estate; results: \(results)")
     }
 
     @Test("a federation response carries the lower engine grant identity")
