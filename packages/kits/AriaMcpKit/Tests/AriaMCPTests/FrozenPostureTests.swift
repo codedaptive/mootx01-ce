@@ -298,6 +298,71 @@ struct FrozenDispatcherTests {
         #expect(firstText(gone).contains("does not exist"), "the deleted file must be gone; got: \(firstText(gone))")
     }
 
+    // MARK: - Read path writes nothing — BLOCKED (v2 dropped dereference reward-marking)
+    //
+    // v1: live search seeds trace rows; a frozen search adds none, and a
+    // frozen dereference (`moot_memory_get`) leaves the reward mark
+    // untouched — probed via `kit.markRecallUsed` returning a non-zero
+    // "still eligible to be flipped" count. This discriminates frozen from
+    // live: a LIVE dereference is expected to mark the row (make
+    // `markRecallUsed` return 0 the second time), while a FROZEN one must
+    // not.
+    //
+    // In v2, `moot_memory_get`'s production path
+    // (`AriaV2MemoryOperations.get`, AriaV2MemoryOperations.swift:756-782)
+    // calls `context.usageLedger.recordDereferenced(...)` at line 767, but
+    // every concrete `AriaV2MemoryUsageLedger` wired to it is a no-op:
+    // the default implementation is an empty body
+    // (`public func recordDereferenced(...) async {}`,
+    // AriaV2MemoryOperations.swift:50), and the dispatcher's own
+    // `DispatcherV2MemoryUsageLedger.recordDereferenced`
+    // (ToolDispatch.swift:37) explicitly discards its arguments
+    // (`_ = (memoryIDs, estateID, callerID, at)`) with a doc comment stating
+    // "Reward marking remains owned by the established typed GLK path; this
+    // adapter does not invent a second session store or mutate recall state
+    // during a read." The only code that actually calls `kit.markRecallUsed`
+    // on a dereference is `noteUsage(_:handle:)` (ToolDispatch.swift:2671-2688),
+    // called exclusively from the dead legacy `runMemoryGet`
+    // (ToolDispatch.swift:2402, line 2611), unreachable from
+    // `ToolDispatcher.dispatch(name:arguments:)`.
+    //
+    // The result: `moot_memory_get` never marks the reward bit in v2,
+    // whether the dispatcher is live or frozen. The v1 probe
+    // (`unmarked > 0` after a dereference) would now be true in BOTH
+    // postures, so it no longer discriminates frozen behavior from live
+    // behavior — the property this case exists to prove (frozen is MORE
+    // restrictive than live here) cannot be demonstrated against v2, because
+    // live is no longer less restrictive on this path. Do not delete; do
+    // not weaken to pass.
+
+    @Test(.disabled("BLOCKED: v2 moot_memory_get never marks the dereference reward bit on ANY posture — context.usageLedger.recordDereferenced (called at AriaV2MemoryOperations.swift:767) is a no-op in every concrete implementation (default empty body at AriaV2MemoryOperations.swift:50; DispatcherV2MemoryUsageLedger.recordDereferenced at ToolDispatch.swift:37 explicitly discards its arguments). The only live call to kit.markRecallUsed is noteUsage() (ToolDispatch.swift:2671-2688), reachable only from the dead legacy runMemoryGet (ToolDispatch.swift:2402), which ToolDispatcher.dispatch(name:arguments:) never calls. The v1 probe (unmarked > 0 after dereference) would now pass under BOTH live and frozen posture, so it can no longer prove frozen is more restrictive than live on this path — the property this case exists to demonstrate is gone. Do not delete; do not weaken to pass."))
+    func frozenSearchThenDereferenceLeavesTracesUnmarked() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle) = try await openSQLiteEstate(url: url)
+        let live = ToolDispatcher(kit: kit, handle: handle, environment: [:])
+        let frozen = ToolDispatcher(kit: kit, handle: handle, environment: [:], posture: .frozen)
+
+        let id = try await fileMemory(live, content: "frozen trace reward test", location: "trace-room")
+        _ = try await search(live, query: "frozen trace reward")
+        let seeded = try await kit.countRecallTraces(handle)
+        #expect(seeded > 0, "live search must seed trace rows")
+
+        // Frozen search: surfaces the drawer, writes no trace row.
+        let frozenSearch = try await search(frozen, query: "frozen trace reward")
+        #expect(firstText(frozenSearch).contains(id))
+        #expect(try await kit.countRecallTraces(handle) == seeded,
+                "a frozen search must not write recall-trace rows")
+
+        // Frozen dereference: succeeds, marks nothing.
+        let get = try await frozen.dispatch(name: "moot_memory_get", arguments: .object(["memory_id": .string(id)]))
+        #expect(!isError(get), "moot_memory_get is a read and must work when frozen; got: \(get)")
+        let unmarked = try await kit.markRecallUsed(handle, target: id, now: Date())
+        #expect(unmarked > 0,
+                "the seeded rows must still be unmarked after a frozen dereference (probe flipped \(unmarked))")
+        #expect(try await kit.countRecallTraces(handle) == seeded)
+    }
+
     // MARK: - moot_synthesize is a read under frozen
 
     /// `moot_synthesize` reads candidates and generates text; it writes no
