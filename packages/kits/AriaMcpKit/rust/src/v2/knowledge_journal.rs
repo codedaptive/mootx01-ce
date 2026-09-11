@@ -64,7 +64,15 @@ impl V2FactTimelineRequest { pub fn decode(v: &JsonValue) -> V2DecodeResult<Self
 impl V2WriteJournalRequest { pub fn decode(v: &JsonValue) -> V2DecodeResult<Self> { let o=strict_object(v,["content","entry_time","tags","estate_id"])?; Ok(Self { content:nonempty(required_string(o,"content")?,"content")?, entry_time_millis:optional_date(o,"entry_time")?, tags:optional_nonempty(o,"tags")?, estate_id:optional_uuid(o,"estate_id")? }) } }
 impl V2ReadJournalRequest { pub fn decode(v: &JsonValue) -> V2DecodeResult<Self> { let o=strict_object(v,["limit","before","after","estate_id"])?; let before=optional_date(o,"before")?; let after=optional_date(o,"after")?; if matches!((after,before),(Some(a),Some(b)) if a>=b) { return Err(V2InvalidArgument::new("$.after","must be earlier than $.before")); } Ok(Self { limit:bounded(o,"limit",10,500)?, before_millis:before, after_millis:after, estate_id:optional_uuid(o,"estate_id")? }) } }
 
-fn bounded(o: &std::collections::BTreeMap<String,JsonValue>, key:&str, default:usize, maximum:usize)->V2DecodeResult<usize>{ match optional_integer(o,key)? { None=>Ok(default), Some(n) if n>=1 && n<=(maximum as i64)=>Ok(n as usize), _=>Err(V2InvalidArgument::new(format!("$.{key}"),format!("must be an integer from 1 through {maximum}"))) } }
+/// Below one is a SYNTAX ERROR and above the ceiling CLAMPS, matching the
+/// Swift port and the shared limit funnel the older surface used.
+///
+/// The halves are deliberately asymmetric. A zero or negative limit is
+/// meaningless and, unchecked, reaches SQLite as `LIMIT -1` — every row — so
+/// it is refused. An over-large limit is a caller asking for more than the
+/// surface gives, which the ceiling already answers; refusing it hands nothing
+/// to a caller who asked for ten thousand instead of handing back the maximum.
+fn bounded(o: &std::collections::BTreeMap<String,JsonValue>, key:&str, default:usize, maximum:usize)->V2DecodeResult<usize>{ match optional_integer(o,key)? { None=>Ok(default), Some(n) if n>=1 =>Ok((n as usize).min(maximum)), _=>Err(V2InvalidArgument::new(format!("$.{key}"),"must be at least 1")) } }
 fn nonempty(v:&str,key:&str)->V2DecodeResult<String>{ if v.trim().is_empty(){Err(V2InvalidArgument::new(format!("$.{key}"),"must not be empty"))}else{Ok(v.to_owned())} }
 fn optional_nonempty(o:&std::collections::BTreeMap<String,JsonValue>,key:&str)->V2DecodeResult<Option<String>>{ optional_string(o,key)?.map(|v|nonempty(v,key)).transpose() }
 fn optional_date(o:&std::collections::BTreeMap<String,JsonValue>,key:&str)->V2DecodeResult<Option<i64>>{ optional_string(o,key)?.map(|v|parse_rfc3339(v,key)).transpose() }
