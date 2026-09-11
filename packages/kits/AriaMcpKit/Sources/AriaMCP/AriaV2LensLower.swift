@@ -140,11 +140,18 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // typed signals.  It reads the persisted output of the atomic hunt
             // directly; it never invokes LensTools or parses its text response.
             let estate = try await kit.estate(for: handle)
-            let tunnels = (try await estate.allTunnels()).filter {
+            // COUNT FIRST, THEN WITHHOLD. Filtering by sensitivity before
+            // counting makes a restricted contradiction vanish from the total,
+            // so an estate with three contradictions reports one and the
+            // caller is told the estate is more consistent than it is. For a
+            // contradiction lens the count IS the product. The rows stay
+            // redacted; only the tally is honest.
+            let allContradictions = (try await estate.allTunnels()).filter {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
                     && ($0.lifecycle == .active || $0.lifecycle == .proposed)
-                    && $0.adjectiveSensitivity.isBulkExportable
             }
+            let tunnels = allContradictions.filter { $0.adjectiveSensitivity.isBulkExportable }
+            let withheldTunnelCount = allContradictions.count - tunnels.count
             let emittedTunnels = Array(tunnels.prefix(50))
             let endpointIDs = Set(emittedTunnels.flatMap {
                 [$0.sourceDrawerId, $0.targetDrawerId].compactMap { $0 }
@@ -172,9 +179,22 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 return .object(row)
             }
 
-            let facts = (try await kit.recallKGFacts(handle)).filter {
-                $0.adjectiveSensitivity.isBulkExportable
+            // Same rule for fact groups: a group is conflicting or it is not,
+            // and that is decided over every fact. Filtering first can hide a
+            // whole group, or — worse — leave a group looking consistent
+            // because the fact that disagreed was restricted.
+            let allFacts = try await kit.recallKGFacts(handle)
+            var allFactsByKey: [ContradictionFactKey: [KGFact]] = [:]
+            for fact in allFacts {
+                let key = ContradictionFactKey(
+                    subject: fact.subject.lowercased(), predicate: fact.predicate.lowercased())
+                allFactsByKey[key, default: []].append(fact)
             }
+            let allConflictingKeys = Set(
+                allFactsByKey
+                    .filter { Set($0.value.map { $0.object.lowercased() }).count > 1 }
+                    .keys)
+            let facts = allFacts.filter { $0.adjectiveSensitivity.isBulkExportable }
             var factsByKey: [ContradictionFactKey: [KGFact]] = [:]
             for fact in facts {
                 let key = ContradictionFactKey(
@@ -203,10 +223,29 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                     "objects": .array(objects),
                 ]))
             }
+            let visibleConflictingKeys = Set(
+                factsByKey
+                    .filter { Set($0.value.map { $0.object.lowercased() }).count > 1 }
+                    .keys)
+            let withheldFactGroupCount = allConflictingKeys.subtracting(visibleConflictingKeys).count
+            let totalContradictions = allContradictions.count
+            let totalFactGroups = allConflictingKeys.count
+            var summary = "Found \(totalContradictions) contradiction tunnels "
+                + "and \(totalFactGroups) conflicting fact groups."
+            if withheldTunnelCount > 0 || withheldFactGroupCount > 0 {
+                summary += " \(withheldTunnelCount + withheldFactGroupCount) withheld by sensitivity."
+            }
             return .init(data: .object([
                 "contradictsTunnels": .array(tunnelRows),
                 "conflictingFacts": .array(factRows),
-            ]), compactText: "Found \(tunnels.count) contradiction tunnels and \(factRows.count) conflicting fact groups.")
+                // Totals over EVERYTHING, so the caller learns the estate has
+                // a contradiction even where the rows are not theirs to read.
+                "totalContradictionCount": .integer(Int64(totalContradictions)),
+                "totalConflictingFactGroupCount": .integer(Int64(totalFactGroups)),
+                // How much of the above is redacted out of the rows above.
+                "withheldContradictionCount": .integer(Int64(withheldTunnelCount)),
+                "withheldConflictingFactGroupCount": .integer(Int64(withheldFactGroupCount)),
+            ]), compactText: summary)
 
         case .lensThemeWeather:
             let weather = try await ThemeWeather.run(
