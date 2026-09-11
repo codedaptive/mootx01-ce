@@ -98,6 +98,38 @@ struct SessionProtocolTests {
     /// or the surrounding template strings without updating the fixture → assert fires;
     /// also fires if this port's output diverges from the fixture the Rust test passes,
     /// surfacing a parity break.
+    // MARK: - Byte-identity: globalModifiersHelpText (shared fixture with Rust)
+
+    /// Gate: `AriaV2HelpService.globalModifiersHelpText` must be byte-identical to
+    /// the Rust `GLOBAL_MODIFIERS_HELP_TEXT` constant via the shared fixture.
+    ///
+    /// Both ports read `Tests/Conformance/global_modifiers_help_fixture.json`.
+    /// If either port's text diverges (changed grammar, different excluded-ops list,
+    /// different Unicode escaping), this test catches it alongside the Rust equivalent.
+    ///
+    /// How it fails if reverted: any edit to `globalModifiersHelpText` without
+    /// updating the fixture → assert fires; also fires if the port diverges from the
+    /// fixture the Rust test passes, surfacing a parity break.
+    @Test("globalModifiersHelpText is byte-identical to shared fixture (parity with Rust)")
+    func globalModifiersHelpByteIdentity() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // …/AriaMCPTests
+            .deletingLastPathComponent()  // …/Tests
+            .appendingPathComponent("Conformance/global_modifiers_help_fixture.json")
+
+        let data = try Data(contentsOf: fixtureURL)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let expected = json?["expected"] as? String else {
+            Issue.record("global_modifiers_help_fixture.json must have an \'expected\' string field")
+            return
+        }
+
+        let actual = AriaV2HelpService.globalModifiersHelpText
+
+        #expect(actual == expected,
+                "globalModifiersHelpText must be byte-identical to shared fixture — \nActual length: \(actual.utf8.count)\nExpected length: \(expected.utf8.count)")
+    }
+
     @Test("modesStatusSection is byte-identical to shared fixture (parity with Rust)")
     func modesStatusSectionByteIdentity() throws {
         let fixtureURL = URL(fileURLWithPath: #filePath)
