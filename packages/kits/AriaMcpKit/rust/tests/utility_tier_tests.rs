@@ -234,3 +234,172 @@ fn list_lenses_terse_default_and_verbose() {
     .expect("verbose list_recipes must succeed");
     assert!(content_text(&verbose_recipes).contains("requires: "));
 }
+
+/// V2 structural path: `CognitionCatalogService.lenses()` must omit
+/// `input_schema` and `output_schema` in terse mode and carry them in
+/// verbose mode. Rust twin of the redirected Swift structural assertion in
+/// `listLensesTerseDefaultAndVerbose` (UtilityTierTests.swift).
+#[test]
+fn cognition_catalog_service_v2_lenses_terse_omits_schemas() {
+    use aria_mcp::lens_tools::is_lens_tool;
+    use aria_mcp::recipe_tools::is_recipe_tool;
+    use aria_mcp::v2::catalog::selected_tools;
+    use aria_mcp::v2::cognition_catalog::{CognitionCatalogRequest, CognitionCatalogService};
+    use uuid::Uuid;
+
+    // Build callable_tool_names from the same catalog the service reads so
+    // the filter matches and we get at least one tool in the result.
+    let catalog = selected_tools();
+    let callable: std::collections::BTreeSet<String> = catalog
+        .as_array()
+        .expect("selected_tools must return an array")
+        .iter()
+        .filter_map(|t| {
+            let name = t["name"].as_str()?;
+            if is_recipe_tool(name) || is_lens_tool(name) {
+                Some(name.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!callable.is_empty(), "there must be at least one callable cognition tool");
+
+    let service = CognitionCatalogService::new(Uuid::new_v4(), callable);
+
+    let terse = service
+        .lenses(CognitionCatalogRequest { verbose: false, estate_id: None })
+        .expect("terse lenses must succeed");
+    assert!(!terse.tools.is_empty(), "terse result must have at least one tool");
+    assert!(
+        terse.tools[0].input_schema.is_none(),
+        "terse mode must omit input_schema"
+    );
+    assert!(
+        terse.tools[0].output_schema.is_none(),
+        "terse mode must omit output_schema"
+    );
+
+    let verbose = service
+        .lenses(CognitionCatalogRequest { verbose: true, estate_id: None })
+        .expect("verbose lenses must succeed");
+    assert!(!verbose.tools.is_empty(), "verbose result must have at least one tool");
+    assert!(
+        verbose.tools[0].input_schema.is_some(),
+        "verbose mode must carry input_schema"
+    );
+    assert!(
+        verbose.tools[0].output_schema.is_some(),
+        "verbose mode must carry output_schema"
+    );
+}
+
+/// V2 structural path: `CognitionCatalogService.recipes()` must omit
+/// `required_capabilities` in terse mode and carry it in verbose mode.
+/// Rust twin of the recipes half of the Swift structural assertions.
+#[test]
+fn cognition_catalog_service_v2_recipes_terse_omits_capabilities() {
+    use aria_mcp::v2::cognition_catalog::{CognitionCatalogRequest, CognitionCatalogService};
+    use uuid::Uuid;
+
+    // callable_tool_names does not gate recipes (recipes() iterates
+    // cognition_kit::recipe_catalog() directly), so an empty set is fine here.
+    let service = CognitionCatalogService::new(
+        Uuid::new_v4(),
+        std::collections::BTreeSet::new(),
+    );
+
+    let terse = service
+        .recipes(CognitionCatalogRequest { verbose: false, estate_id: None })
+        .expect("terse recipes must succeed");
+    assert!(!terse.recipes.is_empty(), "terse result must have at least one recipe");
+    assert!(
+        terse.recipes[0].required_capabilities.is_none(),
+        "terse mode must omit required_capabilities"
+    );
+
+    let verbose = service
+        .recipes(CognitionCatalogRequest { verbose: true, estate_id: None })
+        .expect("verbose recipes must succeed");
+    assert!(!verbose.recipes.is_empty(), "verbose result must have at least one recipe");
+    assert!(
+        verbose.recipes[0].required_capabilities.is_some(),
+        "verbose mode must carry required_capabilities"
+    );
+}
+
+/// Pins the EXACT serialized key set of a verbose `moot_list_lenses` row, so
+/// the Rust and Swift ports are compared field for field rather than each port
+/// being checked only against itself. The Swift twin is
+/// `verboseLensRowKeySetIsExact` (Tests/AriaMCPTests/UtilityTierTests.swift).
+///
+/// `output_schema` is present when the tool declares one and the key is OMITTED
+/// when it does not. Neither port may emit a null `output_schema`: absent in
+/// one port and null in the other is a conformance failure. Rust omits through
+/// `.get("outputSchema").filter(!is_null).cloned()` plus
+/// `skip_serializing_if = "Option::is_none"`; Swift omits through the `if let`
+/// in its verbose row builder.
+#[test]
+fn cognition_catalog_v2_verbose_row_key_set_matches_swift() {
+    use aria_mcp::lens_tools::is_lens_tool;
+    use aria_mcp::recipe_tools::is_recipe_tool;
+    use aria_mcp::v2::catalog::selected_tools;
+    use aria_mcp::v2::cognition_catalog::{CognitionCatalogRequest, CognitionCatalogService};
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    let catalog = selected_tools();
+    let callable: BTreeSet<String> = catalog
+        .as_array()
+        .expect("selected_tools must return an array")
+        .iter()
+        .filter_map(|t| {
+            let name = t["name"].as_str()?;
+            if is_recipe_tool(name) || is_lens_tool(name) {
+                Some(name.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!callable.is_empty(), "there must be at least one callable cognition tool");
+
+    let service = CognitionCatalogService::new(Uuid::new_v4(), callable);
+
+    let verbose = service
+        .lenses(CognitionCatalogRequest { verbose: true, estate_id: None })
+        .expect("verbose lenses must succeed");
+    assert!(!verbose.tools.is_empty(), "the verbose row set must not be empty");
+
+    for tool in &verbose.tools {
+        let row = serde_json::to_value(tool).expect("a descriptor must serialize");
+        let obj = row.as_object().expect("a row must serialize as an object");
+        let keys: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+
+        // No port may ever emit a null output_schema.
+        assert!(
+            !obj.get("output_schema").is_some_and(serde_json::Value::is_null),
+            "{}: output_schema must be omitted, never null",
+            tool.name
+        );
+
+        let expected: BTreeSet<&str> = if obj.contains_key("output_schema") {
+            ["name", "description", "input_schema", "output_schema"].into_iter().collect()
+        } else {
+            ["name", "description", "input_schema"].into_iter().collect()
+        };
+        assert_eq!(keys, expected, "{} verbose key set", tool.name);
+    }
+
+    // The terse row is the same key set minus both schemas.
+    let terse = service
+        .lenses(CognitionCatalogRequest { verbose: false, estate_id: None })
+        .expect("terse lenses must succeed");
+    for tool in &terse.tools {
+        let row = serde_json::to_value(tool).expect("a descriptor must serialize");
+        let obj = row.as_object().expect("a row must serialize as an object");
+        let keys: BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        let expected: BTreeSet<&str> = ["name", "description"].into_iter().collect();
+        assert_eq!(keys, expected, "{} terse key set", tool.name);
+    }
+}
