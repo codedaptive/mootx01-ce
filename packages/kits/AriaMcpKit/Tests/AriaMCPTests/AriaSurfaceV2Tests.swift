@@ -211,7 +211,7 @@ struct AriaSurfaceV2Tests {
         #expect(tools.map(\.name) == [
             "moot_confirm_memory", "moot_connection_map", "moot_connection_search", "moot_dataset_query", "moot_dataset_stats", "moot_drain_status", "moot_dream",
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
-            "moot_fact_search", "moot_fact_timeline", "moot_federated_recall", "moot_file_dataset", "moot_file_fact", "moot_file_memory", "moot_file_packet",
+            "moot_fact_search", "moot_fact_timeline", "moot_federated_recall", "moot_file_dataset", "moot_file_fact", "moot_file_memory",
             "moot_help", "moot_hunt_contradictions",
             "moot_json_import",
             "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
@@ -222,8 +222,8 @@ struct AriaSurfaceV2Tests {
             "moot_lens_trust_synthesis", "moot_link_memories",
             "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
             "moot_memory_list", "moot_memory_recall_transcript", "moot_memory_search", "moot_migration_confirm", "moot_migration_run",
-            "moot_monitoring_set", "moot_monitoring_status", "moot_move_memory", "moot_packet_get",
-            "moot_packet_lineage", "moot_packet_list", "moot_palace_import", "moot_propose_contradictions",
+            "moot_monitoring_set", "moot_monitoring_status", "moot_move_memory",
+            "moot_palace_import", "moot_propose_contradictions",
             "moot_read_journal", "moot_rebuild_status", "moot_recall_connected",
             "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped",
             "moot_recall_temporal", "moot_recall_vague", "moot_recall_walk", "moot_reclassify_fdc", "moot_reindex",
@@ -231,7 +231,7 @@ struct AriaSurfaceV2Tests {
             "moot_vault_export", "moot_vault_import", "moot_vault_job", "moot_vault_reconcile", "moot_vault_status",
             "moot_withdraw_memory", "moot_write_journal",
         ])
-        #expect(tools.count == 84)
+        #expect(tools.count == 80)
         #expect(tools.allSatisfy { $0.outputSchema != nil })
         #expect(tools.allSatisfy { $0.annotations != nil })
         #expect(tools.first { $0.name == "moot_memory_get" }?.annotations == .object([
@@ -317,9 +317,9 @@ struct AriaSurfaceV2Tests {
         let enabled = ToolProjection.tools(environment: [:])
         let explicitlyEnabled = ToolProjection.tools(environment: ["MOOTX01_VAULT": "1"])
         let disabled = ToolProjection.tools(environment: ["MOOTX01_VAULT": "0"])
-        #expect(enabled.count == 84)
+        #expect(enabled.count == 80)
         #expect(explicitlyEnabled.map(\.name) == enabled.map(\.name))
-        #expect(disabled.count == 77)
+        #expect(disabled.count == 73)
         #expect(disabled.allSatisfy { !$0.name.hasPrefix("moot_vault_") })
         #expect(disabled.allSatisfy { !["moot_palace_import", "moot_json_import"].contains($0.name) })
         #expect(
@@ -334,7 +334,7 @@ struct AriaSurfaceV2Tests {
         let help = try await dispatcher.dispatch(name: "moot_help", arguments: .object([:]))
         let structured = try #require(help.objectValue?["structuredContent"]?.objectValue)
         let operations = try #require(structured["data"]?.objectValue?["operations"]?.arrayValue)
-        #expect(operations.count == 77)
+        #expect(operations.count == 73)
         #expect(operations.allSatisfy {
             $0.objectValue?["name"]?.stringValue != "moot_vault_export"
         })

@@ -44,26 +44,26 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 84.
+    /// Hard contract gate: the total tool count must be exactly 80.
     /// The v2 catalog (AriaV2SelectedCatalog) defines the complete surface —
     /// all operations whose typed handlers are executable in this build.
     /// Vault tools are included by default (MOOTX01_VAULT != "0" with empty env).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        // 84 tools in the v2 catalog (vault-on with empty environment):
+        // 80 tools in the v2 catalog (vault-on with empty environment):
         // - moot_help (v2 surface discovery)
         // - 7 recall/search: moot_file_memory, moot_memory_get, moot_memory_list,
         //   moot_memory_search, moot_transcript_recall, moot_update_memory,
         //   moot_withdraw_memory, moot_erase_memory, moot_confirm_memory,
         //   moot_move_memory (10 total Tier 1-5 memory tools)
         // - 23 reasoning lenses + 7 recall operations + grounded synthesize
-        // - 4 packet tools, 3 dataset tools, 5 vault tools
+        // - 3 dataset tools, 5 vault tools
         // - 4 KG/journal tool groups, 2 connection tools
         // - estate diagnostics, migration, monitoring, contradiction hunter, dream
         // - 3 maintenance: reindex, reclassify_fdc, palace_import
         // - federated_recall, json_import
-        #expect(ToolProjection.tools(environment: [:]).count == 84,
-                "tools() must return exactly 84 tools (v2 catalog, vault-on); got \(ToolProjection.tools(environment: [:]).count)")
+        #expect(ToolProjection.tools(environment: [:]).count == 80,
+                "tools() must return exactly 80 tools (v2 catalog, vault-on); got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.
@@ -259,5 +259,5 @@ struct ToolProjectionTests {
 // MARK: - Tier decomposition reconciliation
 // NOTE: The per-tier helper methods (coreMemoryTools, connectionTools, etc.)
 // reflect the v1 surface structure and do not map to the v2 catalog.
-// The v2 live total is guarded by testTotalToolCount above (84 with vault on).
+// The v2 live total is guarded by testTotalToolCount above (80 with vault on).
 // This suite was removed when v2 became the only surface (V2-A migration).
