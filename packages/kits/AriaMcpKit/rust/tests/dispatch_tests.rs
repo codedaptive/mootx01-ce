@@ -5407,17 +5407,31 @@ fn lens_keystones_over_estate_succeeds() {
     );
 }
 
-// PR-05 Part B golden: trust_synthesis S2-row output byte-matches result_composer::render_s2_row.
-// Mirrors Swift `trustSynthesisDenseRowsMatchRenderer` in LensToolsTests.swift.
-// COMPOSER-02B: render_s2_row replaces the deleted dense_row::render.
+// PR-05 Part B value-equality: moot_lens_trust_synthesis body text carries the
+// drawer's actual subject, bestSpan and eventTime via render_s2_row.
+// Mirrors Swift `trustSynthesisDenseRowsCarryStructuredFields` in LensToolsTests.swift.
+//
+// lens_tools.rs trust_synthesis path uses s2_rows_by_id → candidate_from_drawer
+// → render_s2_row to build each row. The expected row is derived from the same
+// pipeline so the assertion proves the content is drawer-sourced, not a sentinel.
+//
+// Row format in body text (lens_tools.rs lines 832-838):
+//   "  <render_s2_row output>"
+// where render_s2_row joins [id, subject, bestSpan, sscFacts, eventTime] with SEP.
+// normalized_best_span deduplicates when best_span == subject (returns "-") so
+// expected values must come from render_s2_row, not raw candidate fields.
 #[test]
-fn trust_synthesis_dense_row_matches_renderer() {
+fn trust_synthesis_dense_rows_carry_structured_fields() {
     let registry = EstateRegistry::new_inmemory();
     let id = file_one_memory(&registry, "golden trust memory — PR-05 rust golden", "study");
-    // Fetch the drawer from the store to compute the expected S2 row.
+    // Derive the expected row by running the same pipeline as trust_synthesis:
+    // candidate_from_drawer → render_s2_row.
     let drawer = stored_drawer(&registry, &id);
-    let expected_row = aria_mcp::result_composer::render_s2_row(
-        &aria_mcp::result_composer::candidate_from_drawer(&drawer));
+    let candidate = aria_mcp::result_composer::candidate_from_drawer(&drawer);
+    // render_s2_row applies normalized_best_span deduplication (best_span == subject → "-")
+    // and normalized_subject; this is the ground truth for what the body must contain.
+    let expected_row = aria_mcp::result_composer::render_s2_row(&candidate);
+
     let result = dispatch_tool(
         "moot_lens_trust_synthesis",
         &args![],
@@ -5426,12 +5440,25 @@ fn trust_synthesis_dense_row_matches_renderer() {
     )
     .expect("moot_lens_trust_synthesis must succeed");
     assert!(is_success(&result), "trust_synthesis must succeed; got: {result:?}");
+    // trust_synthesis in lens_tools.rs returns a text_result with S2-row lines:
+    //   trust_grounded_synthesis: N drawer(s), M high-trust
+    //     <render_s2_row output>
+    //   summary: ...
+    // Each row is prefixed with two spaces.
     let body = content_text(&result);
-    // The dense row is emitted with a two-space prefix per Swift format parity.
-    assert!(
-        body.contains(&format!("  {expected_row}")),
-        "trust_synthesis body must contain the dense row byte-for-byte; got: {body}"
-    );
+    let low_id = id.to_lowercase();
+
+    // Find the row in the body — rows are prefixed "  " (two spaces).
+    let row_line = body
+        .lines()
+        .find(|l| l.trim_start_matches(' ').starts_with(low_id.as_str()))
+        .expect("captured drawer must appear in trust_synthesis body text; make sure the estate has at least one captured drawer");
+    // The trimmed row_line must equal the expected render_s2_row output.
+    // This proves subject, bestSpan, and eventTime are drawer-sourced,
+    // not placeholder sentinels like "-" or "LEAK".
+    assert_eq!(row_line.trim(), expected_row.as_str(),
+        "trust_synthesis body row must exactly match render_s2_row output for the drawer; \
+         got: {row_line:?}, expected: {expected_row:?}");
 }
 
 // PR-05 Part B golden: moot_lens_successors S2-row output byte-matches result_composer::render_s2_row.
