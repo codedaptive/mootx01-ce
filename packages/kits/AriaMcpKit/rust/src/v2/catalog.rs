@@ -1291,20 +1291,42 @@ fn estate_diagnostics_data_schema(name: &str) -> Option<Value> {
             ("state".to_owned(), json!({"const":"mounted"})),
             ("build_serial".to_owned(), string()),
         ]))),
-        "moot_estate_status" => Some(exact_object(serde_json::Map::from_iter([
-            ("estate_id".to_owned(), uuid()),
-            ("estate_name".to_owned(), string()),
-            ("memory_count".to_owned(), count()),
-            ("fact_count".to_owned(), count()),
-            (
-                "fdc_recalculation".to_owned(),
-                json!({"type":"string","enum":["current","missing","stale"]}),
-            ),
-            (
-                "drains".to_owned(),
-                json!({"type":"array","items":drain_entry_schema()}),
-            ),
-        ]))),
+        // `recall_trace_count` and `shared_content_migration` are the two
+        // optional members: the first is omitted when the count could not be
+        // read, because a fabricated zero cannot be told from an empty trace
+        // table; the second appears only once a migration record exists, so
+        // an estate that never ran detection keeps the shape it always had.
+        "moot_estate_status" => Some(json!({
+            "type": "object",
+            "properties": {
+                "estate_id": uuid(),
+                "estate_name": string(),
+                "memory_count": count(),
+                "fact_count": count(),
+                "fdc_recalculation": {"type":"string","enum":["current","missing","stale"]},
+                "drains": {"type":"array","items":drain_entry_schema()},
+                "recall_trace_count": count(),
+                "sync_state": string(),
+                "subjects_bearing": count(),
+                "subjects_eligible": count(),
+                "shared_content_migration": {
+                    "type": "object",
+                    "properties": {
+                        "state": string(),
+                        "estimated_reclaimable_bytes": count(),
+                        "reclaimed_bytes": count(),
+                    },
+                    "required": ["state"],
+                    "additionalProperties": false,
+                },
+            },
+            // Sorted, matching exact_object and the Swift port. The required
+            // array is ordered, so a different order is a different catalog.
+            "required": [
+                "drains", "estate_id", "estate_name", "fact_count", "fdc_recalculation", "memory_count", "subjects_bearing", "subjects_eligible", "sync_state",
+            ],
+            "additionalProperties": false,
+        })),
         "moot_estate_map" => {
             let room = exact_object(serde_json::Map::from_iter([
                 ("name".to_owned(), string()),
