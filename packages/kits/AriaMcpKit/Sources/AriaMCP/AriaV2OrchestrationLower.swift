@@ -45,7 +45,7 @@ public struct AriaV2GeniusLocusOrchestrationProvider: AriaV2OrchestrationProvide
                     ordering: nil,
                     hydrationLevel: .full
                 ),
-                cueTerms: request.query.map(Self.cueTerms) ?? [],
+                cueTerms: try Self.groundedCueTerms(request.query),
                 cap: request.limit,
                 query: request.query,
                 // ARIA's public read surface must not feed provenance-sensitive
@@ -229,8 +229,58 @@ public struct AriaV2GeniusLocusOrchestrationProvider: AriaV2OrchestrationProvide
         )
     }
 
+    /// A caller who SENT a cue must never receive an unscoped estate digest.
+    /// A query of nothing but stopwords and fragments grounds on nothing, and
+    /// answering it from the whole estate returns something that reads like an
+    /// answer to the question asked. That is worse than a refusal, so it is
+    /// one. An ABSENT query is a different thing and stays allowed: synthesis
+    /// without a cue is a supported shape.
+    private static func groundedCueTerms(_ query: String?) throws -> [String] {
+        guard let query else { return [] }
+        let terms = cueTerms(query)
+        guard !terms.isEmpty else {
+            throw AriaV2InvalidArgument(
+                path: "query",
+                message: "query contains no usable terms (all tokens are stopwords or too "
+                    + "short); provide distinctive words to ground on").jsonRPCError
+        }
+        return terms
+    }
+
+    /// Stopwords dropped from a cue before grounding. The Rust port has
+    /// carried this list since v2 landed; Swift split on non-alphanumerics and
+    /// nothing else, which is a port divergence as well as a correctness gap.
+    /// Parity: `STOPWORDS` in rust/src/v2/orchestration_lower.rs.
+    private static let cueStopwords: Set<String> = [
+        "the", "and", "for", "are", "was", "were", "has", "have", "had", "did", "does", "not",
+        "with", "that", "this", "from", "they", "their", "them", "then", "than", "there", "these",
+        "those", "you", "your", "what", "when", "where", "which", "who", "whom", "why", "how",
+        "will", "would", "could", "should", "about", "been", "being", "into", "over", "under", "after",
+        "before", "between", "during", "any", "all", "each", "most", "some", "such", "can", "may",
+        "might", "must", "shall", "its", "his", "her", "him", "she", "our", "out", "but", "per",
+        "via", "also", "just", "only", "very", "much", "more",
+    ]
+
+    /// Cap on cue terms, matching the Rust port.
+    private static let cueTermLimit = 12
+
+    /// Lowercase, drop stopwords and fragments shorter than three characters
+    /// unless they carry a digit, de-duplicate, and cap. Same rules and same
+    /// order as the Rust port so the two prepare a cue identically.
     private static func cueTerms(_ query: String) -> [String] {
-        query.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        var terms: [String] = []
+        for raw in query.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+            let term = raw.lowercased()
+            if term.isEmpty
+                || (term.count < 3 && !term.contains(where: \.isNumber))
+                || cueStopwords.contains(term)
+                || terms.contains(term) {
+                continue
+            }
+            terms.append(term)
+            if terms.count == cueTermLimit { break }
+        }
+        return terms
     }
 
     private static func filterChain(_ filter: String?) throws -> [Filter] {
