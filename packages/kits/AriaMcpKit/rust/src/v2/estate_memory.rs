@@ -72,7 +72,31 @@ impl<'a> EstateV2MemoryService<'a> {
     }
 }
 
+use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+
 impl V2CoreMemoryService for EstateV2MemoryService<'_> {
+    /// Both storage spellings are tried: `mark_recall_used` matches trace rows
+    /// by the stored drawer id, and the two portable estate writers disagree on
+    /// UUID case, so a canonical-only lookup silently matches nothing on an
+    /// estate written by the other port. `note_usage` carries the rest of the
+    /// contract — frozen postures take no persistent write, an id the caller
+    /// already knew earns no reward, and the retention window is derived from
+    /// the ledger's own surfaced_at rather than this dispatch's instant.
+    fn mark_dereferenced(
+        &self,
+        context: &V2MemoryOperationContext,
+        memory_ids: &[uuid::Uuid],
+        ledger: &SurfacedRecallLedger,
+    ) {
+        let Ok(estate) = self.estate(context) else { return };
+        for memory_id in memory_ids {
+            let canonical = memory_id.hyphenated().to_string();
+            for spelling in [canonical.clone(), canonical.to_uppercase()] {
+                crate::interface_tools::note_usage(&spelling, estate, ledger, self.posture);
+            }
+        }
+    }
+
     fn file_memory(&self, context: &V2MemoryOperationContext, request: &V2FileMemoryRequest) -> Result<V2FiledMemory, V2MemoryFailure> {
         let estate = self.estate(context)?;
         let mut frame = CaptureFrame::new(
