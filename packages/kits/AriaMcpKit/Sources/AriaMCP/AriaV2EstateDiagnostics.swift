@@ -100,6 +100,31 @@ public struct AriaV2EstateStatusData: Sendable, Equatable {
     /// Computed from `aria.fdc.recalced_data_version` meta against the
     /// current `FDC.recalculationVersion`. See contract §5.
     public let fdcRecalculation: String
+    /// Recall-trace depth, or nil when the count could not be read.
+    ///
+    /// Absent is NOT zero, and the distinction is the point: a fabricated
+    /// zero is indistinguishable from a genuinely empty trace table and would
+    /// lie about how deep the reward pipeline actually is.
+    public let recallTraceCount: Int?
+    /// Sync backend state, or `local-only` when no sync engine is wired.
+    /// Always present so a consumer never has to guess from an absent field.
+    public let syncState: String
+    /// Subject debt: how many sensitivity-visible, non-empty memories carry a
+    /// subject, out of how many are eligible for one. The gap is the debt the
+    /// `subject_backfill` lane works through.
+    public let subjectsBearing: Int
+    public let subjectsEligible: Int
+    /// Shared-content reclaim state, present only when a migration record
+    /// exists — an estate that never ran detection leaves the shape unchanged.
+    public let sharedContentMigration: AriaV2SharedContentMigration?
+}
+
+/// Shared-content migration progress, reported by `moot_estate_status` when a
+/// migration record exists.
+public struct AriaV2SharedContentMigration: Sendable, Equatable {
+    public let state: String
+    public let estimatedReclaimableBytes: Int64?
+    public let reclaimedBytes: Int64?
 }
 
 public struct AriaV2EstateMapRoom: Sendable, Equatable {
@@ -211,13 +236,35 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
         } else {
             fdcRecalculation = "stale"
         }
+        // Every one of these is best-effort: a diagnostics read must not fail
+        // because one of its fields could not be gathered.
+        let recallTraceCount = try? await kit.countRecallTraces(handle)
+        let syncState = (try? await kit.syncStateToken(for: handle)) ?? "local-only"
+        // Subject debt over the sensitivity-visible set. Empty content is not
+        // eligible for a subject, so it is excluded from both sides rather
+        // than counted as permanently missing.
+        let subjectEligible = visible.filter { !$0.content.isEmpty }
+        let subjectBearing = subjectEligible.filter { $0.subject != nil }
+        var migration: AriaV2SharedContentMigration?
+        if let reclaim = try? await kit.sharedContentReclaimStatus(handle: handle),
+           let state = reclaim.state {
+            migration = AriaV2SharedContentMigration(
+                state: state.rawValue,
+                estimatedReclaimableBytes: reclaim.estimatedReclaimableBytes.map { Int64($0) },
+                reclaimedBytes: reclaim.reclaimedBytes.map { Int64($0) })
+        }
         return AriaV2EstateStatusData(
             estateID: handle.estateUUID,
             estateName: handle.estateName,
             memoryCount: active.count,
             factCount: facts.count,
             drains: drains,
-            fdcRecalculation: fdcRecalculation)
+            fdcRecalculation: fdcRecalculation,
+            recallTraceCount: recallTraceCount,
+            syncState: syncState,
+            subjectsBearing: subjectBearing.count,
+            subjectsEligible: subjectEligible.count,
+            sharedContentMigration: migration)
     }
 
     public func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData {
@@ -420,14 +467,33 @@ private extension AriaV2EstatePingData {
 
 private extension AriaV2EstateStatusData {
     var json: JSONValue {
-        .object([
+        var value: [String: JSONValue] = [
             "estate_id": .string(estateID.uuidString.lowercased()),
             "estate_name": .string(estateName),
             "memory_count": .integer(Int64(memoryCount)),
             "fact_count": .integer(Int64(factCount)),
             "drains": .array(drains.map { $0.json }),
             "fdc_recalculation": .string(fdcRecalculation),
-        ])
+            "sync_state": .string(syncState),
+            "subjects_bearing": .integer(Int64(subjectsBearing)),
+            "subjects_eligible": .integer(Int64(subjectsEligible)),
+        ]
+        // Omitted rather than zeroed when the count could not be read: a
+        // fabricated zero would lie about the reward pipeline's depth.
+        if let recallTraceCount { value["recall_trace_count"] = .integer(Int64(recallTraceCount)) }
+        // Present only when a migration record exists, so an estate that never
+        // ran detection keeps the response shape it always had.
+        if let sharedContentMigration { value["shared_content_migration"] = sharedContentMigration.json }
+        return .object(value)
+    }
+}
+
+private extension AriaV2SharedContentMigration {
+    var json: JSONValue {
+        var value: [String: JSONValue] = ["state": .string(state)]
+        if let estimated = estimatedReclaimableBytes { value["estimated_reclaimable_bytes"] = .integer(estimated) }
+        if let reclaimed = reclaimedBytes { value["reclaimed_bytes"] = .integer(reclaimed) }
+        return .object(value)
     }
 }
 

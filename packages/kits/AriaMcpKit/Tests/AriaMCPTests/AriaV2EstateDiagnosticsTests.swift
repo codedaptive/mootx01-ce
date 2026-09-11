@@ -38,7 +38,15 @@ struct AriaV2EstateDiagnosticsTests {
         #expect((data(ping).map { Set($0.keys) } ?? Set<String>()) == Set(["estate_id", "estate_name", "state", "build_serial"]))
         #expect(data(ping)?["state"] == .string("mounted"))
         #expect(data(ping)?["build_serial"] == .string("fixture-build"))
-        #expect((data(status).map { Set($0.keys) } ?? Set<String>()) == Set(["estate_id", "estate_name", "memory_count", "fact_count", "drains", "fdc_recalculation"]))
+        // recall_trace_count is present because the fixture supplies a count;
+        // shared_content_migration is absent because the fixture has no
+        // migration record, which is the shape an estate that never ran
+        // detection returns.
+        #expect((data(status).map { Set($0.keys) } ?? Set<String>()) == Set([
+            "estate_id", "estate_name", "memory_count", "fact_count", "drains",
+            "fdc_recalculation", "recall_trace_count", "sync_state",
+            "subjects_bearing", "subjects_eligible",
+        ]))
         #expect(data(status)?["memory_count"] == .integer(2))
         #expect(data(map)?["wings"]?.arrayValue?.first?.objectValue?["rooms"]?.arrayValue?.count == 1)
         #expect((data(drains).map { Set($0.keys) } ?? Set<String>()) == Set(["drains"]))
@@ -147,7 +155,12 @@ private actor FakeEstateDiagnosticsProvider: AriaV2EstateDiagnosticsProvider {
             memoryCount: 2,
             factCount: 4,
             drains: [.init(name: "corpus_encode", state: "draining", pending: 3)],
-            fdcRecalculation: "missing")
+            fdcRecalculation: "missing",
+            recallTraceCount: 7,
+            syncState: "local-only",
+            subjectsBearing: 1,
+            subjectsEligible: 2,
+            sharedContentMigration: nil)
     }
 
     func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData {
