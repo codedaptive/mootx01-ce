@@ -8,23 +8,39 @@ import Testing
 @testable import AriaMCP
 import AriaMCPWire
 
+private extension JSONValue {
+    /// Return the text content from a textResult object (first text item).
+    var firstTextContent: String? {
+        guard case .object(let obj) = self,
+              case .array(let content) = obj["content"],
+              case .object(let first) = content.first,
+              case .string(let text) = first["text"] else { return nil }
+        return text
+    }
+}
+
 /// Adoption tests for the AriaV2CallChain wiring in ToolDispatch.
 ///
-/// Four gates each fail against the pre-adoption baseline (75dd41306) or
-/// against the adoption reverted:
+/// Each gate discriminates a specific aspect of the adoption:
 ///
-/// GATE 1 — chain order: egress position 1 is unoccupied in the production
-///           registrations; a gate at position 1 fires before coaching and
-///           halts the chain before coaching runs.
+/// GATE 1 — slot reservation: egress position 1 is unoccupied in the
+///           production registrations. The discriminating assertions are the
+///           position checks; the test fails when egressCoaching is set to 1.
 ///
 /// GATE 2 — ingress placement: a frozen-estate v2 mutation refusal leaves the
 ///           session call counter at zero; a malformed-argument call also
-///           leaves the counter at zero.
+///           leaves the counter at zero. These tests fail when the ingress
+///           invocation is moved above the frozen guard or above decode, not
+///           against the pre-adoption baseline.
 ///
 /// GATE 3 — golden fixture untouched (proved via git diff --stat, not tested
 ///           here; see report).
 ///
 /// GATE 4 — live binary smoke test (external invocation; see report).
+///
+/// GATE 5 — egress wiring: the coaching block appears at call 25 and not
+///           before. This test fails if the egress chain invocation is removed
+///           from dispatchV2.
 @Suite("AriaV2ChainAdoptionTests")
 struct AriaV2ChainAdoptionTests {
 
@@ -57,17 +73,18 @@ struct AriaV2ChainAdoptionTests {
             handle)
     }
 
-    // MARK: - GATE 1: Chain order
+    // MARK: - GATE 1: Slot reservation
 
-    /// The production factory leaves egress position 1 unoccupied.
-    /// A test-double gate registered at egress position 1 alongside the
-    /// production registrations runs first and, when it fires, the chain
-    /// halts with the gate's payload — proving coaching never ran.
+    /// The production factory leaves egress position 1 (the reserved exit-gate
+    /// slot) unoccupied. The discriminating assertions are the position checks:
+    /// if AriaV2ChainPositions.egressCoaching is set to 1, the occupancy check
+    /// fails because coaching would then occupy the reserved slot, and adding a
+    /// gate there would cause chain construction to throw duplicateEgressPosition.
     ///
-    /// This test fails if someone renumbers AriaV2ChainPositions.egressGateReserved
-    /// to collide with AriaV2ChainPositions.egressCoaching, or if coaching's
-    /// egress position is changed to 1.
-    @Test func gate1ProductionChainLeavesEgressPosition1UnoccupiedAndGateFiresBeforeCoaching() async throws {
+    /// The halt assertions are retained because they cost nothing, but this is a
+    /// slot-reservation gate, not an ordering gate — it does not prove coaching
+    /// did not run.
+    @Test func gate1ProductionRegistrationsLeaveEgressSlot1Unoccupied() async throws {
         let session = ModeSessionState()
         // Provide a minimal v2 request — moot_monitoring_status is an inspection
         // so it decodes cleanly and has no mutation side effects.
@@ -192,5 +209,37 @@ struct AriaV2ChainAdoptionTests {
         let snap = await dispatcher.modeSessionState.snapshot
         #expect(snap.totalCalls == 0,
             "malformed-argument decode failure must not advance the session counter; got \(snap.totalCalls)")
+    }
+
+    // MARK: - GATE 5: Egress wiring
+
+    /// The egress chain is wired into the live dispatcher: calls 1 to 24
+    /// produce no coaching block; call 25 produces "[Moot coaching".
+    ///
+    /// This test fails if the chain.runEgress call is removed from dispatchV2
+    /// and coreResult is returned directly in its place.
+    @Test func gate5EgressWiringCoachingBlockAppearsAtCall25() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Calls 1–24: no coaching block.
+        for n in 1...24 {
+            let result = try await dispatcher.dispatch(
+                name: "moot_monitoring_status",
+                arguments: .object([:])
+            )
+            let text = result.firstTextContent ?? ""
+            #expect(!text.contains("[Moot coaching"),
+                "call \(n): coaching block must not appear before call 25")
+        }
+
+        // Call 25: coaching block fires.
+        let result25 = try await dispatcher.dispatch(
+            name: "moot_monitoring_status",
+            arguments: .object([:])
+        )
+        let text25 = result25.firstTextContent ?? ""
+        #expect(text25.contains("[Moot coaching"),
+            "call 25: coaching block must appear at the default cadence of 25 calls")
     }
 }
