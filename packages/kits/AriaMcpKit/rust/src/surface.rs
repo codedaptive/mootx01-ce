@@ -521,7 +521,7 @@ pub(crate) fn execute(
         SurfaceRequest::ContradictionProposal(request) =>
             execute_contradiction_proposal(request, registry, &selected_surface.contradiction_analyses, &meta, now_millis),
         SurfaceRequest::MemoryMutation(request) =>
-            execute_memory_mutation(request, registry, &meta, now_millis),
+            execute_memory_mutation(request, registry, &meta, now_millis, posture, surfaced_recall_ledger),
         SurfaceRequest::KnowledgeJournal(request) =>
             execute_knowledge_journal(request, registry, sensitivity_ledger, &meta, now_millis),
         SurfaceRequest::CognitionCatalog { operation, request } =>
@@ -594,6 +594,8 @@ fn execute_memory_mutation(
     registry: &crate::estate_registry::EstateRegistry,
     meta: &crate::v2::render::V2ResultMeta,
     now_millis: i64,
+    posture: crate::estate_posture::EstatePosture,
+    surfaced_recall_ledger: &crate::surfaced_recall_ledger::SurfacedRecallLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use crate::v2::memory_mutations::{
         CoordinatorMemoryMutationLower, V2MemoryMutationError, V2MemoryMutationService,
@@ -602,6 +604,27 @@ fn execute_memory_mutation(
         SelectedMemoryMutationAuthority { registry, now_millis },
         CoordinatorMemoryMutationLower::new(Arc::clone(&registry.default.coord)),
     );
+    // Acting on a surfaced row is a dereference, so the reward sweep hears
+    // about it. Fires BEFORE the mutation, as in v1: the caller acted on the id
+    // whether or not the write then succeeds. Erase is excluded — v1 did not
+    // reward a row it was destroying — as are link and review, which name a
+    // tunnel rather than a surfaced memory.
+    let dereferenced = match &request {
+        MemoryMutationRequest::Update(request) => Some(request.memory_id),
+        MemoryMutationRequest::Withdraw(request) => Some(request.memory_id),
+        MemoryMutationRequest::Confirm(request) => Some(request.memory_id),
+        MemoryMutationRequest::Move(request) => Some(request.memory_id),
+        _ => None,
+    };
+    if let Some(memory_id) = dereferenced {
+        let canonical = memory_id.hyphenated().to_string();
+        // Both spellings: the two portable writers disagree on UUID case and
+        // mark_recall_used matches trace rows by the stored id.
+        for spelling in [canonical.clone(), canonical.to_uppercase()] {
+            crate::interface_tools::note_usage(
+                &spelling, &registry.default, surfaced_recall_ledger, posture);
+        }
+    }
     let (tool, result) = match request {
         MemoryMutationRequest::Update(request) => (
             crate::v2::memory_mutations::UPDATE_MEMORY_TOOL, service.update(request)),
