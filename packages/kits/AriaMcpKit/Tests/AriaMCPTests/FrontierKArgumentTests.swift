@@ -182,3 +182,24 @@ struct FrontierKArgumentTests {
                 "Error message must name the frontier_k argument; got: \(caughtMessage)")
     }
 }
+
+extension FrontierKArgumentTests {
+    // MARK: - E: frontier_k value reaches the decoded request (discriminates "dropped before engine")
+    //
+    // Test C above only asserts no error; it passes even if frontier_k is decoded
+    // then silently dropped before reaching the request struct.  This test decodes
+    // AriaV2MemorySearchRequest directly and asserts the frontierK field carries
+    // the supplied value — so the assertion fails if the value is dropped at any
+    // point between the JSON argument and the stored request.
+
+    @Test("frontier_k integer value is preserved in the decoded request")
+    func memorySearchFrontierKValueReachesDecodedRequest() throws {
+        let arguments: JSONValue = .object([
+            "query": .string("sentinel"),
+            "frontier_k": .integer(128),
+        ])
+        let request = try AriaV2MemorySearchRequest(arguments: arguments)
+        #expect(request.frontierK == 128,
+                "frontierK must carry the supplied value; dropping it before the request would cause this to fail")
+    }
+}

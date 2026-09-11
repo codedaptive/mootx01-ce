@@ -187,6 +187,38 @@ pub fn apply_coaching_block(mut result: Value, block: &str) -> Value {
     result
 }
 
+/// Append a second content text block carrying `{"id_map":{…}}` to a non-error
+/// v2 result. Used by `moot_json_import` when `return_id_map=true`.
+///
+/// The structured data already carries `id_map` on every JSON import; this
+/// second block serves text-only callers that cannot read structuredContent.
+/// Its shape is wire-identical to the v1 receipt's second block.
+///
+/// Byte parity with Swift rests on two properties, both load-bearing:
+/// serde_json's Map is a BTreeMap when the `preserve_order` feature is off, so
+/// keys serialize sorted, matching Swift's `.sortedKeys`; and serde_json never
+/// escapes forward slashes, matching Swift's `.withoutEscapingSlashes`.
+///
+/// Returns the result unchanged when `id_map` is absent from the data or the
+/// map cannot be serialized. Both signal a data-contract violation, and the
+/// receipt is still worth delivering without the second block.
+///
+/// Parity: Rust twin of Swift `AriaV2DataMobility.appendIDMapBlock(_:from:)`.
+pub fn append_id_map_block(mut result: Value, data: &Value) -> Value {
+    // Re-check: never mutate an error result.
+    if result.get("isError").and_then(|v| v.as_bool()) == Some(true) {
+        return result;
+    }
+    let Some(id_map) = data.get("id_map") else { return result };
+    let Ok(text) = serde_json::to_string(&json!({ "id_map": id_map })) else { return result };
+    if let Some(content) = result.get_mut("content") {
+        if let Some(arr) = content.as_array_mut() {
+            arr.push(json!({ "type": "text", "text": text }));
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

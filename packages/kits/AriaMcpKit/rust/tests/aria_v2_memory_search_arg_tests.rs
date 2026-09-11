@@ -431,3 +431,32 @@ fn weak_discrimination_is_reported_without_explain() {
         "a weak ranking must warn the caller without needing explain; got: {text}"
     );
 }
+// ---------------------------------------------------------------------------
+// E: frontier_k value reaches the decoded request (discriminates "dropped before engine")
+//
+// The integer-accepted test above only asserts no error; it passes even if
+// frontier_k is decoded then silently dropped before the request struct.
+// This test calls V2MemorySearchRequest::decode directly and asserts
+// frontier_k carries the supplied value — fails if it is dropped anywhere
+// between the JSON argument and the stored request.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frontier_k_value_is_preserved_in_decoded_request() {
+    use aria_mcp::jsonrpc::JsonValue;
+    use aria_mcp::v2::core_memory::V2MemorySearchRequest;
+
+    // Convert serde_json::Value to the internal JsonValue via the From impl.
+    let value: JsonValue = serde_json::json!({
+        "query": "sentinel",
+        "frontier_k": 128,
+    })
+    .into();
+    let request = V2MemorySearchRequest::decode(&value)
+        .expect("valid memory search with frontier_k:128 must decode");
+    assert_eq!(
+        request.frontier_k,
+        Some(128),
+        "frontier_k must carry the supplied value; dropping it before the request would cause this to fail"
+    );
+}
