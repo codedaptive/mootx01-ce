@@ -1471,28 +1471,97 @@ fn execute_cognition_catalog(
         CognitionCatalogOperation::Lenses => crate::v2::cognition_catalog::LIST_LENSES_TOOL,
         CognitionCatalogOperation::Recipes => crate::v2::cognition_catalog::LIST_RECIPES_TOOL,
     };
-    let data: Result<serde_json::Value, crate::v2::cognition_catalog::CognitionCatalogFailure> = match operation {
-        CognitionCatalogOperation::Lenses => service.lenses(request)
-            .map(|data| serde_json::to_value(data)
-                .expect("typed cognition lens data must serialize")),
-        CognitionCatalogOperation::Recipes => service.recipes(request)
-            .map(|data| serde_json::to_value(data)
-                .expect("typed cognition recipe data must serialize")),
-    };
-    match data {
-        Ok(data) => crate::v2::render::success(
-            tool, &data, meta, "Returned the current selected cognition directory.",
-        ).map_err(jsonrpc_internal),
-        Err(error) => Ok(crate::v2::render::refusal(
-            tool,
-            &crate::v2::render::V2OperationalRefusal {
-                code: error.code.to_owned(),
-                message: error.message.to_owned(),
-                retryable: error.retryable,
-                recovery: None,
-            },
-            meta,
-        )),
+    // Typed responses carry the data; text is built from it to match Swift.
+    match operation {
+        CognitionCatalogOperation::Lenses => {
+            match service.lenses(request) {
+                Err(error) => Ok(crate::v2::render::refusal(
+                    tool,
+                    &crate::v2::render::V2OperationalRefusal {
+                        code: error.code.to_owned(),
+                        message: error.message.to_owned(),
+                        retryable: error.retryable,
+                        recovery: None,
+                    },
+                    meta,
+                )),
+                Ok(typed) => {
+                    let count = typed.tools.len();
+                    let data = serde_json::to_value(&typed)
+                        .expect("typed cognition lens data must serialize");
+                    // Parity with Swift: verbose emits "Listed N callable cognition
+                    // tools (full schema). Tools: name1, name2, …"; terse emits
+                    // "Listed N callable cognition tools." with a hint appended.
+                    let text = if request.verbose {
+                        let name_list: Vec<&str> = typed.tools.iter()
+                            .map(|t| t.name.as_str()).collect();
+                        format!(
+                            "Listed {} callable cognition tools (full schema). Tools: {}",
+                            count,
+                            name_list.join(", ")
+                        )
+                    } else {
+                        format!("Listed {} callable cognition tools.", count)
+                    };
+                    let result = crate::v2::render::success(tool, &data, meta, &text)
+                        .map_err(jsonrpc_internal)?;
+                    if request.verbose {
+                        Ok(result)
+                    } else {
+                        Ok(crate::v2::render::apply_hint(
+                            result, "(terse — pass verbose:true for the full schema row)",
+                        ))
+                    }
+                }
+            }
+        }
+        CognitionCatalogOperation::Recipes => {
+            match service.recipes(request) {
+                Err(error) => Ok(crate::v2::render::refusal(
+                    tool,
+                    &crate::v2::render::V2OperationalRefusal {
+                        code: error.code.to_owned(),
+                        message: error.message.to_owned(),
+                        retryable: error.retryable,
+                        recovery: None,
+                    },
+                    meta,
+                )),
+                Ok(typed) => {
+                    let count = typed.recipes.len();
+                    let data = serde_json::to_value(&typed)
+                        .expect("typed cognition recipe data must serialize");
+                    // Parity with Swift: verbose emits "Listed N recipe(s)." plus
+                    // "\n<name> requires: <caps>…" lines when recipes have required
+                    // capabilities. Terse emits "Listed N recipe(s)." with a hint appended.
+                    let text = if request.verbose {
+                        let caps_lines: Vec<String> = typed.recipes.iter()
+                            .filter_map(|r| {
+                                let caps = r.required_capabilities.as_deref()?;
+                                if caps.is_empty() { return None; }
+                                Some(format!("{} requires: {}", r.name, caps.join(", ")))
+                            })
+                            .collect();
+                        if caps_lines.is_empty() {
+                            format!("Listed {} recipe(s).", count)
+                        } else {
+                            format!("Listed {} recipe(s).\n{}", count, caps_lines.join("\n"))
+                        }
+                    } else {
+                        format!("Listed {} recipe(s).", count)
+                    };
+                    let result = crate::v2::render::success(tool, &data, meta, &text)
+                        .map_err(jsonrpc_internal)?;
+                    if request.verbose {
+                        Ok(result)
+                    } else {
+                        Ok(crate::v2::render::apply_hint(
+                            result, "(terse — pass verbose:true for the full schema row)",
+                        ))
+                    }
+                }
+            }
+        }
     }
 }
 
