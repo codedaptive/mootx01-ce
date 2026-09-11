@@ -350,7 +350,20 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
         // which sets `degraded: !result.degradedStages.isEmpty` in the returned
         // AriaV2SearchResult. The rrf door on unionBest always records at least one
         // stage; matrixAware runs clean.
-        Ok(V2MemorySearchResult { rows, answer_block, degraded: !result.degraded_stages.is_empty() })
+        // The span rerank stage's registration, so discrimination can cap a
+        // high verdict on a lexical-only ranking. Read through the coordinator
+        // because only it knows which stages are mounted.
+        let span_rerank_registered = estate
+            .coord
+            .lock()
+            .map(|coord| coord.is_span_rerank_registered(&estate.handle))
+            .unwrap_or(true);
+        Ok(V2MemorySearchResult {
+            rows,
+            answer_block,
+            degraded: !result.degraded_stages.is_empty(),
+            span_rerank_registered,
+        })
     }
 
     fn get_memories(&self, context: &V2MemoryOperationContext, request: &V2MemoryGetRequest) -> Result<Vec<V2Memory>, V2MemoryFailure> {
