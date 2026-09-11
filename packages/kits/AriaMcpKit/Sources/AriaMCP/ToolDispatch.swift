@@ -968,6 +968,16 @@ private extension ToolDispatcher {
             case .dataMobility(let request):
                 return try await dataMobility.execute(request)
             }
+        } catch let error as JSONRPCError where error.code == JSONRPCErrorCode.invalidParams {
+            // A SYNTAX ERROR is the CALLER's to fix, so it is reported as one
+            // rather than as `operation_failed`, which reads as an estate
+            // problem and invites a retry that cannot succeed. The message
+            // carries the offending argument and its value; `retryable: false`
+            // says plainly that sending the same call again will not help.
+            return AriaV2Envelope.refusal(
+                tool: request.toolName,
+                error: .init(code: "invalid_argument", message: error.message, retryable: false)
+            )
         } catch let error as JSONRPCError {
             return AriaV2Envelope.refusal(
                 tool: request.toolName,
@@ -1459,7 +1469,7 @@ extension ToolDispatcher {
         case .underlyingEstateFailure(let verb, let reason):
             // Intercept gate-rejection messages before falling through to the
             // generic form. describeGateRejection returns nil for non-gate errors.
-            if let msg = describeGateRejection(verb: verb, reason: reason) {
+            if let msg = Self.describeGateRejection(verb: verb, reason: reason) {
                 return msg
             }
             // Strip internal Rust/Swift type-name prefixes that the substrate
@@ -1511,7 +1521,11 @@ extension ToolDispatcher {
     ///     tombstoned + *            → "memory has been permanently erased and cannot be mutated"
     ///     *        + *              → "the memory's current state (<state>) does not allow this
     ///                                   mutation; check it with moot_memory_search"
-    private func describeGateRejection(verb: String, reason: String) -> String? {
+    /// Internal and static so the v2 mutation surface can reach it too. It
+    /// was private to this type, which is the only reason a v2 gate refusal
+    /// came back as a generic "unavailable": the translator existed and
+    /// nothing outside the v1 dispatch table could call it.
+    static func describeGateRejection(verb: String, reason: String) -> String? {
         let sentinel = "illegal state transition: "
         guard let sentinelRange = reason.range(of: sentinel) else { return nil }
         let tail = String(reason[sentinelRange.upperBound...])
