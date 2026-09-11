@@ -11,45 +11,122 @@
     "memory_row": {
       "type": "object",
       "properties": {
-        "id": { "type": "string" },
-        "subject": { "type": "string" },
-        "bestSpan": { "type": "string" },
-        "sscFacts": { "type": "string" },
-        "eventTime": { "type": "string" },
-        "score": { "type": "number" },
-        "room": { "type": "string" },
-        "retrievalSource": { "type": "string", "enum": ["anchor", "walk", "both"] },
-        "distilled": { "type": "string" },
-        "representation": { "const": "distilled" },
-        "tier": { "type": "string", "enum": ["summary", "original"] }
+        "id": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "bestSpan": {
+          "type": "string"
+        },
+        "sscFacts": {
+          "type": "string"
+        },
+        "eventTime": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "room": {
+          "type": "string"
+        },
+        "retrievalSource": {
+          "type": "string",
+          "enum": [
+            "anchor",
+            "walk",
+            "both"
+          ]
+        },
+        "distilled": {
+          "type": "string"
+        },
+        "representation": {
+          "const": "distilled"
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "original"
+          ]
+        }
       },
-      "required": ["id", "eventTime"],
+      "required": [
+        "id",
+        "eventTime"
+      ],
       "additionalProperties": false
     },
     "capabilities": {
       "type": "object",
       "properties": {
-        "discrimination": { "type": "string", "enum": ["low", "medium"] },
+        "discrimination": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium"
+          ]
+        },
         "temporal": {
           "type": "object",
           "properties": {
-            "mode": { "type": "string", "enum": ["loose", "tight"] },
-            "source": { "type": "string" },
-            "grab": { "type": "string", "enum": ["pool", "dated"] },
-            "from": { "type": "string" },
-            "to": { "type": "string" },
-            "widenedDays": { "type": "integer" }
+            "mode": {
+              "type": "string",
+              "enum": [
+                "loose",
+                "tight"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "grab": {
+              "type": "string",
+              "enum": [
+                "pool",
+                "dated"
+              ]
+            },
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            },
+            "widenedDays": {
+              "type": "integer"
+            }
           },
-          "required": ["mode", "source", "grab", "from", "to"],
+          "required": [
+            "mode",
+            "source",
+            "grab",
+            "from",
+            "to"
+          ],
           "additionalProperties": false
         },
         "walk": {
           "type": "object",
           "properties": {
-            "stage": { "type": "string", "enum": ["stage1_session_hybrid", "stage2_precise_hamming"] },
-            "stoppedEarly": { "type": "boolean" }
+            "stage": {
+              "type": "string",
+              "enum": [
+                "stage1_session_hybrid",
+                "stage2_precise_hamming"
+              ]
+            },
+            "stoppedEarly": {
+              "type": "boolean"
+            }
           },
-          "required": ["stage", "stoppedEarly"],
+          "required": [
+            "stage",
+            "stoppedEarly"
+          ],
           "additionalProperties": false
         }
       },
@@ -59,256 +136,1421 @@
     "recall_data": {
       "type": "object",
       "properties": {
-        "results": { "type": "array", "items": { "$ref": "#/$defs/memory_row" } },
-        "capabilities": { "$ref": "#/$defs/capabilities" }
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/memory_row"
+          }
+        },
+        "capabilities": {
+          "$ref": "#/$defs/capabilities"
+        }
       },
-      "required": ["results"],
-      "additionalProperties": false
-    },
-    "distillation": {
-      "type": "object",
-      "properties": {
-        "returnedTokens": { "type": "integer", "minimum": 0 },
-        "originalTokens": { "type": "integer", "minimum": 0 },
-        "savedTokens": { "type": "integer" },
-        "savedPercent": { "type": "integer" },
-        "estimated": { "type": "boolean" },
-        "estimator": { "type": "string" },
-        "skim": { "type": "object", "properties": { "omittedTokens": { "type": "integer", "minimum": 0 } }, "required": ["omittedTokens"], "additionalProperties": false },
-        "display": { "type": "string" }
-      },
-      "required": ["returnedTokens", "originalTokens", "savedTokens", "savedPercent", "estimated", "estimator", "display"],
-      "additionalProperties": false
-    },
-    "distilled_capabilities": {
-      "type": "object",
-      "properties": {
-        "discrimination": { "type": "string", "enum": ["low", "medium"] },
-        "distillation": { "$ref": "#/$defs/distillation" }
-      },
-      "required": ["distillation"],
-      "additionalProperties": false
-    },
-    "distilled_recall_data": {
-      "type": "object",
-      "properties": {
-        "results": { "type": "array", "items": { "$ref": "#/$defs/memory_row" } },
-        "capabilities": { "$ref": "#/$defs/distilled_capabilities" }
-      },
-      "required": ["results", "capabilities"],
+      "required": [
+        "results"
+      ],
       "additionalProperties": false
     },
     "metric": {
       "type": "object",
       "properties": {
-        "jensenShannon": { "type": "number" },
-        "klDivergence": { "type": "number" }
+        "jensenShannon": {
+          "type": "number"
+        },
+        "klDivergence": {
+          "type": "number"
+        }
       },
-      "required": ["jensenShannon", "klDivergence"],
+      "required": [
+        "jensenShannon",
+        "klDivergence"
+      ],
       "additionalProperties": false
     },
     "association_rule": {
       "type": "object",
       "properties": {
-        "antecedent": { "type": "string" },
-        "consequent": { "type": "string" },
-        "support": { "type": "number" },
-        "confidence": { "type": "number" },
-        "lift": { "type": "number" },
-        "conviction": { "type": "number" },
-        "leverage": { "type": "number" },
-        "exemplarDrawerIDs": { "type": "array", "items": { "type": "string" } }
+        "antecedent": {
+          "type": "string"
+        },
+        "consequent": {
+          "type": "string"
+        },
+        "support": {
+          "type": "number"
+        },
+        "confidence": {
+          "type": "number"
+        },
+        "lift": {
+          "type": "number"
+        },
+        "conviction": {
+          "type": "number"
+        },
+        "leverage": {
+          "type": "number"
+        },
+        "exemplarDrawerIDs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       },
-      "required": ["antecedent", "consequent", "support", "confidence", "lift", "conviction", "leverage", "exemplarDrawerIDs"],
+      "required": [
+        "antecedent",
+        "consequent",
+        "support",
+        "confidence",
+        "lift",
+        "conviction",
+        "leverage",
+        "exemplarDrawerIDs"
+      ],
       "additionalProperties": false
     }
   },
   "operations": {
     "moot_recall_precise": {
       "catalog_index": 36,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:887-1026", "packages/kits/CognitionKit/Sources/CognitionKit/PreciseRecall.swift:9-30", "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1098-1222"],
-      "data_schema": { "$ref": "#/$defs/recall_data" }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:887-1026",
+        "packages/kits/CognitionKit/Sources/CognitionKit/PreciseRecall.swift:9-30",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1098-1222"
+      ],
+      "data_schema": {
+        "$ref": "#/$defs/recall_data"
+      }
     },
     "moot_recall_temporal": {
       "catalog_index": 37,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1028-1153", "packages/kits/CognitionKit/Sources/CognitionKit/TemporalRecall.swift", "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:181-210"],
-      "data_schema": { "$ref": "#/$defs/recall_data" }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1028-1153",
+        "packages/kits/CognitionKit/Sources/CognitionKit/TemporalRecall.swift",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:181-210"
+      ],
+      "data_schema": {
+        "$ref": "#/$defs/recall_data"
+      }
     },
     "moot_recall_connected": {
       "catalog_index": 38,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1155-1223", "packages/kits/CognitionKit/Sources/CognitionKit/ConnectedRecall.swift", "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:87-178"],
-      "data_schema": { "$ref": "#/$defs/recall_data" }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1155-1223",
+        "packages/kits/CognitionKit/Sources/CognitionKit/ConnectedRecall.swift",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:87-178"
+      ],
+      "data_schema": {
+        "$ref": "#/$defs/recall_data"
+      }
     },
     "moot_recall_shaped": {
       "catalog_index": 39,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1225-1389", "packages/kits/CognitionKit/Sources/CognitionKit/ShapedRecall.swift", "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1098-1222"],
-      "data_schema": { "$ref": "#/$defs/recall_data" }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1225-1389",
+        "packages/kits/CognitionKit/Sources/CognitionKit/ShapedRecall.swift",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1098-1222"
+      ],
+      "data_schema": {
+        "$ref": "#/$defs/recall_data"
+      }
     },
     "moot_dream": {
       "catalog_index": 40,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1768-1955"],
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1768-1955"
+      ],
       "data_schema": {
         "type": "object",
         "properties": {
-          "candidatesConsidered": { "type": "integer" },
-          "proposalsEmitted": { "type": "array", "items": { "type": "string" } },
-          "suppressedDuplicates": { "type": "integer" },
-          "belowThreshold": { "type": "integer" },
-          "contradictionsProposed": { "type": "integer" },
-          "contradictionCandidatesBorderline": { "type": "integer" },
-          "subjectsBackfilled": { "type": "integer" },
-          "associationsWritten": { "type": "integer" },
-          "associationsNonUniqueProbes": { "type": "integer" }
+          "candidatesConsidered": {
+            "type": "integer"
+          },
+          "proposalsEmitted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "suppressedDuplicates": {
+            "type": "integer"
+          },
+          "belowThreshold": {
+            "type": "integer"
+          },
+          "contradictionsProposed": {
+            "type": "integer"
+          },
+          "contradictionCandidatesBorderline": {
+            "type": "integer"
+          },
+          "subjectsBackfilled": {
+            "type": "integer"
+          },
+          "associationsWritten": {
+            "type": "integer"
+          },
+          "associationsNonUniqueProbes": {
+            "type": "integer"
+          }
         },
-        "required": ["candidatesConsidered", "proposalsEmitted", "suppressedDuplicates", "belowThreshold", "contradictionsProposed", "contradictionCandidatesBorderline"],
+        "required": [
+          "candidatesConsidered",
+          "proposalsEmitted",
+          "suppressedDuplicates",
+          "belowThreshold",
+          "contradictionsProposed",
+          "contradictionCandidatesBorderline"
+        ],
         "additionalProperties": false
       }
     },
     "moot_recall_distilled": {
       "catalog_index": 41,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2RecallLens.swift:140-147", "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2RecallLens.swift:241-333", "packages/kits/CognitionKit/Sources/CognitionKit/DistilledRecall.swift:50-84", "packages/kits/CognitionKit/Sources/CognitionKit/DistilledSavings.swift:73-182", "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2SelectedCatalog.swift:1608-1632"],
-      "data_schema": { "$ref": "#/$defs/distilled_recall_data" }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:2263-2351",
+        "packages/kits/CognitionKit/Sources/CognitionKit/DistilledRecall.swift:31-99",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1004-1029"
+      ],
+      "data_schema": {
+        "$ref": "#/$defs/recall_data"
+      }
     },
     "moot_recall_vague": {
       "catalog_index": 42,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:2208-2261", "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:974-1002"],
-      "data_schema": { "$ref": "#/$defs/recall_data" }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:2208-2261",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:974-1002"
+      ],
+      "data_schema": {
+        "$ref": "#/$defs/recall_data"
+      }
     },
     "moot_hunt_contradictions": {
       "catalog_index": 43,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1957-2109"],
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:1957-2109"
+      ],
       "data_schema": {
         "type": "object",
         "properties": {
-          "probesScanned": { "type": "integer" },
-          "pairsScreened": { "type": "integer" },
-          "deduplicated": { "type": "integer" },
-          "proposed": { "type": "array", "items": { "type": "object", "properties": { "sourceDrawerID": { "type": "string" }, "targetDrawerID": { "type": "string" }, "cueKind": { "type": "string" }, "score": { "type": "number" }, "tunnelID": { "type": "string" } }, "required": ["sourceDrawerID", "targetDrawerID", "cueKind", "score", "tunnelID"], "additionalProperties": false } },
-          "borderline": { "type": "array", "items": { "type": "object", "properties": { "sourceDrawerID": { "type": "string" }, "targetDrawerID": { "type": "string" }, "cueKind": { "type": "string" }, "score": { "type": "number" }, "sourceSnippet": { "type": "string" }, "targetSnippet": { "type": "string" } }, "required": ["sourceDrawerID", "targetDrawerID", "cueKind", "score", "sourceSnippet", "targetSnippet"], "additionalProperties": false } }
+          "probesScanned": {
+            "type": "integer"
+          },
+          "pairsScreened": {
+            "type": "integer"
+          },
+          "deduplicated": {
+            "type": "integer"
+          },
+          "proposed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sourceDrawerID": {
+                  "type": "string"
+                },
+                "targetDrawerID": {
+                  "type": "string"
+                },
+                "cueKind": {
+                  "type": "string"
+                },
+                "score": {
+                  "type": "number"
+                },
+                "tunnelID": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sourceDrawerID",
+                "targetDrawerID",
+                "cueKind",
+                "score",
+                "tunnelID"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "borderline": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sourceDrawerID": {
+                  "type": "string"
+                },
+                "targetDrawerID": {
+                  "type": "string"
+                },
+                "cueKind": {
+                  "type": "string"
+                },
+                "score": {
+                  "type": "number"
+                },
+                "sourceSnippet": {
+                  "type": "string"
+                },
+                "targetSnippet": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "sourceDrawerID",
+                "targetDrawerID",
+                "cueKind",
+                "score",
+                "sourceSnippet",
+                "targetSnippet"
+              ],
+              "additionalProperties": false
+            }
+          }
         },
-        "required": ["probesScanned", "pairsScreened", "deduplicated", "proposed", "borderline"],
+        "required": [
+          "probesScanned",
+          "pairsScreened",
+          "deduplicated",
+          "proposed",
+          "borderline"
+        ],
         "additionalProperties": false
       }
     },
     "moot_recall_walk": {
       "catalog_index": 44,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:2111-2206", "packages/kits/CognitionKit/Sources/CognitionKit/WalkRecall.swift:42-97", "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1185-1218"],
-      "data_schema": { "$ref": "#/$defs/recall_data" }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/RecipeTools.swift:2111-2206",
+        "packages/kits/CognitionKit/Sources/CognitionKit/WalkRecall.swift:42-97",
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:1185-1218"
+      ],
+      "data_schema": {
+        "$ref": "#/$defs/recall_data"
+      }
     },
     "moot_lens_keystones": {
       "catalog_index": 45,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:402-441", "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/Keystones.swift"],
-      "data_schema": { "type": "object", "properties": { "keystones": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "centrality": { "type": "number" } }, "required": ["id", "centrality"], "additionalProperties": false } } }, "required": ["keystones"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:402-441",
+        "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/Keystones.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "keystones": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "centrality": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "centrality"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "keystones"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_constellation": {
       "catalog_index": 46,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:443-449", "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/Constellation.swift"],
-      "data_schema": { "type": "object", "properties": { "communities": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } } }, "required": ["communities"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:443-449",
+        "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/Constellation.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "communities": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "communities"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_free_association": {
       "catalog_index": 47,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:451-484", "packages/kits/CognitionKit/Sources/CognitionKit/FreeAssociation.swift:11-20"],
-      "data_schema": { "type": "object", "properties": { "associations": { "type": "array", "items": { "type": "object", "properties": { "drawerID": { "type": "string" }, "activation": { "type": "number" } }, "required": ["drawerID", "activation"], "additionalProperties": false } } }, "required": ["associations"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:451-484",
+        "packages/kits/CognitionKit/Sources/CognitionKit/FreeAssociation.swift:11-20"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "associations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "drawerID": {
+                  "type": "string"
+                },
+                "activation": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "drawerID",
+                "activation"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "associations"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_theme_weather": {
       "catalog_index": 48,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:486-491", "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/ThemeWeather.swift"],
-      "data_schema": { "type": "object", "properties": { "weather": { "type": "array", "items": { "type": "object", "properties": { "category": { "type": "string" }, "momentum": { "type": "number" } }, "required": ["category", "momentum"], "additionalProperties": false } } }, "required": ["weather"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:486-491",
+        "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/ThemeWeather.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "weather": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string"
+                },
+                "momentum": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "category",
+                "momentum"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "weather"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_latent_themes": {
       "catalog_index": 49,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:493-499", "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/LatentThemes.swift"],
-      "data_schema": { "type": "object", "properties": { "k": { "type": "integer" }, "loadings": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "dominantTheme": { "type": "integer" } }, "required": ["label", "dominantTheme"], "additionalProperties": false } } }, "required": ["k", "loadings"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:493-499",
+        "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/LatentThemes.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "k": {
+            "type": "integer"
+          },
+          "loadings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "dominantTheme": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "label",
+                "dominantTheme"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "k",
+          "loadings"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_bias": {
       "catalog_index": 50,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:501-522", "packages/kits/CognitionKit/Sources/CognitionKit/Bias.swift:18-61", "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/Bias.swift"],
-      "data_schema": { "type": "object", "properties": { "biasedFor": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "bias": { "type": "number" } }, "required": ["label", "bias"], "additionalProperties": false } }, "biasedAgainst": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "bias": { "type": "number" } }, "required": ["label", "bias"], "additionalProperties": false } }, "dismissal": { "type": "array", "items": { "type": "object", "properties": { "nodeId": { "type": "string" }, "rate": { "type": "number" } }, "required": ["nodeId", "rate"], "additionalProperties": false } }, "learned": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "strength": { "type": "number" }, "endorsements": { "type": "integer" }, "dismissals": { "type": "integer" } }, "required": ["label", "strength", "endorsements", "dismissals"], "additionalProperties": false } } }, "required": ["biasedFor", "biasedAgainst", "dismissal", "learned"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:501-522",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Bias.swift:18-61",
+        "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/Bias.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "biasedFor": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "bias": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "label",
+                "bias"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "biasedAgainst": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "bias": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "label",
+                "bias"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "dismissal": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "nodeId": {
+                  "type": "string"
+                },
+                "rate": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "nodeId",
+                "rate"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "learned": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "strength": {
+                  "type": "number"
+                },
+                "endorsements": {
+                  "type": "integer"
+                },
+                "dismissals": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "label",
+                "strength",
+                "endorsements",
+                "dismissals"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "biasedFor",
+          "biasedAgainst",
+          "dismissal",
+          "learned"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_drift": {
       "catalog_index": 51,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:524-532", "packages/kits/CognitionKit/Sources/CognitionKit/Drift.swift:7-34"],
-      "data_schema": { "type": "object", "properties": { "beforeCount": { "type": "integer" }, "afterCount": { "type": "integer" }, "drift": { "$ref": "#/$defs/metric" } }, "required": ["beforeCount", "afterCount", "drift"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:524-532",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Drift.swift:7-34"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "beforeCount": {
+            "type": "integer"
+          },
+          "afterCount": {
+            "type": "integer"
+          },
+          "drift": {
+            "$ref": "#/$defs/metric"
+          }
+        },
+        "required": [
+          "beforeCount",
+          "afterCount",
+          "drift"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_node_motion": {
       "catalog_index": 52,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:859-900", "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/NodeMotion.swift"],
-      "data_schema": { "type": "object", "properties": { "rowID": { "type": "string" }, "volatility": { "type": "number" }, "eventCount": { "type": "integer" }, "lastEventPhysicalMs": { "type": "integer" }, "anchorTrajectory": { "type": "array", "items": { "type": "integer" } }, "reanchored": { "type": "boolean" }, "currentAnchor": { "type": "integer" }, "anomaly": { "type": "string", "enum": ["churning", "reanchored", "stable"] } }, "required": ["rowID", "volatility", "eventCount", "anchorTrajectory", "reanchored", "anomaly"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:859-900",
+        "packages/kits/NeuronKit/Sources/NeuronKit/Lenses/NodeMotion.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "rowID": {
+            "type": "string"
+          },
+          "volatility": {
+            "type": "number"
+          },
+          "eventCount": {
+            "type": "integer"
+          },
+          "lastEventPhysicalMs": {
+            "type": "integer"
+          },
+          "anchorTrajectory": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "reanchored": {
+            "type": "boolean"
+          },
+          "currentAnchor": {
+            "type": "integer"
+          },
+          "anomaly": {
+            "type": "string",
+            "enum": [
+              "churning",
+              "reanchored",
+              "stable"
+            ]
+          }
+        },
+        "required": [
+          "rowID",
+          "volatility",
+          "eventCount",
+          "anchorTrajectory",
+          "reanchored",
+          "anomaly"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_cohesion": {
       "catalog_index": 53,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:534-607", "packages/kits/CognitionKit/Sources/CognitionKit/Contradiction.swift:8-25", "packages/kits/CognitionKit/Sources/CognitionKit/DatasetCohesion.swift"],
-      "data_schema": { "oneOf": [ { "type": "object", "properties": { "considered": { "type": "integer" }, "outliers": { "type": "array", "items": { "type": "string" } } }, "required": ["considered", "outliers"], "additionalProperties": false }, { "type": "object", "properties": { "rowsScored": { "type": "integer" }, "topAnomalies": { "type": "array", "items": { "type": "object", "properties": { "rowIndex": { "type": "integer" }, "score": { "type": "number" } }, "required": ["rowIndex", "score"], "additionalProperties": false } } }, "required": ["rowsScored", "topAnomalies"], "additionalProperties": false } ] }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:534-607",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Contradiction.swift:8-25",
+        "packages/kits/CognitionKit/Sources/CognitionKit/DatasetCohesion.swift"
+      ],
+      "data_schema": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "considered": {
+                "type": "integer"
+              },
+              "outliers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "considered",
+              "outliers"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "rowsScored": {
+                "type": "integer"
+              },
+              "topAnomalies": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "rowIndex": {
+                      "type": "integer"
+                    },
+                    "score": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "rowIndex",
+                    "score"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "rowsScored",
+              "topAnomalies"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
     },
     "moot_lens_contradiction": {
       "catalog_index": 54,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:609-779"],
-      "data_schema": { "type": "object", "properties": { "contradictsTunnels": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "sourceDrawerId": { "type": "string" }, "targetDrawerId": { "type": "string" }, "lifecycle": { "type": "string", "enum": ["active", "proposed"] } }, "required": ["id", "lifecycle"], "additionalProperties": false } }, "conflictingFacts": { "type": "array", "items": { "type": "object", "properties": { "subject": { "type": "string" }, "predicate": { "type": "string" }, "objects": { "type": "array", "items": { "type": "string" } } }, "required": ["subject", "predicate", "objects"], "additionalProperties": false } } }, "required": ["contradictsTunnels", "conflictingFacts"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:609-779"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "contradictsTunnels": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "sourceDrawerId": {
+                  "type": "string"
+                },
+                "targetDrawerId": {
+                  "type": "string"
+                },
+                "lifecycle": {
+                  "type": "string",
+                  "enum": [
+                    "active",
+                    "proposed"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "lifecycle"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "conflictingFacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "subject": {
+                  "type": "string"
+                },
+                "predicate": {
+                  "type": "string"
+                },
+                "objects": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "subject",
+                "predicate",
+                "objects"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "totalContradictionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "totalConflictingFactGroupCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "withheldContradictionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "withheldConflictingFactGroupCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "conflictingFacts",
+          "contradictsTunnels",
+          "totalConflictingFactGroupCount",
+          "totalContradictionCount",
+          "withheldConflictingFactGroupCount",
+          "withheldContradictionCount"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_trust_synthesis": {
       "catalog_index": 55,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:781-798", "packages/kits/CognitionKit/Sources/CognitionKit/TrustLens.swift:11-49"],
-      "data_schema": { "type": "object", "properties": { "context": { "type": "object", "properties": { "summary": { "type": "string" }, "patterns": { "type": "array", "items": { "type": "string" } }, "successRate": { "type": "number" }, "averageReward": { "type": "number" }, "recommendations": { "type": "array", "items": { "type": "string" } }, "keyInsights": { "type": "array", "items": { "type": "string" } } }, "required": ["summary", "patterns", "successRate", "averageReward", "recommendations", "keyInsights"], "additionalProperties": false }, "rankedIDs": { "type": "array", "items": { "type": "string" } }, "highTrustCount": { "type": "integer" }, "calibratedConfidences": { "type": "array", "items": { "type": "object", "properties": { "claimed": { "type": "number" }, "calibrated": { "type": "number" }, "isCalibrated": { "type": "boolean" } }, "required": ["claimed", "calibrated", "isCalibrated"], "additionalProperties": false } } }, "required": ["context", "rankedIDs", "highTrustCount"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:781-798",
+        "packages/kits/CognitionKit/Sources/CognitionKit/TrustLens.swift:11-49"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "type": "object",
+            "properties": {
+              "summary": {
+                "type": "string"
+              },
+              "patterns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "successRate": {
+                "type": "number"
+              },
+              "averageReward": {
+                "type": "number"
+              },
+              "recommendations": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "keyInsights": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "summary",
+              "patterns",
+              "successRate",
+              "averageReward",
+              "recommendations",
+              "keyInsights"
+            ],
+            "additionalProperties": false
+          },
+          "rankedIDs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "highTrustCount": {
+            "type": "integer"
+          },
+          "calibratedConfidences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "claimed": {
+                  "type": "number"
+                },
+                "calibrated": {
+                  "type": "number"
+                },
+                "isCalibrated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "claimed",
+                "calibrated",
+                "isCalibrated"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "context",
+          "rankedIDs",
+          "highTrustCount"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_partial_cue": {
       "catalog_index": 56,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:800-834", "packages/kits/CognitionKit/Sources/CognitionKit/PartialCueRecall.swift"],
-      "data_schema": { "type": "object", "properties": { "results": { "type": "array", "items": { "$ref": "#/$defs/memory_row" } }, "capabilities": { "$ref": "#/$defs/capabilities" } }, "required": ["results"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:800-834",
+        "packages/kits/CognitionKit/Sources/CognitionKit/PartialCueRecall.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/memory_row"
+            }
+          },
+          "capabilities": {
+            "$ref": "#/$defs/capabilities"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_anticipate": {
       "catalog_index": 57,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:836-857", "packages/kits/CognitionKit/Sources/CognitionKit/Anticipate.swift"],
-      "data_schema": { "type": "object", "properties": { "actions": { "type": "array", "items": { "type": "object", "properties": { "action": { "type": "integer" }, "successRate": { "type": "number" }, "count": { "type": "integer" } }, "required": ["action", "successRate", "count"], "additionalProperties": false } } }, "required": ["actions"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:836-857",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Anticipate.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "integer"
+                },
+                "successRate": {
+                  "type": "number"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "action",
+                "successRate",
+                "count"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "actions"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_successors": {
       "catalog_index": 58,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:902-918", "packages/kits/CognitionKit/Sources/CognitionKit/TunnelSuccessor.swift"],
-      "data_schema": { "type": "object", "properties": { "successors": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "weight": { "type": "number" } }, "required": ["id", "weight"], "additionalProperties": false } } }, "required": ["successors"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:902-918",
+        "packages/kits/CognitionKit/Sources/CognitionKit/TunnelSuccessor.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "successors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "weight": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "id",
+                "weight"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "successors"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_overlap": {
       "catalog_index": 59,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:920-940", "packages/kits/CognitionKit/Sources/CognitionKit/MindOverlap.swift:10-48"],
-      "data_schema": { "type": "object", "properties": { "overlap": { "type": "number" }, "aSufficient": { "type": "boolean" }, "bSufficient": { "type": "boolean" } }, "required": ["overlap", "aSufficient", "bSufficient"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:920-940",
+        "packages/kits/CognitionKit/Sources/CognitionKit/MindOverlap.swift:10-48"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "overlap": {
+            "type": "number"
+          },
+          "aSufficient": {
+            "type": "boolean"
+          },
+          "bSufficient": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "overlap",
+          "aSufficient",
+          "bSufficient"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_divergence": {
       "catalog_index": 60,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:942-961", "packages/kits/CognitionKit/Sources/CognitionKit/EstateDivergence.swift:8-38"],
-      "data_schema": { "type": "object", "properties": { "aCount": { "type": "integer" }, "bCount": { "type": "integer" }, "divergence": { "$ref": "#/$defs/metric" } }, "required": ["aCount", "bCount", "divergence"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:942-961",
+        "packages/kits/CognitionKit/Sources/CognitionKit/EstateDivergence.swift:8-38"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "aCount": {
+            "type": "integer"
+          },
+          "bCount": {
+            "type": "integer"
+          },
+          "divergence": {
+            "$ref": "#/$defs/metric"
+          }
+        },
+        "required": [
+          "aCount",
+          "bCount",
+          "divergence"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_associations": {
       "catalog_index": 61,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:963-1067", "packages/kits/CognitionKit/Sources/CognitionKit/AssociationRules.swift:69-112", "packages/kits/CognitionKit/Sources/CognitionKit/DatasetAssociations.swift"],
-      "data_schema": { "type": "object", "properties": { "rules": { "type": "array", "items": { "$ref": "#/$defs/association_rule" } }, "drawerCount": { "type": "integer" }, "rowCount": { "type": "integer" }, "labelOverflow": { "type": "boolean" } }, "required": ["rules", "labelOverflow"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:963-1067",
+        "packages/kits/CognitionKit/Sources/CognitionKit/AssociationRules.swift:69-112",
+        "packages/kits/CognitionKit/Sources/CognitionKit/DatasetAssociations.swift"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/association_rule"
+            }
+          },
+          "drawerCount": {
+            "type": "integer"
+          },
+          "rowCount": {
+            "type": "integer"
+          },
+          "labelOverflow": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rules",
+          "labelOverflow"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_concepts": {
       "catalog_index": 62,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1249-1291", "packages/kits/CognitionKit/Sources/CognitionKit/FormalConcepts.swift:63-133"],
-      "data_schema": { "type": "object", "properties": { "concepts": { "type": "array", "items": { "type": "object", "properties": { "intent": { "type": "array", "items": { "type": "string" } }, "extentDrawerIDs": { "type": "array", "items": { "type": "string" } }, "support": { "type": "integer" }, "stability": { "type": "number" } }, "required": ["intent", "extentDrawerIDs", "support"], "additionalProperties": false } }, "drawerCount": { "type": "integer" }, "coverDeltas": { "type": "array", "items": { "type": "object", "properties": { "lowerIntent": { "type": "array", "items": { "type": "string" } }, "addedAttributes": { "type": "array", "items": { "type": "string" } } }, "required": ["lowerIntent", "addedAttributes"], "additionalProperties": false } }, "implications": { "type": "array", "items": { "type": "object", "properties": { "premise": { "type": "array", "items": { "type": "string" } }, "conclusion": { "type": "array", "items": { "type": "string" } } }, "required": ["premise", "conclusion"], "additionalProperties": false } }, "implicationsTruncated": { "type": "boolean" } }, "required": ["concepts", "drawerCount", "coverDeltas", "implications", "implicationsTruncated"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1249-1291",
+        "packages/kits/CognitionKit/Sources/CognitionKit/FormalConcepts.swift:63-133"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "concepts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "intent": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "extentDrawerIDs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "support": {
+                  "type": "integer"
+                },
+                "stability": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "intent",
+                "extentDrawerIDs",
+                "support"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "drawerCount": {
+            "type": "integer"
+          },
+          "coverDeltas": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "lowerIntent": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "addedAttributes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "lowerIntent",
+                "addedAttributes"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "implications": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "premise": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "conclusion": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "premise",
+                "conclusion"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "implicationsTruncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "concepts",
+          "drawerCount",
+          "coverDeltas",
+          "implications",
+          "implicationsTruncated"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_apriori": {
       "catalog_index": 63,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1293-1342", "packages/kits/CognitionKit/Sources/CognitionKit/AssociationRules.swift:235-279"],
-      "data_schema": { "type": "object", "properties": { "rules": { "type": "array", "items": { "type": "object", "properties": { "antecedent": { "type": "array", "items": { "type": "string" } }, "consequent": { "type": "string" }, "support": { "type": "number" }, "confidence": { "type": "number" }, "lift": { "type": "number" }, "evidenceCount": { "type": "integer" } }, "required": ["antecedent", "consequent", "support", "confidence", "lift", "evidenceCount"], "additionalProperties": false } } }, "required": ["rules"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1293-1342",
+        "packages/kits/CognitionKit/Sources/CognitionKit/AssociationRules.swift:235-279"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "antecedent": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "consequent": {
+                  "type": "string"
+                },
+                "support": {
+                  "type": "number"
+                },
+                "confidence": {
+                  "type": "number"
+                },
+                "lift": {
+                  "type": "number"
+                },
+                "evidenceCount": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "antecedent",
+                "consequent",
+                "support",
+                "confidence",
+                "lift",
+                "evidenceCount"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "rules"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_moment": {
       "catalog_index": 64,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1069-1090", "packages/kits/CognitionKit/Sources/CognitionKit/Moment.swift:9-41"],
-      "data_schema": { "type": "object", "properties": { "windowCount": { "type": "integer" }, "ranking": { "type": "array", "items": { "type": "object", "properties": { "hammingDistance": { "type": "integer" } }, "required": ["hammingDistance"], "additionalProperties": false } } }, "required": ["windowCount", "ranking"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1069-1090",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Moment.swift:9-41"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "windowCount": {
+            "type": "integer"
+          },
+          "ranking": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "hammingDistance": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "hammingDistance"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "windowCount",
+          "ranking"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_rhythm": {
       "catalog_index": 65,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1092-1111", "packages/kits/CognitionKit/Sources/CognitionKit/Rhythm.swift:7-32"],
-      "data_schema": { "type": "object", "properties": { "bucketCount": { "type": "integer" }, "periods": { "type": "array", "items": { "type": "object", "properties": { "periodSeconds": { "type": "integer" }, "relativeMagnitude": { "type": "number" } }, "required": ["periodSeconds", "relativeMagnitude"], "additionalProperties": false } } }, "required": ["bucketCount", "periods"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1092-1111",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Rhythm.swift:7-32"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "bucketCount": {
+            "type": "integer"
+          },
+          "periods": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "periodSeconds": {
+                  "type": "integer"
+                },
+                "relativeMagnitude": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "periodSeconds",
+                "relativeMagnitude"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "bucketCount",
+          "periods"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_precedence": {
       "catalog_index": 66,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1113-1135", "packages/kits/CognitionKit/Sources/CognitionKit/Precedence.swift:9-38"],
-      "data_schema": { "type": "object", "properties": { "entryCount": { "type": "integer" }, "antecedents": { "type": "array", "items": { "type": "object", "properties": { "source": { "type": "object", "properties": { "fieldPath": { "type": "string" }, "valueRepr": { "type": "string" } }, "required": ["fieldPath", "valueRepr"], "additionalProperties": false }, "lagBucket": { "type": "integer" }, "count": { "type": "integer" } }, "required": ["source", "lagBucket", "count"], "additionalProperties": false } } }, "required": ["entryCount", "antecedents"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1113-1135",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Precedence.swift:9-38"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "entryCount": {
+            "type": "integer"
+          },
+          "antecedents": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "object",
+                  "properties": {
+                    "fieldPath": {
+                      "type": "string"
+                    },
+                    "valueRepr": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "fieldPath",
+                    "valueRepr"
+                  ],
+                  "additionalProperties": false
+                },
+                "lagBucket": {
+                  "type": "integer"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "source",
+                "lagBucket",
+                "count"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "entryCount",
+          "antecedents"
+        ],
+        "additionalProperties": false
+      }
     },
     "moot_lens_complexity": {
       "catalog_index": 67,
-      "source_anchors": ["packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1137-1247", "packages/kits/CognitionKit/Sources/CognitionKit/Complexity.swift:9-42", "packages/kits/CognitionKit/Sources/CognitionKit/DatasetComplexity.swift:26-68"],
-      "data_schema": { "type": "object", "properties": { "totalCount": { "type": "integer" }, "nonNullCount": { "type": "integer" }, "nullCount": { "type": "integer" }, "result": { "type": "object", "properties": { "entropyA": { "type": "number" }, "entropyB": { "type": "number" }, "mutualInformation": { "type": "number" } }, "required": ["entropyA"], "additionalProperties": false } }, "required": ["result"], "additionalProperties": false }
+      "source_anchors": [
+        "packages/kits/AriaMcpKit/Sources/AriaMCP/LensTools.swift:1137-1247",
+        "packages/kits/CognitionKit/Sources/CognitionKit/Complexity.swift:9-42",
+        "packages/kits/CognitionKit/Sources/CognitionKit/DatasetComplexity.swift:26-68"
+      ],
+      "data_schema": {
+        "type": "object",
+        "properties": {
+          "totalCount": {
+            "type": "integer"
+          },
+          "nonNullCount": {
+            "type": "integer"
+          },
+          "nullCount": {
+            "type": "integer"
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "entropyA": {
+                "type": "number"
+              },
+              "entropyB": {
+                "type": "number"
+              },
+              "mutualInformation": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "entropyA"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "additionalProperties": false
+      }
     }
   }
 }
