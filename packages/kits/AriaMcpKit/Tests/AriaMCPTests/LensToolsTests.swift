@@ -618,6 +618,42 @@ struct LensToolsSecurityTests {
         }
     }
 
+    /// The three-year span cap. A window spanning decades scans the entire
+    /// corpus and exhausts memory, which is why v1 bounded it; the bound
+    /// survived into v2 only inside the unreachable v1 dispatch table, so the
+    /// live path had none. Nothing asserted this in v1 either, which is how it
+    /// was lost without anyone noticing — hence this case.
+    @Test func momentWindowSpanningDecadesIsRefused() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_moment",
+            arguments: .object([
+                "windowStart": .string("2000-01-01T00:00:00Z"),
+                "windowEnd":   .string("2026-01-01T00:00:00Z"),
+            ]))
+        #expect(result.objectValue?["isError"]?.boolValue == true,
+                "a 26-year window must be refused, not scanned")
+    }
+
+    /// The same bound on the other lens that shares `dateWindow`.
+    @Test func precedenceWindowSpanningDecadesIsRefused() async throws {
+        let kit = GeniusLocusKit()
+        let (dispatcher, _) = try await openEstate(in: kit)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_precedence",
+            arguments: .object([
+                "windowStart": .string("2000-01-01T00:00:00Z"),
+                "windowEnd":   .string("2026-01-01T00:00:00Z"),
+                "targetField": .string("wing"),
+                "targetValue": .string("study"),
+            ]))
+        #expect(result.objectValue?["isError"]?.boolValue == true,
+                "a 26-year window must be refused, not scanned")
+    }
+
     @Test func momentEqualWindowIsAccepted() async throws {
         let kit = GeniusLocusKit()
         let (dispatcher, _) = try await openEstate(in: kit)
