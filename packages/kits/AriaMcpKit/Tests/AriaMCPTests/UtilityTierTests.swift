@@ -289,6 +289,118 @@ struct UtilityTierTests {
                 "memory_count must exclude the restricted row; got \(String(describing: memoryCount))")
     }
 
+    // MARK: - outputSchema-conformance gate
+
+    /// Validates a LIVE `moot_list_lenses` response against the `outputSchema`
+    /// that the operation itself advertises in the registry, in both terse and
+    /// verbose modes.
+    ///
+    /// The schema is taken from the registry (not hard-coded) so the test tracks
+    /// the contract instead of duplicating it.
+    ///
+    /// What this catches:
+    /// - Before the fix (commit 6ab748019): terse rows omit `input_schema` but
+    ///   the schema declared it as `required` → fails required-key check.
+    ///   Verbose rows include `output_schema` which wasn't declared → fails
+    ///   additionalProperties check.
+    /// - After the fix: terse rows have `required: ["name","description"]`; all
+    ///   four properties are declared so verbose rows pass additionalProperties.
+    ///
+    /// Rust twin: cognition_catalog_output_schema_conforms_to_registry (utility_tier_tests.rs).
+    @Test
+    func listLensesResponseConformsToAdvertisedOutputSchema() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "schema-gate"))
+        let handle = try await kit.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "schema-gate"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Take the outputSchema from the registry — never hard-code a copy.
+        let registry = AriaV2SelectedCatalog.registry(environment: [:])
+        let op = try #require(
+            registry.operations.first(where: { $0.publicName == "moot_list_lenses" }),
+            "moot_list_lenses must be in the registry")
+        let schemaValue = op.projection.outputSchema
+
+        // The declared outputSchema describes the whole structuredContent
+        // envelope (surface_version, tool, data, meta), not the data payload
+        // alone, so the envelope is what gets validated against it.
+        let terseEnvelope = try #require(
+            (try await dispatcher.dispatch(
+                name: "moot_list_lenses", arguments: .object([:])))
+                .objectValue?["structuredContent"])
+        validateJSONSchema(terseEnvelope, schema: schemaValue, path: "terse")
+
+        let verboseEnvelope = try #require(
+            (try await dispatcher.dispatch(
+                name: "moot_list_lenses", arguments: .object(["verbose": .bool(true)])))
+                .objectValue?["structuredContent"])
+        validateJSONSchema(verboseEnvelope, schema: schemaValue, path: "verbose")
+    }
+
+    /// Minimal JSON Schema validator: checks `required`, `additionalProperties: false`,
+    /// and recurses into `items` for arrays and `properties` values for objects.
+    /// Only the constraints used by the ARIA v2 catalog outputSchemas are exercised.
+    private func validateJSONSchema(_ value: JSONValue, schema: JSONValue, path: String) {
+        guard let s = schema.objectValue else {
+            Issue.record("\(path): schema is not an object")
+            return
+        }
+
+        // type check
+        if let typeStr = s["type"]?.stringValue {
+            switch typeStr {
+            case "object":
+                guard let obj = value.objectValue else {
+                    Issue.record("\(path): expected object, got \(value)")
+                    return
+                }
+                // required keys
+                if let required = s["required"]?.arrayValue {
+                    for reqVal in required {
+                        if let key = reqVal.stringValue {
+                            #expect(obj[key] != nil, "\(path): required key \"\(key)\" is missing")
+                        }
+                    }
+                }
+                // additionalProperties: false
+                if s["additionalProperties"] == .bool(false),
+                   let props = s["properties"]?.objectValue {
+                    let declared = Set(props.keys)
+                    for key in obj.keys where !declared.contains(key) {
+                        Issue.record("\(path): undeclared key \"\(key)\" violates additionalProperties:false; declared: \(declared.sorted())")
+                    }
+                    // recurse into declared properties
+                    for (key, propSchema) in props {
+                        if let child = obj[key] {
+                            validateJSONSchema(child, schema: propSchema, path: "\(path).\(key)")
+                        }
+                    }
+                }
+            case "array":
+                guard let arr = value.arrayValue else {
+                    Issue.record("\(path): expected array, got \(value)")
+                    return
+                }
+                if let itemSchema = s["items"] {
+                    for (i, item) in arr.enumerated() {
+                        validateJSONSchema(item, schema: itemSchema, path: "\(path)[\(i)]")
+                    }
+                }
+            case "string":
+                #expect(value.stringValue != nil, "\(path): expected string, got \(value)")
+            default:
+                break
+            }
+        }
+    }
+
     // MARK: - list_lenses terse/verbose
 
     @Test
@@ -383,6 +495,12 @@ struct UtilityTierTests {
             data(of: verboseResult)?["tools"]?.arrayValue, "verbose must return tool rows")
         #expect(!verboseRows.isEmpty, "the verbose row set must not be empty")
 
+        // All v2 catalog operations supply an output_schema (the descriptor
+        // projection always has one). The expected key set is therefore fixed:
+        // a conditional on whether output_schema is present would allow one
+        // port to omit it silently while the other includes it, defeating
+        // the cross-port agreement check.
+        let expectedVerboseKeys: Set<String> = ["name", "description", "input_schema", "output_schema"]
         for row in verboseRows {
             let obj = try #require(row.objectValue)
             let name = try #require(obj["name"]?.stringValue)
@@ -390,13 +508,8 @@ struct UtilityTierTests {
             // No port may ever emit a null output_schema.
             #expect(obj["output_schema"] != JSONValue.null,
                     "\(name): output_schema must be omitted, never null")
-            if obj["output_schema"] == nil {
-                #expect(keys == ["name", "description", "input_schema"],
-                        "\(name) verbose key set without an output schema: \(keys.sorted())")
-            } else {
-                #expect(keys == ["name", "description", "input_schema", "output_schema"],
-                        "\(name) verbose key set: \(keys.sorted())")
-            }
+            #expect(keys == expectedVerboseKeys,
+                    "\(name) verbose key set: \(keys.sorted())")
         }
 
         // The terse row is the same key set minus both schemas.
