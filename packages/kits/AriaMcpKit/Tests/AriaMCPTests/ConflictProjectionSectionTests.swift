@@ -116,7 +116,29 @@ struct ConflictProjectionSectionTests {
     /// facts via `isBulkExportable` before grouping (not counted-but-redacted),
     /// so the F13 "counted in proven: N but [restricted]" behavior is absent.
     /// Awaiting catalog decision. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: v2 lensContradiction lower returns JSON-only compact text; restricted facts are filtered (not counted-but-redacted) in the v2 lower path. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    /// The restored tally, asserted structurally. A contradiction the caller
+    /// may not read is COUNTED and withheld, never dropped — an estate with a
+    /// restricted contradiction must not report itself as consistent.
+    @Test func contradictionCountsIncludeWithheldRows() async throws {
+        let (dispatcher, _, _) = try await makeDispatcher(owner: "contradiction-counts")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_contradiction", arguments: .object([:]))
+        let data = try #require(
+            result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue)
+
+        // Every count is reported, so the caller can always tell "none" from
+        // "some you cannot see".
+        let total = try #require(data["totalContradictionCount"]?.integerValue)
+        let withheld = try #require(data["withheldContradictionCount"]?.integerValue)
+        let rows = data["contradictsTunnels"]?.arrayValue?.count ?? 0
+        #expect(total == Int64(rows) + withheld,
+                "the total must account for every contradiction, visible or withheld")
+        #expect(data["totalConflictingFactGroupCount"]?.integerValue != nil)
+        #expect(data["withheldConflictingFactGroupCount"]?.integerValue != nil)
+    }
+
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED on filtered-not-counted). The COUNT is restored: moot_lens_contradiction now counts every contradiction before applying the sensitivity filter, and reports totalContradictionCount, totalConflictingFactGroupCount and the matching withheld counts, so a restricted or secret contradiction is counted-but-withheld instead of vanishing. An estate with three contradictions no longer reports one. What this case still pins is v1 RENDERED TEXT (the [restricted] marker, the \"proven: N\" line), and v2 answers structurally by ruling. contradictionCountsIncludeWithheldRows below asserts the same facts against the structured payload. Redirecting these greps is like-for-like. Do not delete; do not weaken to pass."))
     func f13RestrictedPairIsRedacted() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-restricted")
         try await plantClaim(kit, handle, content: "Public claim.",
@@ -147,7 +169,7 @@ struct ConflictProjectionSectionTests {
     /// JSON-only; `.secret` facts are filtered before grouping (not
     /// counted-but-silent). Awaiting catalog decision. Do not delete;
     /// do not weaken to pass.
-    @Test(.disabled("BLOCKED: v2 lensContradiction lower returns JSON-only compact text; secret facts are filtered (not counted-but-silent) in the v2 lower path. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED on filtered-not-counted). The COUNT is restored: moot_lens_contradiction now counts every contradiction before applying the sensitivity filter, and reports totalContradictionCount, totalConflictingFactGroupCount and the matching withheld counts, so a restricted or secret contradiction is counted-but-withheld instead of vanishing. An estate with three contradictions no longer reports one. What this case still pins is v1 RENDERED TEXT (the [restricted] marker, the \"proven: N\" line), and v2 answers structurally by ruling. contradictionCountsIncludeWithheldRows below asserts the same facts against the structured payload. Redirecting these greps is like-for-like. Do not delete; do not weaken to pass."))
     func secretCeilingIsCountedButSilent() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-secret")
         try await plantClaim(kit, handle, content: "Public claim.",
