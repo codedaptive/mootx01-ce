@@ -115,6 +115,29 @@ struct TunnelLifecycleDisclosureTests {
         return text
     }
 
+    /// Dispatch moot_memory_get and return the first memory's structured fields,
+    /// or nil when the response carries no admissible record.
+    ///
+    /// Path: result["structuredContent"]["data"]["memories"][0].
+    private func dispatchAndGetFirstMemory(
+        dispatcher: ARIA_MCPDispatcher,
+        memoryID: String
+    ) async -> [String: JSONValue]? {
+        let request = JSONRPCRequest(
+            id: .integer(0),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_memory_get"),
+                "arguments": .object(["memory_id": .string(memoryID)]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        guard let response = rawResponse,
+              case .result(let result) = response.payload,
+              let obj = result.objectValue else { return nil }
+        return obj["structuredContent"]?.objectValue?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue
+    }
+
     // MARK: - connection_search lifecycle gate
     //
     // v2 reshape: `moot_connection_search` no longer takes `from_id`/`to_id`
@@ -332,35 +355,24 @@ struct TunnelLifecycleDisclosureTests {
         return try await harness.kit.capture(harness.handle, frame)
     }
 
-    // MARK: - memory_get tunnel-lifecycle gate — BLOCKED (v2 dropped the field)
+    // MARK: - memory_get tunnel-lifecycle gate
     //
-    // v1's `moot_memory_get` full-record path filtered linked tunnels by
-    // lifecycle == .active before rendering a "tunnels: N" summary line
-    // (still present, unchanged, at ToolDispatch.swift:2568-2579 and
-    // ToolDispatch.swift:2630-2641 — `runMemoryGet`'s `FullRecordData.tunnels`
-    // field). But `moot_memory_get` in the v2 production dispatch path does
-    // NOT reach `runMemoryGet` at all: `ToolDispatcher.dispatch(name:arguments:)`
-    // (ToolDispatch.swift:599-600) decodes every call through
-    // `AriaSurfaceDecoder.decode` + `dispatchV2`, and the `.memoryGet` case
-    // (ToolDispatch.swift:782-783) routes to `memoryOperations.get(getRequest)`
-    // → `AriaV2MemoryOperations.get` → `AriaV2GeniusLocusMemoryBackend.get`
-    // (AriaV2MemoryOperations.swift:590-605), which builds an
-    // `AriaV2MemoryRecord` via `record(for:authorized:)`
-    // (AriaV2MemoryOperations.swift:613-626). `AriaV2MemoryRecord`
-    // (AriaV2MemoryOperations.swift:305-321) has no `tunnels` field and
-    // `record(for:)` never queries `estate.allTunnels()` — the v2 response has
-    // no tunnel-count line in any form, so there is nothing to assert
-    // inclusion or exclusion against. `runMemoryGet` (ToolDispatch.swift:2402)
-    // is unreachable from `dispatch(name:arguments:)`: `InterfaceTools.dispatch`,
-    // the only caller of `runMemoryGet`, has zero call sites anywhere in
-    // Sources/ (confirmed by repo-wide grep) — it is dead code, not an
-    // alternate live path, and the brief's mandated dispatcher
-    // (`ToolDispatcher.dispatch(name:arguments:)`) never reaches it.
-    // Pinned v1 assertion ("tunnels: 0") cannot pass against v2 behavior.
-    // Awaiting catalog decision on whether memory_get's v2 record should
-    // regain a tunnel summary. Do not delete; do not weaken to pass.
+    // v2 moot_memory_get depth:full restores tunnel rows at
+    // AriaV2MemoryOperations.swift:loadTunnels(for:estate:ceiling:).
+    // The lifecycle filter runs at the SQL layer via
+    // estate.activeTunnelsFrom/activeTunnelsTo, which encode the same
+    // tombstonedAt == nil && lifecycle == .active predicate as v1
+    // (ToolDispatch.swift:2568-2579). Assertions are structural: the
+    // tunnels array in structuredContent.data.memories[0] must be empty
+    // when only non-active-lifecycle tunnels are present.
+    //
+    // Far endpoints in these tests are bare UUIDs (not real captured drawers).
+    // The lifecycle filter operates at the SQL layer and rejects non-active
+    // tunnels before the endpoint-resolution step, so the bare-UUID target does
+    // not affect which predicate eliminates the tunnel — it is excluded by
+    // lifecycle, not by endpoint invisibility.
 
-    @Test(.disabled("BLOCKED: v2 moot_memory_get (AriaV2MemoryOperations.swift:590-605, AriaV2MemoryOperations.swift:305-321) builds an AriaV2MemoryRecord with no tunnels field at all — record(for:) never queries estate.allTunnels() (AriaV2MemoryOperations.swift:613-626). The v1 lifecycle-filtered 'tunnels: N' summary line only exists on the dead runMemoryGet path (ToolDispatch.swift:2402), unreachable from ToolDispatcher.dispatch(name:arguments:). Pinned assertion 'tunnels: 0' cannot pass against v2 behavior. Do not delete; do not weaken to pass."))
+    @Test("memory_get excludes proposed tunnels from depth:full tunnel rows (FIND4, v2 structural)")
     func memoryGetExcludesProposedTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
@@ -369,18 +381,15 @@ struct TunnelLifecycleDisclosureTests {
             tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .proposed)
         )
 
-        let text = await dispatchAndExtractText(
-            dispatcher: harness.dispatcher,
-            toolName: "moot_memory_get",
-            args: ["memory_id": .string(drawer.id)]
-        )
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
         #expect(
-            text.contains("tunnels: 0"),
-            "proposed tunnel must not appear in memory_get tunnel summary; got: \(text)"
+            tunnels?.isEmpty == true,
+            "proposed tunnel must not appear in memory_get tunnels; got: \(String(describing: tunnels))"
         )
     }
 
-    @Test(.disabled("BLOCKED: v2 moot_memory_get (AriaV2MemoryOperations.swift:590-605, AriaV2MemoryOperations.swift:305-321) builds an AriaV2MemoryRecord with no tunnels field at all — record(for:) never queries estate.allTunnels() (AriaV2MemoryOperations.swift:613-626). The v1 lifecycle-filtered 'tunnels: N' summary line only exists on the dead runMemoryGet path (ToolDispatch.swift:2402), unreachable from ToolDispatcher.dispatch(name:arguments:). Pinned assertion 'tunnels: 0' cannot pass against v2 behavior. Do not delete; do not weaken to pass."))
+    @Test("memory_get excludes withdrawn tunnels from depth:full tunnel rows (FIND4, v2 structural)")
     func memoryGetExcludesWithdrawnTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
@@ -389,18 +398,15 @@ struct TunnelLifecycleDisclosureTests {
             tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .withdrawn)
         )
 
-        let text = await dispatchAndExtractText(
-            dispatcher: harness.dispatcher,
-            toolName: "moot_memory_get",
-            args: ["memory_id": .string(drawer.id)]
-        )
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
         #expect(
-            text.contains("tunnels: 0"),
-            "withdrawn tunnel must not appear in memory_get tunnel summary; got: \(text)"
+            tunnels?.isEmpty == true,
+            "withdrawn tunnel must not appear in memory_get tunnels; got: \(String(describing: tunnels))"
         )
     }
 
-    @Test(.disabled("BLOCKED: v2 moot_memory_get (AriaV2MemoryOperations.swift:590-605, AriaV2MemoryOperations.swift:305-321) builds an AriaV2MemoryRecord with no tunnels field at all — record(for:) never queries estate.allTunnels() (AriaV2MemoryOperations.swift:613-626). The v1 lifecycle-filtered 'tunnels: N' summary line only exists on the dead runMemoryGet path (ToolDispatch.swift:2402), unreachable from ToolDispatcher.dispatch(name:arguments:). Pinned assertion 'tunnels: 0' cannot pass against v2 behavior. Do not delete; do not weaken to pass."))
+    @Test("memory_get excludes superseded tunnels from depth:full tunnel rows (FIND4, v2 structural)")
     func memoryGetExcludesSupersededTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
@@ -409,14 +415,11 @@ struct TunnelLifecycleDisclosureTests {
             tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .superseded)
         )
 
-        let text = await dispatchAndExtractText(
-            dispatcher: harness.dispatcher,
-            toolName: "moot_memory_get",
-            args: ["memory_id": .string(drawer.id)]
-        )
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
         #expect(
-            text.contains("tunnels: 0"),
-            "superseded tunnel must not appear in memory_get tunnel summary; got: \(text)"
+            tunnels?.isEmpty == true,
+            "superseded tunnel must not appear in memory_get tunnels; got: \(String(describing: tunnels))"
         )
     }
 }

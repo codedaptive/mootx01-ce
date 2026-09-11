@@ -227,13 +227,11 @@ struct MemoryGetTests {
             "lineage_id must be present; got: \(String(describing: lineageID))")
     }
 
-    /// BLOCKED: v2 moot_memory_get (AriaV2MemoryOperations.swift:785-801) does
-    /// not include a tunnel summary in the depth:full record; tunnels are exposed
-    /// via moot_connection_search instead. The v1 assertions cannot be verified
-    /// against the v2 response shape. Awaiting a ruling.
-    /// Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: AriaV2MemoryOperations.swift:785-801 full() omits tunnels from depth:full; v1 tunnel summary is absent from v2 moot_memory_get"))
-    func foundIncludesLinkedTunnelSummary() async throws {
+    /// v2 moot_memory_get depth:full carries the memory's active linked tunnels
+    /// in structuredContent.data.memories[0].tunnels. Each tunnel row carries
+    /// tunnel_id, kind, lifecycle, and far_endpoint_id when the far end is a
+    /// specific drawer (not a room-level endpoint).
+    @Test func foundIncludesLinkedTunnelSummary() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mg-metadata")
         let handle = try await openEstate(in: kit, owner: owner)
@@ -247,18 +245,26 @@ struct MemoryGetTests {
             arguments: .object([
                 "from_id": .string(source.id),
                 "to_id": .string(target.id),
-                "kind": .string("relates"),
+                "relationship": .string("relates"),
             ])
         )
         #expect(!isError(link))
 
         let result = try await dispatcher.dispatch(
             name: "moot_memory_get", arguments: getArgs(id: source.id))
-        let body = try #require(text(of: result))
+        #expect(!isError(result), "memory_get on a found drawer must not be an error result")
 
-        // Linked tunnel summary, same shape as moot_connection_search/map.
-        #expect(body.contains("tunnels: 1"))
-        #expect(body.contains(target.id), "the linked tunnel's target id must appear in the summary")
+        // depth:full response carries structured tunnel rows in
+        // structuredContent.data.memories[0].tunnels.
+        let sc = result.objectValue?["structuredContent"]?.objectValue
+        let firstMemory = sc?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
+        #expect(tunnels?.count == 1,
+            "depth:full must carry the single active linked tunnel; got: \(String(describing: tunnels))")
+        // The far_endpoint_id must reference the target's drawer id (lowercase canonical).
+        let farID = tunnels?.first?.objectValue?["far_endpoint_id"]?.stringValue
+        #expect(farID?.lowercased() == target.id.lowercased(),
+            "far_endpoint_id must reference the linked target drawer; got: \(String(describing: farID))")
     }
 
     // MARK: - 2. Not-found: genuinely absent id
