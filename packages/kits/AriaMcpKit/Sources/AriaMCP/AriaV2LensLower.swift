@@ -267,9 +267,21 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         case .lensNodeMotion:
             let id = try string(request, "memory_id")
             let estate = try await kit.estate(for: handle)
-            guard let drawer = try await RecipeTools.structuredDrawersByID(
-                ids: [id], estate: estate, filterChain: context.authorizationFrame.filterChain)[id],
-                drawer.tombstonedAt == nil else {
+            // Both storage spellings, and the result is keyed by whichever one
+            // the estate holds rather than by the spelling the caller sent.
+            // Public v2 ids are canonical lowercase while the estate may hold
+            // the native uppercase form, so a single-spelling lookup here fails
+            // for every id — this was the one lens operation that never asked
+            // AriaV2ArgumentDecoder for both, and it could resolve nothing at
+            // all. Refusal is deliberately the same for an unknown id, a
+            // tombstoned row and a gated one: a caller must not learn which.
+            let spellings = (UUID(uuidString: id).map(
+                AriaV2ArgumentDecoder.storageIdentitySpellings) ?? [id])
+            let resolved = try await RecipeTools.structuredDrawersByID(
+                ids: spellings, estate: estate,
+                filterChain: context.authorizationFrame.filterChain)
+            guard let drawer = spellings.compactMap({ resolved[$0] }).first,
+                  drawer.tombstonedAt == nil else {
                 throw AriaV2LensLower.refusal("The requested memory is unavailable to this caller.")
             }
             let motion = try await NodeMotionLens.run(
