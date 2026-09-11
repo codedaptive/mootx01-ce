@@ -1055,6 +1055,11 @@ enum AriaV2SelectedCatalog {
                     "required": .array([.string("completeness"), .string("effect")]),
                     "additionalProperties": .bool(true),
                 ]),
+                // hint: optional sibling of data and meta, inserted by
+                // AriaV2Envelope.applyHint. Declared because the envelope
+                // sets additionalProperties:false, which would otherwise make
+                // every hinted response violate its own advertised schema.
+                "hint": .object(["type": .string("string")]),
             ]),
             "required": .array([.string("surface_version"), .string("tool"), .string("data"), .string("meta")]),
             "additionalProperties": .bool(false),
@@ -1492,22 +1497,38 @@ enum AriaV2SelectedCatalog {
     }
 
     private static func cognitionLensesDataSchema() -> JSONValue {
-        let tool = exactObjectSchema([
+        // name and description are required in every row (terse and verbose).
+        // input_schema and output_schema are optional declared properties:
+        // verbose rows include them; terse rows omit them. Both are declared
+        // so that additionalProperties:false does not forbid the verbose
+        // extras — the constraint is "only declared keys allowed", not
+        // "all declared keys required".
+        let tool = orderedExactObjectSchema([
             "name": stringSchema(),
             "description": stringSchema(),
             "input_schema": .object(["type": .string("object"), "additionalProperties": .bool(true)]),
-        ])
+            "output_schema": .object(["type": .string("object"), "additionalProperties": .bool(true)]),
+        ], required: ["description", "name"])
         return exactObjectSchema([
             "tools": .object(["type": .string("array"), "items": tool]),
         ])
     }
 
     private static func cognitionRecipesDataSchema() -> JSONValue {
+        // name, version, and description are required in every row.
+        // required_capabilities is an optional declared property:
+        // verbose rows include it; terse rows omit it.
+        // Note: the prior schema used a dangling $ref (#/definitions/recipe)
+        // with no definitions block; that was unconstrained and is replaced
+        // by an explicit inline schema here.
+        let recipe = orderedExactObjectSchema([
+            "name": stringSchema(),
+            "version": stringSchema(),
+            "description": stringSchema(),
+            "required_capabilities": stringArraySchema(),
+        ], required: ["description", "name", "version"])
         return exactObjectSchema([
-            "recipes": .object([
-                "type": .string("array"),
-                "items": .object(["$ref": .string("#/definitions/recipe")]),
-            ]),
+            "recipes": .object(["type": .string("array"), "items": recipe]),
         ])
     }
 
