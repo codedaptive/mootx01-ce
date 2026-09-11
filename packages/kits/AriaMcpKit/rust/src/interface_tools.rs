@@ -1765,7 +1765,7 @@ fn memory_get_full_record_lines(
 ///
 /// Failures are silenced — a reward-marking failure must never break the
 /// dereference verb's primary result.
-fn note_usage(
+pub(crate) fn note_usage(
     id: &str,
     estate: &crate::estate_registry::OpenEstate,
     ledger: &SurfacedRecallLedger,
