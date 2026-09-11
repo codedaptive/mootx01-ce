@@ -867,6 +867,12 @@ fn execute_vault_lifecycle(
         SelectedVaultMobilityAuthority { registry, now_millis },
         SelectedVaultMobilityLower { registry, ledger },
     );
+    // return_id_map is read before the match consumes `request`. True only for
+    // moot_json_import; every other lifecycle tool leaves the reply at one block.
+    let return_id_map = matches!(
+        &request,
+        VaultLifecycleRequest::JsonImport(request) if request.return_id_map
+    );
     let (tool, effect, result) = match request {
         VaultLifecycleRequest::Reindex(request) => (
             crate::v2::data_mobility::REINDEX_TOOL,
@@ -933,12 +939,19 @@ fn execute_vault_lifecycle(
     match result {
         Ok(result) => {
             let text = vault_lifecycle_text(&result);
-            crate::v2::render::success(
-                tool,
-                &vault_lifecycle_data(result),
-                &meta,
-                &text,
-            ).map_err(jsonrpc_internal)
+            let data = vault_lifecycle_data(result);
+            let rendered = crate::v2::render::success(tool, &data, &meta, &text)
+                .map_err(jsonrpc_internal)?;
+            // return_id_map: append the second text block holding the id_map JSON
+            // when the caller asked for it. The structured data already carries
+            // id_map on every JSON import; this block serves text-only callers
+            // that cannot read structuredContent. Swift twin: AriaV2DataMobility
+            // .execute appends the same block after AriaV2Envelope.success.
+            Ok(if return_id_map {
+                crate::v2::render::append_id_map_block(rendered, &data)
+            } else {
+                rendered
+            })
         },
         Err(V2DataMobilityError::Unavailable) => Ok(crate::v2::render::refusal(
             tool,
