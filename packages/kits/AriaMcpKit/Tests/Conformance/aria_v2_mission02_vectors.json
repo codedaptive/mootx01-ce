@@ -4026,8 +4026,9 @@
           ]
         },
         "accepted_keys": [
-          "now",
-          "estate_id"
+          "associates",
+          "estate_id",
+          "now"
         ],
         "inputSchema": {
           "type": "object",
@@ -4038,6 +4039,9 @@
             "estate_id": {
               "type": "string",
               "format": "uuid"
+            },
+            "associates": {
+              "type": "string"
             }
           },
           "required": [],
