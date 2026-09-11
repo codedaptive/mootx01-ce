@@ -402,7 +402,7 @@ fn explain_true_appends_discrimination_line() {
 /// Without explain, the moot_memory_search compact text must NOT contain a
 /// "discrimination:" line — the gate is strictly opt-in.
 #[test]
-fn explain_omitted_suppresses_discrimination_line() {
+fn weak_discrimination_is_reported_without_explain() {
     let registry = EstateRegistry::new_inmemory();
     let disp = Dispatcher::new(registry, "test", "test", "test", None);
 
@@ -417,12 +417,17 @@ fn explain_omitted_suppresses_discrimination_line() {
         assert!(is_success(&r), "file_memory must succeed; got: {r:?}");
     }
 
-    // explain omitted — default is false, no discrimination line expected.
+    // CONTRACT REVERSED 2026-09-11, twin of the Swift case. The line is
+    // emitted for LOW and MEDIUM only, so it is not a per-call token cost but
+    // a warning that appears exactly when the ranking is too weak to rely on.
+    // Gating it behind explain left the ordinary caller with a poor ranking
+    // and nothing saying so. This fixture makes the point itself: it runs
+    // lexical-only, and the ranking comes back medium.
     let r = call(&disp, "moot_memory_search", json!({"query": "discrimination-gate-test"}));
     assert!(is_success(&r), "omitted explain must succeed; got: {r:?}");
     let text = r["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(
-        !text.contains("discrimination:"),
-        "explain omitted must NOT produce a discrimination line; got: {text}"
+        text.contains("discrimination:"),
+        "a weak ranking must warn the caller without needing explain; got: {text}"
     );
 }
