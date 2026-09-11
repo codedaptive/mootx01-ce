@@ -182,39 +182,56 @@ struct RecallDiscriminationTests {
         )
     }
 
-    /// Conversion of the v1 case that asserted the discrimination line always
-    /// appeared in every moot_memory_search result. In v2 the line is gated
-    /// behind `explain: true`; the rewrite adds that flag and preserves both
-    /// pinned assertions: the "discrimination:" prefix AND a known level label.
-    /// The two-part assertion prevents a false green where the line is emitted
-    /// with an empty or unrecognised label string.
-    @Test func memorySearchResultAlwaysContainsDiscriminationLine() async throws {
-        let dispatcher = try await makeDispatcher()
-        // Three memories with closely-related content produce a low or medium
-        // discrimination signal. Both levels carry a named label in the text output.
-        try await fileMemory(content: "recall-discrimination-v1-port alpha", location: "lab", dispatcher: dispatcher)
-        try await fileMemory(content: "recall-discrimination-v1-port beta", location: "lab", dispatcher: dispatcher)
-        try await fileMemory(content: "recall-discrimination-v1-port gamma", location: "lab", dispatcher: dispatcher)
+    /// An estate with near-identical memories must always carry the discrimination
+    /// line in every moot_memory_search result — unconditionally, without opt-in.
+    ///
+    /// BLOCKED: v2 gates the discrimination line behind `explain: true` at
+    /// AriaV2MemoryOperations.swift:728 (`if request.explain { ... }`). Without
+    /// the flag, no discrimination line is emitted regardless of score spread.
+    /// The v1 property — unconditional presence in every recall result — does not
+    /// hold in v2. The five accepted label strings (low, medium, high, n/a,
+    /// not_found) are preserved intact; do not narrow them when re-enabling.
+    @Test(.disabled("BLOCKED: v2 gates the discrimination line behind explain:true (AriaV2MemoryOperations.swift:728). Without explain the line is absent unconditionally; v1 asserted always-present. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    func memorySearchResultAlwaysContainsDiscriminationLine() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: "recall-disc-test")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        // File several near-identical memories so recall scores cluster.
+        for i in 1...5 {
+            let frame = CaptureFrame(
+                content: "apple fruit tree garden nature",
+                channel: .typed,
+                room: "garden",
+                latticeAnchor: .udc("635"),
+                addedBy: "test",
+                embeddingModelID: "test-model-v1")
+            _ = try await kit.capture(handle, frame)
+            _ = i  // suppress unused-variable warning
+        }
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let args: JSONValue = .object(["query": .string("apple fruit garden")])
         let result = try await dispatcher.dispatch(
-            name: "moot_memory_search",
-            arguments: .object([
-                "query": .string("recall-discrimination-v1-port"),
-                "explain": .bool(true),
-            ])
-        )
-        let text = result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        // The discrimination line must appear (not silently swallowed).
-        #expect(
-            text.contains("discrimination:"),
-            "explain:true must produce a discrimination: line; got: \(text.prefix(400))")
-        // At least one known level label must be present — guards against the
-        // line emitting with an empty or non-canonical label.
-        let hasKnownLevel = text.contains("discrimination: high")
+            name: "moot_memory_search", arguments: args)
+
+        let obj = try #require(result.objectValue)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+
+        // Discrimination signal must always be present — no explain flag required.
+        #expect(text.contains("discrimination:"))
+        // The signal must be one of the five known levels.
+        let hasKnownLevel = text.contains("discrimination: low")
             || text.contains("discrimination: medium")
-            || text.contains("discrimination: low")
-        #expect(
-            hasKnownLevel,
-            "discrimination line must carry a known level label (high/medium/low); got: \(text.prefix(400))")
+            || text.contains("discrimination: high")
+            || text.contains("discrimination: n/a")
+            || text.contains("discrimination: not_found")
+        #expect(hasKnownLevel)
     }
 
     /// With explain:true on an estate seeded with near-identical memories, the
