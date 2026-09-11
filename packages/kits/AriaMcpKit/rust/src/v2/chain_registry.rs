@@ -127,8 +127,11 @@ pub(crate) fn aria_v2_pre_decode_registrations(
         }
 
         // --- Mode arg stripping ---
-        // Collision check: operations that own `mode` in their input_schema (e.g.
-        // moot_reclassify_fdc, moot_palace_import) keep the key untouched.
+        // Ownership is read at runtime from crate::v2::catalog::selected_registry() —
+        // the v2 registry, not the v1 projected-tool list.  Currently three operations declare
+        // `mode` in their v2 input_schema: moot_reclassify_fdc, moot_palace_import,
+        // moot_vault_import.  An operation added later that declares `mode` is excluded here
+        // automatically, without a code change.  Keys for owning operations are left untouched.
         let mut pending_decl: Option<ModeDeclaration> = None;
         let mode_value = arguments
             .as_object()
