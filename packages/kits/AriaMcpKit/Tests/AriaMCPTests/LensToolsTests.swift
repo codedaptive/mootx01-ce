@@ -413,7 +413,7 @@ struct LensToolsTests {
     /// currently refuses EVERY memory_id, normal-sensitivity included — the
     /// v1 "succeeds" assertion cannot be satisfied by any argument. Do not
     /// delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: .lensNodeMotion (AriaV2LensLower.swift:267-273) looks drawers up by the canonical-lowercase memory_id only, never via AriaV2ArgumentDecoder.storageIdentitySpellings — every stored drawer id is UUID().uuidString's native uppercase spelling, so the lookup can never match and moot_lens_node_motion refuses every memory_id, not just restricted/secret ones. The v1 'normal succeeds' assertion cannot be satisfied. Do not delete; do not weaken to pass."))
+    @Test
     func nodeMotionNormalSensitivitySucceeds() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
@@ -455,7 +455,7 @@ struct LensToolsTests {
     /// indistinguishable to this case. It cannot discriminate the gate
     /// until `AriaV2LensLower.swift:267-273` is fixed. Do not delete; do
     /// not weaken to pass.
-    @Test(.disabled("BLOCKED: .lensNodeMotion (AriaV2LensLower.swift:267-273) looks up memory_id via the canonical-lowercase spelling only, never through AriaV2ArgumentDecoder.storageIdentitySpellings — every stored drawer id is UUID().uuidString's native uppercase spelling, so this lookup fails on the same casing bug as every other memory_id, before SensitivityAtMost(.elevated) is ever reached. isError:true is produced by the casing bug, not by the sensitivity gate rejecting a restricted row; the case cannot discriminate the gate from the bug until AriaV2LensLower.swift:267-273 is fixed. Do not delete; do not weaken to pass."))
+    @Test
     func nodeMotionRestrictedSensitivityIsNotFound() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
@@ -481,7 +481,7 @@ struct LensToolsTests {
     /// normal row are currently indistinguishable to this case. It cannot
     /// discriminate the gate until `AriaV2LensLower.swift:267-273` is
     /// fixed. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: .lensNodeMotion (AriaV2LensLower.swift:267-273) looks up memory_id via the canonical-lowercase spelling only, never through AriaV2ArgumentDecoder.storageIdentitySpellings — every stored drawer id is UUID().uuidString's native uppercase spelling, so this lookup fails on the same casing bug as every other memory_id, before SensitivityAtMost(.elevated) is ever reached. isError:true is produced by the casing bug, not by the sensitivity gate rejecting a secret row; the case cannot discriminate the gate from the bug until AriaV2LensLower.swift:267-273 is fixed. Do not delete; do not weaken to pass."))
+    @Test
     func nodeMotionSecretSensitivityIsNotFound() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
