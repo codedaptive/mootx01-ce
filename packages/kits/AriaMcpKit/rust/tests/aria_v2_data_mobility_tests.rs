@@ -253,3 +253,45 @@ fn json_import_accepts_return_id_map() {
     ])).expect("absent return_id_map must default cleanly");
     assert!(!absent.return_id_map, "absent return_id_map must default to false");
 }
+
+// ---------------------------------------------------------------------------
+// Mode whitespace trim — reclassify_fdc and palace_import
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reclassify_fdc_mode_trims_whitespace() {
+    // "ALL " (trailing space) must decode without error and produce All after
+    // trim + lowercase. Fails if the decoder lowercases before trimming —
+    // "all " would not match any variant and would error.
+    let with_trailing = V2ReclassifyFdcRequest::decode(&arguments([
+        ("mode", JsonValue::String("ALL ".to_owned())),
+    ])).expect("\"ALL \" with trailing space must be accepted");
+    assert_eq!(with_trailing.mode, V2FdcReclassifyMode::All,
+        "\"ALL \" must trim and decode to All; got {:?}", with_trailing.mode);
+
+    // " SuspectOnly" (leading space) must also trim and decode cleanly.
+    let with_leading = V2ReclassifyFdcRequest::decode(&arguments([
+        ("mode", JsonValue::String(" SuspectOnly".to_owned())),
+    ])).expect("\" SuspectOnly\" with leading space must be accepted");
+    assert_eq!(with_leading.mode, V2FdcReclassifyMode::SuspectOnly,
+        "\" SuspectOnly\" must trim and decode to SuspectOnly; got {:?}", with_leading.mode);
+}
+
+#[test]
+fn palace_import_mode_trims_whitespace() {
+    // "BACKGROUND " (trailing space) must decode to Background after trim + lowercase.
+    let with_trailing = V2PalaceImportRequest::decode(&arguments([
+        ("palace_path", JsonValue::String("/tmp/palace".to_owned())),
+        ("mode", JsonValue::String("BACKGROUND ".to_owned())),
+    ])).expect("\"BACKGROUND \" with trailing space must be accepted");
+    assert_eq!(with_trailing.mode, Some(V2ImportMode::Background),
+        "\"BACKGROUND \" must trim and decode to Background; got {:?}", with_trailing.mode);
+
+    // " Foreground" (leading space) must also trim and decode cleanly.
+    let with_leading = V2PalaceImportRequest::decode(&arguments([
+        ("palace_path", JsonValue::String("/tmp/palace".to_owned())),
+        ("mode", JsonValue::String(" Foreground".to_owned())),
+    ])).expect("\" Foreground\" with leading space must be accepted");
+    assert_eq!(with_leading.mode, Some(V2ImportMode::Foreground),
+        "\" Foreground\" must trim and decode to Foreground; got {:?}", with_leading.mode);
+}
