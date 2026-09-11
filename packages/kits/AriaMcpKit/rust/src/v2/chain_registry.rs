@@ -6,19 +6,17 @@
 //!
 //! ## Position constants
 //!
-//! Ingress and egress positions are independent ordinals: ingress 10 and
-//! egress 10 are unrelated.  Position 1 on the egress chain is the
-//! exit-gate slot, reserved for HammerGuard.  Nothing registers at egress 1
-//! in this mission; the GATE 1 test proves the semantics.
+//! Transform, ingress, and egress positions are independent ordinals: a
+//! transform position of 10, an ingress position of 10, and an egress position
+//! of 10 are all unrelated.  Position 1 on the egress chain is the exit-gate
+//! slot, reserved for HammerGuard.  The GATE 1 test proves the slot semantics.
 //!
-//! ## Ingress placement invariant
+//! ## Record phase placement invariant
 //!
-//! The chain runs AFTER the frozen-mutation guard AND after argument decode.
-//! Moving the ingress invocation above the frozen guard would advance the
-//! session call counter on frozen-estate refusals, changing when the periodic
-//! coaching block fires.  This mission changes no behaviour, so the ingress
-//! chain runs where `record_call` ran before — same position, now delegated
-//! to the hook.
+//! The ingress (record) chain runs after the frozen-mutation guard and after
+//! argument decode.  Counting runs here because a refused call is not a call
+//! and a decode-failed call is not a call.  The transform phase runs before
+//! decode so a hook can remove a key the strict decoder rejects.
 //!
 //! ## Arc requirement
 //!
@@ -37,10 +35,18 @@ use crate::v2::call_chain::{IngressHook, TransformHook, V2ChainRegistration, V2E
 
 // MARK: - Position constants
 
-/// Ingress position for the session-accounting (coaching) concern.
+/// Transform position 1 is reserved for pre-decode argument mutation.
 ///
-/// Position 10 places the `record_call` hook after the frozen-mutation guard
-/// and after argument decode.  See the module-level doc for the invariant.
+/// The transform phase runs before decode so a hook can remove a key the
+/// strict decoder rejects.  No concern registers on the transform phase in
+/// production; the slot is defined so future concerns can reserve a position
+/// without colliding.
+pub const TRANSFORM_RESERVED: i32 = 1;
+
+/// Ingress (record) position for the session-accounting (coaching) concern.
+///
+/// Counting runs here because a refused or decode-failed call is not a call.
+/// The transform phase runs before decode and must not advance the counter.
 pub const INGRESS_COACHING: i32 = 10;
 
 /// Egress position 1 is the exit-gate slot, reserved for HammerGuard.
@@ -65,6 +71,9 @@ pub const EGRESS_COACHING: i32 = 10;
 /// `V2CallChain::new(...).expect(...)` at the call site, following the
 /// precedent in other infallible programmer-error paths.
 ///
+/// The transform phase is empty in production: no concern removes keys before
+/// decode.  The chain's transform slot is defined and reserved; it lands empty.
+///
 /// # Parameters
 ///
 /// * `request` — The decoded [`SurfaceRequest`] for this call.  Consumed into
@@ -76,11 +85,12 @@ pub(crate) fn aria_v2_production_registrations(
     mss: Arc<ModeSessionState>,
 ) -> Vec<V2ChainRegistration> {
 
-    // MARK: Coaching ingress hook
+    // MARK: Coaching ingress (record) hook
     //
-    // Calls `record_call` so the periodic-coaching counter advances exactly
-    // where it did before this adoption: after the frozen-mutation guard and
-    // after argument decode, immediately before execute.
+    // Calls `record_call` after the frozen-mutation guard and after argument
+    // decode.  Counting runs here because a refused call and a decode-failed
+    // call are not calls.  The transform phase runs before decode and must not
+    // advance the counter.
     //
     // The returned arguments are the same as the inputs — the coaching concern
     // does not mutate arguments.  The ingress state is `None`; coaching does
@@ -131,6 +141,10 @@ mod tests {
     //! GATE 1: Slot reservation — egress position 1 is unoccupied in the
     //! production registrations.  The discriminating assertions are the position
     //! checks; the test fails when EGRESS_COACHING is set to 1.
+    //!
+    //! Position spaces are independent: a transform position of 1, an ingress
+    //! position of 1, and an egress position of 1 are unrelated.  Only the
+    //! egress slot at position 1 is the reserved exit-gate slot.
 
     use super::*;
     use crate::surface::SurfaceRequest;
