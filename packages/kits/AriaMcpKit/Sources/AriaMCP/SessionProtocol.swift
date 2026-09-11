@@ -24,7 +24,7 @@ extension ToolDispatcher {
       — Call moot_list_lenses to see available cognition tools.
       — Add teachme:true to any tool to learn it before using it.
       — Watch for hint: lines in responses — they contain coaching for better results.
-      — Declare a mode with mode:"Recall=Auto" on any tool call to set the session default.
+      — Declare a mode with mode:"Recall=Auto" on any call to set the session default; full global-modifiers grammar in moot_help directory.
       — File memories: moot_file_memory (content + subject + location required).
       — Search memories: moot_memory_search (query required).
       — Write journal entries: moot_write_journal after meaningful sessions.
