@@ -471,6 +471,10 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         return date
     }
 
+    /// Three years, matching the v1 ceiling. Expressed the same way v1 wrote
+    /// it so the two are comparable at a glance.
+    static let maximumWindowSeconds: TimeInterval = 3 * 365.25 * 24 * 60 * 60
+
     private func dateWindow(
         _ request: AriaV2RecallLensRequest, start: String, end: String
     ) throws -> ClosedRange<Date> {
@@ -478,6 +482,15 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         let upper = try iso8601Date(request, end)
         guard lower <= upper else {
             throw AriaV2LensLower.refusal("The lens time window must not be inverted.")
+        }
+        // A window spanning decades scans the entire corpus and exhausts
+        // memory, so the span is capped at three years — generous for any
+        // analytical query and the same ceiling v1 enforced. The cap survived
+        // into v2 only inside the v1 dispatch table, where nothing can reach
+        // it, so the live path had no bound at all.
+        guard upper.timeIntervalSince(lower) <= Self.maximumWindowSeconds else {
+            throw AriaV2LensLower.refusal(
+                "The lens time window must not exceed three years; reduce the range.")
         }
         return lower...upper
     }
