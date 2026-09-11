@@ -13,7 +13,7 @@
 //!
 //! ## What these tests prove
 //!
-//! GATE 1 (wiring): A `moot_monitoring_status` call on its 25th invocation
+//! GATE 5 (wiring): A `moot_monitoring_status` call on its 25th invocation
 //! returns a coaching block in the response text.  Without the egress
 //! transform the block never fires.
 //!
@@ -56,13 +56,13 @@ fn has_coaching_block(response: &serde_json::Value) -> bool {
     text.contains("[Moot coaching")
 }
 
-/// GATE 1 (integration, wiring): the egress transform fires at the default
+/// GATE 5 (integration, wiring): the egress transform fires at the default
 /// cadence of 25 calls.
 ///
 /// If the chain were not wired, `should_coach()` and `render_block` would
 /// never be called and the coaching block would never appear.
 #[test]
-fn gate1_chain_is_wired_egress_fires_coaching_block_at_call_25() {
+fn gate5_chain_is_wired_egress_fires_coaching_block_at_call_25() {
     let dispatcher = make_live_dispatcher();
 
     // Calls 1–24 must NOT carry the coaching block.
