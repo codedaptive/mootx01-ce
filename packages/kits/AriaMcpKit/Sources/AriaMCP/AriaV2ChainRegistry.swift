@@ -101,10 +101,12 @@ func ariaV2PreDecodeRegistrations(
         }
 
         // --- Mode arg stripping ---
-        // Some operations own `mode` in their inputSchema (e.g. moot_reclassify_fdc,
-        // moot_palace_import, moot_vault_import, moot_lens_partial_cue). When the
-        // operation owns `mode`, the key is left untouched and the stash is set to nil —
-        // the decoder will see and handle it normally.
+        // Ownership is read at runtime from AriaV2SelectedCatalog.registry(environment:) —
+        // the v2 registry, not the v1 projected-tool list. Currently three operations declare
+        // `mode` in their v2 inputSchema: moot_reclassify_fdc, moot_palace_import,
+        // moot_vault_import. An operation added later that declares `mode` is excluded here
+        // automatically, without a code change. When an operation owns `mode`, the key is
+        // left untouched and the stash is set to nil — the decoder will see and handle it normally.
         var pendingDecl: ModeDeclaration? = nil
         if let modeValue = args["mode"] {
             let registry = AriaV2SelectedCatalog.registry(environment: environment)
