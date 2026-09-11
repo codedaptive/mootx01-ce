@@ -120,6 +120,12 @@ pub struct V2MemorySearchResult {
     /// line the v1 S1 surface emits via ResultComposer.controlLines. Estate
     /// adapters set this from `!recall_result.degraded_stages.is_empty()`.
     pub degraded: bool,
+    /// False when the span rerank stage is not registered, which makes the
+    /// ranking lexical-only. Discrimination reads it through
+    /// `recall_discrimination::dense_lane_dark` and caps a high verdict down
+    /// to medium: a lexical-only ordering cannot justify high confidence.
+    /// Adapters that do not know default to true, keeping ordinary behaviour.
+    pub span_rerank_registered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,22 +619,27 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
                 found_part
             };
 
-            // explain: append discrimination line when signal level warrants it.
-            // v1 control line order: discrimination precedes degradation
-            // (ResultComposer.controlLines §1 before §3). Only low and medium
-            // are surfaced in v2 compact text (high/single/not_found are silent).
-            // Mirrors Swift AriaV2MemoryOperations.search() explain branch.
-            if request.explain.unwrap_or(false) {
-                let scores: Vec<f64> = result.rows.iter().filter_map(|r| r.score).collect();
-                let disc = crate::recall_discrimination::classify(&scores);
-                match disc {
-                    crate::recall_discrimination::DiscriminationLevel::Low
-                    | crate::recall_discrimination::DiscriminationLevel::Medium => {
-                        compact.push('\n');
-                        compact.push_str(crate::recall_discrimination::result_line(disc));
-                    }
-                    _ => {}
+            // NOT gated behind `explain`. The line is emitted for LOW and
+            // MEDIUM only — high, single and not-found stay silent — so it is
+            // not a per-call token cost but a warning that appears exactly
+            // when the ranking is too weak to rely on. v1 emitted it on every
+            // search under the same condition. Order: discrimination precedes
+            // degradation (ResultComposer.controlLines §1 before §3).
+            let scores: Vec<f64> = result.rows.iter().filter_map(|r| r.score).collect();
+            let mut disc = crate::recall_discrimination::classify(&scores);
+            // A lexical-only ranking cannot support a high verdict.
+            if crate::recall_discrimination::dense_lane_dark(result.span_rerank_registered)
+                && matches!(disc, crate::recall_discrimination::DiscriminationLevel::High)
+            {
+                disc = crate::recall_discrimination::DiscriminationLevel::Medium;
+            }
+            match disc {
+                crate::recall_discrimination::DiscriminationLevel::Low
+                | crate::recall_discrimination::DiscriminationLevel::Medium => {
+                    compact.push('\n');
+                    compact.push_str(crate::recall_discrimination::result_line(disc));
                 }
+                _ => {}
             }
 
             // retrieval: degraded — emit AFTER discrimination, matching the v1 S1
@@ -751,6 +762,7 @@ mod answer_block_seam_tests {
             -> Result<V2MemorySearchResult, V2MemoryFailure>
         {
             Ok(V2MemorySearchResult {
+                span_rerank_registered: true,
                 rows: vec![],
                 answer_block: Some(V2SearchAnswerBlock {
                     text: "fake synthesized answer".to_owned(),
