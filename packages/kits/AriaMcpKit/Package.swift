@@ -130,11 +130,6 @@ let package = Package(
         // targets that import a product directly. Test-only dep; no layering inversion.
         // Per in-repository dependency direction.
         .package(name: "QueueKit", path: "../QueueKit"),
-        // WorkPacketKit: the four moot_*_packet tools (FAB5-I2) store and retrieve
-        // agentic work packets as structuredJSON drawers. App→kit layering,
-        // no inversion. WorkPacketKit depends only on LocusKit, which AriaMcpKit
-        // already carries transitively via GeniusLocusKit.
-        .package(name: "WorkPacketKit", path: "../WorkPacketKit"),
         // were retired from the AriaMCP library (ENC-W6B). No longer imported
         // by the AriaMCP library target; test-only dep. No layering inversion.
         // ContextDistillLib: inline distillation for depth:distilled and moot_recall_distilled.
@@ -172,8 +167,6 @@ let package = Package(
                 .product(name: "EideticLib", package: "EideticLib"),
                 // LoopbackHTTP backs HTTPServer.swift (the resident HTTP MCP transport).
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
-                // WorkPacketKit backs the four moot_*_packet tools (FAB5-I2).
-                .product(name: "WorkPacketKit", package: "WorkPacketKit"),
                 // ContextDistillLib: inline distillation at read time for depth:distilled
                 // and moot_recall_distilled (replaces stored distilled column, schema 19).
                 .product(name: "ContextDistillLib", package: "ContextDistillLib"),

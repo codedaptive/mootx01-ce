@@ -119,11 +119,11 @@ struct ToolMutationInventoryTests {
     @Test func writersAreRefusedAndReadersAreNot() {
         let refused = ToolMutationInventory.frozenRefusedTools
         for tool in ["moot_file_memory", "moot_update_memory", "moot_erase_memory",
-                     "moot_dream", "moot_json_import", "moot_file_packet"] {
+                     "moot_dream", "moot_json_import", "moot_file_fact"] {
             #expect(refused.contains(tool), "\(tool) must be refused when frozen")
         }
         for tool in ["moot_memory_search", "moot_estate_status", "moot_memory_get", "moot_recall_precise",
-                     "moot_lens_concepts", "moot_estate_ping", "moot_drain_status", "moot_packet_get"] {
+                     "moot_lens_concepts", "moot_estate_ping", "moot_drain_status", "moot_dataset_query"] {
             #expect(!refused.contains(tool), "\(tool) is a read and must stay callable when frozen")
             #expect(ToolMutationInventory.frozenReadTools.contains(tool),
                     "\(tool) is a read and must be in the explicit read set")
