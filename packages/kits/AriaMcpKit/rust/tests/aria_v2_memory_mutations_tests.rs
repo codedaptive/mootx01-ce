@@ -54,7 +54,7 @@ impl V2MemoryMutationLower for Lower {
     fn erase(&self, _: &V2MemoryMutationAdmission, _: Uuid, _: bool, _: Option<&str>) -> Result<bool, ()> { self.calls.lock().unwrap().push("erase"); Ok(self.partial_erase) }
     fn move_memory(&self, _: &V2MemoryMutationAdmission, _: Uuid, _: &str, _: &str) -> Result<(), ()> { self.calls.lock().unwrap().push("move"); Ok(()) }
     fn link(&self, _: &V2MemoryMutationAdmission, _: &V2LinkMemoriesRequest) -> Result<Uuid, ()> { self.calls.lock().unwrap().push("link"); Ok(uuid(TUNNEL)) }
-    fn review(&self, _: &V2MemoryMutationAdmission, _: Uuid, decision: V2TunnelDecision, _: Option<&str>) -> Result<V2TunnelReviewReceipt, ()> {
+    fn review(&self, _: &V2MemoryMutationAdmission, _: Uuid, decision: V2TunnelDecision, _: Option<&str>, _: &str) -> Result<V2TunnelReviewReceipt, ()> {
         self.calls.lock().unwrap().push("review");
         Ok(match decision {
             V2TunnelDecision::Endorse => V2TunnelReviewReceipt::Endorsed {
