@@ -195,9 +195,12 @@ pub fn apply_coaching_block(mut result: Value, block: &str) -> Value {
 /// Its shape is wire-identical to the v1 receipt's second block.
 ///
 /// Byte parity with Swift rests on two properties, both load-bearing:
-/// serde_json's Map is a BTreeMap when the `preserve_order` feature is off, so
-/// keys serialize sorted, matching Swift's `.sortedKeys`; and serde_json never
-/// escapes forward slashes, matching Swift's `.withoutEscapingSlashes`.
+/// the id_map is collected into a `BTreeMap` at surface.rs before being
+/// passed to `json!`, so keys serialize in sorted order regardless of
+/// serde_json's `preserve_order` feature state (which IS on in this build
+/// graph, making serde_json's Map an IndexMap — without the BTreeMap
+/// collect the keys would be unsorted); and serde_json never escapes
+/// forward slashes, matching Swift's `.withoutEscapingSlashes`.
 ///
 /// Returns the result unchanged when `id_map` is absent from the data or the
 /// map cannot be serialized. Both signal a data-contract violation, and the
