@@ -9,15 +9,39 @@ import NeuronKit
 public enum AriaV2Dream {
     public static let toolName = "moot_dream"
 
-    /// The v2 operation deliberately has no caller-supplied clock.  The
-    /// authority injects the instant it authorized, keeping direct dreaming
-    /// deterministic without accepting an unbounded public time selector.
+    /// The v2 operation admits a caller-proposed clock instant and an
+    /// association sweep mode.  The authority validates the proposed clock and
+    /// may reject it; both fields are optional so existing callers that omit
+    /// them continue to work without modification.
     public struct Request: Sendable, Equatable {
         public let estateID: UUID?
+        /// A caller-proposed cycle clock.  Must be a valid ISO 8601 UTC string;
+        /// malformed strings throw -32602 immediately.  The authority enforces a
+        /// 24-hour future ceiling before admitting the instant.
+        public let now: Date?
+        /// Association sweep mode: "all" = full-estate pass (10_000 probe
+        /// ceiling), "off" = skip the sweep entirely, nil or absent = default
+        /// cadence (50 probes, defaultProbeLimit).
+        public let associates: String?
 
         public init(arguments: JSONValue) throws {
-            let decoder = try AriaV2ArgumentDecoder(arguments, allowedKeys: ["estate_id"])
+            let decoder = try AriaV2ArgumentDecoder(
+                arguments, allowedKeys: ["estate_id", "now", "associates"])
             estateID = try decoder.optionalUUID("estate_id")
+            if let nowString = try decoder.optionalString("now") {
+                let fmt = ISO8601DateFormatter()
+                guard let parsed = fmt.date(from: nowString) else {
+                    throw AriaV2InvalidArgument(
+                        path: "now",
+                        message: "Argument 'now' must be a valid ISO 8601 date-time string.",
+                        correction: "Provide 'now' in the format YYYY-MM-DDTHH:MM:SSZ."
+                    ).jsonRPCError
+                }
+                now = parsed
+            } else {
+                now = nil
+            }
+            associates = try decoder.optionalString("associates")
         }
     }
 
@@ -46,16 +70,20 @@ public enum AriaV2Dream {
 
     public enum Failure: Error, Sendable, Equatable {
         case refusal(AriaV2OperationalRefusal)
-
-        var refusal: AriaV2OperationalRefusal {
-            switch self { case .refusal(let value): value }
-        }
+        /// Caller-supplied argument was structurally valid but semantically out
+        /// of range (e.g. `now` more than 24 hours in the future).  The service
+        /// converts this to a JSON-RPC -32602 thrown error, never a refusal
+        /// envelope, because the destructive paths must not be reached with a
+        /// far-future clock.
+        case invalidArgument(String)
     }
 
     /// Selection and generation checks belong to the selected surface.  A
-    /// refusal is an operation result, distinct from malformed arguments.
+    /// refusal is an operation result; an invalidArgument is a thrown error,
+    /// distinct from both malformed input (thrown by Request.init) and runtime
+    /// unavailability (returned as a refusal envelope).
     public protocol Authority: Sendable {
-        func admit(requestedEstateID: UUID?) async -> Result<Admission, Failure>
+        func admit(requestedEstateID: UUID?, requestedNow: Date?) async -> Result<Admission, Failure>
         func revalidate(_ admission: Admission) async -> Result<Void, Failure>
     }
 
@@ -156,6 +184,12 @@ public enum AriaV2Dream {
     public struct GeniusLocusLower: Lower {
         public let kit: GeniusLocusKit
 
+        /// Full-estate association probe ceiling used when `associates="all"`.
+        /// The named constant prevents the nil path (unbounded probing) while
+        /// keeping the limit explicit and auditable.  Parity with Rust:
+        /// `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE = 10_000` in recipe_tools.rs.
+        static let allModeMaxProbe: Int = 10_000
+
         public init(kit: GeniusLocusKit) {
             self.kit = kit
         }
@@ -180,10 +214,29 @@ public enum AriaV2Dream {
                 let report = try await daemon.triggerDreamingCycle(now: admission.now)
                 let hunt = try await kit.huntContradictions(
                     in: admission.handle, probeLimit: 500, now: admission.now)
-                let association = try await kit.associateSweep(
-                    in: admission.handle,
-                    probeLimit: VectorSimilaritySignal.defaultProbeLimit,
-                    now: admission.now)
+
+                // Resolve association sweep probe limit from the `associates` mode:
+                //   "all"  → full-estate pass, bounded by allModeMaxProbe (10_000)
+                //   "off"  → skip the sweep entirely; associations fields are absent
+                //   nil    → default cadence (defaultProbeLimit, 50 probes)
+                let associatesMode = request.associates?.lowercased()
+                let associationsWritten: Int?
+                let associationsNonUniqueProbes: Int?
+                if associatesMode == "off" {
+                    associationsWritten = nil
+                    associationsNonUniqueProbes = nil
+                } else {
+                    let probeLimit = associatesMode == "all"
+                        ? Self.allModeMaxProbe
+                        : VectorSimilaritySignal.defaultProbeLimit
+                    let sweep = try await kit.associateSweep(
+                        in: admission.handle,
+                        probeLimit: probeLimit,
+                        now: admission.now)
+                    associationsWritten = sweep.written
+                    associationsNonUniqueProbes = sweep.nonUniqueProbes
+                }
+
                 let subjectsBackfilled: Int?
                 if await kit.subjectProducerPipeline(for: admission.handle) != nil {
                     let estate = try await kit.estate(for: admission.handle)
@@ -197,8 +250,15 @@ public enum AriaV2Dream {
                     subjectsBackfilled = nil
                 }
                 return .success(.completed(.init(
-                    report: report, hunt: hunt, subjectsBackfilled: subjectsBackfilled,
-                    association: association)))
+                    candidatesConsidered: report.candidatesConsidered,
+                    proposalsEmitted: report.proposalsEmitted.map(\.target),
+                    suppressedDuplicates: report.suppressedDuplicates,
+                    belowThreshold: report.belowThreshold,
+                    contradictionsProposed: hunt.proposed.count,
+                    contradictionCandidatesBorderline: hunt.borderline.count,
+                    subjectsBackfilled: subjectsBackfilled,
+                    associationsWritten: associationsWritten,
+                    associationsNonUniqueProbes: associationsNonUniqueProbes)))
             } catch {
                 return .failure(.refusal(.init(
                     code: "dream_unavailable",
@@ -226,16 +286,32 @@ public enum AriaV2Dream {
 
         public func execute(_ request: Request) async throws -> JSONValue {
             let admission: Admission
-            switch await authority.admit(requestedEstateID: request.estateID) {
+            switch await authority.admit(requestedEstateID: request.estateID, requestedNow: request.now) {
             case .success(let value): admission = value
-            case .failure(let failure): return AriaV2Envelope.refusal(tool: toolName, error: failure.refusal)
+            case .failure(.refusal(let r)):
+                return AriaV2Envelope.refusal(tool: toolName, error: r)
+            case .failure(.invalidArgument(let message)):
+                // Semantic range violation on a structurally-valid argument: raise
+                // -32602 so destructive paths (pruneRecallTraces, etc.) are never
+                // reached with an out-of-range clock.
+                throw AriaV2InvalidArgument(
+                    path: "now",
+                    message: message,
+                    correction: "Provide a 'now' no more than 24 hours in the future."
+                ).jsonRPCError
             }
             switch await lower.run(admission, request: request) {
-            case .failure(let failure): return AriaV2Envelope.refusal(tool: toolName, error: failure.refusal)
+            case .failure(.refusal(let r)):
+                return AriaV2Envelope.refusal(tool: toolName, error: r)
+            case .failure(.invalidArgument(let message)):
+                throw AriaV2InvalidArgument(path: "now", message: message).jsonRPCError
             case .success(let outcome):
                 switch await authority.revalidate(admission) {
                 case .success: return render(outcome)
-                case .failure(let failure): return AriaV2Envelope.refusal(tool: toolName, error: failure.refusal)
+                case .failure(.refusal(let r)):
+                    return AriaV2Envelope.refusal(tool: toolName, error: r)
+                case .failure(.invalidArgument(let message)):
+                    throw AriaV2InvalidArgument(path: "now", message: message).jsonRPCError
                 }
             }
         }

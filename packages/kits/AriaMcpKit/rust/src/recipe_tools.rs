@@ -589,6 +589,9 @@ const RECALL_WALK: &str = "moot_recall_walk";
 ///
 /// Parity constant: Swift `RecipeTools.dreamAssociateAllModeMaxProbe = 10_000`.
 const DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE: usize = 10_000;
+/// Exported alias for use in the v2 lower engine (`v2::dream`).  The constant
+/// value is the same; the alias keeps the canonical definition in one place.
+pub(crate) const DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE_PUB: usize = DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE;
 
 // ---------------------------------------------------------------------------
 // Contract-change notice texts — byte-identical to Swift notice constants.
@@ -2427,7 +2430,7 @@ fn run_walk_recall_tool(
 /// Does NOT support timezone offsets — only the `Z` (UTC) suffix, matching the
 /// ISO8601 instants the substrate stores and the Swift `ISO8601DateFormatter`
 /// default format. Mirrors the Swift parse in `RecipeTools.runDream`.
-fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
+pub(crate) fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
     // Accept "Z"-terminated strings only; strip the suffix.
     let s = s.strip_suffix('Z')?;
     // Split date and time on 'T'.

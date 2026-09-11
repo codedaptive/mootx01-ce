@@ -1266,3 +1266,140 @@ fn cognition_catalog_output_schema_conforms_to_registry() {
     let verbose_envelope = &verbose["result"]["structuredContent"];
     validate(verbose_envelope, output_schema, "verbose");
 }
+
+/// Wall-clock helper for the dream ceiling tests.
+///
+/// The dispatcher stamps each call with `bench_clock_now()`, which is the wall
+/// clock unless `MOOT_BENCH_EPOCH_NOW` pins it. These tests avoid touching that
+/// env seam (it is cached process-wide and other tests share the process) and
+/// instead choose offsets that hold under either mode: a value 48 hours ahead of
+/// the wall clock is beyond the 24-hour ceiling whether the authority clock is
+/// the wall clock or a pinned past instant, and a value in the past is inside
+/// the ceiling under both, because the ceiling is an upper bound only.
+fn wall_clock_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64
+}
+
+fn iso8601_utc(millis: i64) -> String {
+    let seconds = millis / 1_000;
+    let days = seconds / 86_400;
+    let time_of_day = seconds % 86_400;
+    // Civil-date conversion from days since 1970-01-01 (Howard Hinnant's
+    // algorithm), so the test needs no date dependency.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, time_of_day / 3_600, (time_of_day % 3_600) / 60, time_of_day % 60
+    )
+}
+
+/// The 24-hour ceiling on `moot_dream`'s `now` is enforced by
+/// `SelectedDreamAuthority::admit`, and a breach must surface as -32602 rather
+/// than an operational refusal envelope. The distinction matters because the
+/// cycle prunes recall traces at the stamped instant minus thirty days, so an
+/// out-of-range clock would delete every trace in the estate.
+#[test]
+fn v2_dream_far_future_now_is_refused_as_invalid_argument() {
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+    let far_future = iso8601_utc(wall_clock_millis() + 48 * 3_600 * 1_000);
+    let response = call(&dispatcher, "moot_dream", serde_json::json!({ "now": far_future }));
+
+    assert!(
+        response.get("error").is_some(),
+        "a far-future now must raise a JSON-RPC error, got {response}"
+    );
+    assert_eq!(
+        response["error"]["code"], -32602,
+        "the ceiling breach must be invalid-params, not an operational refusal: {response}"
+    );
+    assert_eq!(
+        response["error"]["data"]["path"], "now",
+        "the error must name the offending argument: {response}"
+    );
+    assert!(
+        response["result"].is_null(),
+        "a refused call must not also produce a result envelope: {response}"
+    );
+}
+
+/// A caller instant inside the ceiling is admitted and the cycle runs. A past
+/// instant is always inside the ceiling, which keeps the assertion independent
+/// of whichever clock the authority is using.
+#[test]
+fn v2_dream_past_now_is_admitted_and_the_cycle_runs() {
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+    let past = iso8601_utc(wall_clock_millis() - 3_600 * 1_000);
+    let response = call(&dispatcher, "moot_dream", serde_json::json!({ "now": past }));
+
+    assert!(
+        response.get("error").is_none(),
+        "an in-range now must not raise a transport error: {response}"
+    );
+    assert_eq!(
+        response["result"]["isError"], false,
+        "an in-range now must complete: {response}"
+    );
+}
+
+/// `associates: "off"` skips the association sweep entirely, so the receipt
+/// carries neither association field. The default cadence runs the sweep, so it
+/// carries both. Asserting on the presence of the fields proves the mode
+/// reached the lower, which a no-error assertion would not.
+#[test]
+fn v2_dream_associates_off_skips_the_sweep_and_default_runs_it() {
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+
+    let off = call(&dispatcher, "moot_dream", serde_json::json!({ "associates": "off" }));
+    assert_eq!(off["result"]["isError"], false, "associates:off must complete: {off}");
+    let off_data = &off["result"]["structuredContent"]["data"];
+    assert!(
+        off_data.get("associationsWritten").is_none(),
+        "associates:off must skip the sweep, so associationsWritten is absent: {off_data}"
+    );
+    assert!(
+        off_data.get("associationsNonUniqueProbes").is_none(),
+        "associates:off must skip the sweep, so associationsNonUniqueProbes is absent: {off_data}"
+    );
+
+    let default = call(&dispatcher, "moot_dream", serde_json::json!({}));
+    assert_eq!(default["result"]["isError"], false, "default must complete: {default}");
+    let default_data = &default["result"]["structuredContent"]["data"];
+    assert!(
+        default_data.get("associationsWritten").is_some(),
+        "the default cadence must run the sweep: {default_data}"
+    );
+}
+
+/// `associates: "all"` runs the sweep with the full-estate probe bound rather
+/// than the default cadence. The receipt does not expose the limit, and the
+/// limit reaches `associate_sweep` through a concrete coordinator with no seam
+/// to intercept it, so the exact value passed is NOT asserted here. What is
+/// asserted is that the mode reached the lower and ran the sweep. On an empty
+/// estate a 50-probe and a 10_000-probe sweep produce identical receipts, so no
+/// receipt assertion could distinguish them; the two constants the branch
+/// selects between are crate-private and are pinned by
+/// `associates_mode_selects_the_documented_probe_bounds` in `v2::dream`.
+#[test]
+fn v2_dream_associates_all_runs_the_sweep_against_the_full_estate_bound() {
+    let dispatcher = v2_dispatcher(Arc::new(MonitoringProbe::enabled()));
+    let all = call(&dispatcher, "moot_dream", serde_json::json!({ "associates": "all" }));
+    assert_eq!(all["result"]["isError"], false, "associates:all must complete: {all}");
+    assert!(
+        all["result"]["structuredContent"]["data"].get("associationsWritten").is_some(),
+        "associates:all must run the sweep: {all}"
+    );
+
+}
