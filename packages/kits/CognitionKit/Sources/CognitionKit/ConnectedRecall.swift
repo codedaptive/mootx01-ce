@@ -206,18 +206,24 @@ public enum ConnectedRecall {
             hydratedDrawers = Dictionary(
                 uniqueKeysWithValues: drawers.map { ($0.id, $0) })
         }
-        return fused.map { id in
+        // compactMap: an ID whose hydration returned nil was excluded by the
+        // caller's filter (e.g. not exportable, not confirmed, tombstoned). A
+        // stale tunnel edge must not disclose a drawer the filter forbids. IDs
+        // in the anchor set already passed the same filter at recall time, so
+        // they are retained unconditionally; only walk-only IDs need the guard.
+        return fused.compactMap { id in
             let inAnchor = anchorByID[id] != nil
             let inWalk = walkSet.contains(id)
             let source = inAnchor && inWalk ? "both" : (inAnchor ? "anchor" : "walk")
             if let row = anchorByID[id] {
                 return ConnectedMatch(id: id, room: row.room, content: row.content, source: source)
             }
-            let drawer = hydratedDrawers[id]
+            // Walk-only result: must have passed hydration with the caller's filter.
+            guard let drawer = hydratedDrawers[id] else { return nil }
             return ConnectedMatch(
                 id: id,
-                room: drawer?.parentNodeId ?? "",
-                content: drawer?.content ?? "",
+                room: drawer.parentNodeId,
+                content: drawer.content,
                 source: source)
         }
     }
