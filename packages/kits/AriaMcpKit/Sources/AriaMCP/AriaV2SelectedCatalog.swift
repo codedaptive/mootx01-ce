@@ -623,7 +623,11 @@ enum AriaV2SelectedCatalog {
             effect: .write,
             description: "Run one on-demand maintenance and dreaming cycle.",
             intents: ["Run one on-demand maintenance and dreaming cycle."],
-            properties: ["estate_id": uuidSchema()],
+            properties: [
+                "estate_id": uuidSchema(),
+                "now": stringSchema(),
+                "associates": stringSchema(),
+            ],
             includeEmptyRequired: true,
             dataSchema: dreamDataSchema()
         ),
