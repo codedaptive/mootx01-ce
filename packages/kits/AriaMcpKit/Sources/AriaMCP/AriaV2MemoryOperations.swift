@@ -429,8 +429,22 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         if let requestQuery = request.query {
             query = requestQuery
         } else if let near = request.near {
+            // This is the BACKEND get, which MARKS each record with
+            // `isAuthorized` (via provenanceVisible) but does not filter — the
+            // filtering lives one layer up in AriaV2MemoryOperations. Taking
+            // `.first` here would use the content of a row the caller may not
+            // read, and pivoting through a gated anchor leaks its
+            // content-derived neighbours past the redaction boundary. So the
+            // verdict this read already computed is applied here rather than
+            // discarded.
+            //
+            // An unauthorized anchor and an absent one both yield an empty
+            // result: the caller must not be able to tell which, which is the
+            // same oracle-free shape memory_get uses.
             let source = try await get(AriaV2MemoryGetRequest(memoryIDs: [near], depth: .full, estateID: request.estateID), context: context)
-            guard let anchor = source.first else { return AriaV2SearchResult(records: [], answerBlock: nil, totalCount: 0) }
+            guard let anchor = source.first(where: \.isAuthorized) else {
+                return AriaV2SearchResult(records: [], answerBlock: nil, totalCount: 0)
+            }
             query = anchor.content
         } else {
             return AriaV2SearchResult(records: [], answerBlock: nil, totalCount: 0)
