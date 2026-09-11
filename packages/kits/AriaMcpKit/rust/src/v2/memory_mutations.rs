@@ -281,18 +281,44 @@ impl V2LinkMemoriesRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2TunnelDecision { Accept, Endorse, Reject }
+/// The reviewer identity recorded in the review ledger.  Edge activation is
+/// user-only, so this is the value the `accept` gate reads.
+pub const USER_REVIEWER: &str = "user";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct V2ReviewTunnelRequest { pub tunnel_id: Uuid, pub decision: V2TunnelDecision, pub note: Option<String>, pub estate_id: Option<Uuid> }
+pub struct V2ReviewTunnelRequest { pub tunnel_id: Uuid, pub decision: V2TunnelDecision, pub note: Option<String>, pub reviewed_by: String, pub estate_id: Option<Uuid> }
 impl V2ReviewTunnelRequest {
+    /// True when the reviewer is the user rather than a model.
+    pub fn is_user_reviewer(&self) -> bool { self.reviewed_by == USER_REVIEWER }
+
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
-        let object = strict_object(value, ["tunnel_id", "decision", "note", "estate_id"])?;
+        let object = strict_object(value, ["tunnel_id", "decision", "note", "reviewed_by", "estate_id"])?;
         let decision = match required_string(object, "decision")? {
             "accept" => V2TunnelDecision::Accept,
             "endorse" => V2TunnelDecision::Endorse,
             "reject" => V2TunnelDecision::Reject,
             _ => return Err(V2InvalidArgument::new("$.decision", "must be accept, endorse, or reject")),
         };
-        Ok(Self { tunnel_id: required_uuid(object, "tunnel_id")?, decision, note: optional_string(object, "note")?.map(str::to_owned), estate_id: optional_uuid(object, "estate_id")? })
+        // An explicitly empty reviewed_by is a caller error, not a silent
+        // fallback to the user identity — that would turn a typo into an edge
+        // activation.
+        let reviewed_by = match optional_string(object, "reviewed_by")? {
+            None => USER_REVIEWER.to_owned(),
+            Some(raw) if raw.trim().is_empty() => {
+                return Err(V2InvalidArgument::new("$.reviewed_by", "must be a non-empty string"))
+            }
+            Some(raw) => raw.to_owned(),
+        };
+        // Edge activation is user-only.  Models endorse or reject; neither
+        // settles the edge, so a machine can never ratify another machine's
+        // inference.  Checked at decode so the refusal names the argument.
+        if matches!(decision, V2TunnelDecision::Accept) && reviewed_by != USER_REVIEWER {
+            return Err(V2InvalidArgument::new(
+                "$.reviewed_by",
+                "edge activation is user-only: decision 'accept' requires reviewed_by 'user'; model reviewers use 'endorse' or 'reject'",
+            ));
+        }
+        Ok(Self { tunnel_id: required_uuid(object, "tunnel_id")?, decision, note: optional_string(object, "note")?.map(str::to_owned), reviewed_by, estate_id: optional_uuid(object, "estate_id")? })
     }
 }
 
@@ -331,7 +357,7 @@ pub trait V2MemoryMutationLower: Send + Sync {
     fn erase(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, confirmation: bool, reason: Option<&str>) -> Result<bool, ()>;
     fn move_memory(&self, admission: &V2MemoryMutationAdmission, memory_id: Uuid, wing: &str, room: &str) -> Result<(), ()>;
     fn link(&self, admission: &V2MemoryMutationAdmission, request: &V2LinkMemoriesRequest) -> Result<Uuid, ()>;
-    fn review(&self, admission: &V2MemoryMutationAdmission, tunnel_id: Uuid, decision: V2TunnelDecision, note: Option<&str>) -> Result<V2TunnelReviewReceipt, ()>;
+    fn review(&self, admission: &V2MemoryMutationAdmission, tunnel_id: Uuid, decision: V2TunnelDecision, note: Option<&str>, reviewed_by: &str) -> Result<V2TunnelReviewReceipt, ()>;
 }
 
 pub struct V2MemoryMutationService<A, L> { authority: A, lower: L }
@@ -370,7 +396,7 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn review(&self, request: V2ReviewTunnelRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::ReviewTunnel, request.estate_id)?;
-        let tunnel_review = self.lower.review(&admitted, request.tunnel_id, request.decision, request.note.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
+        let tunnel_review = self.lower.review(&admitted, request.tunnel_id, request.decision, request.note.as_deref(), &request.reviewed_by).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let outcome = match request.decision {
             V2TunnelDecision::Accept => V2MemoryMutationOutcome::TunnelAccepted,
             V2TunnelDecision::Endorse => V2MemoryMutationOutcome::TunnelEndorsed,
@@ -426,7 +452,7 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
         let tunnel = estate.capture_tunnel(frame, admission.now_millis).map_err(|_| ())?;
         Uuid::parse_str(&tunnel.id).map_err(|_| ())
     }
-    fn review(&self, admission: &V2MemoryMutationAdmission, tunnel_id: Uuid, decision: V2TunnelDecision, note: Option<&str>) -> Result<V2TunnelReviewReceipt, ()> {
+    fn review(&self, admission: &V2MemoryMutationAdmission, tunnel_id: Uuid, decision: V2TunnelDecision, note: Option<&str>, reviewed_by: &str) -> Result<V2TunnelReviewReceipt, ()> {
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let estate = coordinator.estate_for(&admission.estate_handle).map_err(|_| ())?;
         let canonical = tunnel_id.hyphenated().to_string();
@@ -444,10 +470,31 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
                     _ => ContradictionTier::LexicalValue,
                 };
                 let (new_endorser, distinct_endorsers, contested) = coordinator
-                    .endorse_tunnel(&admission.estate_handle, &stored.id, &admission.caller_binding, lens, admission.now_millis)
+                    .endorse_tunnel(&admission.estate_handle, &stored.id, reviewed_by, lens, admission.now_millis)
                     .map_err(|_| ())?;
                 Ok(V2TunnelReviewReceipt::Endorsed { new_endorser, distinct_endorsers, contested })
             }
+            // A MODEL rejection is an objection, not a verdict.  It withdraws
+            // only when no model endorsement stands; otherwise the tunnel stays
+            // `.proposed` and is marked contested so the user sees a disputed
+            // proposal rather than a silently buried one.  Routing this through
+            // respond_to_tunnel would give a machine the permanence of a user
+            // rejection, whose pairs are never re-proposed.
+            V2TunnelDecision::Reject if reviewed_by != USER_REVIEWER => {
+                use genius_locus_kit::brain::conflict_projection_sweep::rejection_tier_of_label;
+                use genius_locus_kit::brain::tiered_contradiction_search::ContradictionTier;
+                let lens = match rejection_tier_of_label(&stored.label) {
+                    Some(1) => ContradictionTier::TypedProven,
+                    Some(2) => ContradictionTier::LexicalStructural,
+                    _ => ContradictionTier::LexicalValue,
+                };
+                let (withdrawn, contested) = coordinator
+                    .object_to_tunnel(&admission.estate_handle, &stored.id, reviewed_by, lens, admission.now_millis)
+                    .map_err(|_| ())?;
+                Ok(V2TunnelReviewReceipt::Settled { withdrawn, contested })
+            }
+            // User verdicts only: `accept` is gated at decode, and a user
+            // `reject` withdraws permanently.
             V2TunnelDecision::Accept | V2TunnelDecision::Reject => {
                 estate.respond_to_tunnel(
                     &stored.id,
