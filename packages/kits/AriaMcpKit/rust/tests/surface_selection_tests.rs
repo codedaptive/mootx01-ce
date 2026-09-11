@@ -808,7 +808,10 @@ fn v2_cognition_directories_advertise_only_selected_handlers_and_typed_recipes()
     assert!(synthesis["result"]["structuredContent"]["data"]["summary"].is_string());
     assert!(synthesis["result"]["structuredContent"]["data"]["results"].is_array());
 
-    let recipes = call(&dispatcher, "moot_list_recipes", serde_json::json!({}));
+    // verbose:true to fetch the full row including required_capabilities.
+    // The terse default omits it, matching the Swift twin
+    // (Tests/AriaMCPTests/AriaSurfaceV2Tests.swift).
+    let recipes = call(&dispatcher, "moot_list_recipes", serde_json::json!({"verbose": true}));
     assert_eq!(recipes["result"]["isError"], false, "{recipes}");
     let recipe = recipes["result"]["structuredContent"]["data"]["recipes"]
         .as_array().expect("typed recipe records")

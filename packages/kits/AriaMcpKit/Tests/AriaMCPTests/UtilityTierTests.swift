@@ -289,28 +289,9 @@ struct UtilityTierTests {
                 "memory_count must exclude the restricted row; got \(String(describing: memoryCount))")
     }
 
-    // MARK: - list_lenses terse/verbose — BLOCKED (v2 verbose arg is a no-op)
-    //
-    // v1's `moot_list_lenses` rendered a prose-only terse block by default,
-    // and a longer prose block with "Required: " lines when `verbose:true`
-    // (RecipeTools.swift:660-678, the legacy runner). The live v2 path
-    // (`ToolDispatcher.dispatch` → `cognitionCatalog.lenses(request)`,
-    // ToolDispatch.swift:860-861) is `AriaV2CognitionCatalogService.lenses`
-    // (AriaV2CognitionCatalog.swift:43-59), whose doc comment states
-    // explicitly: "v2 returns the complete structured projection instead of
-    // a prose-only terse/verbose rendering" (AriaV2CognitionCatalog.swift:6-7).
-    // `request.verbose` is decoded then discarded (`_ = request.verbose`,
-    // AriaV2CognitionCatalog.swift:45) — terse and verbose calls produce
-    // byte-identical output ("Listed N callable cognition tools.",
-    // AriaV2CognitionCatalog.swift:58), and no response ever contains
-    // "Required: " as a text line (required args live only in each tool's
-    // structured `input_schema`, AriaV2CognitionCatalog.swift:52). v1's
-    // `verbose.count > terse.count` and `verbose.contains("Required: ")`
-    // assertions cannot pass against v2 behavior — there is no verbose/terse
-    // distinction left to redirect them to. Do not delete; do not weaken to
-    // pass.
+    // MARK: - list_lenses terse/verbose
 
-    @Test(.disabled("BLOCKED: v2 moot_list_lenses (AriaV2CognitionCatalog.swift:43-59) explicitly ignores the verbose argument (`_ = request.verbose`, AriaV2CognitionCatalog.swift:45) — per the type's own doc comment (AriaV2CognitionCatalog.swift:6-7) v2 always returns the same structured projection regardless of verbose. terse and verbose calls are byte-identical; no response ever contains a 'Required: ' text line. Pinned assertions (verbose.count > terse.count, verbose.contains(\"Required: \")) cannot pass against v2 behavior. Do not delete; do not weaken to pass."))
+    @Test
     func listLensesTerseDefaultAndVerbose() async throws {
         let kit = GeniusLocusKit()
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -324,16 +305,27 @@ struct UtilityTierTests {
         defer { Task { try? await kit.close(handle) } }
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        let terse = text(of: try await dispatcher.dispatch(
-            name: "moot_list_lenses", arguments: .object([:])))
+        let terseResult = try await dispatcher.dispatch(
+            name: "moot_list_lenses", arguments: .object([:]))
+        let terse = text(of: terseResult)
         #expect(terse.contains("cognition tools"))
         #expect(terse.contains("(terse — pass verbose:true"))
         #expect(!terse.contains("Required: "),
                 "terse mode must not include the required-args blocks")
 
-        let verbose = text(of: try await dispatcher.dispatch(
-            name: "moot_list_lenses", arguments: .object(["verbose": .bool(true)])))
-        #expect(verbose.contains("Required: "))
+        let verboseResult = try await dispatcher.dispatch(
+            name: "moot_list_lenses", arguments: .object(["verbose": .bool(true)]))
+        let verbose = text(of: verboseResult)
+        // v1 rendered required args as "Required: arg" prose; v2 carries the
+        // same information as machine-readable JSON in input_schema["required"].
+        // Redirect to the structural equivalent: verbose row carries input_schema,
+        // terse row omits it entirely.
+        let verboseFirstTool = data(of: verboseResult)?["tools"]?.arrayValue?.first?.objectValue
+        let terseFirstTool = data(of: terseResult)?["tools"]?.arrayValue?.first?.objectValue
+        #expect(verboseFirstTool?["input_schema"] != nil,
+                "verbose mode must carry input_schema (the required array lives inside it)")
+        #expect(terseFirstTool?["input_schema"] == nil,
+                "terse mode must omit input_schema")
         #expect(verbose.count > terse.count,
                 "verbose must be larger than terse (terse \(terse.count) vs verbose \(verbose.count))")
 
@@ -344,5 +336,78 @@ struct UtilityTierTests {
         let verboseRecipes = text(of: try await dispatcher.dispatch(
             name: "moot_list_recipes", arguments: .object(["verbose": .bool(true)])))
         #expect(verboseRecipes.contains("requires: "))
+    }
+
+    /// Pins the EXACT key set of a verbose `moot_list_lenses` row, so the Swift
+    /// and Rust ports are compared field for field rather than each port being
+    /// checked only against itself. The Rust twin is
+    /// `cognition_catalog_v2_verbose_row_key_set_matches_swift`
+    /// (rust/tests/utility_tier_tests.rs).
+    ///
+    /// `output_schema` is present when the tool declares one and the key is
+    /// OMITTED when it does not. Neither port may emit a null `output_schema`:
+    /// absent in one port and null in the other is a conformance failure.
+    /// Swift omits via `if let` in `buildOutputSchemaLookup`'s consumer; Rust
+    /// omits via `.get("outputSchema").filter(!is_null).cloned()` plus
+    /// `skip_serializing_if`.
+    @Test
+    func verboseLensRowKeySetIsExact() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "catalogue"))
+        let handle = try await kit.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "catalogue"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Empirical check that motivates the omit-on-absent branch: how many
+        // callable cognition tools carry no declared output schema. Every v2
+        // operation supplies one through
+        // AriaV2OperationDescriptor.projectedTool() (outputSchema:
+        // projection.outputSchema, non-optional), so this is expected to be 0
+        // today. The branch still has to agree across ports.
+        let callableNames = Set(
+            (RecipeTools.tools() + LensTools.tools()).map(\.name))
+        let projected = ToolProjection.tools().filter { callableNames.contains($0.name) }
+        let missingOutputSchema = projected.filter { $0.outputSchema == nil }
+        #expect(missingOutputSchema.isEmpty,
+                "callable cognition tools with no output schema: \(missingOutputSchema.map(\.name))")
+
+        let verboseResult = try await dispatcher.dispatch(
+            name: "moot_list_lenses", arguments: .object(["verbose": .bool(true)]))
+        let verboseRows = try #require(
+            data(of: verboseResult)?["tools"]?.arrayValue, "verbose must return tool rows")
+        #expect(!verboseRows.isEmpty, "the verbose row set must not be empty")
+
+        for row in verboseRows {
+            let obj = try #require(row.objectValue)
+            let name = try #require(obj["name"]?.stringValue)
+            let keys = Set(obj.keys)
+            // No port may ever emit a null output_schema.
+            #expect(obj["output_schema"] != JSONValue.null,
+                    "\(name): output_schema must be omitted, never null")
+            if obj["output_schema"] == nil {
+                #expect(keys == ["name", "description", "input_schema"],
+                        "\(name) verbose key set without an output schema: \(keys.sorted())")
+            } else {
+                #expect(keys == ["name", "description", "input_schema", "output_schema"],
+                        "\(name) verbose key set: \(keys.sorted())")
+            }
+        }
+
+        // The terse row is the same key set minus both schemas.
+        let terseResult = try await dispatcher.dispatch(
+            name: "moot_list_lenses", arguments: .object([:]))
+        let terseRows = try #require(data(of: terseResult)?["tools"]?.arrayValue)
+        for row in terseRows {
+            let obj = try #require(row.objectValue)
+            let name = try #require(obj["name"]?.stringValue)
+            #expect(Set(obj.keys) == ["name", "description"],
+                    "\(name) terse key set: \(Set(obj.keys).sorted())")
+        }
     }
 }

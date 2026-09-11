@@ -588,8 +588,9 @@ struct AriaSurfaceV2Tests {
         }
         #expect(lenses.objectValue?["structuredContent"]?.objectValue?["meta"]?.objectValue?["effect"] == .string("read"))
 
+        // verbose:true to fetch the full row including required_capabilities.
         let recipes = try await dispatcher.dispatch(
-            name: "moot_list_recipes", arguments: .object([:]))
+            name: "moot_list_recipes", arguments: .object(["verbose": .bool(true)]))
         let recipeData = recipes.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
         let rows = try #require(recipeData?["recipes"]?.arrayValue)
         #expect(rows.count == RecipeCatalog.all.count)
