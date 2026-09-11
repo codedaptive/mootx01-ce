@@ -23,10 +23,10 @@ use crate::estate_registry::{EstateRegistry, OpenEstate};
 use super::core_memory::{
     V2AnswerMode, V2CompactMemory, V2ContentKind, V2CoreMemoryService, V2Exportability,
     V2FetchArguments, V2FetchReference, V2FiledMemory, V2FileMemoryRequest,
-    V2Memory, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext,
+    V2Memory, V2MemoryDepth, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext,
     V2MemorySearchRequest, V2MemorySearchResult, V2Placement, V2SearchAnswerBlock,
     V2SearchDoor, V2SearchFilter, V2SearchMediaType, V2SearchOrdering,
-    V2SearchScoring, V2SearchTarget, V2Sensitivity, MEMORY_GET_TOOL,
+    V2SearchScoring, V2SearchTarget, V2Sensitivity, V2TunnelRow, MEMORY_GET_TOOL,
 };
 
 pub struct EstateV2MemoryService<'a> {
@@ -47,7 +47,7 @@ impl<'a> EstateV2MemoryService<'a> {
         }
     }
 
-    fn record(&self, estate: &OpenEstate, drawer: &Drawer) -> Result<V2Memory, V2MemoryFailure> {
+    fn record(&self, estate: &OpenEstate, drawer: &Drawer, tunnels: Vec<V2TunnelRow>) -> Result<V2Memory, V2MemoryFailure> {
         let names = estate.coord.lock().map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
             .resolve_drawer_node_names(&estate.handle, std::slice::from_ref(&drawer.parent_node_id));
         let (wing, room) = names.get(&drawer.parent_node_id).cloned().unwrap_or_default();
@@ -67,8 +67,88 @@ impl<'a> EstateV2MemoryService<'a> {
             exportability: Some(format!("{:?}", drawer.exportability()).to_lowercase()),
             confirmation: Some(format!("{:?}", drawer.confirmation()).to_lowercase()),
             lineage_id: Some(drawer.lineage_id.to_string()),
+            tunnels,
             fetch: placeholder_fetch(memory_id),
         })
+    }
+
+    /// Load active linked tunnels for a drawer, sensitivity-filtered and capped
+    /// at 50. Uses `all_active_tunnels()` which filters `lifecycle == Active &&
+    /// !is_retired()`, then filters in-memory by drawer id — the Rust coordinator
+    /// has no per-drawer active-tunnel query, so we filter after loading.
+    ///
+    /// Sensitivity gate: tunnel sensitivity <= ceiling. Far-endpoint drawers
+    /// (when the far id is non-nil) are fetched and any that exceed the ceiling
+    /// cause the tunnel to be dropped — mirrors the Swift visibleTunnels() rule
+    /// in AriaV2KnowledgeJournal.swift:399-413.
+    fn load_tunnels(
+        &self,
+        estate: &OpenEstate,
+        drawer_id: &str,
+        ceiling: AdjectiveSensitivity,
+    ) -> Result<Vec<V2TunnelRow>, V2MemoryFailure> {
+        use locus_kit::tunnel_operational::TunnelLifecycle;
+
+        // All active (lifecycle == Active, not retired) tunnels in the estate.
+        // This mirrors the LocusKit SQL-layer filter in the Swift port
+        // (activeTunnelsFrom/To → LocusKit.Estate L947/L955).
+        let all_active = estate.coord.lock()
+            .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
+            .all_active_tunnels(&estate.handle)
+            .map_err(|e| failure("operation_failed", &format!("tunnel fetch failed: {e:?}")))?;
+
+        // Filter to tunnels linked to this drawer.
+        let linked: Vec<_> = all_active.iter().filter(|t| {
+            t.source_drawer_id.as_deref() == Some(drawer_id)
+                || t.target_drawer_id.as_deref() == Some(drawer_id)
+        }).collect();
+
+        // Sensitivity gate on the tunnel itself. raw_value encodes scale-gapped
+        // ordinal (0 Normal, 16 Elevated, 32 Restricted, 48 Secret) so a
+        // less-than-or-equal comparison on raw_value is the correct ordering.
+        let within_ceiling: Vec<_> = linked.into_iter().filter(|t| {
+            t.adjective_sensitivity().raw_value() <= ceiling.raw_value()
+        }).collect();
+
+        // Cap at 50 matching v1 behavior (ToolDispatch.swift:2576 linked.prefix(50)).
+        let capped: Vec<_> = within_ceiling.into_iter().take(50).collect();
+        if capped.is_empty() { return Ok(Vec::new()); }
+
+        // Collect far-endpoint drawer ids for sensitivity check.
+        let far_ids: Vec<&str> = capped.iter().filter_map(|t| {
+            if t.source_drawer_id.as_deref() == Some(drawer_id) {
+                t.target_drawer_id.as_deref()
+            } else {
+                t.source_drawer_id.as_deref()
+            }
+        }).collect();
+
+        // Fetch far-endpoint drawers. get_drawers returns only those that exist.
+        let endpoint_drawers = estate.coord.lock()
+            .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
+            .get_drawers(&estate.handle, &far_ids)
+            .unwrap_or_default();
+        let visible_ids: std::collections::HashSet<&str> = endpoint_drawers.iter()
+            .filter(|d| d.adjective_sensitivity().raw_value() <= ceiling.raw_value())
+            .map(|d| d.id.as_str())
+            .collect();
+
+        let rows: Vec<V2TunnelRow> = capped.iter().filter_map(|t| {
+            let is_outgoing = t.source_drawer_id.as_deref() == Some(drawer_id);
+            let far_drawer_id = if is_outgoing { t.target_drawer_id.as_deref() } else { t.source_drawer_id.as_deref() };
+            // Drop the tunnel if the far endpoint is a known drawer over the ceiling.
+            if let Some(far_id) = far_drawer_id {
+                if !visible_ids.contains(far_id) { return None; }
+            }
+            Some(V2TunnelRow {
+                tunnel_id: canonical_uuid_str(&t.id),
+                kind: format!("{:?}", t.kind).to_lowercase(),
+                lifecycle: format!("{:?}", TunnelLifecycle::Active).to_lowercase(),
+                far_endpoint_id: far_drawer_id.map(canonical_uuid_str),
+            })
+        }).collect();
+
+        Ok(rows)
     }
 }
 
@@ -464,7 +544,18 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
 
         requested_order.iter().filter_map(|memory_id| {
             (!ambiguous.contains(memory_id)).then(|| selected.get(memory_id))
-                .flatten().map(|drawer| self.record(estate, drawer))
+                .flatten().map(|drawer| {
+                    // Tunnel rows are only included for depth:full. depth:subject and
+                    // depth:distilled carry no tunnels, matching v1 which only queried
+                    // tunnels on the full-record path (ToolDispatch.swift:2568-2579).
+                    let tunnels = if request.depth == V2MemoryDepth::Full {
+                        self.load_tunnels(estate, &drawer.id, sensitivity_ceiling(context))
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    self.record(estate, drawer, tunnels)
+                })
         }).collect()
     }
 }
@@ -639,6 +730,22 @@ fn recall_frame(context: &V2MemoryOperationContext, limit: usize) -> RecallFrame
 
 fn sensitivity(value: V2Sensitivity) -> AdjectiveSensitivity { match value { V2Sensitivity::Normal => AdjectiveSensitivity::Normal, V2Sensitivity::Elevated => AdjectiveSensitivity::Elevated, V2Sensitivity::Restricted => AdjectiveSensitivity::Restricted, V2Sensitivity::Secret => AdjectiveSensitivity::Secret } }
 fn exportability(value: V2Exportability) -> AdjectiveExportability { match value { V2Exportability::Private => AdjectiveExportability::Private, V2Exportability::Public => AdjectiveExportability::Public } }
+
+/// Map the optional sensitivity ceiling from context to an AdjectiveSensitivity,
+/// defaulting to Normal (public floor) when no ceiling grant is active.
+fn sensitivity_ceiling(context: &V2MemoryOperationContext) -> AdjectiveSensitivity {
+    context.sensitivity_ceiling.map(sensitivity).unwrap_or(AdjectiveSensitivity::Normal)
+}
+
+/// Normalise a raw tunnel/drawer id string to lowercase-canonical UUID form.
+/// Returns the lowercased string as-is when it does not parse as a UUID —
+/// keeping an opaque id visible rather than silently dropping it.
+fn canonical_uuid_str(id: &str) -> String {
+    // Attempt UUID normalisation; fall back to plain lowercase so odd-shaped ids
+    // remain visible in the response rather than vanishing.
+    use uuid::Uuid;
+    Uuid::parse_str(id).map(|u| u.hyphenated().to_string()).unwrap_or_else(|_| id.to_lowercase())
+}
 fn content_kind(value: V2ContentKind) -> ContentKind { match value { V2ContentKind::Prose => ContentKind::Prose, V2ContentKind::Code => ContentKind::Code, V2ContentKind::Transcript => ContentKind::Transcript, V2ContentKind::List => ContentKind::List, V2ContentKind::StructuredJson => ContentKind::StructuredJson, V2ContentKind::ImageCaption => ContentKind::ImageCaption, V2ContentKind::FingerprintOnly => ContentKind::FingerprintOnly } }
 fn placeholder_fetch(memory_id: Uuid) -> V2FetchReference { V2FetchReference { tool: MEMORY_GET_TOOL, arguments: V2FetchArguments { memory_id: memory_id.to_string() } } }
 fn failure(code: &str, message: &str) -> V2MemoryFailure { V2MemoryFailure { code: code.to_owned(), message: message.to_owned(), retryable: false, recovery: None } }
