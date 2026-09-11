@@ -605,12 +605,21 @@ private enum AriaV2KnowledgeJournalRequest {
         return direction
     }
 
+    /// Below one is a SYNTAX ERROR and above the ceiling CLAMPS, which is the
+    /// split v1's shared limit funnel used.
+    ///
+    /// The two halves are not symmetric on purpose. A negative or zero limit
+    /// is meaningless and, left alone, reaches SQLite as `LIMIT -1` — every
+    /// row — so it must be refused rather than quietly corrected. An
+    /// over-large limit is a caller asking for more than the surface will
+    /// give, which the ceiling already answers; refusing it instead makes a
+    /// caller who asked for 10_000 get nothing rather than 500.
     static func limit(_ value: Int64?, defaultValue: Int, maximum: Int, path: String) throws -> Int {
         guard let value else { return defaultValue }
-        guard value >= 1, value <= Int64(maximum) else {
-            throw invalid(path: path, message: "Argument '\(path)' must be between 1 and \(maximum).")
+        guard value >= 1 else {
+            throw invalid(path: path, message: "Argument '\(path)' must be at least 1.")
         }
-        return Int(value)
+        return Int(min(value, Int64(maximum)))
     }
 
     static func date(_ value: String?, path: String) throws -> Date? {
