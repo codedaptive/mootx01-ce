@@ -233,10 +233,28 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             V2SearchTarget::Query(query) => query.clone(),
             V2SearchTarget::Near(id) => {
                 let anchor_frame = recall_frame(context, request.limit);
+                // Both storage spellings: the two portable writers disagree on
+                // UUID case, so a canonical-only lookup misses an estate
+                // written by the other port.
+                let canonical = id.hyphenated().to_string();
+                let spellings = [canonical.clone(), canonical.to_uppercase()];
                 let rows = estate.coord.lock().map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
-                    .get_drawers_matching_frame(&estate.handle, &[id.to_string()], &anchor_frame)
+                    .get_drawers_matching_frame(&estate.handle, &spellings, &anchor_frame)
                     .map_err(|error| failure("operation_failed", &format!("anchor lookup failed: {error:?}")))?;
-                rows.into_iter().next().map(|row| row.content).ok_or_else(V2MemoryFailure::not_found)?
+                // The recall frame covers adjective sensitivity only.
+                // Provenance sensitivity is a separate axis, and a
+                // provenance-restricted row can pass the frame — so the same
+                // predicate the search results and ordinary get already apply
+                // is applied to the anchor BEFORE its content becomes the
+                // query. Pivoting through a gated anchor would leak its
+                // content-derived neighbours past the redaction boundary.
+                //
+                // An unauthorized anchor is reported exactly as an absent one:
+                // the caller must not be able to tell which.
+                rows.into_iter()
+                    .find(|row| provenance_visible(row.provenance))
+                    .map(|row| row.content)
+                    .ok_or_else(V2MemoryFailure::not_found)?
             }
         };
 
