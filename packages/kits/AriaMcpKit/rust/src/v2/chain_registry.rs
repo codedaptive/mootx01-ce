@@ -140,7 +140,9 @@ mod tests {
     /// The production factory leaves egress position 1 (the reserved exit-gate
     /// slot) unoccupied.  The discriminating assertions are the position checks:
     /// if EGRESS_COACHING is set to 1, the occupancy assertion fails because
-    /// coaching would then occupy the reserved slot.  The halt assertions are
+    /// coaching would then occupy the reserved slot, and adding a gate there
+    /// would cause chain construction to fail with `V2CallChainError::DuplicateEgressPosition`.
+    /// The halt assertions are
     /// retained because they cost nothing, but this is a slot-reservation gate,
     /// not an ordering gate — it does not prove coaching did not run.
     #[test]
@@ -176,8 +178,7 @@ mod tests {
         );
 
         // Add a gate double at position 1: fires immediately with a sentinel.
-        // The coaching transform (at position 10) must NOT run when this gate fires.
-        // We verify that by checking:
+        // This exercises the halt mechanics at the reserved slot:
         //   (a) egress_outcome.halt is GateFired("test-gate")
         //   (b) egress_outcome.result is the gate's exact sentinel payload
         let sentinel = serde_json::json!("gate-halt-sentinel");
