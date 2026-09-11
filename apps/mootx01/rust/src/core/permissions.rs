@@ -104,8 +104,6 @@ const READ_TOOLS: &[&str] = &[
     "moot_migration_run",
     // Dataset reads (MX-TAB-7): query rows / column stats are read-only.
     "moot_dataset_query", "moot_dataset_stats",
-    // Work-packet reads: retrieve, list, or trace lineage of stored work packets.
-    "moot_packet_get", "moot_packet_list", "moot_packet_lineage",
     "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
     "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts", "moot_lens_constellation",
     "moot_lens_contradiction", "moot_lens_divergence", "moot_lens_drift", "moot_lens_free_association",

@@ -146,10 +146,6 @@ public enum PermissionsWriter {
         "moot_lens_keystones", "moot_lens_latent_themes", "moot_lens_moment", "moot_lens_node_motion",
         "moot_lens_overlap", "moot_lens_partial_cue", "moot_lens_precedence", "moot_lens_rhythm",
         "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
-        // Work-packet reads (FAB5-I2): fetch and list are pure reads of
-        // structuredJSON drawers; lineage traversal follows embedded links
-        // without touching committed state. Allow tier mirrors frozenReadTools.
-        "moot_packet_get", "moot_packet_list", "moot_packet_lineage",
         // Maintenance read (M-REBUILD-1): reports derived-state rebuild progress.
         // Read-only; safe to poll while moot_reindex settles.
         "moot_rebuild_status",
