@@ -2125,6 +2125,20 @@ fn memory_list_decode_error(error: crate::v2::memory_list::MemoryListError) -> J
     }
 }
 
+/// Historical name; not a work-packet function. The name predates the
+/// work-packet capability withdrawal (2026-09-10) and is preserved to
+/// avoid churn at seven live call sites. This helper builds an incomplete
+/// [`crate::v2::render::V2ResultMeta`] for any write-effect operation
+/// that must report a side effect without a fully-resolved final state.
+///
+/// Live callers (none are packet operations):
+/// - `execute`
+/// - `execute_memory_mutation`
+/// - `execute_vault_lifecycle`
+/// - `execute_knowledge_journal`
+/// - `execute_dream`
+/// - `execute_migration_confirm`
+/// - `execute_contradiction_proposal`
 fn packet_meta(
     base: &crate::v2::render::V2ResultMeta,
     effect: crate::v2::operation::V2OperationEffect,
