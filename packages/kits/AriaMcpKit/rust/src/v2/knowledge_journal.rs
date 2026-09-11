@@ -6,7 +6,7 @@
 use std::{collections::{BTreeSet, HashSet}, sync::{Arc, Mutex}};
 
 use genius_locus_kit::{EstateCoordinator, EstateHandle};
-use locus_kit::{adjectives::AdjectiveSensitivity, kg_fact::{KGFact, KGFactOrigin}, tunnel::Tunnel, tunnel_operational::TunnelLifecycle};
+use locus_kit::{adjectives::AdjectiveSensitivity, kg_fact::{KGFact, KGFactOrigin}, tunnel::Tunnel, tunnel_operational::{TunnelKind, TunnelLifecycle}};
 use uuid::Uuid;
 
 use crate::jsonrpc::JsonValue;
@@ -79,6 +79,27 @@ fn optional_date(o:&std::collections::BTreeMap<String,JsonValue>,key:&str)->V2De
 
 /// Strict UTC/offset RFC-3339 parser.  The lower kits use epoch milliseconds;
 /// this keeps date conversion at the typed boundary and never uses wall clock.
+/// Canonical camelCase wire representation of a TunnelKind value.
+///
+/// `format!("{:?}", kind)` on a PascalCase Rust enum produces `"References"`,
+/// `"DerivesFrom"` etc. — which is wrong. Swift emits camelCase via
+/// `String(describing:)` on camelCase enum cases (e.g. `.derivesFrom`).
+/// This function replicates the Swift wire output without relying on Debug.
+fn tunnel_kind_wire(kind: TunnelKind) -> String {
+    match kind {
+        TunnelKind::Supersedes  => "supersedes".to_owned(),
+        TunnelKind::References  => "references".to_owned(),
+        TunnelKind::Blocks      => "blocks".to_owned(),
+        TunnelKind::Validates   => "validates".to_owned(),
+        TunnelKind::Contradicts => "contradicts".to_owned(),
+        TunnelKind::DerivesFrom => "derivesFrom".to_owned(),
+        TunnelKind::Covers      => "covers".to_owned(),
+        TunnelKind::Elaborates  => "elaborates".to_owned(),
+        TunnelKind::RespondsTo  => "respondsTo".to_owned(),
+        TunnelKind::Parent      => "parent".to_owned(),
+    }
+}
+
 fn parse_rfc3339(value:&str,key:&str)->V2DecodeResult<i64>{
     let invalid=||V2InvalidArgument::new(format!("$.{key}"),"must be an ISO-8601 date-time");
     let (date,time)=value.split_once('T').ok_or_else(invalid)?;
@@ -136,7 +157,7 @@ impl<A:V2KnowledgeJournalAuthority,L:V2KnowledgeJournalLower> V2KnowledgeJournal
 
 pub struct CoordinatorKnowledgeJournalLower{coordinator:Arc<Mutex<EstateCoordinator>>} impl CoordinatorKnowledgeJournalLower{pub fn new(coordinator:Arc<Mutex<EstateCoordinator>>)->Self{Self{coordinator}}}
 impl CoordinatorKnowledgeJournalLower {
-    fn visible_tunnels(&self,a:&V2KnowledgeJournalAdmission,tunnels:Vec<Tunnel>,limit:usize)->Result<Vec<V2KnowledgeTunnel>,()> { let c=self.coordinator.lock().map_err(|_|())?;let estate=c.estate_for(&a.estate_handle).map_err(|_|())?;let mut seen=BTreeSet::new();let mut rows=Vec::new();for t in tunnels {if !seen.insert(t.id.clone())||t.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){continue;} let endpoints=[t.source_drawer_id.as_deref(),t.target_drawer_id.as_deref()].into_iter().flatten().map(|id|estate.drawer_by_id(id).map_err(|_|())?.ok_or(())).collect::<Result<Vec<_>,()>>()?;if endpoints.iter().any(|drawer|drawer.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value()){continue;} let tid=Uuid::parse_str(&t.id).map_err(|_|())?;let from=t.source_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;let to=t.target_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;rows.push(V2KnowledgeTunnel{tunnel_id:tid,from_id:from,to_id:to,kind:format!("{:?}",t.kind),lifecycle:format!("{:?}",t.lifecycle()).to_lowercase()});if rows.len()==limit{break;}}Ok(rows) }
+    fn visible_tunnels(&self,a:&V2KnowledgeJournalAdmission,tunnels:Vec<Tunnel>,limit:usize)->Result<Vec<V2KnowledgeTunnel>,()> { let c=self.coordinator.lock().map_err(|_|())?;let estate=c.estate_for(&a.estate_handle).map_err(|_|())?;let mut seen=BTreeSet::new();let mut rows=Vec::new();for t in tunnels {if !seen.insert(t.id.clone())||t.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){continue;} let endpoints=[t.source_drawer_id.as_deref(),t.target_drawer_id.as_deref()].into_iter().flatten().map(|id|estate.drawer_by_id(id).map_err(|_|())?.ok_or(())).collect::<Result<Vec<_>,()>>()?;if endpoints.iter().any(|drawer|drawer.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value()){continue;} let tid=Uuid::parse_str(&t.id).map_err(|_|())?;let from=t.source_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;let to=t.target_drawer_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_|())?;rows.push(V2KnowledgeTunnel{tunnel_id:tid,from_id:from,to_id:to,kind:tunnel_kind_wire(t.kind),lifecycle:format!("{:?}",t.lifecycle()).to_lowercase()});if rows.len()==limit{break;}}Ok(rows) }
     fn visible_fact(&self,a:&V2KnowledgeJournalAdmission,f:KGFact)->Result<Option<V2KnowledgeFact>,()> {if f.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){return Ok(None);}let source_memory_id=if f.source_drawer_id.is_empty(){None}else{let c=self.coordinator.lock().map_err(|_|())?;let estate=c.estate_for(&a.estate_handle).map_err(|_|())?;let d=estate.drawer_by_id(&f.source_drawer_id).map_err(|_|())?.ok_or(())?;if d.adjective_sensitivity().raw_value()>a.maximum_sensitivity.raw_value(){return Ok(None);}Some(Uuid::parse_str(&f.source_drawer_id).map_err(|_|())?)};let state=format!("{:?}",f.state());Ok(Some(V2KnowledgeFact{fact_id:Uuid::parse_str(&f.id).map_err(|_|())?,subject:f.subject,predicate:f.predicate,object:f.object,source_memory_id,event_time_millis:f.filed_at,state})) }
 }
 impl V2KnowledgeJournalLower for CoordinatorKnowledgeJournalLower {
