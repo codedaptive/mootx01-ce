@@ -127,6 +127,45 @@ public actor ModeSessionState: Sendable {
     /// Never set when `stickyEnabled == false`.
     private(set) var stickyDeclaration: ModeDeclaration? = nil
 
+    // MARK: - Pending declaration (transform → ingress stash)
+
+    /// Transient slot bridging the pre-decode transform phase to the post-decode
+    /// ingress/egress hooks for the mode concern.
+    ///
+    /// Set by the transform hook in `ariaV2PreDecodeRegistrations` (strips `mode`
+    /// from arguments, parses the declaration). Consumed by the mode ingress hook
+    /// (reads `unknownHint` as per-concern state) and cleared by the coaching
+    /// ingress hook (calls `recordCall` with the declaration). Nil when the current
+    /// call carried no `mode` argument or when the transform had a collision.
+    var pendingDeclaration: ModeDeclaration? = nil
+
+    /// Store a mode declaration parsed in the transform phase, to be consumed by
+    /// the post-decode ingress hooks.
+    func setPendingDeclaration(_ decl: ModeDeclaration?) {
+        pendingDeclaration = decl
+    }
+
+    /// Clear the pending declaration after it has been consumed by the ingress hooks.
+    func clearPendingDeclaration() {
+        pendingDeclaration = nil
+    }
+
+    // MARK: - Sticky recall answer mode
+
+    /// The answer mode raw value for the current sticky Recall variant, or `nil`
+    /// when no sticky Recall=<variant> is set.
+    ///
+    /// Injected as the `answer` argument by the pre-decode transform hook when
+    /// `answer` is absent from the call arguments and the session has a sticky
+    /// Recall variant. Per-call explicit `answer` always wins — the transform hook
+    /// only injects when the argument is absent.
+    ///
+    /// Returns `"auto"` for `Recall=Auto`, `"never"` for `Recall=Rows`,
+    /// `"always"` for `Recall=Answer`.
+    public var stickyRecallAnswerMode: String? {
+        stickyDeclaration?.recognizedRecallVariant?.answerModeRawValue
+    }
+
     // MARK: - Call counters
 
     /// Total calls recorded this session.
