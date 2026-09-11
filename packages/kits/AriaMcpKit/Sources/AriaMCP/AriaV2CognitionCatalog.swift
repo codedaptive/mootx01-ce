@@ -47,9 +47,12 @@ public struct AriaV2CognitionCatalogService: Sendable {
         if request.verbose {
             // Verbose: include input_schema and output_schema for each tool.
             // output_schema comes from the effective registry (ToolProjection),
-            // because LensTools/RecipeTools direct-built instances carry
-            // outputSchema: nil. ToolProjection builds from the selected catalog
-            // which always provides outputSchema per operation.
+            // not from LensTools/RecipeTools direct instances. LensTools
+            // instances carry outputSchema: nil; RecipeTools instances vary —
+            // the five recall tools declare ToolProjection.recallResultsOutputSchema(),
+            // while the rest carry nil. Using ToolProjection for all tools
+            // ensures port parity: the v2 catalog's declared schemas are the
+            // single source of truth, regardless of per-tool defaults.
             let outputSchemaByName = Self.buildOutputSchemaLookup()
             let fullTools = filteredTools.map { tool -> JSONValue in
                 var obj: [String: JSONValue] = [
@@ -135,9 +138,11 @@ public struct AriaV2CognitionCatalogService: Sendable {
 
     /// Build a name→outputSchema lookup from the effective registry's projected
     /// tools. `ToolProjection.tools()` returns projectedTools from the selected
-    /// catalog, which carry outputSchema per operation. Direct `LensTools.tools()`
-    /// and `RecipeTools.tools()` instances have `outputSchema: nil`, so this
-    /// lookup is the only path to the output schema for the verbose response.
+    /// catalog, which carry outputSchema per operation. LensTools instances carry
+    /// outputSchema: nil; RecipeTools instances vary (the five recall tools set
+    /// ToolProjection.recallResultsOutputSchema(), the rest carry nil). Using
+    /// ToolProjection is the correct path because it reads from the authoritative
+    /// v2 catalog declarations, keeping both ports in sync.
     private static func buildOutputSchemaLookup() -> [String: JSONValue] {
         Dictionary(
             ToolProjection.tools().compactMap { tool -> (String, JSONValue)? in

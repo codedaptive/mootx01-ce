@@ -32,13 +32,15 @@ public enum AriaV2DataMobilityRequest: Sendable {
         case "moot_reclassify_fdc":
             let d = try decoder(arguments, ["estate_id", "apply", "mode", "limit"])
             let apply = try d.optionalBoolean("apply") ?? false
-            // mode: "suspectOnly" or "all" accepted case-insensitively; v1 lowercased
-            // before comparing and v2 matches that so callers are not punished for
-            // capitalisation differences. Unrecognised value is a refusal, not a
-            // silent fallback. Canonical form is preserved: "all" or "suspectOnly".
+            // mode: "suspectOnly" or "all" accepted case-insensitively; v1
+            // trimmed whitespace then lowercased before comparing, and v2
+            // matches that so callers are not punished for leading/trailing
+            // spaces or capitalisation differences. Unrecognised value is a
+            // refusal, not a silent fallback. Canonical form is preserved:
+            // "all" or "suspectOnly".
             let modeStr: String
             if let raw = try d.optionalString("mode") {
-                switch raw.lowercased() {
+                switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
                 case "all": modeStr = "all"
                 case "suspectonly": modeStr = "suspectOnly"
                 default:
@@ -64,10 +66,12 @@ public enum AriaV2DataMobilityRequest: Sendable {
                 limit: limit)
         case "moot_palace_import":
             let d = try decoder(arguments, ["palace_path", "mode", "estate_id"])
-            // Case-insensitive: "FOREGROUND", "Background", etc. resolve like v1.
-            // ImportMode.rawValue is already lowercase, so lowercasing the input
-            // before init(rawValue:) is sufficient for any capitalisation.
-            let raw = (try d.optionalString("mode") ?? ImportMode.foreground.rawValue).lowercased()
+            // Case-insensitive and whitespace-tolerant: "FOREGROUND ", "Background", etc.
+            // resolve like v1. v1 trimmed whitespace then lowercased before comparing.
+            // ImportMode.rawValue is already lowercase, so trim + lowercase before
+            // init(rawValue:) handles any capitalisation or surrounding whitespace.
+            let raw = (try d.optionalString("mode") ?? ImportMode.foreground.rawValue)
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard let mode = ImportMode(rawValue: raw) else { throw invalid("mode", "mode must be foreground or background.") }
             return .palaceImport(path: try text(d, "palace_path"), mode: mode, estateID: try d.optionalUUID("estate_id"))
         case "moot_json_import":
