@@ -106,17 +106,9 @@ struct AriaV2ChainAdoptionTests {
         #expect(!occupiesReservedSlot, "egress position 1 must be unoccupied in production registrations")
 
         // Gate double at position 1: fires immediately with a distinct sentinel.
-        // Coaching's transform (at position 10) must NOT run when this gate fires.
-        // We verify that by checking:
+        // This exercises the halt mechanics at the reserved slot:
         //   (a) egressOutcome.halt is .gateFired("test-gate")
         //   (b) egressOutcome.result is the gate's exact sentinel payload
-        //
-        // The coaching transform on a monitoringStatus result with a fresh session
-        // passes the result through unchanged (no hint fires, shouldCoach() is
-        // false at total_calls == 1 against the default coachingCallsX == 25).
-        // Therefore, if coaching had run, the result would still equal the sentinel
-        // — but the halt reason would be .none rather than .gateFired. Both
-        // assertions (halt reason AND result identity) together prove order.
         let sentinelPayload: JSONValue = .string("gate-halt-sentinel")
         let gateDouble = AriaV2ChainRegistration(
             concernName: "test-gate",
