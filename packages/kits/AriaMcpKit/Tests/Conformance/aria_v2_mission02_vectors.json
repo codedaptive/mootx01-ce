@@ -527,7 +527,135 @@
             },
             "data": {
               "type": "object",
-              "additionalProperties": true
+              "properties": {
+                "memories": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "memory_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "subject": {
+                        "type": "string"
+                      },
+                      "distilled": {
+                        "type": "string"
+                      },
+                      "content": {
+                        "type": "string"
+                      },
+                      "placement": {
+                        "type": "object",
+                        "properties": {
+                          "wing": {
+                            "type": "string"
+                          },
+                          "room": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "wing",
+                          "room"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "filed_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "event_time": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "state": {
+                        "type": "string"
+                      },
+                      "trust": {
+                        "type": "string"
+                      },
+                      "sensitivity": {
+                        "type": "string"
+                      },
+                      "exportability": {
+                        "type": "string"
+                      },
+                      "confirmation": {
+                        "type": "string"
+                      },
+                      "lineage_id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "tunnels": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "tunnel_id": {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "kind": {
+                              "type": "string"
+                            },
+                            "lifecycle": {
+                              "type": "string"
+                            },
+                            "far_endpoint_id": {
+                              "type": "string",
+                              "format": "uuid"
+                            }
+                          },
+                          "required": [
+                            "tunnel_id",
+                            "kind",
+                            "lifecycle"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "fetch": {
+                        "type": "object",
+                        "properties": {
+                          "tool": {
+                            "const": "moot_memory_get"
+                          },
+                          "arguments": {
+                            "type": "object",
+                            "properties": {
+                              "memory_id": {
+                                "type": "string",
+                                "format": "uuid"
+                              }
+                            },
+                            "required": [
+                              "memory_id"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "tool",
+                          "arguments"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "memory_id",
+                      "fetch"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "memories"
+              ],
+              "additionalProperties": false
             },
             "meta": {
               "type": "object",
@@ -900,7 +1028,32 @@
             },
             "data": {
               "type": "object",
-              "additionalProperties": true
+              "properties": {
+                "memory_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "erased",
+                    "erased_partially"
+                  ]
+                },
+                "refused_sibling_memory_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              },
+              "required": [
+                "memory_id",
+                "outcome",
+                "refused_sibling_memory_ids"
+              ],
+              "additionalProperties": false
             },
             "meta": {
               "type": "object",
