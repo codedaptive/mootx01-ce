@@ -176,9 +176,10 @@ pub struct Dispatcher {
     memory_tool_enabled: bool,
     /// Pre-decode transform registrations injected before argument decode.
     ///
-    /// In production this is always empty — no concern removes keys before decode.
-    /// Test code populates it to prove the transform phase strips a decoder-rejected
-    /// key before the surface decoder sees the arguments.
+    /// In production this is populated by `aria_v2_pre_decode_registrations` with the
+    /// mode concern's transform hook, which strips the `mode` global modifier before
+    /// decode and injects sticky recall `answer` for `moot_memory_search`. Tests may
+    /// add their own registrations to exercise the transform phase with a custom hook.
     /// Mirrors Swift `ToolDispatcher.preDecodeRegistrations`.
     pub pre_decode_registrations: Vec<crate::v2::call_chain::V2ChainRegistration>,
 }

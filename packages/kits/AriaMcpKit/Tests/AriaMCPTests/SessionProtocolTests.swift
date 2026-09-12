@@ -85,19 +85,6 @@ struct SessionProtocolTests {
     /// text. The block is a static constant; it must not vary by call or by
     /// estate state changes between calls.
 
-    // MARK: - Byte-identity: modesStatusSection (shared fixture with Rust)
-
-    /// Gate: `SessionProtocol.modesStatusSection` must produce the byte-identical
-    /// string that Rust's `modes_status_section()` produces.
-    ///
-    /// Both ports read `Tests/Conformance/modes_status_section_fixture.json`.
-    /// If either port's rendering diverges (different separator, wrong contract
-    /// text, missing mode), this test catches it alongside the Rust equivalent.
-    ///
-    /// How it fails if reverted: any edit to `MootMode.contract`, `MootMode.rawValue`,
-    /// or the surrounding template strings without updating the fixture → assert fires;
-    /// also fires if this port's output diverges from the fixture the Rust test passes,
-    /// surfacing a parity break.
     // MARK: - Byte-identity: globalModifiersHelpText (shared fixture with Rust)
 
     /// Gate: `AriaV2HelpService.globalModifiersHelpText` must be byte-identical to
@@ -130,6 +117,19 @@ struct SessionProtocolTests {
                 "globalModifiersHelpText must be byte-identical to shared fixture — \nActual length: \(actual.utf8.count)\nExpected length: \(expected.utf8.count)")
     }
 
+    // MARK: - Byte-identity: modesStatusSection (shared fixture with Rust)
+
+    /// Gate: `SessionProtocol.modesStatusSection` must produce the byte-identical
+    /// string that Rust's `modes_status_section()` produces.
+    ///
+    /// Both ports read `Tests/Conformance/modes_status_section_fixture.json`.
+    /// If either port's rendering diverges (different separator, wrong contract
+    /// text, missing mode), this test catches it alongside the Rust equivalent.
+    ///
+    /// How it fails if reverted: any edit to `MootMode.contract`, `MootMode.rawValue`,
+    /// or the surrounding template strings without updating the fixture → assert fires;
+    /// also fires if this port's output diverges from the fixture the Rust test passes,
+    /// surfacing a parity break.
     @Test("modesStatusSection is byte-identical to shared fixture (parity with Rust)")
     func modesStatusSectionByteIdentity() throws {
         let fixtureURL = URL(fileURLWithPath: #filePath)
