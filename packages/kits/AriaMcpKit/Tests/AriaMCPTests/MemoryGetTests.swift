@@ -272,14 +272,14 @@ struct MemoryGetTests {
     ///
     /// Three cases, all asserted:
     ///   1. No grant — restricted far endpoint (tunnel born restricted): the tunnel
-    ///      is withheld by the tunnel-own-sensitivity gate (loadTunnels line 789).
+    ///      is withheld by the tunnel-own-sensitivity gate (adjectiveSensitivity <= ceiling).
     ///      DrawerStore.addTunnel stamps the tunnel with the maximum sensitivity of
     ///      its endpoints at creation time, so a tunnel to a .restricted drawer is
     ///      itself .restricted and never reaches the far-endpoint gate (line 802).
     ///   2. Restricted grant — same setup as case 1: the tunnel appears with far_endpoint_id.
     ///   3. Normal-sensitivity tunnel, far endpoint upgraded to .restricted after link:
     ///      the tunnel's own sensitivity stays .normal (stamped at creation when both
-    ///      endpoints were .normal), so it passes line 789. Line 802 then drops it
+    ///      endpoints were .normal), so it passes the tunnel-own-sensitivity gate. Line 802 then drops it
     ///      because the far endpoint is now above the default ceiling.
     ///
     /// Gate discipline: `#require` on the source drawer row ensures assertions
@@ -309,7 +309,7 @@ struct MemoryGetTests {
         // Case 1 — no grant.
         // DrawerStore.addTunnel stamps the tunnel's own sensitivity as the maximum
         // of its endpoints (.restricted), so the tunnel-own-sensitivity gate
-        // (AriaV2MemoryOperations.swift line 789) drops it. The far-endpoint gate
+        // (adjectiveSensitivity <= ceiling in loadTunnels) drops it. The far-endpoint gate
         // (line 802) is never reached for this fixture.
         // The source drawer IS found (verify with #require so the assertion runs).
         let noGrantResult = try await dispatcher.dispatch(
@@ -346,12 +346,12 @@ struct MemoryGetTests {
         // after the link was filed.
         //
         // The tunnel is created when both endpoints are .normal, so addTunnel stamps
-        // it with .normal sensitivity (line 789 admits it). After the far endpoint
+        // it with .normal sensitivity (adjectiveSensitivity <= ceiling admits it). After the far endpoint
         // is upgraded to .restricted, line 802 drops the tunnel because the far
         // drawer is now above the default ceiling (.elevated).
         //
         // This is the only fixture that isolates line 802 specifically: the tunnel
-        // passes line 789 (own sensitivity .normal ≤ ceiling .elevated) and is then
+        // passes the tunnel-own-sensitivity gate (own sensitivity .normal ≤ ceiling .elevated) and is then
         // dropped by line 802 (far endpoint .restricted > ceiling .elevated).
         let sourceNormal = try await seed("source for line-802 gate", room: "mg-disclosure-802", in: handle, kit: kit)
         let targetNormal = try await seed("initially-normal far endpoint", room: "mg-disclosure-802", in: handle, kit: kit)
@@ -386,7 +386,7 @@ struct MemoryGetTests {
         await dispatcher.sensitivityUnlockLedger.lock()
 
         // Now query without a grant. The tunnel's own sensitivity is .normal
-        // (passes line 789). The far endpoint is .restricted above the ceiling
+        // (passes the tunnel-own-sensitivity gate). The far endpoint is .restricted above the ceiling
         // (line 802 drops the tunnel).
         let result802 = try await dispatcher.dispatch(
             name: "moot_memory_get", arguments: getArgs(id: sourceNormal.id))
@@ -397,6 +397,100 @@ struct MemoryGetTests {
         let tunnels802 = firstMemory802["tunnels"]?.arrayValue
         #expect(tunnels802?.isEmpty == true,
             "tunnel to an upgraded-.restricted far endpoint must be withheld by line 802; got: \(String(describing: tunnels802))")
+    }
+
+    /// Tunnel-own-sensitivity gate (`adjectiveSensitivity <= ceiling`, line 780)
+    /// acts independently of the far-endpoint gate (line 802).
+    ///
+    /// Fixture: the tunnel's OWN sensitivity is .restricted. The far endpoint
+    /// drawer's sensitivity is .normal (within the default .elevated ceiling).
+    ///
+    /// Line 802 admits this tunnel — the far endpoint IS visible. Line 780
+    /// withholds it — the tunnel's own sensitivity .restricted (raw 32) exceeds
+    /// the .elevated ceiling (raw 16).
+    ///
+    /// The tunnel acquires .restricted sensitivity because the source drawer is
+    /// .restricted when addTunnel runs. DrawerStore.addTunnel stamps the tunnel
+    /// with the maximum sensitivity of its endpoints (.restricted). Correcting the
+    /// source drawer to .normal afterward leaves the tunnel's stamped sensitivity
+    /// unchanged — nothing re-stamps it.
+    ///
+    /// Gate isolation proof:
+    ///   - Bypassing line 780 (let withinCeiling = combined): the .restricted
+    ///     tunnel passes through; far endpoint .normal is within ceiling so line
+    ///     802 does not drop it; tunnel appears in results; this case goes RED.
+    ///   - Deleting line 802 instead, leaving line 780 intact: line 780 still
+    ///     drops the .restricted tunnel; this case stays GREEN.
+    ///
+    /// A case that goes red when EITHER line is removed is not isolating the
+    /// rule. This case goes red ONLY when line 780 is removed.
+    ///
+    /// Room-level variant (nil far endpoint): cannot be expressed through the
+    /// public MCP API. moot_link_memories always requires two drawer IDs.
+    /// A nil-targetDrawerId tunnel is architecturally possible in the schema but
+    /// has no creation path in the ARIA v2 tool catalog.
+    @Test func tunnelOwnSensitivityGateIsolateLine780() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "mg-line780-isolation")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Source starts .restricted so addTunnel stamps the tunnel with
+        // .restricted sensitivity (max of .restricted source and .normal target).
+        let source = try await seed("source for line-780 isolation",
+            room: "mg-line780",
+            sensitivity: .restricted,
+            in: handle, kit: kit)
+        // Far endpoint is .normal — within the default .elevated ceiling.
+        let farEndpoint = try await seed("normal far endpoint for line-780 isolation",
+            room: "mg-line780",
+            in: handle, kit: kit)
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Link the two drawers. moot_link_memories uses estate.allDrawers()
+        // with no sensitivity filter, so it succeeds regardless of the source
+        // drawer's sensitivity. The tunnel is stamped .restricted (max of the
+        // two endpoint sensitivities: source .restricted, target .normal).
+        let link = try await dispatcher.dispatch(
+            name: "moot_link_memories",
+            arguments: .object([
+                "from_id": .string(source.id),
+                "to_id": .string(farEndpoint.id),
+                "relationship": .string("relates"),
+            ])
+        )
+        #expect(!isError(link), "link must succeed; moot_link_memories does not gate on sensitivity")
+
+        // Correct the source drawer's sensitivity to .normal. moot_update_memory
+        // looks up by ID without a sensitivity ceiling, so no grant is required.
+        // The tunnel's stamped .restricted sensitivity is unaffected.
+        let downgrade = try await dispatcher.dispatch(
+            name: "moot_update_memory",
+            arguments: .object([
+                "memory_id": .string(source.id),
+                "mutation": .string("correct_sensitivity"),
+                "sensitivity": .string("normal"),
+            ])
+        )
+        #expect(!isError(downgrade), "sensitivity correction to .normal must succeed")
+
+        // Query without a grant (ceiling .elevated).
+        // Source drawer: .normal, within ceiling — appears in get results.
+        // Tunnel own sensitivity: .restricted, exceeds ceiling — dropped by the
+        // adjectiveSensitivity <= ceiling gate (line 780). The far-endpoint
+        // gate (line 802) is never reached for this tunnel.
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_get", arguments: getArgs(id: source.id))
+        let sc = result.objectValue?["structuredContent"]?.objectValue
+        let firstMemory = try #require(
+            sc?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue,
+            "source drawer must be found after sensitivity correction to .normal")
+        let tunnels = firstMemory["tunnels"]?.arrayValue
+        // The adjectiveSensitivity <= ceiling gate (line 780) withholds this tunnel.
+        // The far endpoint is .normal and would survive line 802, so this result
+        // isolates line 780 specifically.
+        #expect(tunnels?.isEmpty == true,
+            "tunnel with own sensitivity .restricted must be withheld by the tunnel-own-sensitivity gate (adjectiveSensitivity <= ceiling) even when the far endpoint is .normal; got: \(String(describing: tunnels))")
     }
 
     // MARK: - 2. Not-found: genuinely absent id
