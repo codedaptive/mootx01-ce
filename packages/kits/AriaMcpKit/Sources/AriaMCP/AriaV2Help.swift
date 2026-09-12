@@ -166,5 +166,5 @@ public struct AriaV2HelpService: Sendable {
         "Grammar: mode:\"Name\" sets the mode; mode:\"Name=Variant\" sets mode and variant; " +
         "a bare name clears any prior variant for that mode; the last declaration on a call wins.\n" +
         "Fail-open: an unknown mode name or variant is silently ignored and does not clobber existing sticky state.\n" +
-        "Excluded (own mode in their input schema): moot_reclassify_fdc, moot_palace_import, moot_vault_import."
+        "Excluded (own mode in their input schema): moot_reclassify_fdc, moot_palace_import, moot_vault_import, moot_lens_partial_cue."
 }
