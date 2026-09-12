@@ -466,10 +466,13 @@ fn execute_distilled_recall_with_no_rows_still_reports_the_zero_distillation_obj
     let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", None);
     let response = call(&dispatcher, "moot_recall_distilled", serde_json::json!({"query": "savings-probe"}));
     assert_eq!(response["result"]["isError"], false, "{response}");
-    assert_eq!(
-        response["result"]["content"][0]["text"],
-        serde_json::json!(format!("Returned 0 typed recall result(s).\n{zero}"))
-    );
+    // The selected surface appends the coaching hint for a zero-result lens
+    // after the distillation display line, so the compact text is checked as
+    // a prefix and the remainder must be that hint line or nothing.
+    let text = response["result"]["content"][0]["text"].as_str().expect("compact text");
+    let expected = format!("Returned 0 typed recall result(s).\n{zero}");
+    let rest = text.strip_prefix(&expected).unwrap_or_else(|| panic!("compact text: {text}"));
+    assert!(rest.is_empty() || rest.starts_with("\nhint: "), "unexpected tail: {rest}");
 }
 
 #[test]
