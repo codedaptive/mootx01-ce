@@ -75,4 +75,4 @@ Do not start work in this turn. Orientation is the whole job here.
 
 Say so plainly rather than guessing. Read the recent git log and any
 project state file, report what you can establish, and name what you
-cannot. An honest cold start beats a confident wrong reconstruction.
+cannot. A plain cold start beats a confident wrong reconstruction.
