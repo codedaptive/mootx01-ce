@@ -376,8 +376,9 @@ struct ModesDispatchTests {
         // global-modifier contract says ALL other operations must not carry mode in
         // their schema — mode is stripped at the ARIA door before decode.
         //
-        // The allowedOwners set is read at runtime from the catalog so a new owner
-        // is detected rather than silently absorbed; if a new operation legitimately
+        // The allowedOwners set is a hand list; the operations are read from the
+        // catalog at runtime and compared against it, so a new owner fails this gate
+        // rather than being silently absorbed. If a new operation legitimately
         // declares mode, add it to allowedOwners and document why.
         let allowedOwners: Set<String> = [
             "moot_reclassify_fdc",  // FDC mode: suspectOnly|all
@@ -402,6 +403,8 @@ struct ModesDispatchTests {
             "moot_help directory must carry a global_modifiers key")
         #expect(modText.contains("mode"),
             "global_modifiers entry must describe the mode modifier")
+        #expect(modText == AriaV2HelpService.globalModifiersHelpText,
+            "global_modifiers entry must equal AriaV2HelpService.globalModifiersHelpText")
 
         // Assertion 3: session orientation protocol names mode.
         #expect(ToolDispatcher.ARIASessionProtocol.contains("mode:"),
