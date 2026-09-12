@@ -1,23 +1,31 @@
 //! Server-loop gates for `version_skew` and `update_available` advisories.
 //!
-//! Tests here drive `run_stdio_loop` end-to-end with a `ServerConfig` that
-//! carries the advisory fields, proving that the wiring at server.rs
-//! (`.with_version_skew(config.version_skew)` and
-//! `.with_update_advisory(config.update_advisory)`) actually reaches the
-//! rendered output. Deleting either builder call from `run_stdio_loop` will
-//! turn the corresponding positive assertions RED while leaving the negative
-//! assertions green.
+//! Tests here drive `run_stdio_loop` and `serve_http` end-to-end with a
+//! `ServerConfig` that carries the advisory fields, proving that the wiring
+//! inside `dispatcher_from_config` (`.with_version_skew(config.version_skew)`
+//! and `.with_update_advisory(config.update_advisory)`) actually reaches the
+//! rendered output for BOTH transports. Deleting either builder call from
+//! `dispatcher_from_config` will turn the corresponding positive assertions RED
+//! for both stdio AND http simultaneously — that is the discrimination property
+//! this file establishes.
 //!
 //! The dispatcher-level gates in `aria_v2_advisory_dispatch_tests.rs` cover
 //! the Dispatcher → surface leg. These tests cover the ServerConfig →
 //! Dispatcher seam that sits above it, closing the gap that the unit-2 brief
 //! left open.
+//!
+//! The HTTP test (`both_advisories_surface_via_http_construction_path`) drives
+//! the REAL `serve_http` construction path with a real `ServerConfig`, not a
+//! pre-built dispatcher. The prior `run_http_loop_for_test` helper took an
+//! already-constructed `Arc<Mutex<Dispatcher>>` and bypassed construction
+//! entirely, which was the hole this test closes.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
 use aria_mcp::{
     dispatcher::UpdateAdvisoryProvider,
+    http_server::{bind_loopback, serve_http},
     server::{run_stdio_loop, ServerConfig},
 };
 
@@ -225,4 +233,102 @@ fn no_update_advisory_omits_key_from_status_via_server_loop() {
          got: {:?}",
         d["update_available"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// HTTP construction path — drives serve_http with a real ServerConfig
+// ---------------------------------------------------------------------------
+
+/// Helper: find the position of `needle` in `haystack`.
+fn find_in(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Gate: both `version_skew` and `update_available` surface in
+/// `moot_estate_ping` data when `serve_http` is given a `ServerConfig` that
+/// carries both advisories.
+///
+/// This test drives the REAL `dispatcher_from_config` construction path — the
+/// same construction `run_http_loop` triggers in production — via the bounded
+/// `serve_http` helper with `connection_limit: Some(1)`. The test joins the server thread
+/// before returning, so no thread is leaked.
+///
+/// Deleting `.with_version_skew(...)` OR `.with_update_advisory(...)` from
+/// `dispatcher_from_config` will turn this RED AND will also turn the
+/// corresponding stdio gate RED simultaneously — that is the discrimination
+/// the brief requires.
+#[test]
+fn both_advisories_surface_via_http_construction_path() {
+    // Build a ServerConfig that carries both advisories.
+    let mut cfg = ServerConfig::default_inmemory();
+    cfg.version_skew = SKEW_ADVISORY.to_owned();
+    cfg.update_advisory = Some(fixed_provider(UPDATE_ADVISORY));
+
+    // Bind an OS-assigned loopback port; hand the listener to the server.
+    let listener = bind_loopback(0).expect("bind loopback for HTTP advisory gate");
+    let port = listener.local_addr().unwrap().port();
+
+    // Spawn serve_http with connection_limit=Some(1): it accepts one connection
+    // and returns, so the JoinHandle is guaranteed to complete after the client
+    // round-trip. This is how a test drives the real construction path without
+    // leaking a thread (the prior run_http_loop_for_test took an
+    // already-constructed Arc<Mutex<Dispatcher>> and bypassed construction).
+    let server = std::thread::spawn(move || {
+        serve_http(listener, 4 * 1024 * 1024, cfg, None, Some(1))
+            .expect("serve_http must not fail during test");
+    });
+
+    // Build one tools/call frame for moot_estate_ping.
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "moot_estate_ping", "arguments": {} }
+    });
+    let body = serde_json::to_vec(&frame).unwrap();
+
+    // Send the request over a loopback TCP socket; set a read timeout so a
+    // hang in the response path fails the test loudly instead of hanging the
+    // entire test binary.
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port))
+        .expect("connect to serve_http");
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        String::from_utf8_lossy(&body)
+    );
+    client.write_all(request.as_bytes()).unwrap();
+    client.flush().unwrap();
+
+    // Read until the server closes the connection (Connection: close).
+    let mut resp = Vec::new();
+    client.read_to_end(&mut resp).unwrap();
+
+    // Split HTTP headers from body at \r\n\r\n.
+    let sep = find_in(&resp, b"\r\n\r\n")
+        .expect("HTTP response must contain header/body separator \\r\\n\\r\\n");
+    let json_body = &resp[sep + 4..];
+
+    let response: serde_json::Value =
+        serde_json::from_slice(json_body).expect("HTTP body must be valid JSON");
+    let d = data(&response);
+
+    assert_eq!(
+        d["version_skew"].as_str(),
+        Some(SKEW_ADVISORY),
+        "moot_estate_ping over HTTP must carry version_skew when ServerConfig.version_skew is set; \
+         deleting .with_version_skew(...) from dispatcher_from_config will turn this RED"
+    );
+    assert_eq!(
+        d["update_available"].as_str(),
+        Some(UPDATE_ADVISORY),
+        "moot_estate_ping over HTTP must carry update_available when ServerConfig.update_advisory is set; \
+         deleting .with_update_advisory(...) from dispatcher_from_config will turn this RED"
+    );
+
+    // Join the server thread — must not panic.
+    server.join().expect("serve_http thread must not panic");
 }

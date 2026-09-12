@@ -27,6 +27,7 @@
 //! of which backend is selected. Persistence is server-internal only.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::Arc;
 
 use crate::dispatcher::Dispatcher;
 use crate::estate_registry::EstateRegistry;
@@ -47,8 +48,8 @@ pub struct ServerConfig {
     /// Plugin/binary version-skew advisory (empty ⇒ none to report). This
     /// reference server has no plugin concept, so it always constructs with
     /// `String::new()`. Injected into the dispatcher via `with_version_skew`
-    /// in `run_stdio_loop` and `run_http_loop`, threading through to
-    /// `execute_estate_diagnostics` where it surfaces as the optional
+    /// inside `dispatcher_from_config`, the shared construction function called
+    /// by both `run_stdio_loop` and `run_http_loop`; surfaces as the optional
     /// `version_skew` field of `moot_estate_ping` / `moot_estate_status`.
     pub version_skew: String,
     /// Upstream-release advisory provider (see
@@ -245,6 +246,38 @@ fn read_line_capped<R: BufRead>(reader: &mut R) -> Option<String> {
     }
 }
 
+/// Construct a production [`Dispatcher`] from a [`ServerConfig`].
+///
+/// This is the ONLY place a production `Dispatcher` is constructed from a
+/// `ServerConfig`. Both server loops (`run_stdio_loop` and `run_http_loop`)
+/// call this function via `crate::server::dispatcher_from_config`, so both
+/// transports carry identical advisory wiring. Deleting either builder call
+/// (`.with_version_skew` or `.with_update_advisory`) here will turn at least
+/// one stdio gate AND the HTTP construction gate RED simultaneously.
+///
+/// `monitoring_control` is `None` for stdio (no stats store in that transport)
+/// and `Some(...)` for HTTP when a stats store is configured.
+pub(crate) fn dispatcher_from_config(
+    config: ServerConfig,
+    monitoring_control: Option<Arc<dyn crate::monitoring_control::MonitoringControl>>,
+) -> Dispatcher {
+    // Destructure first so config.registry can be moved into Dispatcher::new
+    // without triggering a "partial move" compile error on the remaining fields.
+    let ServerConfig {
+        registry,
+        server_name,
+        server_version,
+        build_serial,
+        version_skew,
+        update_advisory,
+    } = config;
+    Dispatcher::new(registry, &server_name, &server_version, &build_serial, monitoring_control)
+        .with_version_skew(version_skew)
+        // Forwarded even when None (stdio configs carry None, HTTP resident hosts
+        // inject the real provider). Both transports share the same builder chain.
+        .with_update_advisory(update_advisory)
+}
+
 /// Reads bytes from `reader`, splits on newline, parses each line as JSON,
 /// dispatches, and writes responses to `writer` one line each. Malformed
 /// lines emit a parseError response with a null id, matching the Swift
@@ -257,17 +290,7 @@ fn read_line_capped<R: BufRead>(reader: &mut R) -> Option<String> {
 pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: ServerConfig) {
     // stdio mode: no stats store → monitoring_control = None.
     // moot_monitoring_status will report "unavailable" in this transport.
-    let dispatcher = Dispatcher::new(
-        config.registry,
-        &config.server_name,
-        &config.server_version,
-        &config.build_serial,
-        None,
-    )
-    .with_version_skew(config.version_skew)
-    // Forwarded even though resident hosts wire it only for HTTP mode —
-    // stdio configs carry None, so ping/status stay advisory-free here.
-    .with_update_advisory(config.update_advisory);
+    let dispatcher = dispatcher_from_config(config, None);
     let mut buf = BufReader::new(reader);
 
     loop {

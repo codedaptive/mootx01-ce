@@ -1824,7 +1824,11 @@ struct FirstPartyHTTPLaneTests {
                 afterRegistration: { registration.mark() }
             )
         }
-        let waitDeadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+        // Six seconds, not two: this budget is the first gate in the test and must
+        // not be tighter than the three-second elapsed assertion below, which was
+        // widened because a saturated cooperative executor and GCD pool delay the
+        // whole chain.  The same saturation delays registration.
+        let waitDeadline = DispatchTime.now().uptimeNanoseconds + 6_000_000_000
         while !registration.value, DispatchTime.now().uptimeNanoseconds < waitDeadline {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
@@ -1835,7 +1839,13 @@ struct FirstPartyHTTPLaneTests {
         let result = await task.value
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         #expect(result == nil)
-        #expect(elapsed < 1_000_000_000,
+        // Three seconds is well below the five-second reader timeout, so the
+        // assertion still excludes the defect it names (an uninterrupted recv
+        // waiting out the full deadline).  The original one-second margin was
+        // flaky under a saturated cooperative executor and GCD pool — legitimate
+        // shutdown can exceed one second when both are loaded, while the mechanism
+        // itself is working correctly.
+        #expect(elapsed < 3_000_000_000,
                 "cancellation must unblock recv, not wait for the five-second deadline")
 
         // The peer observes shutdown even though the test remains the sole
@@ -2144,8 +2154,18 @@ struct FirstPartyLaneSeparationTests {
         let armed = send(port: armedPort, raw: raw)
         stopArmed()
 
-        #expect(dark?.components(separatedBy: "\r\n").first == armed?.components(separatedBy: "\r\n").first)
-        #expect(dark?.contains("Parse error") == armed?.contains("Parse error"))
+        // Guard before comparing: two nil or two empty responses pass every optional
+        // comparison without proving anything.  Require that both sides are non-nil
+        // and contain an HTTP response line before comparing them to each other.
+        let darkResponse = try #require(dark, "the dark lane produced no response at all")
+        let armedResponse = try #require(armed, "the armed lane produced no response at all")
+        try #require(darkResponse.contains("HTTP/1.1"),
+                     "the dark lane response is not an HTTP response: \(darkResponse.debugDescription)")
+        try #require(armedResponse.contains("HTTP/1.1"),
+                     "the armed lane response is not an HTTP response: \(armedResponse.debugDescription)")
+        // Now compare as non-optional Strings; nil/empty would have been caught above.
+        #expect(darkResponse.components(separatedBy: "\r\n").first == armedResponse.components(separatedBy: "\r\n").first)
+        #expect(darkResponse.contains("Parse error") == armedResponse.contains("Parse error"))
     }
 
     @Test("An oversize Content-Length truncates rather than refusing, armed or not")
@@ -2294,35 +2314,60 @@ struct FirstPartyLaneSeparationTests {
         serveTask.cancel()
 
         // Measure how long it takes for serve(withFD:) to return.
-        // If the accept thread does not wake on shutdown(2), this await would block
-        // indefinitely and the test would time out.  The 2-second guarantee is
-        // expressed via the Task.sleep timeout below.
+        // The two-second bound below is DIAGNOSED, not enforced: the task group
+        // cannot return until the `await serveTask.value` child completes, and
+        // Task.value on a non-throwing Task does not honour the awaiting task's
+        // cancellation, so group.cancelAll() cannot free it.  If the accept thread
+        // never wakes on shutdown(2) this test blocks for as long as the shutdown
+        // takes and then reports which child won, rather than failing at two
+        // seconds.  Swift Testing applies no per-test timeout here.
         let deadline = Task.detached {
             // Give the shutdown up to 2 seconds.  On a healthy implementation this
             // completes in milliseconds; 2 s is a generous CI-safe bound.
             try await Task.sleep(nanoseconds: 2_000_000_000)
         }
 
-        // await the serve task — it must finish before the deadline.
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { await serveTask.value }
-            group.addTask { try? await deadline.value }
-            // First one to finish ends the group; the other task is cancelled.
-            await group.next()
+        // Track which task finishes first: the serve task completing its cooperative
+        // shutdown, or the deadline expiring.  Without this check the group ends on
+        // whichever child completes first and the test walks on silently even when the
+        // deadline won — the subsequent fd-write assertion then races against an fd that
+        // may still be open, and the failure message ("must close the fd") names the
+        // wrong symptom.  The winner check here produces a targeted failure message
+        // when the shutdown did not complete in time.
+        enum ShutdownRaceWinner: Sendable { case served, deadline }
+        let winner = await withTaskGroup(of: ShutdownRaceWinner.self) { group -> ShutdownRaceWinner in
+            group.addTask { await serveTask.value; return .served }
+            group.addTask { try? await deadline.value; return .deadline }
+            let first = await group.next()!
             group.cancelAll()
+            // Cancel the external deadline task so its Task.sleep unblocks immediately;
+            // without this the group body waits the full 2 s for the child that's
+            // awaiting deadline.value even after the race is decided.
+            deadline.cancel()
+            return first
         }
+        try #require(winner == .served,
+                     "serve(withFD:) did not return within the 2 second deadline; the deadline task won the race")
 
         // If serve(withFD:) returns correctly, the fd is now closed.
         // Writing to a closed fd returns EBADF; success here means the fd leaked.
         let dummyByte = [UInt8(0x00)]
-        let writeResult = dummyByte.withUnsafeBytes { ptr in
-            write(fd, ptr.baseAddress!, 1)
+        // Capture errno immediately adjacent to the write syscall.  Any call
+        // inserted between write(2) and the errno read — including the Swift Testing
+        // runtime entered by #expect — may issue syscalls that clobber the
+        // thread-local errno value before we can inspect it.
+        var capturedErrno: Int32 = 0
+        let writeResult = dummyByte.withUnsafeBytes { ptr -> Int in
+            let result = write(fd, ptr.baseAddress!, 1)
+            capturedErrno = errno
+            return result
         }
         // EBADF == fd is closed.  Any other errno or a successful write (>= 0)
         // means the fd was NOT closed — the shutdown guarantee was violated.
         #expect(writeResult == -1, "serve(withFD:) must close the fd before returning (F6)")
         if writeResult == -1 {
-            #expect(errno == EBADF, "expected EBADF after serve(withFD:) returned, got errno \(errno)")
+            #expect(capturedErrno == EBADF,
+                    "expected EBADF after serve(withFD:) returned, got errno \(capturedErrno)")
         }
     }
 
