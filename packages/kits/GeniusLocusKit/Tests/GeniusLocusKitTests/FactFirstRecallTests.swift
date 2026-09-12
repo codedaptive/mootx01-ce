@@ -153,6 +153,69 @@ struct FactFirstRecallTests {
                 "Phase 2: the formerly-stale Jack fact must win once the version is stamped")
     }
 
+    // Gate B extension: the literal schema DEFAULT shape.
+    //
+    // Every pre-upgrade kg_facts row has searchProjection = "" and
+    // searchProjectionVersion = "" (the v19→v20 migration DEFAULT). This test
+    // verifies that such a fact is not returned by recall and that stamping it
+    // with the real FactSearchProjection values makes it win.
+    //
+    // Two independent mechanisms exclude an empty-projection fact:
+    //   1. FactFirstRecall.swift line 79: `!fact.searchProjection.isEmpty`
+    //   2. `guard !tokens.isEmpty` (defaultKeywordTokens("") returns []).
+    //
+    // This test CANNOT discriminate between the two mechanisms: removing
+    // lines 79-80 alone does not make Phase 1 go red, because an empty
+    // searchProjection produces no tokens and the fact is excluded by the
+    // second guard anyway. No single condition can be toggled to isolate the
+    // isEmpty path from the tokens path. The test documents a defended
+    // invariant — both guards cover the schema-DEFAULT shape — without
+    // claiming a discrimination it does not have.
+    @Test("Gate B ext: empty-projection fact excluded; stamped fact wins")
+    func gateBEmptyProjectionExcluded() {
+        let sourceID = "source-empty"
+        let source = drawer(id: sourceID, content: "Jack's birthday is in June.", settled: true)
+        let sources = [sourceID: source]
+
+        // Fact with the schema-DEFAULT shape: searchProjection = "" and
+        // searchProjectionVersion = "", exactly as the v19→v20 migration
+        // leaves every pre-upgrade row. Subject/object match the query so
+        // only the exclusion guards prevent a hit.
+        let emptyFact = KGFact(
+            id: "f-empty", subject: "Jack", predicate: "birthday", object: "June",
+            sourceDrawerID: sourceID, searchProjection: "",
+            searchProjectionVersion: "",
+            filedAt: now)
+
+        // Phase 1: the empty-projection fact is excluded. No eligible fact
+        // remains → fallThrough.
+        let decision = FactFirstRecallStage.decide(
+            query: "jack birthday", queryEntities: ["Jack"],
+            facts: [emptyFact], sourceDrawers: sources)
+        #expect(decision == .fallThrough,
+                "empty-projection fact must not be returned; excluded by isEmpty guard and downstream !tokens.isEmpty guard")
+
+        // Phase 2: stamp the fact with the real FactSearchProjection values —
+        // the exact bytes the backfill writes. Now it must win.
+        let stamped = KGFact(
+            id: "f-empty", subject: "Jack", predicate: "birthday", object: "June",
+            sourceDrawerID: sourceID,
+            searchProjection: FactSearchProjection.build(
+                subject: "Jack", predicate: "birthday", object: "June", aliases: []),
+            searchProjectionVersion: FactSearchProjection.version,
+            filedAt: now)
+
+        let afterDecision = FactFirstRecallStage.decide(
+            query: "jack birthday", queryEntities: ["Jack"],
+            facts: [stamped], sourceDrawers: sources)
+        guard case let .solid(family) = afterDecision else {
+            Issue.record("Phase 2: expected .solid after stamp; got \(afterDecision)")
+            return
+        }
+        #expect(family.fact.id == "f-empty",
+                "Phase 2: the stamped fact must win recall")
+    }
+
     private func fact(
         id: String, subject: String, object: String, source: String, projection: String
     ) -> KGFact {
