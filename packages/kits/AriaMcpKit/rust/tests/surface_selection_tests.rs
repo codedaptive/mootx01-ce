@@ -265,9 +265,12 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
         assert_eq!(actual["inputSchema"], expected["inputSchema"], "{name} input schema");
         assert_eq!(actual["outputSchema"], expected["outputSchema"], "{name} output schema");
     }
+    // moot_dream is in this loop rather than the outputSchema loop above because
+    // the fixture carries a loose outputSchema for it (additionalProperties:true)
+    // while the live catalog emits a typed one; only the inputSchema is pinned here.
     for name in [
         "moot_memory_get", "moot_memory_search", "moot_link_memories",
-        "moot_review_tunnel", "moot_file_dataset",
+        "moot_review_tunnel", "moot_file_dataset", "moot_dream",
     ] {
         let expected = mission02_catalog_operation(name);
         let actual = tools.iter().find(|tool| tool["name"] == name)

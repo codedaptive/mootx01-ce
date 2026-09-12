@@ -34,6 +34,8 @@ struct AriaV2DreamTests {
             .object(["estate_id": .string("not-a-uuid")]),
             // malformed now — not a valid ISO 8601 string
             .object(["now": .string("not-a-date")]),
+            // unknown associates value — only "off" and "all" are valid
+            .object(["associates": .string("banana")]),
         ] {
             #expect(throws: JSONRPCError.self) {
                 _ = try AriaV2Dream.Request(arguments: value)

@@ -369,6 +369,7 @@ struct AriaSurfaceV2Tests {
         for name in [
             "moot_memory_get", "moot_memory_search", "moot_link_memories",
             "moot_review_tunnel", "moot_file_dataset",
+            "moot_dream", "moot_lens_partial_cue",
         ] {
             let expected = try mission02CatalogOperation(name)
             let actual = try #require(tools.first { $0.name == name })

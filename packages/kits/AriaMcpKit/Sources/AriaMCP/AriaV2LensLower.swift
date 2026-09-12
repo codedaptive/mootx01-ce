@@ -321,11 +321,63 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 compactText: "Synthesized \(output.rankedIDs.count) trust-ranked memories.")
 
         case .lensPartialCue:
-            let matches = try await PartialCueRecall.run(
-                kit: kit, handle: handle, frame: context.authorizationFrame,
-                anchorID: try string(request, "anchor_memory_id"), mode: .feelsLike,
-                k: positiveInteger(request, "limit", defaultValue: 5))
-            return try await partialCueOutcome(matches, context: context)
+            // Map the mode string to CueMode.  AriaV2RecallLensRequest.init
+            // validates the mode enum at decode time; an unknown value never
+            // reaches here via the shipped surface.  The switch over a String
+            // requires a default arm; the type's single validating initializer
+            // makes that arm unreachable today.  Throwing rather than silently
+            // defaulting stops a future non-validating construction path from
+            // coercing an unknown mode into feelsLike.
+            let cueMode: CueMode
+            if let rawMode = request.arguments["mode"]?.stringValue {
+                switch rawMode {
+                case "feelsLike": cueMode = .feelsLike
+                case "aboutThis": cueMode = .aboutThis
+                case "fromThen":  cueMode = .fromThen
+                default:
+                    // Unreachable today: AriaV2RecallLensRequest declares exactly one
+                    // initializer, which throws and validates.  Every construction site
+                    // goes through the validating init.  Throwing here rather than
+                    // silently defaulting ensures a future non-validating path does not
+                    // coerce an unknown mode into feelsLike.
+                    throw AriaV2InvalidArgument(
+                        path: "mode",
+                        message: "Unknown mode '\(rawMode)'. Valid: feelsLike, aboutThis, fromThen.",
+                        allowed: ["feelsLike", "aboutThis", "fromThen"],
+                        correction: "Use \"feelsLike\", \"aboutThis\", or \"fromThen\"."
+                    ).jsonRPCError
+                }
+            } else {
+                cueMode = .feelsLike
+            }
+            // The schema normalises anchor_memory_id to canonical lowercase.
+            // PartialCueRecall.run compares drawer.id directly: the Swift port
+            // stores uppercase UUIDs (Apple native form) while the Rust port
+            // stores lowercase. Try both spellings so either storage form resolves.
+            // AnchorNotInRecalledSetError after the first try causes a retry with
+            // the other spelling; all other errors propagate immediately.
+            let canonicalAnchorID = try string(request, "anchor_memory_id")
+            let spellings = UUID(uuidString: canonicalAnchorID).map(
+                AriaV2ArgumentDecoder.storageIdentitySpellings) ?? [canonicalAnchorID]
+            let k = positiveInteger(request, "limit", defaultValue: 5)
+            var latestAnchorError: AnchorNotInRecalledSetError?
+            for spelling in spellings {
+                let matches: [CueMatch]
+                do {
+                    matches = try await PartialCueRecall.run(
+                        kit: kit, handle: handle, frame: context.authorizationFrame,
+                        anchorID: spelling, mode: cueMode, k: k)
+                } catch let e as AnchorNotInRecalledSetError {
+                    latestAnchorError = e
+                    continue
+                }
+                // partialCueOutcome is outside the retry do-block so only the
+                // recall attempt is retried — an AnchorNotInRecalledSetError
+                // from envelope construction would be a distinct defect and
+                // must propagate, not trigger a second spelling attempt.
+                return try await partialCueOutcome(matches, context: context)
+            }
+            throw latestAnchorError ?? AnchorNotInRecalledSetError(anchorID: canonicalAnchorID)
 
         case .lensAnticipate:
             let predictions = try await Anticipate.run(
@@ -347,10 +399,11 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // the estate holds rather than by the spelling the caller sent.
             // Public v2 ids are canonical lowercase while the estate may hold
             // the native uppercase form, so a single-spelling lookup here fails
-            // for every id — this was the one lens operation that never asked
-            // AriaV2ArgumentDecoder for both, and it could resolve nothing at
-            // all. Refusal is deliberately the same for an unknown id, a
-            // tombstoned row and a gated one: a caller must not learn which.
+            // for every id. Both .lensNodeMotion and .lensPartialCue derive both
+            // spellings via AriaV2ArgumentDecoder.storageIdentitySpellings so
+            // either port's storage form resolves. Refusal is deliberately the
+            // same for an unknown id, a tombstoned row and a gated one: a caller must not
+            // learn which.
             let spellings = (UUID(uuidString: id).map(
                 AriaV2ArgumentDecoder.storageIdentitySpellings) ?? [id])
             let resolved = try await RecipeTools.structuredDrawersByID(

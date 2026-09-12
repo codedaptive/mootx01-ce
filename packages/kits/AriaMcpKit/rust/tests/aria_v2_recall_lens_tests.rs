@@ -65,7 +65,7 @@ impl V2RecallLensLower for Lower {
         &self,
         _: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         Ok(V2RecallLensResult {
             operation: request.operation,
             rows: vec![],
