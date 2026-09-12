@@ -787,7 +787,12 @@ struct FirstPartyHTTPLaneTests {
             }
         }
         guard connected == 0 else { return nil }
-        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        // 30 s matches the server's own read timeout (HTTPServer.swift uses 30 s).
+        // A shorter client timeout turns a slow concurrency-scheduling window under
+        // parallel test load into a false 404-assertion failure: the client times out
+        // before the server's Task{} gets a slot, recv returns empty, and statusLine("")
+        // contains no "404".  The assertion is correct; only the wait must be longer.
+        var tv = timeval(tv_sec: 30, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         guard POSIXSocket.sendAll(fd, Data(raw.utf8)) else { return nil }
         var out = Data()
