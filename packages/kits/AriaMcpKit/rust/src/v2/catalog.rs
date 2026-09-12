@@ -540,8 +540,16 @@ fn remaining_data_schema(name: &str) -> Option<Value> {
             ))
         }
         "moot_memory_get" => {
+            // tunnels is present at depth:full (even when empty) and absent at depth:subject
+            // and depth:distilled, so it is declared in properties but not in required.
+            // far_endpoint_id is absent when the far side terminates at a room rather than
+            // a specific drawer, so it is declared but not required in the tunnel row.
+            let tunnel_row = exact(
+                json!({"tunnel_id":uuid(),"kind":{"type":"string"},"lifecycle":{"type":"string"},"far_endpoint_id":uuid()}),
+                json!(["tunnel_id", "kind", "lifecycle"]),
+            );
             let memory = exact(
-                json!({"memory_id":uuid(),"subject":{"type":"string"},"distilled":{"type":"string"},"content":{"type":"string"},"placement":placement_schema(),"filed_at":{"type":"string","format":"date-time"},"event_time":{"type":"string","format":"date-time"},"state":{"type":"string"},"trust":{"type":"string"},"sensitivity":{"type":"string"},"exportability":{"type":"string"},"confirmation":{"type":"string"},"lineage_id":uuid(),"fetch":fetch_schema()}),
+                json!({"memory_id":uuid(),"subject":{"type":"string"},"distilled":{"type":"string"},"content":{"type":"string"},"placement":placement_schema(),"filed_at":{"type":"string","format":"date-time"},"event_time":{"type":"string","format":"date-time"},"state":{"type":"string"},"trust":{"type":"string"},"sensitivity":{"type":"string"},"exportability":{"type":"string"},"confirmation":{"type":"string"},"lineage_id":uuid(),"tunnels":{"type":"array","items":tunnel_row},"fetch":fetch_schema()}),
                 json!(["memory_id", "fetch"]),
             );
             Some(exact(
@@ -576,8 +584,11 @@ fn remaining_data_schema(name: &str) -> Option<Value> {
         )),
         "moot_withdraw_memory" => Some(exact(json!({"memory_id":uuid()}), json!(["memory_id"]))),
         "moot_erase_memory" => Some(exact(
-            json!({"memory_id":uuid(),"refused_sibling_memory_ids":{"type":"array","items":uuid()}}),
-            json!(["memory_id", "refused_sibling_memory_ids"]),
+            // outcome is a closed vocabulary: erased on a full expunge, erased_partially when
+            // lineage siblings survived the audit gate. refused_sibling_memory_ids is always
+            // present — empty on full erase, populated on partial erase.
+            json!({"memory_id":uuid(),"outcome":{"type":"string","enum":["erased","erased_partially"]},"refused_sibling_memory_ids":{"type":"array","items":uuid()}}),
+            json!(["memory_id", "outcome", "refused_sibling_memory_ids"]),
         )),
         "moot_confirm_memory" => Some(exact(
             json!({"memory_id":uuid(),"mutation":{"const":"confirm"}}),
@@ -808,7 +819,10 @@ fn lens_input_schema(name: &str) -> Option<Value> {
 fn lens_data_schema(name: &str) -> Option<Value> {
     match name {
         "moot_lens_keystones" => Some(
-            json!({"type":"object","properties":{"keystones":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"centrality":{"type":"number"}},"required":["id","centrality"],"additionalProperties":false}}},"required":["keystones"],"additionalProperties":false}),
+            // Gated (restricted/secret) rows carry only id and centrality.
+            // Admissible rows also carry subject, bestSpan, and eventTime.
+            // The three dense fields are optional so that a gated row is schema-valid.
+            json!({"type":"object","properties":{"keystones":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"centrality":{"type":"number"},"subject":{"type":"string"},"bestSpan":{"type":"string"},"eventTime":{"type":"string","format":"date-time"}},"required":["id","centrality"],"additionalProperties":false}}},"required":["keystones"],"additionalProperties":false}),
         ),
         "moot_lens_constellation" => Some(
             json!({"type":"object","properties":{"communities":{"type":"array","items":{"type":"array","items":{"type":"string"}}}},"required":["communities"],"additionalProperties":false}),
@@ -835,7 +849,10 @@ fn lens_data_schema(name: &str) -> Option<Value> {
             json!({"type":"object","properties":{"beforeCount":{"type":"integer"},"afterCount":{"type":"integer"},"drift":{"type":"object","properties":{"jensenShannon":{"type":"number"},"klDivergence":{"type":"number"}},"required":["jensenShannon","klDivergence"],"additionalProperties":false}},"required":["beforeCount","afterCount","drift"],"additionalProperties":false}),
         ),
         "moot_lens_trust_synthesis" => Some(
-            json!({"type":"object","properties":{"context":{"type":"object","properties":{"summary":{"type":"string"},"patterns":{"type":"array","items":{"type":"string"}},"successRate":{"type":"number"},"averageReward":{"type":"number"},"recommendations":{"type":"array","items":{"type":"string"}},"keyInsights":{"type":"array","items":{"type":"string"}}},"required":["summary","patterns","successRate","averageReward","recommendations","keyInsights"],"additionalProperties":false},"rankedIDs":{"type":"array","items":{"type":"string"}},"highTrustCount":{"type":"integer"},"calibratedConfidences":{"type":"array","items":{"type":"object","properties":{"claimed":{"type":"number"},"calibrated":{"type":"number"},"isCalibrated":{"type":"boolean"}},"required":["claimed","calibrated","isCalibrated"],"additionalProperties":false}}},"required":["context","rankedIDs","highTrustCount"],"additionalProperties":false}),
+            // rankedIDs is an array of objects, not strings.
+            // Gated rows carry only {id}; admissible rows also carry subject, bestSpan, eventTime.
+            // The three dense fields are optional so that a gated row is schema-valid.
+            json!({"type":"object","properties":{"context":{"type":"object","properties":{"summary":{"type":"string"},"patterns":{"type":"array","items":{"type":"string"}},"successRate":{"type":"number"},"averageReward":{"type":"number"},"recommendations":{"type":"array","items":{"type":"string"}},"keyInsights":{"type":"array","items":{"type":"string"}}},"required":["summary","patterns","successRate","averageReward","recommendations","keyInsights"],"additionalProperties":false},"rankedIDs":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"subject":{"type":"string"},"bestSpan":{"type":"string"},"eventTime":{"type":"string","format":"date-time"}},"required":["id"],"additionalProperties":false}},"highTrustCount":{"type":"integer"},"calibratedConfidences":{"type":"array","items":{"type":"object","properties":{"claimed":{"type":"number"},"calibrated":{"type":"number"},"isCalibrated":{"type":"boolean"}},"required":["claimed","calibrated","isCalibrated"],"additionalProperties":false}}},"required":["context","rankedIDs","highTrustCount"],"additionalProperties":false}),
         ),
         "moot_lens_partial_cue" => Some(
             json!({"type":"object","properties":{"results":{"type":"array","items":lens_memory_row_schema()},"capabilities":lens_capabilities_schema()},"required":["results"],"additionalProperties":false}),
