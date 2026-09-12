@@ -4181,19 +4181,22 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "now": {
-              "type": "string"
+            "associates": {
+              "type": "string",
+              "enum": [
+                "off",
+                "all",
+                "recent"
+              ],
+              "default": "recent",
+              "description": "Association sweep mode. \"recent\" probes the 50 most-recently-filed items (default, fast, mirrors the standing-signal cadence). \"all\" runs a full-estate pass (high coverage, slower). \"off\" skips the step entirely."
             },
             "estate_id": {
               "type": "string",
               "format": "uuid"
             },
-            "associates": {
-              "type": "string",
-              "enum": [
-                "off",
-                "all"
-              ]
+            "now": {
+              "type": "string"
             }
           },
           "required": [],
@@ -4210,7 +4213,55 @@
             },
             "data": {
               "type": "object",
-              "additionalProperties": true
+              "properties": {
+                "candidatesConsidered": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "proposalsEmitted": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "suppressedDuplicates": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "belowThreshold": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "contradictionsProposed": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "contradictionCandidatesBorderline": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "subjectsBackfilled": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "associationsWritten": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "associationsNonUniqueProbes": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "candidatesConsidered",
+                "proposalsEmitted",
+                "suppressedDuplicates",
+                "belowThreshold",
+                "contradictionsProposed",
+                "contradictionCandidatesBorderline"
+              ],
+              "additionalProperties": false
             },
             "meta": {
               "type": "object",

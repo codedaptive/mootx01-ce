@@ -356,14 +356,13 @@ struct PartialCueModeTests {
             #expect(error.data?.objectValue?["path"] == .string("mode"),
                     "error data.path must be 'mode'; got \(String(describing: error.data?.objectValue?["path"]))")
             // Parity gate: both ports must expose a machine-readable allowed list.
-            // Swift sorts the allowed list alphabetically; assert on the set of
-            // values so this passes regardless of emission order.
+            // Both ports sort alphabetically, so order is part of the contract.
             let allowedValues = error.data?.objectValue?["allowed"]?.arrayValue?
                 .compactMap { $0.stringValue }
             #expect(allowedValues != nil,
                     "error data.allowed must be present; got data: \(String(describing: error.data))")
-            #expect(Set(allowedValues ?? []) == Set(["feelsLike", "aboutThis", "fromThen"]),
-                    "error data.allowed must contain exactly the three valid modes; got \(String(describing: allowedValues))")
+            #expect(allowedValues == ["aboutThis", "feelsLike", "fromThen"],
+                    "error data.allowed must be sorted alphabetically with exactly the three valid modes; got \(String(describing: allowedValues))")
             // Parity gate: both ports must expose a machine-readable correction hint.
             // The hint tells clients which values are valid without parsing the message.
             let correction = error.data?.objectValue?["correction"]?.stringValue

@@ -35,7 +35,8 @@ public struct AriaV2MemoryListRequest: Sendable, Equatable {
             throw AriaV2InvalidArgument(
                 path: "filter",
                 message: "Argument 'filter' must be 'missing_subject' when supplied.",
-                allowed: ["missing_subject"]
+                allowed: ["missing_subject"],
+                correction: "use 'missing_subject' as the filter value"
             ).jsonRPCError
         }
         if let rawLimit = try decoder.optionalInteger("limit") {
