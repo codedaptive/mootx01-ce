@@ -1865,6 +1865,24 @@ fn run_dream_tool(
     // Seconds view for the DreamingDaemon's seconds-based cycle clock.
     let now_epoch_secs: i64 = now_epoch_ms / 1000;
 
+    // Validate "associates" before any work begins — an unknown value must
+    // refuse with INVALID_PARAMS and leave the estate completely unmodified
+    // (no cycle, no sweep, no tunnel writes). Normalise to lowercase so
+    // "OFF"/"ALL" are accepted alongside their lowercase forms.
+    let associates_mode_owned: Option<String> =
+        optional_string(args, "associates")?.map(|s| s.to_lowercase());
+    if let Some(ref mode) = associates_mode_owned {
+        if mode != "off" && mode != "all" {
+            return Err(JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!(
+                    "associates '{}' is not a valid mode; allowed values are \"off\" and \"all\"",
+                    mode
+                ),
+            ));
+        }
+    }
+
     // Step 1 — Matrix rebuild.
     // Feed the estate's unified audit log and rebuild the recall-scoring
     // MatrixTier from it, registering the tier on the coordinator's per-estate
@@ -2001,7 +2019,11 @@ fn run_dream_tool(
     // Reuses the coordinator guard held since the accelerator rebuild at the
     // top of this function — re-locking self-deadlocked once before.
     // Mirrors Swift runDream step 3.5 (uses dreamAssociateAllModeMaxProbe = 10_000).
-    let associates_mode = optional_string(args, "associates")?.unwrap_or("recent");
+    // `associates_mode_owned` was validated and parsed before Step 1 — an unknown
+    // value was already refused before any cycle or tunnel write could run.
+    // None maps to the default 50-probe cadence; "all" uses the bounded full-estate
+    // probe limit; "off" skips the sweep entirely.
+    let associates_mode: &str = associates_mode_owned.as_deref().unwrap_or("recent");
     let mut assoc_line = String::new();
     if associates_mode != "off" {
         let probe_limit = if associates_mode == "all" {
