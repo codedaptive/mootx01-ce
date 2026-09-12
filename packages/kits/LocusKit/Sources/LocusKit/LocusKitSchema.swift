@@ -104,17 +104,16 @@ public enum LocusKitSchema {
     /// `− distilled_source_digest`. `subject`, `subject_pipeline_version`
     /// and `subject_at` stay.
     ///
-    /// Migration policy: ONE ladder entry, v10 → v19. CE 1.0.35 and 1.0.37
-    /// ship schema 10; development estates written at 11–18 never shipped and are
-    /// brought to 19 by the SQL surgery script, never by this ladder. The
-    /// hop applies only the deltas that survive at 19 (operationalAND, the
-    /// subject trio, the kg_facts identity trio, idx_drawers_filedAt, the
-    /// recall_trace attribution trio, encoder_models, ssc_facts) and never
-    /// creates the v16–v18 adornment or distilled objects. `mootx01 upgrade`
-    /// decides with `upgradePath(storedVersion:)` BEFORE opening the schema,
-    /// because PersistenceKit's runner stamps the declared version whenever
-    /// no ladder entry matches, which would silently mark an unsupported
-    /// estate current.
+    /// Migration policy: TWO ladder entries — v10 → v19 and v19 → v20. CE
+    /// 1.0.35 and 1.0.37 ship schema 10 (a supported version); estates already
+    /// at 19 receive only the v19 → v20 hop. Development estates at 11–18
+    /// are brought to a supported version by the SQL surgery script, never by
+    /// this ladder. The v10 → v19 hop applies only the deltas that survive at
+    /// 19 and never creates the v16–v18 adornment or distilled objects.
+    /// `mootx01 upgrade` decides with `upgradePath(storedVersion:)` BEFORE
+    /// opening the schema, because PersistenceKit's runner stamps the declared
+    /// version whenever no ladder entry matches, which would silently mark an
+    /// unsupported estate current.
     ///
     /// Version history (versions before the ladder live in the base CREATE):
     /// v2 keys.ext; v3 nodes; v4 parent_node_id replaces wing/room; v5
@@ -136,7 +135,7 @@ public enum LocusKitSchema {
     /// `storedVersion`. Read the ledger raw and call this BEFORE
     /// `Storage.open(schema:)`: the runner stamps `version` whenever no
     /// ladder entry matches, so an unsupported estate opened blind would be
-    /// marked current with none of the v19 objects in place.
+    /// marked current with none of the v20 objects in place.
     public static func upgradePath(storedVersion: Int) -> SchemaUpgradePath {
         switch storedVersion {
         case 0: return .fresh
@@ -180,15 +179,14 @@ public enum LocusKitSchema {
             ],
             indices: indices,
             migrations: [
-                // ONE hop, v10 → v19: every delta that survives at v19 and
-                // nothing that was retired on the way (no adornment tables or
-                // column, no distilled columns). Every operation is idempotent
-                // — addColumn skips a present column, the DDL is CREATE ... IF
-                // NOT EXISTS, addIndex is IF NOT EXISTS — so a fresh estate,
-                // which the runner creates at the current layout before replaying
-                // the ladder, is unchanged by it. Populated estates exist at
-                // 10 (CE 1.0.35/1.0.37) and at 19; nothing in between is
-                // supported here (see `upgradePath(storedVersion:)`).
+                // TWO hops: v10 → v19 and v19 → v20. A v10 estate (CE 1.0.35/
+                // 1.0.37) traverses both; a v19 estate receives only the second.
+                // Every operation is idempotent — addColumn skips a present
+                // column, the DDL is CREATE ... IF NOT EXISTS, addIndex is IF
+                // NOT EXISTS — so a fresh estate, which the runner creates at
+                // the current layout before replaying the ladder, is unchanged
+                // by either hop. Populated estates exist at 10 or 19; nothing
+                // in between is supported here (see `upgradePath(storedVersion:)`).
                 Migration(fromVersion: 10, toVersion: 19, operations: [
                     // v11: AND-aggregate on container_fingerprints. Default -1
                     // (AND identity, all bits set) so an empty container never
