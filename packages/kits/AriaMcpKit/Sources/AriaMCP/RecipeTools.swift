@@ -1408,19 +1408,24 @@ enum RecipeTools {
     ///
     /// `filterChain` carries the CALLER's filter when the tool surface
     /// accepts one (connected recall passes it so walk-reachable rows cannot
-    /// bypass the filter at render, Wave-3 G1). Structured hydration: content
-    /// blobs are NOT loaded here; recall-recipe content comes from the match.
+    /// bypass the filter at render, Wave-3 G1). Default structured hydration:
+    /// content blobs are NOT loaded; recall-recipe content comes from the match.
+    /// Pass `.full` when the caller needs `drawer.content` for bestSpan — the
+    /// lens dense-field path uses `.full` so that normalizeValue operates on the
+    /// real body rather than the empty string that structured hydration returns
+    /// (matching Rust get_drawers_matching_frame which always loads full rows).
     /// Gated ids are ABSENT from the returned map — callers render opaque rows
     /// (id visible, subject withheld) for absent ids, which keeps the gate
     /// an accurate containment boundary without changing result counts.
     static func structuredDrawersByID(
-        ids: [String], estate: Estate, filterChain: [Filter] = []
+        ids: [String], estate: Estate, filterChain: [Filter] = [],
+        hydrationLevel: HydrationLevel = .structured
     ) async throws -> [String: Drawer] {
         guard !ids.isEmpty else { return [:] }
         let fetched = try await estate.getDrawers(
             ids: ids,
-            matchingFrame: RecallFrame(filterChain: filterChain, hydrationLevel: .structured),
-            hydrationLevel: .structured)
+            matchingFrame: RecallFrame(filterChain: filterChain, hydrationLevel: hydrationLevel),
+            hydrationLevel: hydrationLevel)
         return Dictionary(uniqueKeysWithValues: fetched.admissible.map { ($0.id, $0) })
     }
 
