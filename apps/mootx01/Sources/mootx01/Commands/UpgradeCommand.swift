@@ -49,7 +49,7 @@ struct UpgradeCommand: AsyncParsableCommand {
               mootx01 upgrade --check
 
             Use --backfill-only to run only the estate migration steps
-            (schema 10 → 20 and 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record
+            (schema 10 → 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record
             vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim)
             against the estate --db selects (the active estate when absent), then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
@@ -92,7 +92,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
 
-    /// Run ONLY the estate migration steps: schema 10 → 20 and 19 → 20, kg_facts
+    /// Run ONLY the estate migration steps: schema 10 → 19 → 20, kg_facts
     /// identity, projection backfill, shared-content reclaim, whole-record vacuum,
     /// ssc facts, dense pooling convergence, span encode, and vector reclaim.
     /// Intended for scripted and benchmark estates, which the caller names with
@@ -116,7 +116,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// reclaim last (deletes what nothing serves any more).
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the estate migration steps (schema 10 → 20 and 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
+        help: "Run only the estate migration steps (schema 10 → 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -200,7 +200,7 @@ struct UpgradeCommand: AsyncParsableCommand {
 
         // --backfill-only: headless estate convergence for scripted and
         // benchmark estates. Runs only the nine estate migration
-        // steps (schema 10 → 20 and 19 → 20, kg_facts identity, projection
+        // steps (schema 10 → 19 → 20, kg_facts identity, projection
         // backfill, shared-content reclaim, whole-record vacuum, ssc facts,
         // dense pooling convergence, span encode, vector reclaim) against the
         // estate the catalog selected above. No network, no download, no plugin
