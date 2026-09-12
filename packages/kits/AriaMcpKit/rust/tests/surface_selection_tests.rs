@@ -770,7 +770,11 @@ fn v2_memory_mutations_are_selected_writes_before_legacy_dispatch() {
     assert_eq!(updated["result"]["isError"], false, "{updated}");
     assert_eq!(updated["result"]["structuredContent"]["tool"], "moot_update_memory");
     assert_eq!(updated["result"]["structuredContent"]["meta"]["effect"], "write");
-    assert_eq!(updated["result"]["structuredContent"]["data"]["operation"], "moot_update_memory");
+    // The declared output schema for moot_update_memory is { memory_id, mutation }.
+    // The old code emitted `operation` (the tool name) which is not in the schema.
+    // After the fix the data carries `mutation` (the wire-format mutation name)
+    // matching the schema and the Swift port.
+    assert_eq!(updated["result"]["structuredContent"]["data"]["mutation"], "confirm");
 
     let tools = tool_list(&dispatcher);
     let listed: std::collections::BTreeSet<&str> = tools["result"]["tools"]
