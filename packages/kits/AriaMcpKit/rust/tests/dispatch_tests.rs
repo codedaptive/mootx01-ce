@@ -5409,7 +5409,9 @@ fn lens_keystones_over_estate_succeeds() {
 
 // PR-05 Part B value-equality: moot_lens_trust_synthesis body text carries the
 // drawer's actual subject, bestSpan and eventTime via render_s2_row.
-// Mirrors Swift `trustSynthesisDenseRowsCarryStructuredFields` in LensToolsTests.swift.
+// Exercises the v1 lens_tools composer via dispatch_tool → lens_tools::trust_synthesis.
+// dispatch_tool routes to the v1 composer and is only reachable from test helpers,
+// not from any production path; this gates the v1 renderer, not the v2 shipping path.
 //
 // lens_tools.rs trust_synthesis path uses s2_rows_by_id → candidate_from_drawer
 // → render_s2_row to build each row. The expected row is derived from the same
