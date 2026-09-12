@@ -604,17 +604,59 @@ fn execute_memory_mutation(
                     "withdrawn": withdrawn,
                     "contested": contested,
                 }),
-                None => json!({
-                    "operation": result.operation.tool_name(),
-                    "outcome": mutation_outcome_wire_value(result.outcome),
-                    "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
-                    "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
-                    // Always present: empty array on full erase, populated on
-                    // partial erase (accepted lineage siblings refused erasure).
-                    // Mirrors Swift AriaV2MemoryMutations.swift:347 which emits
-                    // this key unconditionally regardless of erasure completeness.
-                    "refused_sibling_memory_ids": result.refused_sibling_ids,
-                }),
+                None => {
+                    // Per-operation dispatch: each mutation emits exactly the key set
+                    // declared in remaining_data_schema (catalog.rs), matching Swift.
+                    // The single json! literal that preceded this was the defect:
+                    // it emitted {operation, outcome, memory_id, tunnel_id,
+                    // refused_sibling_memory_ids} for every mutation, disagreeing with
+                    // all five declared schemas (see surface.rs tests for the red run).
+                    use crate::v2::memory_mutations::V2MutationResponsePayload;
+                    match result.payload {
+                        Some(V2MutationResponsePayload::Withdraw) => json!({
+                            // moot_withdraw_memory schema: { memory_id }
+                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
+                        }),
+                        Some(V2MutationResponsePayload::Erase) => json!({
+                            // moot_erase_memory schema: { memory_id, outcome, refused_sibling_memory_ids }
+                            // Always present: empty array on full erase, populated on partial erase.
+                            // Mirrors Swift AriaV2MemoryMutations.swift:347.
+                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
+                            "outcome": mutation_outcome_wire_value(result.outcome),
+                            "refused_sibling_memory_ids": result.refused_sibling_ids,
+                        }),
+                        Some(V2MutationResponsePayload::Confirm) => json!({
+                            // moot_confirm_memory schema: { memory_id, mutation } where mutation is const "confirm"
+                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
+                            "mutation": "confirm",
+                        }),
+                        Some(V2MutationResponsePayload::Move { wing, room }) => json!({
+                            // moot_move_memory schema: { memory_id, placement }
+                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
+                            "placement": { "wing": wing, "room": room },
+                        }),
+                        Some(V2MutationResponsePayload::Link { from_id, to_id, kind, lifecycle }) => json!({
+                            // moot_link_memories schema: { tunnel_id, from_id, to_id, kind, lifecycle }
+                            "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
+                            "from_id": from_id.hyphenated().to_string(),
+                            "to_id": to_id.hyphenated().to_string(),
+                            "kind": kind,
+                            "lifecycle": lifecycle,
+                        }),
+                        Some(V2MutationResponsePayload::Update { mutation }) => json!({
+                            // moot_update_memory schema: { memory_id, mutation }
+                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
+                            "mutation": mutation,
+                        }),
+                        None => {
+                            // Unreachable in correct execution: every service method sets
+                            // result.payload.  Defensive fallback emits memory_id only.
+                            json!({
+                                "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
+                            })
+                        }
+                    }
+                },
             },
             &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write),
             "Applied the selected typed memory mutation.",
@@ -2563,6 +2605,452 @@ mod tests {
             response["structuredContent"]["data"]["outcome"],
             "erased",
             "execute_memory_mutation must emit \"erased\" for a full erase with no refused siblings"
+        );
+    }
+
+    // ── Schema key-set parity gates ───────────────────────────────────────────
+    //
+    // Each gate below drives execute_memory_mutation through the real response
+    // path and asserts that the emitted structuredContent.data key set is EXACTLY
+    // the key set declared in the operation's output schema (catalog.rs
+    // remaining_data_schema).  The expected key set is read from the catalog at
+    // runtime rather than hard-coded, so these tests track the schema
+    // automatically if it moves.
+    //
+    // Pre-fix failure: the None arm of the tunnel_review match emits a single
+    // json! literal for ALL non-review mutations:
+    //   { operation, outcome, memory_id, tunnel_id, refused_sibling_memory_ids }
+    // which disagrees with every one of the five declared schemas.  Each test
+    // will fail with a BTreeSet mismatch until the None arm is replaced with
+    // per-operation dispatch.
+
+    /// Gate: moot_withdraw_memory data carries exactly { memory_id }.
+    ///
+    /// Pre-fix failure (verbatim):
+    ///   assertion `left == right` failed: moot_withdraw_memory data key set must
+    ///   equal the declared schema properties — got extras {"operation", "outcome",
+    ///   "refused_sibling_memory_ids", "tunnel_id"} and missing {}
+    ///     left: {"memory_id", "operation", "outcome", "refused_sibling_memory_ids", "tunnel_id"}
+    ///    right: {"memory_id"}
+    #[test]
+    fn mutation_response_key_set_withdraw_matches_declared_schema() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2WithdrawMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id: String = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("withdraw key-set gate", CaptureChannel::Typed, "default", LatticeAnchor::udc("000"), "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
+                memory_id: drawer_uuid,
+                reason: None,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 100,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("withdraw must succeed");
+
+        // Expected key set from the declared schema (catalog.rs remaining_data_schema).
+        let surface = SelectedSurface::selected(false, true);
+        let declared_keys: std::collections::BTreeSet<String> = surface
+            .catalog()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "moot_withdraw_memory")
+            .unwrap()["outputSchema"]["properties"]["data"]["properties"]
+            .as_object()
+            .expect("data properties must be an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let actual_keys: std::collections::BTreeSet<String> = response["structuredContent"]["data"]
+            .as_object()
+            .expect("data must be a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            actual_keys,
+            declared_keys,
+            "moot_withdraw_memory data key set must equal the declared schema properties — \
+             got extras {:?} and missing {:?}",
+            actual_keys.difference(&declared_keys).collect::<std::collections::BTreeSet<_>>(),
+            declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    /// Gate: moot_erase_memory data carries exactly
+    /// { memory_id, outcome, refused_sibling_memory_ids }.
+    ///
+    /// Pre-fix failure (verbatim):
+    ///   assertion `left == right` failed: moot_erase_memory data key set must
+    ///   equal the declared schema properties — got extras {"operation", "tunnel_id"}
+    ///   and missing {}
+    ///     left: {"memory_id", "operation", "outcome", "refused_sibling_memory_ids", "tunnel_id"}
+    ///    right: {"memory_id", "outcome", "refused_sibling_memory_ids"}
+    #[test]
+    fn mutation_response_key_set_erase_matches_declared_schema() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2EraseMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id: String = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("erase key-set gate", CaptureChannel::Typed, "default", LatticeAnchor::udc("000"), "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                memory_id: drawer_uuid,
+                confirmation: true,
+                reason: None,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 100,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("erase must succeed");
+
+        let surface = SelectedSurface::selected(false, true);
+        let declared_keys: std::collections::BTreeSet<String> = surface
+            .catalog()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "moot_erase_memory")
+            .unwrap()["outputSchema"]["properties"]["data"]["properties"]
+            .as_object()
+            .expect("data properties must be an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let actual_keys: std::collections::BTreeSet<String> = response["structuredContent"]["data"]
+            .as_object()
+            .expect("data must be a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            actual_keys,
+            declared_keys,
+            "moot_erase_memory data key set must equal the declared schema properties — \
+             got extras {:?} and missing {:?}",
+            actual_keys.difference(&declared_keys).collect::<std::collections::BTreeSet<_>>(),
+            declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    /// Gate: moot_confirm_memory data carries exactly { memory_id, mutation }.
+    ///
+    /// Pre-fix failure (verbatim):
+    ///   assertion `left == right` failed: moot_confirm_memory data key set must
+    ///   equal the declared schema properties — got extras {"operation", "outcome",
+    ///   "refused_sibling_memory_ids", "tunnel_id"} and missing {"mutation"}
+    ///     left: {"memory_id", "operation", "outcome", "refused_sibling_memory_ids", "tunnel_id"}
+    ///    right: {"memory_id", "mutation"}
+    #[test]
+    fn mutation_response_key_set_confirm_matches_declared_schema() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2ConfirmMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id: String = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("confirm key-set gate", CaptureChannel::Typed, "default", LatticeAnchor::udc("000"), "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Confirm(V2ConfirmMemoryRequest {
+                memory_id: drawer_uuid,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 100,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("confirm must succeed");
+
+        let surface = SelectedSurface::selected(false, true);
+        let declared_keys: std::collections::BTreeSet<String> = surface
+            .catalog()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "moot_confirm_memory")
+            .unwrap()["outputSchema"]["properties"]["data"]["properties"]
+            .as_object()
+            .expect("data properties must be an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let actual_keys: std::collections::BTreeSet<String> = response["structuredContent"]["data"]
+            .as_object()
+            .expect("data must be a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            actual_keys,
+            declared_keys,
+            "moot_confirm_memory data key set must equal the declared schema properties — \
+             got extras {:?} and missing {:?}",
+            actual_keys.difference(&declared_keys).collect::<std::collections::BTreeSet<_>>(),
+            declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    /// Gate: moot_move_memory data carries exactly { memory_id, placement }.
+    ///
+    /// Pre-fix failure (verbatim):
+    ///   assertion `left == right` failed: moot_move_memory data key set must
+    ///   equal the declared schema properties — got extras {"operation", "outcome",
+    ///   "refused_sibling_memory_ids", "tunnel_id"} and missing {"placement"}
+    ///     left: {"memory_id", "operation", "outcome", "refused_sibling_memory_ids", "tunnel_id"}
+    ///    right: {"memory_id", "placement"}
+    #[test]
+    fn mutation_response_key_set_move_matches_declared_schema() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2MoveMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id: String = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("move key-set gate", CaptureChannel::Typed, "default", LatticeAnchor::udc("000"), "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Move(V2MoveMemoryRequest {
+                memory_id: drawer_uuid,
+                wing: "test-wing".to_owned(),
+                room: "test-room".to_owned(),
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 100,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("move must succeed");
+
+        let surface = SelectedSurface::selected(false, true);
+        let declared_keys: std::collections::BTreeSet<String> = surface
+            .catalog()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "moot_move_memory")
+            .unwrap()["outputSchema"]["properties"]["data"]["properties"]
+            .as_object()
+            .expect("data properties must be an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let actual_keys: std::collections::BTreeSet<String> = response["structuredContent"]["data"]
+            .as_object()
+            .expect("data must be a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            actual_keys,
+            declared_keys,
+            "moot_move_memory data key set must equal the declared schema properties — \
+             got extras {:?} and missing {:?}",
+            actual_keys.difference(&declared_keys).collect::<std::collections::BTreeSet<_>>(),
+            declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    /// Gate: moot_link_memories data carries exactly
+    /// { tunnel_id, from_id, to_id, kind, lifecycle }.
+    ///
+    /// Pre-fix failure (verbatim):
+    ///   assertion `left == right` failed: moot_link_memories data key set must
+    ///   equal the declared schema properties — got extras {"memory_id", "operation",
+    ///   "outcome", "refused_sibling_memory_ids"} and missing {"from_id", "kind",
+    ///   "lifecycle", "to_id"}
+    ///     left: {"memory_id", "operation", "outcome", "refused_sibling_memory_ids", "tunnel_id"}
+    ///    right: {"from_id", "kind", "lifecycle", "to_id", "tunnel_id"}
+    #[test]
+    fn mutation_response_key_set_link_matches_declared_schema() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2LinkMemoriesRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        // Two drawers in different rooms so the link can resolve node names.
+        let (from_id, to_id): (String, String) = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d1 = coord.capture(
+                &handle,
+                CaptureFrame::new("link source", CaptureChannel::Typed, "wing-a", LatticeAnchor::udc("001"), "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture source");
+            let d2 = coord.capture(
+                &handle,
+                CaptureFrame::new("link target", CaptureChannel::Typed, "wing-b", LatticeAnchor::udc("002"), "test", "test-embed-v1"),
+                NOW + 1,
+            ).expect("capture target");
+            (d1.id.clone(), d2.id.clone())
+        };
+
+        let from_uuid = Uuid::parse_str(&from_id).expect("from uuid");
+        let to_uuid = Uuid::parse_str(&to_id).expect("to uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id: from_uuid,
+                to_id: to_uuid,
+                relationship: "supports".to_owned(),
+                confidence: None,
+                evidence: None,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 100,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("link must succeed");
+
+        let surface = SelectedSurface::selected(false, true);
+        let declared_keys: std::collections::BTreeSet<String> = surface
+            .catalog()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "moot_link_memories")
+            .unwrap()["outputSchema"]["properties"]["data"]["properties"]
+            .as_object()
+            .expect("data properties must be an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let actual_keys: std::collections::BTreeSet<String> = response["structuredContent"]["data"]
+            .as_object()
+            .expect("data must be a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            actual_keys,
+            declared_keys,
+            "moot_link_memories data key set must equal the declared schema properties — \
+             got extras {:?} and missing {:?}",
+            actual_keys.difference(&declared_keys).collect::<std::collections::BTreeSet<_>>(),
+            declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
         );
     }
 }
