@@ -67,6 +67,11 @@ struct AriaV2ProposedTunnelParityTests {
         result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
     }
 
+    /// Extract the envelope text from content[0].text.
+    private func contentText(_ result: JSONValue) -> String? {
+        result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
+    }
+
     /// Count outgoing connections for a memory via moot_connection_search.
     private func connectionCount(_ dispatcher: ToolDispatcher, memoryID: String) async throws -> Int {
         let result = try await dispatcher.dispatch(
@@ -109,6 +114,11 @@ struct AriaV2ProposedTunnelParityTests {
         #expect(
             data(result)?["tunnel_id"]?.stringValue?.isEmpty == false,
             "link envelope must carry a non-empty tunnel_id"
+        )
+        // Envelope text: proposed link names both memories and points user to moot_review_tunnel.
+        #expect(
+            contentText(result) == "Proposed a link between memories \(fromID) and \(toID); review it with moot_review_tunnel.",
+            "proposed link envelope text must match; got: \(String(describing: contentText(result)))"
         )
     }
 
@@ -163,6 +173,11 @@ struct AriaV2ProposedTunnelParityTests {
         #expect(
             data(accept)?["contested"] == .bool(false),
             "accept receipt must carry contested=false; got: \(String(describing: data(accept)?["contested"]))"
+        )
+        // Envelope text: user-verdict path emits "Reviewed tunnel <id>." (is_objection=false).
+        #expect(
+            contentText(accept) == "Reviewed tunnel \(tunnelID).",
+            "accept envelope text must be 'Reviewed tunnel <id>.'; got: \(String(describing: contentText(accept)))"
         )
 
         // After accept: active tunnel is visible to connection_search.
@@ -225,6 +240,11 @@ struct AriaV2ProposedTunnelParityTests {
             data(reject)?["contested"] == .bool(false),
             "reject receipt must carry contested=false; got: \(String(describing: data(reject)?["contested"]))"
         )
+        // Envelope text: user-verdict path emits "Reviewed tunnel <id>." (is_objection=false).
+        #expect(
+            contentText(reject) == "Reviewed tunnel \(tunnelID).",
+            "reject envelope text must be 'Reviewed tunnel <id>.'; got: \(String(describing: contentText(reject)))"
+        )
 
         // After reject: withdrawn tunnel is invisible to connection_search.
         let afterCount = try await connectionCount(dispatcher, memoryID: fromID)
@@ -279,6 +299,11 @@ struct AriaV2ProposedTunnelParityTests {
         )
         let endorseError = endorse.objectValue?["isError"]?.boolValue ?? true
         #expect(!endorseError, "model-1 endorse must succeed: \(endorse)")
+        // Envelope text: endorse path produces "Endorsed tunnel <id>."
+        #expect(
+            contentText(endorse) == "Endorsed tunnel \(tunnelID).",
+            "endorse envelope text must be 'Endorsed tunnel <id>.'; got: \(String(describing: contentText(endorse)))"
+        )
 
         // model-2 objects (reject with reviewed_by != "user") → model-objection branch.
         let reject = try await dispatcher.dispatch(
@@ -291,6 +316,13 @@ struct AriaV2ProposedTunnelParityTests {
         )
         let rejectError = reject.objectValue?["isError"]?.boolValue ?? true
         #expect(!rejectError, "model reject must succeed: \(reject)")
+        // Envelope text: model-objection path (is_objection=true) emits "Recorded an objection to tunnel <id>."
+        // This is the neuter-proof discriminant: the generic literal "Applied the selected typed memory mutation."
+        // must NOT appear here — is_objection drives a distinct string for the model-rejection path.
+        #expect(
+            contentText(reject) == "Recorded an objection to tunnel \(tunnelID).",
+            "model-reject envelope text must be 'Recorded an objection to tunnel <id>.'; got: \(String(describing: contentText(reject)))"
+        )
 
         // object_to_tunnel with standing model-1 endorsement: withdrawn=false, contested=true.
         // These exact literals must match the Rust gate in
