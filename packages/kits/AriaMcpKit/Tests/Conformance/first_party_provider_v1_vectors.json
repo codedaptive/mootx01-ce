@@ -1,0 +1,44 @@
+{
+  "purpose": "Executable fixed first-party provider contract vectors shared with the later Rust runtime mission.",
+  "schema_version": "1.1",
+  "provider": {
+    "provider": "FirstPartyProvider",
+    "contract_version": "1.1.0",
+    "aria_supported_version": "v2",
+    "capabilities": ["memory.capture", "memory.read", "memory.mutate", "memory.connect", "fact.capture", "fact.read", "fact.retire", "journal.read", "recall.precise", "cognition.review", "estate.inspect"],
+    "capability_digest": "3cb6f168d86fc2c1dc0f5384f1ac5972c8c16d49ff08b32a862abaaab2d3a77e"
+  },
+  "operations": [
+    {"name":"moot_file_memory","identity":"first_party_memory_capture","effect":"write","arguments":{"content":"The lake path is on the north side.","subject":"Lake path","location":"field notes"}},
+    {"name":"moot_memory_get","identity":"first_party_memory_read","effect":"read","arguments":{"memory_id":"11111111-2222-3333-4444-555555555555"}},
+    {"name":"moot_memory_list","identity":"first_party_memory_list","effect":"read","arguments":{"wing":"main"}},
+    {"name":"moot_memory_search","identity":"first_party_memory_search","effect":"read","arguments":{"query":"lake path","filter":"exportable"}},
+    {"name":"moot_update_memory","identity":"first_party_memory_update","effect":"write","arguments":{"id":"11111111-2222-3333-4444-555555555555","mutation":"confirm"}},
+    {"name":"moot_withdraw_memory","identity":"first_party_memory_withdraw","effect":"write","arguments":{"id":"11111111-2222-3333-4444-555555555555"}},
+    {"name":"moot_erase_memory","identity":"first_party_memory_erase","effect":"write","arguments":{"id":"11111111-2222-3333-4444-555555555555","confirmed":true}},
+    {"name":"moot_confirm_memory","identity":"first_party_memory_confirm","effect":"write","arguments":{"id":"11111111-2222-3333-4444-555555555555"}},
+    {"name":"moot_move_memory","identity":"first_party_memory_move","effect":"write","arguments":{"id":"11111111-2222-3333-4444-555555555555","location":"field notes"}},
+    {"name":"moot_link_memories","identity":"first_party_memory_link","effect":"write","arguments":{"from_id":"11111111-2222-3333-4444-555555555555","to_id":"66666666-7777-8888-9999-aaaaaaaaaaaa","relationship":"supports"}},
+    {"name":"moot_review_tunnel","identity":"first_party_tunnel_review","effect":"write","arguments":{"tunnel_id":"11111111-2222-3333-4444-555555555555","verdict":"accept"}},
+    {"name":"moot_file_fact","identity":"first_party_fact_capture","effect":"write","arguments":{"subject":"Lake path","predicate":"is","object":"north"}},
+    {"name":"moot_fact_search","identity":"first_party_fact_search","effect":"read","arguments":{"source_id_exact":"","subject_exact":"lake path"}},
+    {"name":"moot_retire_fact","identity":"first_party_fact_retire","effect":"write","arguments":{"id":"11111111-2222-3333-4444-555555555555"}},
+    {"name":"moot_read_journal","identity":"first_party_journal_read","effect":"read","arguments":{}},
+    {"name":"moot_recall_precise","identity":"first_party_recall_precise","effect":"read","arguments":{"query":"lake path","filter":"exportable"}},
+    {"name":"moot_list_lenses","identity":"first_party_lenses","effect":"read","arguments":{}},
+    {"name":"moot_lens_keystones","identity":"first_party_lens_keystones","effect":"read","arguments":{"wing":"main"}},
+    {"name":"moot_lens_theme_weather","identity":"first_party_lens_theme_weather","effect":"read","arguments":{}},
+    {"name":"moot_lens_cohesion","identity":"first_party_lens_cohesion","effect":"read","arguments":{}},
+    {"name":"moot_lens_contradiction","identity":"first_party_lens_contradiction","effect":"read","arguments":{}},
+    {"name":"moot_lens_drift","identity":"first_party_lens_drift","effect":"read","arguments":{"splitAt":"2026-01-01T00:00:00Z"}},
+    {"name":"moot_estate_status","identity":"first_party_estate_status","effect":"read","arguments":{}},
+    {"name":"moot_drain_status","identity":"first_party_drain_status","effect":"read","arguments":{}},
+    {"name":"moot_rebuild_status","identity":"first_party_rebuild_status","effect":"read","arguments":{}},
+    {"name":"moot_timing_report","identity":"first_party_timing_report","effect":"read","arguments":{}}
+  ],
+  "jsonrpc_examples": [
+    {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}},
+    {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_file_memory","first_party_provider":{"contract_version":"1.1.0","aria_supported_version":"v2","capability_digest":"3cb6f168d86fc2c1dc0f5384f1ac5972c8c16d49ff08b32a862abaaab2d3a77e"},"arguments":{"content":"The lake path is on the north side.","subject":"Lake path","location":"field notes"}}},
+    {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_memory_get","first_party_provider":{"contract_version":"1.1.0","aria_supported_version":"v2","capability_digest":"3cb6f168d86fc2c1dc0f5384f1ac5972c8c16d49ff08b32a862abaaab2d3a77e"},"arguments":{"memory_id":"11111111-2222-3333-4444-555555555555"}}}
+  ]
+}

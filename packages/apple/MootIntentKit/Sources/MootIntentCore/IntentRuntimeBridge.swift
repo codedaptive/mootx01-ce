@@ -52,6 +52,18 @@ public final class IntentRuntimeBridge: @unchecked Sendable {
         }
     }
 
+    /// Drop a failed registered caller while retaining the lazy provider that
+    /// can re-admit it. Identity protects a replacement from a late failure
+    /// reported by an older caller.
+    public func invalidate(_ caller: any MootToolCalling) {
+        lock.withLock {
+            guard let registeredCaller,
+                  registeredCaller as AnyObject === caller as AnyObject else { return }
+            self.registeredCaller = nil
+            providerTask = nil
+        }
+    }
+
     /// Return the registered caller, or throw if nothing is registered.
     /// Intents call this from their `resolvedCaller()` fallback.
     public func bridge() async throws -> any MootToolCalling {

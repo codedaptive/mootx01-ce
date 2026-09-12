@@ -116,6 +116,9 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
 
+        #expect(await kit.mountState(for: handle) == .mounted,
+                "selected v2 tunnel filing requires a mounted estate")
+
         let fromID = try await fileMemory(dispatcher, content: "Link source memory for coverage.", subject: "Link source")
         let toID = try await fileMemory(dispatcher, content: "Link target memory for coverage.", subject: "Link target")
 
@@ -136,6 +139,30 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
         #expect(d["from_id"] == .string(fromID), "from_id must round-trip")
         #expect(d["to_id"] == .string(toID), "to_id must round-trip")
         #expect(d["kind"] == .string("relates"), "kind must reflect the relationship argument")
+    }
+
+    @Test func quiescedSelectedLinkDoesNotCaptureTunnel() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        let fromID = try await fileMemory(dispatcher, content: "Quiesced source.", subject: "Quiesced source")
+        let toID = try await fileMemory(dispatcher, content: "Quiesced target.", subject: "Quiesced target")
+        let estate = try await kit.estate(for: handle)
+        let tunnelsBefore = try await estate.allTunnels()
+        try await kit.quiesce(handle)
+        #expect(await kit.mountState(for: handle) == .quiesced)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_link_memories",
+            arguments: .object([
+                "from_id": .string(fromID),
+                "to_id": .string(toID),
+                "relationship": .string("relates"),
+            ]))
+        #expect(result.objectValue?["isError"] == .bool(true),
+                "quiesced selected link must be refused by the typed capture verb")
+        #expect(try await estate.allTunnels().map(\.id) == tunnelsBefore.map(\.id),
+                "a quiesced selected link must not reach tunnel storage")
     }
 
     /// Missing required argument throws JSONRPCError before reaching the estate.

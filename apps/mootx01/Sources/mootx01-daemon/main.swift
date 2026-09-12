@@ -22,6 +22,7 @@
 // hard-codes "federation-sync"; the composition root injects it here.
 
 import Foundation
+import AriaMCP
 import MootDaemonProvider
 import MootCommunityDaemon
 
@@ -39,16 +40,21 @@ private let federationCapabilities: [String] = []
 #if canImport(MootProductDock)
 import MootProductDock
 private let productDockCapabilities: [String] = [ProductDock.capabilityToken]
+private let stableFirstPartyProvider = FirstPartyProviderExecutor()
 private func runResident() async -> (code: Int32, output: String) {
     await CommunityResidentMain.run(
         additionalCapabilities: eeExtraCapabilities,
-        firstPartyToolHost: ProductDock.shared
+        firstPartyToolHost: ProductDock.shared,
+        firstPartyProvider: stableFirstPartyProvider
     )
 }
 #else
 private let productDockCapabilities: [String] = []
+private let stableFirstPartyProvider = FirstPartyProviderExecutor()
 private func runResident() async -> (code: Int32, output: String) {
-    await CommunityResidentMain.run(additionalCapabilities: eeExtraCapabilities)
+    await CommunityResidentMain.run(
+        additionalCapabilities: eeExtraCapabilities,
+        firstPartyProvider: stableFirstPartyProvider)
 }
 #endif
 

@@ -46,7 +46,7 @@
 // .matrixAware) changes the final score math, producing ranked ≠ substring results.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 // ConvergenceKit: sync-backend abstraction. `SyncEngine` trait + `SyncState` enum
@@ -77,7 +77,9 @@ use corpus_kit::{
 use crate::intake::LocusDrawerContentSource;
 use engram_lib::Engram;
 use synapsekit::vector_store::{VectorMatch, VectorStore};
+use persistence_kit::dataset_store::{ColumnStats, DatasetSchema};
 use persistence_kit::storage::{Storage, BackendConfiguration};
+use persistence_kit::types::{StorageRow, TypedValue};
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::sqlite::SqliteStorage;
 use queuekit::{DrainLease, PersistenceKitBackend};
@@ -100,6 +102,8 @@ use locus_kit::frames::{AssociateFrame as LocusAssociateFrame, CaptureFrame, Lea
 // signature and the test helper below.
 use crate::verbs::frames::LearnFrame as GlkLearnFrame;
 use locus_kit::tunnel::Tunnel;
+use locus_kit::dataset_handle::DatasetColumnSummary;
+use locus_kit::frames::TunnelCaptureFrame;
 
 use crate::grants::{
     CustodyMode, Grant, GrantError, GrantOptions, IssueGrantResult, GrantStore, ScopeKeyVault,
@@ -148,6 +152,30 @@ fn build_node_name_map(
     }
     map
 }
+
+/// Filing-stage errors preserve the dataset caller's established diagnostics
+/// while keeping table creation, append rollback, and handle capture at the
+/// GLK boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatasetFilingError {
+    StorageUnavailable(String),
+    CreateFailed(String),
+    AppendFailed(String),
+    HandleFailed(String),
+}
+
+impl std::fmt::Display for DatasetFilingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StorageUnavailable(detail)
+            | Self::CreateFailed(detail)
+            | Self::AppendFailed(detail)
+            | Self::HandleFailed(detail) => f.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for DatasetFilingError {}
 
 /// Errors raised by the GeniusLocusKit composition surface on the Rust
 /// side. Mirrors the Swift `GeniusLocusKitError`; cases carry the same
@@ -794,7 +822,8 @@ impl EstateCoordinator {
 /// `GeniusLocusKit.fileProposal`.
 #[allow(clippy::too_many_arguments)]
 fn file_conflict_proposal(
-    estate: &Estate,
+    coordinator: &EstateCoordinator,
+    handle: &EstateHandle,
     node_names: &std::collections::HashMap<String, (String, String)>,
     drawers_by_id: &std::collections::HashMap<&str, &locus_kit::drawer::Drawer>,
     state: &mut ConflictFilingState,
@@ -805,7 +834,7 @@ fn file_conflict_proposal(
     renewal_key: &str,
     label: String,
     now: i64,
-) -> Result<Option<String>, locus_kit::error::LocusKitError> {
+) -> Result<Option<String>, VerbDispatchError> {
     use crate::brain::conflict_projection_sweep::decline_matrix_suppresses;
     use locus_kit::frames::TunnelCaptureFrame;
     use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
@@ -846,7 +875,7 @@ fn file_conflict_proposal(
     frame.kind = TunnelKind::Contradicts;
     frame.origin_class = TunnelOriginClass::Derived;
     frame.lifecycle = TunnelLifecycle::Proposed;
-    let tunnel = estate.capture_tunnel(frame, now)?;
+    let tunnel = coordinator.capture_tunnel(handle, frame, now)?;
     // Filing order is tier 1 → 2 → 3, so inserting here also suppresses
     // same-pair filings at the lower tiers of THIS pass — the claim just
     // went on the books.
@@ -2936,6 +2965,178 @@ impl EstateCoordinator {
         // this verb, so this is the one door for the facts write.
         crate::intake::write_ssc_facts(estate, &drawer);
         Ok(drawer)
+    }
+
+    // MARK: - typed tunnel capture and settlement
+
+    /// File one typed tunnel through the mounted estate addressed by `handle`.
+    /// The explicit epoch-millisecond clock is the established Rust LocusKit capture
+    /// convention; GLK adds only the stale/quiesced handle gate.
+    pub fn capture_tunnel(
+        &self,
+        handle: &EstateHandle,
+        frame: TunnelCaptureFrame,
+        now: i64,
+    ) -> Result<Tunnel, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .capture_tunnel(frame, now)
+            .map_err(|e| remap("capture_tunnel", &uuid_to_str(&handle.estate_uuid), e).into())
+    }
+
+    /// Settle a proposed tunnel. `accept` selects `Active`; reject selects
+    /// `Withdrawn`. LocusKit atomically updates lifecycle and canonical
+    /// `reviewedBy`; it intentionally does not persist `reason` or `now` in
+    /// tunnel ext, but both are forwarded to retain the current call contract.
+    pub fn settle_tunnel(
+        &self,
+        handle: &EstateHandle,
+        tunnel_id: &str,
+        accept: bool,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .respond_to_tunnel(tunnel_id, accept, changed_by, reason, now)
+            .map_err(|e| remap("settle_tunnel", &uuid_to_str(&handle.estate_uuid), e).into())
+    }
+
+    /// Capture a typed dataset handle through the mounted estate addressed by
+    /// `handle`. The common Swift/Rust contract deliberately owns only a UDC
+    /// code because this Rust lower primitive cannot retain facets or QIDs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_dataset_handle(
+        &self,
+        handle: &EstateHandle,
+        dataset_id: Uuid,
+        columns: Vec<DatasetColumnSummary>,
+        row_count: i64,
+        source_description: &str,
+        wing: Option<&str>,
+        room: &str,
+        added_by: &str,
+        sensitivity_raw: i64,
+        udc_code: &str,
+        now: i64,
+    ) -> Result<Drawer, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .capture_dataset_handle(
+                dataset_id, columns, row_count, source_description, wing, room,
+                added_by, sensitivity_raw, udc_code, now,
+            )
+            .map_err(|e| remap("capture_dataset_handle", &uuid_to_str(&handle.estate_uuid), e).into())
+    }
+
+    /// File the backend dataset and its typed handle through one narrow GLK
+    /// coordination seam. If append or capture fails, drop the table so an
+    /// orphaned raw dataset cannot survive without its belief-layer handle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn file_dataset(
+        &self,
+        handle: &EstateHandle,
+        dataset_id: Uuid,
+        schema: &DatasetSchema,
+        rows: &[BTreeMap<String, TypedValue>],
+        columns: Vec<DatasetColumnSummary>,
+        source_description: &str,
+        wing: Option<&str>,
+        room: &str,
+        added_by: &str,
+        sensitivity_raw: i64,
+        udc_code: &str,
+        now: i64,
+    ) -> Result<Drawer, DatasetFilingError> {
+        // Validate the mounted handle before looking up storage or issuing DDL.
+        // A quiesced/stale handle must not create a raw table that lacks a
+        // belief-layer dataset drawer.
+        self.estate_for_verb(handle)
+            .map_err(|error| DatasetFilingError::HandleFailed(format!("{error:?}")))?;
+        let storage = self.storages.get(handle).cloned().ok_or_else(|| {
+            DatasetFilingError::StorageUnavailable(format!(
+                "estate {} is not open", uuid_to_str(&handle.estate_uuid)
+            ))
+        })?;
+        let dataset_store = storage.dataset_store().map_err(|error| {
+            DatasetFilingError::StorageUnavailable(error.to_string())
+        })?;
+
+        dataset_store.create_dataset(dataset_id, schema, &[]).map_err(|error| {
+            DatasetFilingError::CreateFailed(error.to_string())
+        })?;
+        if !rows.is_empty() {
+            if let Err(error) = dataset_store.append_rows(dataset_id, rows) {
+                let _ = dataset_store.drop_dataset(dataset_id);
+                return Err(DatasetFilingError::AppendFailed(error.to_string()));
+            }
+        }
+
+        let row_count = match i64::try_from(rows.len()) {
+            Ok(row_count) => row_count,
+            Err(_) => {
+                let _ = dataset_store.drop_dataset(dataset_id);
+                return Err(DatasetFilingError::HandleFailed(
+                    "dataset row count exceeds i64".to_string(),
+                ));
+            }
+        };
+        match self.capture_dataset_handle(
+            handle, dataset_id, columns, row_count,
+            source_description, wing, room, added_by, sensitivity_raw, udc_code, now,
+        ) {
+            Ok(drawer) => Ok(drawer),
+            Err(error) => {
+                let _ = dataset_store.drop_dataset(dataset_id);
+                Err(DatasetFilingError::HandleFailed(format!("{error:?}")))
+            }
+        }
+    }
+
+    /// Patch the fixed dataset signatures through the mounted estate. The
+    /// caller may treat a failure as non-fatal after filing, but it cannot use
+    /// a raw `Estate` to bypass the GLK handle gate.
+    pub fn compute_dataset_signatures(
+        &self,
+        handle: &EstateHandle,
+        drawer_id: &str,
+        columns: &[DatasetColumnSummary],
+        column_stats: &HashMap<String, ColumnStats>,
+        sampled_rows: &[StorageRow],
+    ) -> Result<Drawer, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        crate::dataset_signatures::compute_dataset_signatures(
+            estate,
+            drawer_id,
+            columns,
+            column_stats,
+            sampled_rows,
+        )
+        .map_err(|error| {
+            remap(
+                "compute_dataset_signatures",
+                &uuid_to_str(&handle.estate_uuid),
+                error,
+            )
+            .into()
+        })
+    }
+
+    /// Stamp only the FDC estate-wide recalculation floor. This typed seam
+    /// owns the literal key and cannot be used as a universal metadata broker.
+    pub fn stamp_fdc_recalculation_floor(
+        &self,
+        handle: &EstateHandle,
+        value: &str,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .set_meta("aria.fdc.recalced_data_version", value)
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "stamp_fdc_recalculation_floor".to_string(),
+                reason: e.to_string(),
+            }))
     }
 
     // MARK: - capture_batch
@@ -5983,7 +6184,7 @@ impl EstateCoordinator {
                 frame.kind = TunnelKind::Contradicts;
                 frame.origin_class = TunnelOriginClass::Derived;
                 frame.lifecycle = TunnelLifecycle::Proposed;
-                let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
+                let tunnel = self.capture_tunnel(handle, frame, now)?;
                 settled_pairs.insert(pair_key(&a.id, &b.id));
                 proposed.push(ProposedContradiction {
                     tunnel_id: tunnel.id,
@@ -6582,7 +6783,8 @@ impl EstateCoordinator {
             );
             let label = format!("{renewal_key} result={}", outcome.result_id);
             if let Some(id) = file_conflict_proposal(
-                estate,
+                self,
+                handle,
                 &node_names,
                 &drawers_by_id,
                 &mut state,
@@ -6593,9 +6795,7 @@ impl EstateCoordinator {
                 &renewal_key,
                 label,
                 now,
-            )
-            .map_err(remap_err)?
-            {
+            )? {
                 proposed.push(id);
             }
         }
@@ -6638,7 +6838,8 @@ impl EstateCoordinator {
                     let label =
                         format!("{renewal_key} score={}", finding.score.unwrap_or(0.0));
                     if let Some(id) = file_conflict_proposal(
-                        estate,
+                        self,
+                        handle,
                         &node_names,
                         &drawers_by_id,
                         &mut state,
@@ -6649,9 +6850,7 @@ impl EstateCoordinator {
                         &renewal_key,
                         label,
                         now,
-                    )
-                    .map_err(remap_err)?
-                    {
+                    )? {
                         if tier == 2 {
                             proposed_tier2.push(id);
                         } else {
@@ -6907,7 +7106,7 @@ impl EstateCoordinator {
             frame.kind = TunnelKind::Supersedes;
             frame.origin_class = TunnelOriginClass::Derived;
             frame.lifecycle = TunnelLifecycle::Active;
-            let tunnel = estate.capture_tunnel(frame, now).map_err(remap_err)?;
+            let tunnel = self.capture_tunnel(handle, frame, now)?;
             filed.push(tunnel.id);
         }
         Ok((filed, unresolved))
@@ -16111,6 +16310,22 @@ mod tests {
     }
 
     #[test]
+    fn hunt_strong_cue_refuses_quiesced_before_filing() {
+        let (mut coord, h, vs) = open_one_with_vectors();
+        let near = hunt_near();
+        hunt_plant(&coord, &h, &vs, "the api timeout is 30 seconds", &near);
+        hunt_plant(&coord, &h, &vs, "the api timeout is 90 seconds", &near);
+        coord.quiesce(&h).expect("quiesce");
+
+        let error = coord
+            .hunt_contradictions(&h, "minilm-v6", 50, None, 64, NOW)
+            .expect_err("quiesced strong-candidate filing must refuse");
+        assert!(matches!(error, VerbDispatchError::EstateQuiesced { .. }));
+        let estate = coord.estate_for(&h).expect("estate remains readable");
+        assert!(estate.all_tunnels().expect("tunnels").is_empty());
+    }
+
+    #[test]
     fn user_reject_t1_suppresses_lower_tier_refiling() {
         let (coord, h, vs) = open_one_with_vectors();
         let near = hunt_near();
@@ -16620,6 +16835,214 @@ mod tests {
             !after.is_endorsed(),
             "stale endorsed bit must not be applied by rejected write"
         );
+    }
+
+    #[test]
+    fn typed_write_boundary_captures_settles_and_stamps_fixed_fdc_key() {
+        use locus_kit::dataset_handle::DatasetColumnSummary;
+        use locus_kit::tunnel_review_ledger::TunnelReviewLedger;
+        use locus_kit::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
+
+        let (coord, handle) = open_one();
+        let mut accept_frame = tunnel_frame("source", "target", "accept");
+        accept_frame.kind = TunnelKind::Contradicts;
+        accept_frame.origin_class = TunnelOriginClass::Derived;
+        accept_frame.lifecycle = TunnelLifecycle::Proposed;
+        let accepted = coord
+            .capture_tunnel(&handle, accept_frame, NOW)
+            .expect("typed capture accept");
+
+        let mut reject_frame = tunnel_frame("source", "target", "reject");
+        reject_frame.kind = TunnelKind::Contradicts;
+        reject_frame.origin_class = TunnelOriginClass::Derived;
+        reject_frame.lifecycle = TunnelLifecycle::Proposed;
+        let rejected = coord
+            .capture_tunnel(&handle, reject_frame, NOW)
+            .expect("typed capture reject");
+
+        coord
+            .settle_tunnel(&handle, &accepted.id, true, "accept-reviewer", Some("approved"), NOW + 1)
+            .expect("typed accept");
+        coord
+            .settle_tunnel(&handle, &rejected.id, false, "reject-reviewer", Some("declined"), NOW + 1)
+            .expect("typed reject");
+        let estate = coord.estate_for(&handle).expect("estate");
+        let accepted_after = estate.get_tunnel(&accepted.id).unwrap().unwrap();
+        let rejected_after = estate.get_tunnel(&rejected.id).unwrap().unwrap();
+        assert_eq!(accepted_after.lifecycle(), TunnelLifecycle::Active);
+        assert_eq!(rejected_after.lifecycle(), TunnelLifecycle::Withdrawn);
+        // Tunnels have no row-audit event. reviewed_by is the canonical
+        // ledger record of the lifecycle reviewer, atomically written with
+        // the lifecycle bitmap by the established substrate verb.
+        assert_eq!(accepted_after.ext.as_deref(), Some("{\"reviewedBy\":\"accept-reviewer\"}"));
+        assert_eq!(rejected_after.ext.as_deref(), Some("{\"reviewedBy\":\"reject-reviewer\"}"));
+        assert_eq!(
+            TunnelReviewLedger::parse(accepted_after.ext.as_deref()).unwrap().reviewed_by.as_deref(),
+            Some("accept-reviewer")
+        );
+        assert_eq!(
+            TunnelReviewLedger::parse(rejected_after.ext.as_deref()).unwrap().reviewed_by.as_deref(),
+            Some("reject-reviewer")
+        );
+
+        let dataset = coord
+            .capture_dataset_handle(
+                &handle,
+                Uuid::new_v4(),
+                vec![DatasetColumnSummary { name: "name".to_string(), data_type: "TEXT".to_string() }],
+                0,
+                "typed boundary test",
+                None,
+                "datasets",
+                "agent",
+                0,
+                "004",
+                NOW,
+            )
+            .expect("typed dataset capture");
+        assert_eq!(dataset.content_kind(), ContentKind::Dataset);
+        assert_eq!(dataset.udc_code, "004");
+        assert!(dataset.udc_facets.is_none());
+        assert!(dataset.wikidata_qid.is_none());
+        assert!(dataset.wikidata_qids_secondary.is_none(),
+            "the typed dataset seam is UDC-only until LocusKit gains typed dataset facet/QID slots");
+
+        coord
+            .stamp_fdc_recalculation_floor(&handle, "fdc-v4-test")
+            .expect("fixed-key floor stamp");
+        assert_eq!(estate.meta("aria.fdc.recalced_data_version").unwrap().as_deref(), Some("fdc-v4-test"));
+
+        coord
+            .reanchor_anchor(
+                &handle,
+                &dataset.id,
+                LatticeAnchor {
+                    udc_code: "005".to_string(),
+                    udc_facets: Some("005,005.1".to_string()),
+                    wikidata_qid: Some("Q4".to_string()),
+                    wikidata_qids_secondary: Some("Q5,Q6".to_string()),
+                },
+                "anchor-reviewer",
+                "typed anchor correction",
+            )
+            .expect("typed reanchor");
+        let reanchored = estate.get_drawer(&dataset.id).unwrap().unwrap();
+        assert_eq!(reanchored.udc_code, "005");
+        assert_eq!(reanchored.udc_facets.as_deref(), Some("005,005.1"));
+        assert_eq!(reanchored.wikidata_qid.as_deref(), Some("Q4"));
+        assert_eq!(reanchored.wikidata_qids_secondary.as_deref(), Some("Q5,Q6"));
+        let reanchor_event = estate.audit_trail(&dataset.id).unwrap().pop().unwrap();
+        assert_eq!(reanchor_event.actor, "anchor-reviewer");
+        assert_eq!(reanchor_event.reason.as_deref(), Some("typed anchor correction"));
+        // Rust's established reanchor API generates its timestamp internally;
+        // it must still append a post-capture HLC event.
+        assert!(reanchor_event.hlc.physical_time > NOW * 1_000);
+    }
+
+    #[test]
+    fn typed_write_boundary_rejects_quiesced_and_stale_handles() {
+        let (mut coord, handle) = open_one();
+        coord.quiesce(&handle).expect("quiesce");
+        let err = coord
+            .capture_tunnel(&handle, tunnel_frame("source", "target", "blocked"), NOW)
+            .expect_err("quiesced capture must fail");
+        assert!(matches!(err, VerbDispatchError::EstateQuiesced { .. }));
+
+        let (mut coord, handle) = open_one();
+        coord.close(&handle).expect("close");
+        let err = coord
+            .stamp_fdc_recalculation_floor(&handle, "stale")
+            .expect_err("stale stamp must fail");
+        assert!(matches!(err, VerbDispatchError::EstateNotOpen { .. }));
+    }
+
+    #[test]
+    fn file_dataset_rejects_quiesced_handle_before_creating_table() {
+        let (mut coord, handle) = open_one();
+        let dataset_id = Uuid::new_v4();
+        let storage = coord
+            .storages
+            .get(&handle)
+            .expect("open estate registers its storage")
+            .clone();
+        let dataset_store = storage.dataset_store().expect("dataset store");
+        coord.quiesce(&handle).expect("quiesce");
+
+        let schema = DatasetSchema {
+            columns: vec![persistence_kit::schema::ColumnDeclaration::new(
+                "name",
+                persistence_kit::types::ColumnType::Text,
+            )],
+            primary_key_column: None,
+        };
+        let error = coord
+            .file_dataset(
+                &handle,
+                dataset_id,
+                &schema,
+                &[],
+                vec![DatasetColumnSummary {
+                    name: "name".to_string(),
+                    data_type: "TEXT".to_string(),
+                }],
+                "quiesced filing test",
+                None,
+                "datasets",
+                "agent",
+                0,
+                "004",
+                NOW,
+            )
+            .expect_err("quiesced filing must fail before DDL");
+        assert!(matches!(error, DatasetFilingError::HandleFailed(_)));
+        assert!(dataset_store
+            .query_rows(dataset_id, None, &[], None, None, None)
+            .is_err(), "quiesced filing must not leave a backend table");
+    }
+
+    #[test]
+    fn file_dataset_drops_table_after_append_failure() {
+        let (coord, handle) = open_one();
+        let dataset_id = Uuid::new_v4();
+        let storage = coord
+            .storages
+            .get(&handle)
+            .expect("open estate registers its storage")
+            .clone();
+        let dataset_store = storage.dataset_store().expect("dataset store");
+        let schema = DatasetSchema {
+            columns: vec![persistence_kit::schema::ColumnDeclaration::new(
+                "name",
+                persistence_kit::types::ColumnType::Text,
+            )],
+            primary_key_column: None,
+        };
+        let mut invalid_row = BTreeMap::new();
+        invalid_row.insert("bad-key".to_string(), TypedValue::Text("cannot append".to_string()));
+
+        let error = coord
+            .file_dataset(
+                &handle,
+                dataset_id,
+                &schema,
+                &[invalid_row],
+                vec![DatasetColumnSummary {
+                    name: "name".to_string(),
+                    data_type: "TEXT".to_string(),
+                }],
+                "append rollback test",
+                None,
+                "datasets",
+                "agent",
+                0,
+                "004",
+                NOW,
+            )
+            .expect_err("invalid row key must fail append");
+        assert!(matches!(error, DatasetFilingError::AppendFailed(_)));
+        assert!(dataset_store
+            .query_rows(dataset_id, None, &[], None, None, None)
+            .is_err(), "append failure must not leave a backend table");
     }
 }
 

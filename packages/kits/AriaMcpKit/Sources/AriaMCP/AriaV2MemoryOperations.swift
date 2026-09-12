@@ -14,6 +14,9 @@ public struct AriaV2MemoryOperationContext: Sendable {
     public let serverIdentity: String
     public let now: @Sendable () -> Date
     public let maximumSensitivity: AdjectiveSensitivity
+    /// First-party policy may narrow every read to material explicitly marked
+    /// exportable. This is additive to the sensitivity ceiling.
+    public let exportableOnly: Bool
     public let recallOrigin: RecallOrigin
     public let usageLedger: any AriaV2MemoryUsageLedger
     /// The un-collapsed sensitivity-grant ceiling, `nil` when no grant is
@@ -36,6 +39,7 @@ public struct AriaV2MemoryOperationContext: Sendable {
         serverIdentity: String,
         now: @escaping @Sendable () -> Date = { Date() },
         maximumSensitivity: AdjectiveSensitivity = .elevated,
+        exportableOnly: Bool = false,
         recallOrigin: RecallOrigin = .external,
         usageLedger: any AriaV2MemoryUsageLedger = AriaV2NoopMemoryUsageLedger(),
         grantCeiling: AdjectiveSensitivity? = nil
@@ -45,6 +49,7 @@ public struct AriaV2MemoryOperationContext: Sendable {
         self.serverIdentity = serverIdentity
         self.now = now
         self.maximumSensitivity = maximumSensitivity
+        self.exportableOnly = exportableOnly
         self.recallOrigin = recallOrigin
         self.usageLedger = usageLedger
         self.grantCeiling = grantCeiling
@@ -510,6 +515,7 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         // The sensitivity ceiling suppresses the BitmapEvaluator default narrower
         // ceiling (.elevated), matching the precedence documented in ToolDispatch.
         var filterChain: [Filter] = [.sensitivityAtMost(context.maximumSensitivity)]
+        if context.exportableOnly { filterChain.append(.exportable) }
         if let filterStr = request.filter {
             switch filterStr {
             case "unconfirmed":   filterChain.append(.unconfirmed)
@@ -693,7 +699,9 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         // lowercase, so look up both valid storage spellings without changing
         // the typed UUID identity or exposing which spelling exists.
         let ids = request.memoryIDs.flatMap(AriaV2ArgumentDecoder.storageIdentitySpellings)
-        let frame = RecallFrame(filterChain: [.sensitivityAtMost(context.maximumSensitivity)], hydrationLevel: .full)
+        var filters: [Filter] = [.sensitivityAtMost(context.maximumSensitivity)]
+        if context.exportableOnly { filters.append(.exportable) }
+        let frame = RecallFrame(filterChain: filters, hydrationLevel: .full)
         let loaded = try await estate.getDrawers(ids: ids, matchingFrame: frame, hydrationLevel: .full)
         var records: [AriaV2MemoryRecord] = []
         for drawer in loaded.admissible {

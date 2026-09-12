@@ -604,7 +604,12 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
         // Mirrors Swift's `lifecycle: request.proposed ? .proposed : .active`
         // at AriaV2MemoryMutations.swift:452.
         if request.proposed { frame.lifecycle = TunnelLifecycle::Proposed; }
-        let tunnel = estate.capture_tunnel(frame, admission.now_millis).map_err(|_| ())?;
+        // The direct estate remains the read authority above, but creation
+        // must cross the typed GLK verb so a quiesced/stale selected handle
+        // cannot file a tunnel after admission.
+        let tunnel = coordinator
+            .capture_tunnel(&admission.estate_handle, frame, admission.now_millis)
+            .map_err(|_| ())?;
         Uuid::parse_str(&tunnel.id).map_err(|_| ())
     }
     fn review(&self, admission: &V2MemoryMutationAdmission, tunnel_id: Uuid, decision: V2TunnelDecision, note: Option<&str>, reviewed_by: &str) -> Result<V2TunnelReviewReceipt, ()> {
@@ -665,13 +670,16 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
             // User verdicts only: `accept` is gated at decode, and a user
             // `reject` withdraws permanently.
             V2TunnelDecision::Accept | V2TunnelDecision::Reject => {
-                estate.respond_to_tunnel(
-                    &stored.id,
-                    matches!(decision, V2TunnelDecision::Accept),
-                    &admission.caller_binding,
-                    note,
-                    admission.now_millis,
-                ).map_err(|_| ())?;
+                coordinator
+                    .settle_tunnel(
+                        &admission.estate_handle,
+                        &stored.id,
+                        matches!(decision, V2TunnelDecision::Accept),
+                        &admission.caller_binding,
+                        note,
+                        admission.now_millis,
+                    )
+                    .map_err(|_| ())?;
                 Ok(V2TunnelReviewReceipt::Settled {
                     withdrawn: matches!(decision, V2TunnelDecision::Reject),
                     contested: false,

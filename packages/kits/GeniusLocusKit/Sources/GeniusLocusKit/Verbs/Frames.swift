@@ -170,6 +170,15 @@ public typealias RecallTraceItem = LocusKit.RecallTraceItem
 /// through `DreamingSubstrateReader.existingTunnels`.
 public typealias Tunnel = LocusKit.Tunnel
 
+/// Typed input for filing one tunnel through the GLK write boundary.
+/// The frame remains owned by LocusKit so endpoint and lifecycle encoding have
+/// one source of truth in both ports.
+public typealias TunnelCaptureFrame = LocusKit.TunnelCaptureFrame
+
+/// Dataset-handle column description re-exported for the typed GLK capture
+/// boundary. Callers need no direct LocusKit import to construct a handle.
+public typealias DatasetColumnSummary = LocusKit.DatasetColumnSummary
+
 /// Diary entry re-export. The dreaming and maintenance daemons write one
 /// cycle summary per run through `DreamingProposalSink.recordCycleDiary` /
 /// `MaintenanceProposalSink.recordCycleDiary`.
