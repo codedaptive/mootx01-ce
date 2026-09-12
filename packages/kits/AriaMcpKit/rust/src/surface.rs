@@ -604,24 +604,52 @@ fn execute_memory_mutation(
     }
     match result {
         Ok(result) => {
-            crate::v2::render::success(
-            tool,
-            &match result.tunnel_review {
+            // Each mutation arm computes (data, text) so content[0].text is
+            // byte-equal to the Swift string at AriaV2MemoryMutations.swift.
+            // structuredContent.data is unchanged: this block only adds the
+            // per-mutation text to the envelope prose.
+            use crate::v2::memory_mutations::V2MutationResponsePayload;
+            let (mutation_data, mutation_text): (serde_json::Value, String) = match result.tunnel_review {
                 Some(crate::v2::memory_mutations::V2TunnelReviewReceipt::Endorsed {
                     new_endorser, distinct_endorsers, contested,
-                }) => json!({
-                    "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
-                    "new_endorser": new_endorser,
-                    "distinct_endorsers": distinct_endorsers,
-                    "contested": contested,
-                }),
+                }) => {
+                    // moot_review_tunnel: endorse path.
+                    // Swift: "Endorsed tunnel \(tunnelID)."  (AriaV2MemoryMutations.swift:511)
+                    let tid = result.tunnel_id
+                        .map(|id| id.hyphenated().to_string())
+                        .unwrap_or_default();
+                    let text = format!("Endorsed tunnel {}.", tid);
+                    (json!({
+                        "tunnel_id": if tid.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(tid) },
+                        "new_endorser": new_endorser,
+                        "distinct_endorsers": distinct_endorsers,
+                        "contested": contested,
+                    }), text)
+                }
                 Some(crate::v2::memory_mutations::V2TunnelReviewReceipt::Settled {
-                    withdrawn, contested,
-                }) => json!({
-                    "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
-                    "withdrawn": withdrawn,
-                    "contested": contested,
-                }),
+                    withdrawn, contested, is_objection,
+                }) => {
+                    // moot_review_tunnel: two Settled paths share one key set but
+                    // carry different prose.  is_objection=true → object_to_tunnel
+                    // (model rejection); is_objection=false → settle_tunnel (user
+                    // verdict).  is_objection is render-only: it never appears in
+                    // json!() or structuredContent.data.
+                    // Swift: "Recorded an objection to tunnel \(tunnelID)." (:525)
+                    //        "Reviewed tunnel \(tunnelID)."                 (:539)
+                    let tid = result.tunnel_id
+                        .map(|id| id.hyphenated().to_string())
+                        .unwrap_or_default();
+                    let text = if is_objection {
+                        format!("Recorded an objection to tunnel {}.", tid)
+                    } else {
+                        format!("Reviewed tunnel {}.", tid)
+                    };
+                    (json!({
+                        "tunnel_id": if tid.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(tid) },
+                        "withdrawn": withdrawn,
+                        "contested": contested,
+                    }), text)
+                }
                 None => {
                     // Per-operation dispatch: each mutation emits exactly the key set
                     // declared in remaining_data_schema (catalog.rs), matching Swift.
@@ -629,56 +657,99 @@ fn execute_memory_mutation(
                     // it emitted {operation, outcome, memory_id, tunnel_id,
                     // refused_sibling_memory_ids} for every mutation, disagreeing with
                     // all five declared schemas (see surface.rs tests for the red run).
-                    use crate::v2::memory_mutations::V2MutationResponsePayload;
                     match result.payload {
-                        Some(V2MutationResponsePayload::Withdraw) => json!({
+                        Some(V2MutationResponsePayload::Withdraw) => {
                             // moot_withdraw_memory schema: { memory_id }
-                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
-                        }),
-                        Some(V2MutationResponsePayload::Erase) => json!({
+                            // Swift: "Withdrew memory \(id(request.memoryID))." (:344)
+                            let mid = result.memory_id.map(|id| id.hyphenated().to_string());
+                            let text = format!("Withdrew memory {}.", mid.as_deref().unwrap_or(""));
+                            (json!({ "memory_id": mid }), text)
+                        }
+                        Some(V2MutationResponsePayload::Erase) => {
                             // moot_erase_memory schema: { memory_id, outcome, refused_sibling_memory_ids }
                             // Always present: empty array on full erase, populated on partial erase.
                             // Mirrors Swift AriaV2MemoryMutations.swift:347.
-                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
-                            "outcome": mutation_outcome_wire_value(result.outcome),
-                            "refused_sibling_memory_ids": result.refused_sibling_ids,
-                        }),
-                        Some(V2MutationResponsePayload::Confirm) => json!({
+                            // Swift partial: "Partially erased memory \(id(request.memoryID)); \(refusedIDs.count) sibling(s) refused by the audit gate." (:364)
+                            // Swift full:    "Erased memory \(id(request.memoryID))." (:365)
+                            let mid = result.memory_id.map(|id| id.hyphenated().to_string());
+                            let n = result.refused_sibling_ids.len();
+                            let text = if n > 0 {
+                                format!(
+                                    "Partially erased memory {}; {} sibling(s) refused by the audit gate.",
+                                    mid.as_deref().unwrap_or(""), n
+                                )
+                            } else {
+                                format!("Erased memory {}.", mid.as_deref().unwrap_or(""))
+                            };
+                            (json!({
+                                "memory_id": mid,
+                                "outcome": mutation_outcome_wire_value(result.outcome),
+                                "refused_sibling_memory_ids": result.refused_sibling_ids,
+                            }), text)
+                        }
+                        Some(V2MutationResponsePayload::Confirm) => {
                             // moot_confirm_memory schema: { memory_id, mutation } where mutation is const "confirm"
-                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
-                            "mutation": "confirm",
-                        }),
-                        Some(V2MutationResponsePayload::Move { wing, room }) => json!({
+                            // Swift: "Confirmed memory \(id(request.memoryID))." (:398)
+                            let mid = result.memory_id.map(|id| id.hyphenated().to_string());
+                            let text = format!("Confirmed memory {}.", mid.as_deref().unwrap_or(""));
+                            (json!({ "memory_id": mid, "mutation": "confirm" }), text)
+                        }
+                        Some(V2MutationResponsePayload::Move { wing, room }) => {
                             // moot_move_memory schema: { memory_id, placement }
-                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
-                            "placement": { "wing": wing, "room": room },
-                        }),
-                        Some(V2MutationResponsePayload::Link { from_id, to_id, kind, lifecycle }) => json!({
+                            // Swift: "Moved memory \(id(request.memoryID))." (:425)
+                            let mid = result.memory_id.map(|id| id.hyphenated().to_string());
+                            let text = format!("Moved memory {}.", mid.as_deref().unwrap_or(""));
+                            (json!({
+                                "memory_id": mid,
+                                "placement": { "wing": wing, "room": room },
+                            }), text)
+                        }
+                        Some(V2MutationResponsePayload::Link { from_id, to_id, kind, lifecycle }) => {
                             // moot_link_memories schema: { tunnel_id, from_id, to_id, kind, lifecycle }
-                            "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
-                            "from_id": from_id.hyphenated().to_string(),
-                            "to_id": to_id.hyphenated().to_string(),
-                            "kind": kind,
-                            "lifecycle": lifecycle,
-                        }),
-                        Some(V2MutationResponsePayload::Update { mutation }) => json!({
+                            // Swift proposed: "Proposed a link between memories \(id(request.fromID)) and \(id(request.toID)); review it with moot_review_tunnel." (:462)
+                            // Swift active:   "Linked memories \(id(request.fromID)) and \(id(request.toID))." (:463)
+                            let from_str = from_id.hyphenated().to_string();
+                            let to_str = to_id.hyphenated().to_string();
+                            // Build text before json! moves from_str and to_str.
+                            let text = if lifecycle == "proposed" {
+                                format!(
+                                    "Proposed a link between memories {} and {}; review it with moot_review_tunnel.",
+                                    from_str, to_str
+                                )
+                            } else {
+                                format!("Linked memories {} and {}.", from_str, to_str)
+                            };
+                            (json!({
+                                "tunnel_id": result.tunnel_id.map(|id| id.hyphenated().to_string()),
+                                "from_id": from_str,
+                                "to_id": to_str,
+                                "kind": kind,
+                                "lifecycle": lifecycle,
+                            }), text)
+                        }
+                        Some(V2MutationResponsePayload::Update { mutation }) => {
                             // moot_update_memory schema: { memory_id, mutation }
-                            "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
-                            "mutation": mutation,
-                        }),
+                            // Swift: "Updated memory \(id(request.memoryID))." (:320)
+                            let mid = result.memory_id.map(|id| id.hyphenated().to_string());
+                            let text = format!("Updated memory {}.", mid.as_deref().unwrap_or(""));
+                            (json!({ "memory_id": mid, "mutation": mutation }), text)
+                        }
                         None => {
                             // Unreachable in correct execution: every service method sets
                             // result.payload.  Defensive fallback emits memory_id only.
-                            json!({
-                                "memory_id": result.memory_id.map(|id| id.hyphenated().to_string()),
-                            })
+                            let mid = result.memory_id.map(|id| id.hyphenated().to_string());
+                            (json!({ "memory_id": mid }),
+                             "Applied the selected typed memory mutation.".to_string())
                         }
                     }
-                },
-            },
-            &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write),
-            "Applied the selected typed memory mutation.",
-        ).map_err(jsonrpc_internal)
+                }
+            };
+            crate::v2::render::success(
+                tool,
+                &mutation_data,
+                &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write),
+                &mutation_text,
+            ).map_err(jsonrpc_internal)
         }
         Err(error) => {
             let (code, message, retryable) = match error {
@@ -5024,6 +5095,638 @@ mod tests {
             "model_reject_routes_to_object_to_tunnel: contested must be true when a \
              model endorsement stands; got: {:?}",
             reject["structuredContent"]["data"]["contested"]
+        );
+    }
+
+    // ── content[0].text parity gates ──────────────────────────────────────────
+    //
+    // One test per mutation string, eleven in total.  Each asserts that
+    // content[0].text is byte-equal to the Swift literal at the line cited.
+    // The twin Swift assertion is named in each doc-comment.
+    //
+    // Pre-fix failure for every test below:
+    //   thread 'tests::mutation_envelope_text_<N>' panicked at …
+    //   assertion `left == right` failed: content[0].text must match Swift
+    //     left: "Applied the selected typed memory mutation."
+    //    right: "<correct per-mutation string>"
+    //
+    // Post-fix: surface.rs computes text per arm before calling render::success.
+
+    /// Parity gate: moot_update_memory content[0].text.
+    /// Swift: "Updated memory \(id(request.memoryID))."  (AriaV2MemoryMutations.swift:320)
+    /// Twin Swift assertion: AriaV2MemoryMutationsTests.swift directlyMutatesLinksAndReviews
+    #[test]
+    fn mutation_envelope_text_update() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2UpdateMemoryRequest, V2UpdateMutation};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.capture(&handle, CaptureFrame::new(
+                "text-gate-update", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("000"), "test", "test-embed-v1",
+            ), NOW).expect("capture").id.clone()
+        };
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let mid = drawer_uuid.hyphenated().to_string();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                memory_id: drawer_uuid, mutation: V2UpdateMutation::Confirm,
+                note: None, estate_id: None,
+            }),
+            &registry, &meta, NOW + 100, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("update must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Updated memory {}.", mid),
+            "content[0].text must match Swift (moot_update_memory); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_withdraw_memory content[0].text.
+    /// Swift: "Withdrew memory \(id(request.memoryID))."  (AriaV2MemoryMutations.swift:344)
+    /// Twin Swift assertion: AriaV2MemoryMutationsTests.swift directlyMutatesLinksAndReviews
+    #[test]
+    fn mutation_envelope_text_withdraw() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2WithdrawMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.capture(&handle, CaptureFrame::new(
+                "text-gate-withdraw", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("000"), "test", "test-embed-v1",
+            ), NOW).expect("capture").id.clone()
+        };
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let mid = drawer_uuid.hyphenated().to_string();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
+                memory_id: drawer_uuid, reason: None, estate_id: None,
+            }),
+            &registry, &meta, NOW + 100, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("withdraw must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Withdrew memory {}.", mid),
+            "content[0].text must match Swift (moot_withdraw_memory); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_erase_memory content[0].text, full erase path.
+    /// Swift: "Erased memory \(id(request.memoryID))."  (AriaV2MemoryMutations.swift:365)
+    /// Twin Swift assertion: AriaV2MemoryMutationsTests.swift directlyMutatesLinksAndReviews
+    #[test]
+    fn mutation_envelope_text_erase_full() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2EraseMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.capture(&handle, CaptureFrame::new(
+                "text-gate-erase-full", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("000"), "test", "test-embed-v1",
+            ), NOW).expect("capture").id.clone()
+        };
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let mid = drawer_uuid.hyphenated().to_string();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                memory_id: drawer_uuid, confirmation: true, reason: None, estate_id: None,
+            }),
+            &registry, &meta, NOW + 100, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("erase must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Erased memory {}.", mid),
+            "content[0].text must match Swift (moot_erase_memory full); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_erase_memory content[0].text, partial erase path.
+    /// Swift: "Partially erased memory \(id(request.memoryID)); \(refusedIDs.count) sibling(s) refused by the audit gate."  (AriaV2MemoryMutations.swift:364)
+    /// Twin Swift assertion: AriaV2MemoryMutationsTests.swift partialEraseEnvelopeTextMatchesSwift (new @Test)
+    ///
+    /// Setup mirrors execute_memory_mutation_emits_erased_partially_for_emission_path:
+    /// D1 (accepted, audit-gate-blocked) + D2 (active sibling) → erasing D2 yields
+    /// ErasedPartially with 1 refused sibling.
+    #[test]
+    fn mutation_envelope_text_erase_partial() {
+        use locus_kit::adjectives::Trust;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::{CaptureFrame, MutationKind};
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2EraseMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        // D1 is accepted (audit-gate refuses tombstone); D2 is an active sibling.
+        // Erasing D2 yields ErasedPartially with 1 refused sibling (D1).
+        let d2_id = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d1 = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-partial-anchor", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("000"), "test", "test-embed-v1",
+            ), NOW).expect("capture d1");
+            coord.mutate(&handle, &d1.id, MutationKind::CorrectTrust(Trust::Canonical), None)
+                .expect("correct trust");
+            coord.mutate(&handle, &d1.id, MutationKind::Accept, None).expect("accept d1");
+
+            let mut d2_frame = CaptureFrame::new(
+                "text-gate-partial-sibling", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("000"), "test", "test-embed-v1",
+            );
+            d2_frame.lineage_id = Some(d1.lineage_id);
+            coord.capture(&handle, d2_frame, NOW + 100).expect("capture d2").id.clone()
+        };
+
+        let d2_uuid = Uuid::parse_str(&d2_id).expect("uuid");
+        let mid = d2_uuid.hyphenated().to_string();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                memory_id: d2_uuid, confirmation: true, reason: None, estate_id: None,
+            }),
+            &registry, &meta, NOW + 200, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("partial erase must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Partially erased memory {}; 1 sibling(s) refused by the audit gate.", mid),
+            "content[0].text must match Swift (moot_erase_memory partial); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_confirm_memory content[0].text.
+    /// Swift: "Confirmed memory \(id(request.memoryID))."  (AriaV2MemoryMutations.swift:398)
+    /// Twin Swift assertion: AriaV2MemoryMutationsTests.swift directlyMutatesLinksAndReviews
+    #[test]
+    fn mutation_envelope_text_confirm() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2ConfirmMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.capture(&handle, CaptureFrame::new(
+                "text-gate-confirm", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("000"), "test", "test-embed-v1",
+            ), NOW).expect("capture").id.clone()
+        };
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let mid = drawer_uuid.hyphenated().to_string();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Confirm(V2ConfirmMemoryRequest {
+                memory_id: drawer_uuid, estate_id: None,
+            }),
+            &registry, &meta, NOW + 100, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("confirm must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Confirmed memory {}.", mid),
+            "content[0].text must match Swift (moot_confirm_memory); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_move_memory content[0].text.
+    /// Swift: "Moved memory \(id(request.memoryID))."  (AriaV2MemoryMutations.swift:425)
+    /// Twin Swift assertion: AriaV2MemoryMutationsTests.swift directlyMutatesLinksAndReviews
+    #[test]
+    fn mutation_envelope_text_move() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2MoveMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.capture(&handle, CaptureFrame::new(
+                "text-gate-move", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("000"), "test", "test-embed-v1",
+            ), NOW).expect("capture").id.clone()
+        };
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let mid = drawer_uuid.hyphenated().to_string();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Move(V2MoveMemoryRequest {
+                memory_id: drawer_uuid,
+                wing: "Archive".to_owned(),
+                room: "Moved".to_owned(),
+                estate_id: None,
+            }),
+            &registry, &meta, NOW + 100, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("move must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Moved memory {}.", mid),
+            "content[0].text must match Swift (moot_move_memory); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_link_memories content[0].text, active (lifecycle=active) path.
+    /// Swift: "Linked memories \(id(request.fromID)) and \(id(request.toID))."  (AriaV2MemoryMutations.swift:463)
+    /// Twin Swift assertion: AriaV2MemoryMutationsTests.swift directlyMutatesLinksAndReviews
+    #[test]
+    fn mutation_envelope_text_link_active() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2LinkMemoriesRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let (from_id, to_id) = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let f = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-link-a-from", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("la-f"), "test", "test-embed-v1",
+            ), NOW).expect("capture from").id.clone();
+            let t = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-link-a-to", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("la-t"), "test", "test-embed-v1",
+            ), NOW + 1).expect("capture to").id.clone();
+            (Uuid::parse_str(&f).expect("from uuid"), Uuid::parse_str(&t).expect("to uuid"))
+        };
+        let from_str = from_id.hyphenated().to_string();
+        let to_str = to_id.hyphenated().to_string();
+        let expected = format!("Linked memories {} and {}.", from_str, to_str);
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id, to_id, relationship: "relates".to_owned(),
+                confidence: None, evidence: None, proposed: false, estate_id: None,
+            }),
+            &registry, &meta, NOW + 100, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("link must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            expected,
+            "content[0].text must match Swift (moot_link_memories active); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_link_memories content[0].text, proposed path.
+    /// Swift: "Proposed a link between memories \(id(request.fromID)) and \(id(request.toID)); review it with moot_review_tunnel."  (AriaV2MemoryMutations.swift:462)
+    /// Twin Swift assertion: AriaV2ProposedTunnelParityTests.swift proposedLinkEnvelopeCarriesLifecycleProposed
+    #[test]
+    fn mutation_envelope_text_link_proposed() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2LinkMemoriesRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let (from_id, to_id) = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let f = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-link-p-from", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("lp-f"), "test", "test-embed-v1",
+            ), NOW).expect("capture from").id.clone();
+            let t = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-link-p-to", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("lp-t"), "test", "test-embed-v1",
+            ), NOW + 1).expect("capture to").id.clone();
+            (Uuid::parse_str(&f).expect("from uuid"), Uuid::parse_str(&t).expect("to uuid"))
+        };
+        let from_str = from_id.hyphenated().to_string();
+        let to_str = to_id.hyphenated().to_string();
+        let expected = format!(
+            "Proposed a link between memories {} and {}; review it with moot_review_tunnel.",
+            from_str, to_str
+        );
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id, to_id, relationship: "relates".to_owned(),
+                confidence: None, evidence: None, proposed: true, estate_id: None,
+            }),
+            &registry, &meta, NOW + 100, EstatePosture::Live,
+            &ledger, &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("proposed link must succeed");
+
+        assert_eq!(
+            response["content"][0]["text"].as_str().unwrap_or(""),
+            expected,
+            "content[0].text must match Swift (moot_link_memories proposed); got {:?}",
+            response["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_review_tunnel content[0].text, endorse path.
+    /// Swift: "Endorsed tunnel \(tunnelID)."  (AriaV2MemoryMutations.swift:511)
+    /// Twin Swift assertion: AriaV2ProposedTunnelParityTests.swift reviewTunnelModelRejectRoutesToObjectToTunnel (endorse setup)
+    #[test]
+    fn mutation_envelope_text_review_endorse() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2LinkMemoriesRequest, V2ReviewTunnelRequest, V2TunnelDecision};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+
+        let (from_id, to_id) = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let f = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-endorse-from", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("end-f"), "test", "test-embed-v1",
+            ), NOW).expect("from").id.clone();
+            let t = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-endorse-to", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("end-t"), "test", "test-embed-v1",
+            ), NOW + 1).expect("to").id.clone();
+            (Uuid::parse_str(&f).expect("from uuid"), Uuid::parse_str(&t).expect("to uuid"))
+        };
+
+        // File proposed link and extract the tunnel_id.
+        let link_response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id, to_id, relationship: "relates".to_owned(),
+                confidence: None, evidence: None, proposed: true, estate_id: None,
+            }),
+            &registry, &meta, NOW + 2, EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("link must succeed");
+        let tunnel_id_str = link_response["structuredContent"]["data"]["tunnel_id"]
+            .as_str().expect("tunnel_id in link response").to_owned();
+        let tunnel_id = Uuid::parse_str(&tunnel_id_str).expect("parse tunnel_id");
+
+        let endorse = execute_memory_mutation(
+            MemoryMutationRequest::Review(V2ReviewTunnelRequest {
+                tunnel_id, decision: V2TunnelDecision::Endorse, note: None,
+                reviewed_by: "model-1".to_owned(), estate_id: None,
+            }),
+            &registry, &meta, NOW + 3, EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("endorse must succeed");
+
+        assert_eq!(
+            endorse["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Endorsed tunnel {}.", tunnel_id_str),
+            "content[0].text must match Swift (moot_review_tunnel endorse); got {:?}",
+            endorse["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_review_tunnel content[0].text, model-objection path.
+    ///
+    /// This is the neuter-proof arm: restoring the generic literal for this arm
+    /// must make this test go RED.  See neuter proof in the completion report.
+    ///
+    /// Swift: "Recorded an objection to tunnel \(tunnelID)."  (AriaV2MemoryMutations.swift:525)
+    /// Twin Swift assertion: AriaV2ProposedTunnelParityTests.swift reviewTunnelModelRejectRoutesToObjectToTunnel
+    #[test]
+    fn mutation_envelope_text_review_objection() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2LinkMemoriesRequest, V2ReviewTunnelRequest, V2TunnelDecision};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+
+        let (from_id, to_id) = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let f = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-objection-from", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("obj-f"), "test", "test-embed-v1",
+            ), NOW).expect("from").id.clone();
+            let t = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-objection-to", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("obj-t"), "test", "test-embed-v1",
+            ), NOW + 1).expect("to").id.clone();
+            (Uuid::parse_str(&f).expect("from uuid"), Uuid::parse_str(&t).expect("to uuid"))
+        };
+
+        let link_response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id, to_id, relationship: "contradicts".to_owned(),
+                confidence: None, evidence: None, proposed: true, estate_id: None,
+            }),
+            &registry, &meta, NOW + 2, EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("link must succeed");
+        let tunnel_id_str = link_response["structuredContent"]["data"]["tunnel_id"]
+            .as_str().expect("tunnel_id in link response").to_owned();
+        let tunnel_id = Uuid::parse_str(&tunnel_id_str).expect("parse tunnel_id");
+
+        // Model-1 endorses so the objection below yields contested=true (not withdrawn).
+        execute_memory_mutation(
+            MemoryMutationRequest::Review(V2ReviewTunnelRequest {
+                tunnel_id, decision: V2TunnelDecision::Endorse, note: None,
+                reviewed_by: "model-1".to_owned(), estate_id: None,
+            }),
+            &registry, &meta, NOW + 3, EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("endorse must succeed");
+
+        // Model-2 objects → is_objection=true → "Recorded an objection to tunnel <id>."
+        let objection = execute_memory_mutation(
+            MemoryMutationRequest::Review(V2ReviewTunnelRequest {
+                tunnel_id, decision: V2TunnelDecision::Reject, note: None,
+                reviewed_by: "model-2".to_owned(), estate_id: None,
+            }),
+            &registry, &meta, NOW + 4, EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("model objection must succeed");
+
+        assert_eq!(
+            objection["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Recorded an objection to tunnel {}.", tunnel_id_str),
+            "content[0].text must match Swift (moot_review_tunnel objection); got {:?}",
+            objection["content"][0]["text"]
+        );
+    }
+
+    /// Parity gate: moot_review_tunnel content[0].text, user-settle path.
+    /// Swift: "Reviewed tunnel \(tunnelID)."  (AriaV2MemoryMutations.swift:539)
+    /// Twin Swift assertions: AriaV2ProposedTunnelParityTests.swift reviewTunnelAcceptFlipsProposedToActive
+    ///                        AriaV2ProposedTunnelParityTests.swift reviewTunnelRejectWithdrawsProposedTunnel
+    #[test]
+    fn mutation_envelope_text_review_settled() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2LinkMemoriesRequest, V2ReviewTunnelRequest, V2TunnelDecision};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+
+        let (from_id, to_id) = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let f = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-settle-from", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("set-f"), "test", "test-embed-v1",
+            ), NOW).expect("from").id.clone();
+            let t = coord.capture(&handle, CaptureFrame::new(
+                "text-gate-settle-to", CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("set-t"), "test", "test-embed-v1",
+            ), NOW + 1).expect("to").id.clone();
+            (Uuid::parse_str(&f).expect("from uuid"), Uuid::parse_str(&t).expect("to uuid"))
+        };
+
+        let link_response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id, to_id, relationship: "supports".to_owned(),
+                confidence: None, evidence: None, proposed: true, estate_id: None,
+            }),
+            &registry, &meta, NOW + 2, EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("link must succeed");
+        let tunnel_id_str = link_response["structuredContent"]["data"]["tunnel_id"]
+            .as_str().expect("tunnel_id in link response").to_owned();
+        let tunnel_id = Uuid::parse_str(&tunnel_id_str).expect("parse tunnel_id");
+
+        // User accepts → is_objection=false → "Reviewed tunnel <id>."
+        let settle = execute_memory_mutation(
+            MemoryMutationRequest::Review(V2ReviewTunnelRequest {
+                tunnel_id, decision: V2TunnelDecision::Accept, note: None,
+                reviewed_by: "user".to_owned(), estate_id: None,
+            }),
+            &registry, &meta, NOW + 3, EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("user accept must succeed");
+
+        assert_eq!(
+            settle["content"][0]["text"].as_str().unwrap_or(""),
+            format!("Reviewed tunnel {}.", tunnel_id_str),
+            "content[0].text must match Swift (moot_review_tunnel user settle); got {:?}",
+            settle["content"][0]["text"]
         );
     }
 }
