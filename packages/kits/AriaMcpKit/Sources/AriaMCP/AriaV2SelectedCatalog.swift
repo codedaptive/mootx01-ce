@@ -2,7 +2,7 @@ import AriaMCPWire
 
 /// The currently executable ARIA v2 catalog.  An operation is added here only
 /// after its typed decoder and direct service adapter are present.  This keeps
-/// the deliberately incomplete v2 tools/list honest while later families are
+/// the deliberately incomplete v2 tools/list truthful while later families are
 /// extracted.
 enum AriaV2SelectedCatalog {
     static let coreCapability = AriaV2Capability(rawValue: "core")
