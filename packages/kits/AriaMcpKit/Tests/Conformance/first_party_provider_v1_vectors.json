@@ -1,5 +1,5 @@
 {
-  "purpose": "Executable fixed first-party provider contract vectors shared with the later Rust runtime mission.",
+  "purpose": "Executable fixed first-party provider contract vectors shared with the later Rust runtime work.",
   "schema_version": "1.1",
   "provider": {
     "provider": "FirstPartyProvider",
