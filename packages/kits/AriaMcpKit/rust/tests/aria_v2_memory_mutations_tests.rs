@@ -183,7 +183,7 @@ fn typed_service_has_stable_operation_identity_and_outcomes() {
     assert_eq!(erased.memory_id, Some(uuid(MEMORY)));
     assert_eq!(erased.refused_sibling_ids, vec!["sibling-id-abc"]);
 
-    let linked = service.link(V2LinkMemoriesRequest { from_id: uuid(MEMORY), to_id: uuid(TUNNEL), relationship: "contradicts".to_owned(), confidence: None, evidence: None, estate_id: None }).unwrap();
+    let linked = service.link(V2LinkMemoriesRequest { from_id: uuid(MEMORY), to_id: uuid(TUNNEL), relationship: "contradicts".to_owned(), confidence: None, evidence: None, proposed: false, estate_id: None }).unwrap();
     assert_eq!(linked.operation.tool_name(), LINK_MEMORIES_TOOL);
     assert_eq!(linked.outcome, V2MemoryMutationOutcome::Linked);
     assert_eq!(linked.tunnel_id, Some(uuid(TUNNEL)));
