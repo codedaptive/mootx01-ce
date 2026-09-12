@@ -100,6 +100,7 @@ pub mod hydration_representation;
 // Rust twin of EncodeIntake.swift.
 pub mod intake;
 pub mod matrix;
+pub mod kg_fact_search_projection_backfill_gateway;
 pub mod migration;
 pub mod node_topology;
 pub mod substrate_node_topology_provider;
