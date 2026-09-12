@@ -561,8 +561,12 @@ public struct AriaV2MemoryMutations: Sendable {
     ///
     /// `.structured` hydration is used (not `.bitmapOnly`) so that `parentNodeId`
     /// is available when the caller needs it for placement (e.g. `link`). The
-    /// sensitivity comparison is the ONLY ceiling check in this file — both
-    /// `gatedStoredMemoryID` and `link` route through here.
+    /// This is the ONLY ceiling check for MEMORY target resolution — both
+    /// `gatedStoredMemoryID` and `link` route through here. The `review` function
+    /// applies its own separate two-part TUNNEL rule (Part 1: the tunnel's own
+    /// sensitivity; Part 2: each far-endpoint drawer's sensitivity), mirroring
+    /// `loadTunnels`. Those checks live in `review` and do not go through this
+    /// helper.
     private func gatedDrawer(_ memoryID: UUID) async throws -> Drawer {
         let candidates = AriaV2ArgumentDecoder.storageIdentitySpellings(memoryID)
         let estate = try await kit.estate(for: handle)
