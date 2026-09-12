@@ -153,38 +153,35 @@ struct FactFirstRecallTests {
                 "Phase 2: the formerly-stale Jack fact must win once the version is stamped")
     }
 
-    // Gate B extension: the literal schema DEFAULT shape.
+    // Gate B extension: the empty-projection shape after a correct-version backfill.
     //
-    // Every pre-upgrade kg_facts row has searchProjection = "" and
-    // searchProjectionVersion = "" (the v19→v20 migration DEFAULT). This test
-    // verifies that such a fact is not returned by recall and that stamping it
-    // with the real FactSearchProjection values makes it win.
+    // A post-migration-plus-wrong-order scenario: the fact's searchProjectionVersion
+    // is correct (the backfill stamped the version) but searchProjection is "" (the
+    // backfill wrote an empty string, which is the actual schema DEFAULT for unextracted
+    // rows). The version guard passes; only the empty-projection guards remain.
     //
-    // Two independent mechanisms exclude an empty-projection fact:
+    // Two mechanisms exclude the empty-projection fact:
     //   1. FactFirstRecall.swift line 79: `!fact.searchProjection.isEmpty`
     //   2. `guard !tokens.isEmpty` (defaultKeywordTokens("") returns []).
     //
-    // This test CANNOT discriminate between the two mechanisms: removing
-    // lines 79-80 alone does not make Phase 1 go red, because an empty
-    // searchProjection produces no tokens and the fact is excluded by the
-    // second guard anyway. No single condition can be toggled to isolate the
-    // isEmpty path from the tokens path. The test documents a defended
-    // invariant — both guards cover the schema-DEFAULT shape — without
-    // claiming a discrimination it does not have.
+    // This test CANNOT discriminate between the two mechanisms: an empty
+    // searchProjection triggers both at once — the isEmpty check fires first, and
+    // even if it were removed, the downstream tokens guard would exclude the fact.
+    // The test documents a defended invariant — both guards cover the empty-projection
+    // shape — without claiming a discrimination it does not have.
     @Test("Gate B ext: empty-projection fact excluded; stamped fact wins")
     func gateBEmptyProjectionExcluded() {
         let sourceID = "source-empty"
         let source = drawer(id: sourceID, content: "Jack's birthday is in June.", settled: true)
         let sources = [sourceID: source]
 
-        // Fact with the schema-DEFAULT shape: searchProjection = "" and
-        // searchProjectionVersion = "", exactly as the v19→v20 migration
-        // leaves every pre-upgrade row. Subject/object match the query so
-        // only the exclusion guards prevent a hit.
+        // Fact with a correct searchProjectionVersion but an empty searchProjection —
+        // the honest shape for isolating the empty-projection guards. Subject/object
+        // match the query so only the empty-projection guards prevent a hit.
         let emptyFact = KGFact(
             id: "f-empty", subject: "Jack", predicate: "birthday", object: "June",
             sourceDrawerID: sourceID, searchProjection: "",
-            searchProjectionVersion: "",
+            searchProjectionVersion: FactSearchProjection.version,
             filedAt: now)
 
         // Phase 1: the empty-projection fact is excluded. No eligible fact
