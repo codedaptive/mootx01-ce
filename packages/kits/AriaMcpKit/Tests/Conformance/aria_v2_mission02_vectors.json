@@ -5,16 +5,12 @@
     "blast_radius_commit": "f87dabb60",
     "contract": "docs_internal/specs/ARIA_V2_CONTRACT.md",
     "swift_registry": "packages/kits/AriaMcpKit/Sources/AriaMCP/ToolProjection.swift",
-    "rust_registry": "packages/kits/AriaMcpKit/rust/src/tool_list.rs",
-    "packet_sources": {
-      "swift": "packages/kits/AriaMcpKit/Sources/AriaMCP/PacketTools.swift",
-      "rust": "packages/kits/AriaMcpKit/rust/src/v2/packets.rs"
-    }
+    "rust_registry": "packages/kits/AriaMcpKit/rust/src/tool_list.rs"
   },
   "catalog": {
     "base_full_feature_roster": {
-      "expected_tool_count": 83,
-      "retained_callable_identities": 80,
+      "expected_tool_count": 79,
+      "retained_callable_identities": 76,
       "new_callable_identities": [
         "moot_help",
         "moot_monitoring_set",
@@ -22,7 +18,6 @@
       ],
       "feature_prerequisites": [
         "core",
-        "packets",
         "vault"
       ]
     },
@@ -8583,479 +8578,6 @@
         }
       },
       {
-        "id": "file_packet",
-        "name": "moot_file_packet",
-        "description": "File a structured work packet and retain its durable drawer identity.",
-        "help": {
-          "intent": "File a structured work packet and retain its durable drawer identity.",
-          "example": {
-            "name": "moot_file_packet",
-            "arguments": {
-              "objective": "example",
-              "model": "example",
-              "agent": "example"
-            }
-          },
-          "nearest_alternative": null
-        },
-        "effect": "write",
-        "availability": {
-          "all_of": [
-            "core",
-            "packets"
-          ]
-        },
-        "accepted_keys": [
-          "objective",
-          "sources",
-          "claims",
-          "uncertainties",
-          "next_steps",
-          "model",
-          "agent",
-          "sensitivity",
-          "lineage_links",
-          "wing",
-          "estate_id"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "objective": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sources": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "description": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "kind": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "uri": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "description"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "claims": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "statement": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "confidence": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1
-                  },
-                  "supportingSourceIDs": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                "required": [
-                  "statement"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "uncertainties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "next_steps": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "model": {
-              "type": "string",
-              "minLength": 1
-            },
-            "agent": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sensitivity": {
-              "type": "string",
-              "enum": [
-                "normal",
-                "elevated",
-                "restricted",
-                "secret"
-              ]
-            },
-            "lineage_links": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "enum": [
-                      "derivesFrom",
-                      "respondsTo"
-                    ]
-                  },
-                  "targetPacketID": {
-                    "type": "string",
-                    "format": "uuid"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "targetPacketID"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "wing": {
-              "type": "string",
-              "minLength": 1
-            },
-            "estate_id": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "required": [
-            "objective",
-            "model",
-            "agent"
-          ],
-          "additionalProperties": false
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "surface_version": {
-              "const": "v2"
-            },
-            "tool": {
-              "const": "moot_file_packet"
-            },
-            "data": {
-              "type": "object",
-              "additionalProperties": true
-            },
-            "meta": {
-              "type": "object",
-              "properties": {
-                "completeness": {
-                  "const": "incomplete"
-                },
-                "effect": {
-                  "const": "write"
-                }
-              },
-              "required": [
-                "completeness",
-                "effect"
-              ],
-              "additionalProperties": true
-            },
-            "hint": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "surface_version",
-            "tool",
-            "data",
-            "meta"
-          ],
-          "additionalProperties": false
-        }
-      },
-      {
-        "id": "packet_get",
-        "name": "moot_packet_get",
-        "description": "Fetch one authorized work packet by its durable drawer UUID.",
-        "help": {
-          "intent": "Fetch one authorized work packet by its durable drawer UUID.",
-          "example": {
-            "name": "moot_packet_get",
-            "arguments": {
-              "drawer_id": "00000000-0000-4000-8000-000000000000"
-            }
-          },
-          "nearest_alternative": null
-        },
-        "effect": "read",
-        "availability": {
-          "all_of": [
-            "core",
-            "packets"
-          ]
-        },
-        "accepted_keys": [
-          "drawer_id",
-          "wing",
-          "estate_id"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "drawer_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "wing": {
-              "type": "string",
-              "minLength": 1
-            },
-            "estate_id": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "required": [
-            "drawer_id"
-          ],
-          "additionalProperties": false
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "surface_version": {
-              "const": "v2"
-            },
-            "tool": {
-              "const": "moot_packet_get"
-            },
-            "data": {
-              "type": "object",
-              "additionalProperties": true
-            },
-            "meta": {
-              "type": "object",
-              "properties": {
-                "completeness": {
-                  "const": "incomplete"
-                },
-                "effect": {
-                  "const": "read"
-                }
-              },
-              "required": [
-                "completeness",
-                "effect"
-              ],
-              "additionalProperties": true
-            },
-            "hint": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "surface_version",
-            "tool",
-            "data",
-            "meta"
-          ],
-          "additionalProperties": false
-        }
-      },
-      {
-        "id": "packet_list",
-        "name": "moot_packet_list",
-        "description": "List authorized work packets in newest-first capture order.",
-        "help": {
-          "intent": "List authorized work packets in newest-first capture order.",
-          "example": {
-            "name": "moot_packet_list",
-            "arguments": {}
-          },
-          "nearest_alternative": null
-        },
-        "effect": "read",
-        "availability": {
-          "all_of": [
-            "core",
-            "packets"
-          ]
-        },
-        "accepted_keys": [
-          "wing",
-          "limit",
-          "estate_id"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "wing": {
-              "type": "string",
-              "minLength": 1
-            },
-            "limit": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            },
-            "estate_id": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "additionalProperties": false
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "surface_version": {
-              "const": "v2"
-            },
-            "tool": {
-              "const": "moot_packet_list"
-            },
-            "data": {
-              "type": "object",
-              "additionalProperties": true
-            },
-            "meta": {
-              "type": "object",
-              "properties": {
-                "completeness": {
-                  "const": "incomplete"
-                },
-                "effect": {
-                  "const": "read"
-                }
-              },
-              "required": [
-                "completeness",
-                "effect"
-              ],
-              "additionalProperties": true
-            },
-            "hint": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "surface_version",
-            "tool",
-            "data",
-            "meta"
-          ],
-          "additionalProperties": false
-        }
-      },
-      {
-        "id": "packet_lineage",
-        "name": "moot_packet_lineage",
-        "description": "Trace authorized packet antecedents breadth-first from a durable drawer UUID.",
-        "help": {
-          "intent": "Trace authorized packet antecedents breadth-first from a durable drawer UUID.",
-          "example": {
-            "name": "moot_packet_lineage",
-            "arguments": {
-              "drawer_id": "00000000-0000-4000-8000-000000000000"
-            }
-          },
-          "nearest_alternative": null
-        },
-        "effect": "read",
-        "availability": {
-          "all_of": [
-            "core",
-            "packets"
-          ]
-        },
-        "accepted_keys": [
-          "drawer_id",
-          "wing",
-          "max_depth",
-          "estate_id"
-        ],
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "drawer_id": {
-              "type": "string",
-              "format": "uuid"
-            },
-            "wing": {
-              "type": "string",
-              "minLength": 1
-            },
-            "max_depth": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
-            },
-            "estate_id": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          "required": [
-            "drawer_id"
-          ],
-          "additionalProperties": false
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "surface_version": {
-              "const": "v2"
-            },
-            "tool": {
-              "const": "moot_packet_lineage"
-            },
-            "data": {
-              "type": "object",
-              "additionalProperties": true
-            },
-            "meta": {
-              "type": "object",
-              "properties": {
-                "completeness": {
-                  "const": "incomplete"
-                },
-                "effect": {
-                  "const": "read"
-                }
-              },
-              "required": [
-                "completeness",
-                "effect"
-              ],
-              "additionalProperties": true
-            },
-            "hint": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "surface_version",
-            "tool",
-            "data",
-            "meta"
-          ],
-          "additionalProperties": false
-        }
-      },
-      {
         "id": "help",
         "name": "moot_help",
         "description": "Discover exact callable v2 tools by intent or inspect one selected contract.",
@@ -9401,10 +8923,9 @@
         "id": "vault_on_memory_off",
         "features": [
           "core",
-          "packets",
           "vault"
         ],
-        "expected_tool_count": 83,
+        "expected_tool_count": 79,
         "tools": [
           "moot_file_memory",
           "moot_memory_search",
@@ -9482,10 +9003,6 @@
           "moot_vault_status",
           "moot_vault_reconcile",
           "moot_vault_job",
-          "moot_file_packet",
-          "moot_packet_get",
-          "moot_packet_list",
-          "moot_packet_lineage",
           "moot_help",
           "moot_monitoring_set",
           "moot_propose_contradictions"
@@ -9494,10 +9011,9 @@
       {
         "id": "vault_off_memory_off",
         "features": [
-          "core",
-          "packets"
+          "core"
         ],
-        "expected_tool_count": 76,
+        "expected_tool_count": 72,
         "tools": [
           "moot_file_memory",
           "moot_memory_search",
@@ -9568,10 +9084,6 @@
           "moot_file_dataset",
           "moot_dataset_query",
           "moot_dataset_stats",
-          "moot_file_packet",
-          "moot_packet_get",
-          "moot_packet_list",
-          "moot_packet_lineage",
           "moot_help",
           "moot_monitoring_set",
           "moot_propose_contradictions"
@@ -9581,11 +9093,10 @@
         "id": "vault_on_memory_on",
         "features": [
           "core",
-          "packets",
           "vault",
           "memory_adapter"
         ],
-        "expected_tool_count": 84,
+        "expected_tool_count": 80,
         "tools": [
           "memory",
           "moot_file_memory",
@@ -9664,10 +9175,6 @@
           "moot_vault_status",
           "moot_vault_reconcile",
           "moot_vault_job",
-          "moot_file_packet",
-          "moot_packet_get",
-          "moot_packet_list",
-          "moot_packet_lineage",
           "moot_help",
           "moot_monitoring_set",
           "moot_propose_contradictions"
@@ -9677,10 +9184,9 @@
         "id": "vault_off_memory_on",
         "features": [
           "core",
-          "packets",
           "memory_adapter"
         ],
-        "expected_tool_count": 77,
+        "expected_tool_count": 73,
         "tools": [
           "memory",
           "moot_file_memory",
@@ -9752,10 +9258,6 @@
           "moot_file_dataset",
           "moot_dataset_query",
           "moot_dataset_stats",
-          "moot_file_packet",
-          "moot_packet_get",
-          "moot_packet_list",
-          "moot_packet_lineage",
           "moot_help",
           "moot_monitoring_set",
           "moot_propose_contradictions"
