@@ -15,7 +15,10 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 import LocusKit
+import CorpusKit
+import SynapseKit
 import NeuronKit
 import CognitionKit
 import PersistenceKit
@@ -1859,22 +1862,115 @@ struct RecipeToolsSecurityTests {
                 "far-future now must produce invalid_argument refusal; got code: \(code)")
     }
 
-    @Test func dreamNowWithinCeilingIsAccepted() async throws {
+    /// A past `now` within the admission ceiling must be accepted AND used to
+    /// stamp any associations the dream writes.
+    ///
+    /// Setup: a VectorStore-wired estate (token-bag embedding, same as
+    /// DreamAssociatesDispatchTests) with three similar planted rows.  The dream
+    /// runs with `now = "2021-01-01T00:00:00Z"` (far in the past, well within
+    /// the 24 h ceiling), so associations are stamped with that date.
+    ///
+    /// Mutation gate: if `SelectedDreamAuthority.admit` ignores the proposed
+    /// `now` and substitutes wall-clock instead, `association.filedAt` will be
+    /// approximately 2026, not 2021, and the assertion fails ✗.
+    @Test func dreamPastNowIsAdmittedAndStampsAssociations() async throws {
+        // Wire a VectorStore-backed estate so the association sweep can find
+        // similarity pairs among the planted rows.
         let kit = GeniusLocusKit()
-        let handle = try await openEstate(in: kit)
+        let owner = OwnerCredentials(ownerIdentifier: "dream-now-stamp-test")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+
+        // Token-bag embedding: per-token FNV hash → 32-dim float projection.
+        let tokenBag: @Sendable (String) async throws -> [Float] = { text in
+            var acc = [Float](repeating: 0, count: 32)
+            let tokens = text.lowercased().split(
+                whereSeparator: { !$0.isLetter && !$0.isNumber })
+            for token in tokens {
+                var h: UInt64 = 14_695_981_039_346_656_037
+                for byte in token.utf8 {
+                    h = (h ^ UInt64(byte)) &* 1_099_511_628_211
+                }
+                for i in 0..<32 {
+                    h = h &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                    acc[i] += (Float(h >> 40) / Float(1 << 24)) * 2 - 1
+                }
+            }
+            return acc
+        }
+        let provider = FloatSimHashEmbeddingProvider(
+            modelID: "assoc-token-bag-v1", modelVersion: "1.0",
+            projectionSeed: 0xC0FF_EE00, inference: tokenBag)
+
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle)
+        try await kit.wireGLKSubstores(
+            for: handle, backingStorage: storage,
+            embeddingModels: [.randomIndexing(provider: provider)])
+
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        defer { Task { try? await kit.close(handle) } }
 
-        // A date 12 hours in the future — within the 24 h ceiling.
-        let nearFuture = Date().addingTimeInterval(12 * 3600)
-        let formatter = ISO8601DateFormatter()
-        let nearFutureStr = formatter.string(from: nearFuture)
+        // Plant three similar rows — high token-bag overlap guarantees proximity
+        // pairs and thus at least one association written by the sweep.
+        for phrase in [
+            "the api timeout is thirty seconds on all endpoints",
+            "the api timeout is sixty seconds on all endpoints",
+            "the api timeout is ninety seconds on all endpoints",
+        ] {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_memory",
+                arguments: .object([
+                    "content": .string(phrase),
+                    "subject": .string(phrase),
+                    "location": .string("test/notes"),
+                    "impatient": .bool(true),
+                ]))
+        }
 
-        // Should NOT throw — the future-now guard allows up to 24 h.
-        // The dream itself may fail (empty estate) but must not fail at the
-        // boundary validation.
-        _ = try? await dispatcher.dispatch(
+        // Known past instant — 2021-01-01T00:00:00Z.
+        // Five years before wall-clock 2026, so the difference is unambiguous.
+        let knownPastStr = "2021-01-01T00:00:00Z"
+        let knownPast = Date(timeIntervalSince1970: 1_609_459_200)  // 2021-01-01
+
+        let result = try await dispatcher.dispatch(
             name: "moot_dream",
-            arguments: .object(["now": .string(nearFutureStr)]))
+            arguments: .object([
+                "now": .string(knownPastStr),
+                "associates": .string("all"),
+            ]))
+
+        guard case let .object(obj) = result,
+              case .bool(false)? = obj["isError"]
+        else {
+            Issue.record("Expected successful dream; got: \(result)")
+            return
+        }
+
+        // Read associations to verify the admitted `now` was used as the
+        // filing timestamp, not wall-clock.
+        let associations = try await kit.recallAssociations(handle)
+        guard !associations.isEmpty else {
+            // If no associations were written the proximity threshold wasn't
+            // met (e.g. embedding model variation).  Report as a test failure
+            // rather than silently passing, because a vacuous pass hides gate
+            // misses.
+            Issue.record("Expected at least one association from similar planted rows; got zero — the mutation gate cannot be verified")
+            return
+        }
+
+        // Every association must be stamped within 60 seconds of the admitted
+        // past instant.  A wall-clock stamp (2026) would be ~5 years away and
+        // fail this assertion.
+        let margin: TimeInterval = 60
+        for assoc in associations {
+            let diff = abs(assoc.filedAt.timeIntervalSince(knownPast))
+            #expect(diff < margin,
+                    "association.filedAt must be close to the admitted past (\(knownPastStr)); got \(assoc.filedAt) — diff \(diff) s > \(margin) s")
+        }
     }
 
     // MARK: - moot_synthesize clampLimit boundary guards (Finding 3)
