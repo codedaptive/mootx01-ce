@@ -294,7 +294,7 @@ public struct AriaV2MemoryMutations: Sendable {
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await storedMemoryID(request.memoryID)
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.mutate(handle, .init(
                 rowID: storedID,
                 kind: try request.lowerKind(),
@@ -303,6 +303,8 @@ public struct AriaV2MemoryMutations: Sendable {
             return success(tool: "moot_update_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)), "mutation": .string(request.mutation),
             ]), text: "Updated memory \(id(request.memoryID)).")
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_update_memory")
         } catch { return refusal("moot_update_memory", verb: request.mutation, error: error) }
     }
 
@@ -317,16 +319,18 @@ public struct AriaV2MemoryMutations: Sendable {
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await storedMemoryID(request.memoryID)
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.withdraw(handle, .init(rowID: storedID, reason: request.reason))
             return success(tool: "moot_withdraw_memory", data: .object(["memory_id": .string(id(request.memoryID))]), text: "Withdrew memory \(id(request.memoryID)).")
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_withdraw_memory")
         } catch { return unavailable("moot_withdraw_memory") }
     }
 
     public func erase(_ request: AriaV2EraseMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
         do {
-            let storedID = try await storedMemoryID(request.memoryID)
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
             let expungeOutcome = try await kit.expunge(handle, .init(
                 rowID: storedID,
                 reason: request.reason ?? "",
@@ -346,6 +350,8 @@ public struct AriaV2MemoryMutations: Sendable {
                 "outcome": .string(isPartial ? "erased_partially" : "erased"),
                 "refused_sibling_memory_ids": .array(refusedIDs.map { .string($0) }),
             ]), text: text)
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_erase_memory")
         } catch { return unavailable("moot_erase_memory") }
     }
 
@@ -360,11 +366,13 @@ public struct AriaV2MemoryMutations: Sendable {
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await storedMemoryID(request.memoryID)
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.mutate(handle, .init(rowID: storedID, kind: .confirm))
             return success(tool: "moot_confirm_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)), "mutation": .string("confirm"),
             ]), text: "Confirmed memory \(id(request.memoryID)).")
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_confirm_memory")
         } catch { return unavailable("moot_confirm_memory") }
     }
 
@@ -379,12 +387,14 @@ public struct AriaV2MemoryMutations: Sendable {
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await storedMemoryID(request.memoryID)
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.reanchor(handle, .init(rowID: storedID, toRoom: request.room, toWing: request.wing))
             return success(tool: "moot_move_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)),
                 "placement": .object(["wing": .string(request.wing), "room": .string(request.room)]),
             ]), text: "Moved memory \(id(request.memoryID)).")
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_move_memory")
         } catch { return unavailable("moot_move_memory") }
     }
 
@@ -473,15 +483,38 @@ public struct AriaV2MemoryMutations: Sendable {
         }
     }
 
-    /// Resolve the physical spelling without changing the public UUID or
-    /// revealing which candidate exists. Swift-authored estates commonly use
-    /// `uuidString`; portable Rust estates use canonical lowercase.
-    private func storedMemoryID(_ memoryID: UUID) async throws -> String {
+    /// Sentinel thrown when a memory is absent or above the caller's sensitivity
+    /// ceiling. The caller sees a uniform `memory_not_found` refusal for both
+    /// cases so neither can oracle the other.
+    private struct MemoryNotFoundError: Error {}
+
+    /// Resolve the physical storage spelling through a sensitivity ceiling check.
+    /// Returns the stored ID spelling when the memory exists AND its sensitivity
+    /// is within the caller's ceiling. Throws `MemoryNotFoundError` when the ID
+    /// is absent OR when the row sits above `context.maximumSensitivity`. Both
+    /// outcomes produce the same `memory_not_found` refusal so neither case can
+    /// be distinguished by the caller (oracle-closure).
+    ///
+    /// Uses the lifecycle-agnostic `getDrawers(ids:hydrationLevel:)` — not
+    /// `getDrawers(ids:matchingFrame:)` — so that write operations on
+    /// non-active rows (e.g. reject on contested, confirm on active, withdraw
+    /// on any state) are not excluded by lifecycle filters. Only the sensitivity
+    /// adjective is gated here; lifecycle validity is enforced by the lower kit.
+    private func gatedStoredMemoryID(_ memoryID: UUID) async throws -> String {
         let candidates = AriaV2ArgumentDecoder.storageIdentitySpellings(memoryID)
         let estate = try await kit.estate(for: handle)
         let rows = try await estate.getDrawers(ids: candidates, hydrationLevel: .bitmapOnly)
-        return AriaV2ArgumentDecoder.matchingStorageIdentity(memoryID, among: rows.map(\.id))
-            ?? memoryID.uuidString
+        guard let match = rows.first(where: {
+            AriaV2ArgumentDecoder.matchingStorageIdentity(memoryID, among: [$0.id]) != nil
+        }) else {
+            throw MemoryNotFoundError()
+        }
+        // Above-ceiling rows are treated as absent so the caller cannot
+        // distinguish a restricted row from a missing one (oracle-closure).
+        guard match.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue else {
+            throw MemoryNotFoundError()
+        }
+        return match.id
     }
 
     private func success(tool: String, data: JSONValue, text: String) -> JSONValue {
@@ -490,6 +523,16 @@ public struct AriaV2MemoryMutations: Sendable {
 
     private func unavailable(_ tool: String) -> JSONValue {
         AriaV2Envelope.refusal(tool: tool, error: .init(code: "mutation_unavailable", message: "The requested mutation is unavailable in the selected estate.", retryable: false))
+    }
+
+    /// Returned when a memory ID resolves to nothing admissible — either absent
+    /// or above the caller's sensitivity ceiling. The wording is identical in
+    /// both cases so the caller cannot oracle which condition applies.
+    private func notFoundRefusal(_ tool: String) -> JSONValue {
+        AriaV2Envelope.refusal(tool: tool, error: .init(
+            code: "memory_not_found",
+            message: "No authorized memory matched the requested reference.",
+            retryable: false))
     }
 
     /// A GATE REFUSAL is the estate saying no for a stated reason the caller
