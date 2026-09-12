@@ -7,10 +7,15 @@
 // and GLK migration + wireGLKSubstores so the VectorStore is live.
 //
 // Coverage:
-//   1. associates=all on an estate with similar planted rows → response line
-//      `associationsWritten: N (probed: P, deduplicated: D)` appears with N>0.
-//   2. associates=off → the step is entirely skipped; `associationsWritten:`
-//      does NOT appear in the response.
+//   1. associates=all on an estate with similar planted rows → structured data
+//      field `associationsWritten: N` appears in structuredContent.data with N>0.
+//   2. associates=off → the step is entirely skipped; `associationsWritten`
+//      is absent from structuredContent.data.
+//   3. associates=all with 2 items → `associationsNonUniqueProbes` is present
+//      (non-unique pair attempts during the kNN scan); bounded by allModeMaxProbe.
+//   4. allModeMaxProbe constant is 10_000 (compile-time pin).
+//   5. associates=all probes more items than the default 50-probe cadence when
+//      the estate has older items beyond the default probe window.
 
 import Testing
 import Foundation
@@ -199,12 +204,16 @@ struct DreamAssociatesDispatchTests {
     // MARK: - Test 3 — associates=all is bounded (cap holds)
 
     /// `moot_dream` with `associates: "all"` must use a server-side probe bound
-    /// rather than an unlimited sweep. When the estate has fewer items than the
-    /// bound (10_000), all items are probed — `probed:` equals the estate size.
-    /// This confirms the cap path uses `dreamAssociateAllModeMaxProbe` rather
-    /// than `nil` (unbounded): a `nil` probe limit would pass `Int.max` to
-    /// `recentItemIDs(limit:)`, scanning the full table without any bound; the
-    /// named constant makes the limit explicit.
+    /// (10_000) rather than an unlimited sweep.  The server-side constant is
+    /// `AriaV2Dream.GeniusLocusLower.allModeMaxProbe`.  This test confirms the
+    /// field is present (step 3.5 ran) and that the non-unique-probe count is
+    /// within the documented bound.
+    ///
+    /// `associationsNonUniqueProbes` carries the count of kNN candidate pairs
+    /// that were already in the settled set (deduplicated within the sweep),
+    /// NOT the total number of items probed.  It equals the probe count only
+    /// when every item's kNN neighbours were already associated — i.e. at full
+    /// saturation.
     ///
     /// Parity: `dream_all_mode_uses_bounded_probe_limit_not_unlimited` in Rust
     /// `dispatch_tests.rs`.
@@ -234,34 +243,39 @@ struct DreamAssociatesDispatchTests {
         }
 
         // v2 puts structured fields in structuredContent.data.
-        // associationsNonUniqueProbes carries the probed count.  With 2 items
-        // the count must be <= 10_000 (dreamAssociateAllModeMaxProbe).
+        // associationsNonUniqueProbes is present whenever the sweep ran — its
+        // absence means the sweep was skipped or the "all" mode didn't reach
+        // the lower.
         let data = try #require(
             obj["structuredContent"]?.objectValue?["data"]?.objectValue,
             "structuredContent.data must be present in a successful v2 response")
-        if let probes = data["associationsNonUniqueProbes"]?.integerValue {
-            // probes must be <= allModeMaxProbe (10_000); with only 2 estate
-            // items this is trivially satisfied, but the test documents the
-            // contract: "all" is bounded by a named constant, not nil.
-            #expect(probes <= 10_000,
-                    "associates=all probe count must be <= 10_000; got \(probes)")
-        }
+        let nonUniqueProbes = try #require(
+            data["associationsNonUniqueProbes"]?.integerValue,
+            "associates=all must produce associationsNonUniqueProbes in data")
+        // Constant pin: the bound is 10_000.  With 2 items every probe is
+        // trivially within the cap, but the assertion is unconditional so the
+        // test fails if the field is absent (mode was wrong or step was skipped).
+        #expect(nonUniqueProbes <= AriaV2Dream.GeniusLocusLower.allModeMaxProbe,
+                "associates=all non-unique-probes must be <= allModeMaxProbe (\(AriaV2Dream.GeniusLocusLower.allModeMaxProbe)); got \(nonUniqueProbes)")
+        // Compile-time constant pin.
+        #expect(AriaV2Dream.GeniusLocusLower.allModeMaxProbe == 10_000,
+                "allModeMaxProbe must be 10_000")
     }
 
-    // MARK: - Test 4 — dreamAssociateAllModeMaxProbe constant value is 10_000
+    // MARK: - Test 4 — allModeMaxProbe constant value is 10_000
 
-    /// Documents that `RecipeTools.dreamAssociateAllModeMaxProbe` is 10_000.
-    /// The value is private, so this test drives `moot_dream associates=all`
-    /// on a fresh estate and asserts the step completes without error — the
-    /// compile-time constant is verified by reading the source (structural,
-    /// not behavioral). The behavioral cap is exercised by Test 3 above.
+    /// Documents that `AriaV2Dream.GeniusLocusLower.allModeMaxProbe` is 10_000.
+    /// The behavioral enforcement is that `assocProbeLimit` in `GeniusLocusLower.run`
+    /// is always an `Int` (never `nil`), preventing the nil path that allowed
+    /// unbounded probing.  The constant is public so the pin is made directly
+    /// in Test 3 above; this test confirms no-crash on an estate without a
+    /// VectorStore (the sweep is a no-op, not an error).
     @Test
     func dreamAllModeMaxProbeConstantIsDocumented() async throws {
-        // This test is a marker: the behavioral enforcement is that `assocProbeLimit`
-        // in runDream is now always `Int` (never `Int?`), preventing the nil path
-        // that allowed unbounded probing. The constant value 10_000 is the
-        // documented bound. Verified by reading RecipeTools.swift line marked
-        // `private static let dreamAssociateAllModeMaxProbe: Int = 10_000`.
+        // Smoke: the "all" path must not crash when the estate has no VectorStore.
+        // The constant-value pin (#expect == 10_000) lives in Test 3 alongside
+        // the bounded-probe assertion.  Placing it there keeps the pin
+        // unconditionally verified whenever the sweep runs.
         //
         // Run the tool on a bare estate to confirm the "all" path compiles and
         // executes without crashing even on an estate with no VectorStore.
@@ -291,5 +305,98 @@ struct DreamAssociatesDispatchTests {
             return
         }
         #expect(!isError, "moot_dream associates=all on empty estate must not error")
+    }
+
+    // MARK: - Test 5 — associates=all reaches older items that default mode skips
+
+    /// When the estate has more items than the default 50-probe cadence, the
+    /// `associates="all"` mode must write more associations than the default mode
+    /// because it probes items that are older than the default's recency window.
+    ///
+    /// Setup: two clusters, both planted via the wired VectorStore so proximity
+    /// pairs are detectable:
+    ///   - Cluster B (8 items, planted first / oldest): "quantum error qubit N"
+    ///     variations — all similar to each other, dissimilar to cluster A.
+    ///   - Cluster A (52 items, planted second / newest): "api timeout endpoint N"
+    ///     variations — all similar to each other, dissimilar to cluster B.
+    ///
+    /// Default mode (50 probes): takes the 50 most recent items — all from
+    /// cluster A.  kNN finds cluster-A pairs only.  Cluster B is beyond the
+    /// probe window and generates zero associations in this mode.
+    ///
+    /// All mode (10_000 probes): probes all 60 items.  kNN finds cluster-A
+    /// pairs AND cluster-B pairs → `associationsWritten` is strictly larger.
+    ///
+    /// Mutation gate: if `associates="all"` mode is made to use the same 50-probe
+    /// limit as default, both modes probe only the 50 most recent items → same
+    /// result → assertion fails ✗.
+    @Test
+    func dreamAssociatesAllSelectsMoreAssociationsThanDefault() async throws {
+        // --- Estate 1: default-mode run ---
+        let (defaultDispatcher, defaultKit, defaultHandle) = try await makeDispatcher()
+        defer { Task { try? await defaultKit.close(defaultHandle) } }
+
+        // Plant cluster B first (will be older / beyond default probe window).
+        for i in 1...8 {
+            try await file("quantum error qubit alignment \(i) correction", via: defaultDispatcher)
+        }
+        // Plant cluster A second (will be newest / within default probe window).
+        for i in 1...52 {
+            try await file("api timeout endpoint \(i) seconds response time", via: defaultDispatcher)
+        }
+
+        let defaultResult = try await defaultDispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-08-01T00:00:00Z"),
+                // No `associates` arg → default 50-probe cadence.
+            ]))
+
+        guard case let .object(defaultObj) = defaultResult,
+              case .bool(false)? = defaultObj["isError"]
+        else {
+            Issue.record("Default-mode dream failed: \(defaultResult)")
+            return
+        }
+        let defaultData = try #require(
+            defaultObj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "default-mode structuredContent.data must be present")
+        let defaultWritten = defaultData["associationsWritten"]?.integerValue ?? 0
+
+        // --- Estate 2: all-mode run (same content, fresh estate) ---
+        let (allDispatcher, allKit, allHandle) = try await makeDispatcher()
+        defer { Task { try? await allKit.close(allHandle) } }
+
+        for i in 1...8 {
+            try await file("quantum error qubit alignment \(i) correction", via: allDispatcher)
+        }
+        for i in 1...52 {
+            try await file("api timeout endpoint \(i) seconds response time", via: allDispatcher)
+        }
+
+        let allResult = try await allDispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-08-01T00:00:00Z"),
+                "associates": .string("all"),
+            ]))
+
+        guard case let .object(allObj) = allResult,
+              case .bool(false)? = allObj["isError"]
+        else {
+            Issue.record("All-mode dream failed: \(allResult)")
+            return
+        }
+        let allData = try #require(
+            allObj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "all-mode structuredContent.data must be present")
+        let allWritten = try #require(
+            allData["associationsWritten"]?.integerValue,
+            "associates=all must produce associationsWritten in data")
+
+        // All mode must have probed cluster B (8 older items beyond default's
+        // recency window) and written their associations too.
+        #expect(allWritten > defaultWritten,
+                "associates=all must write more associations than default cadence; all=\(allWritten) default=\(defaultWritten)")
     }
 }
