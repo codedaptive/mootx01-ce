@@ -505,6 +505,10 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn link(&self, request: V2LinkMemoriesRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::LinkMemories, request.estate_id)?;
+        // Gate both endpoints through the sensitivity ceiling before writing any edge.
+        // resolve_memory returns NotFound for absent and above-ceiling alike (oracle-closure).
+        self.authority.resolve_memory(&admitted, request.from_id)?;
+        self.authority.resolve_memory(&admitted, request.to_id)?;
         // Capture link payload fields before the lower call borrows request.
         let from_id = request.from_id;
         let to_id = request.to_id;
@@ -593,6 +597,20 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
             .into_iter()
             .find_map(|candidate| estate.get_tunnel(&candidate).ok().flatten())
             .ok_or(())?;
+        // Two-part tunnel sensitivity gate (mirrors visible_tunnels):
+        // Part 1: refuse when the tunnel's own sensitivity exceeds the ceiling.
+        if stored.adjective_sensitivity().raw_value() > admission.maximum_sensitivity.raw_value() {
+            return Err(());
+        }
+        // Part 2: refuse when a known far-endpoint drawer exceeds the ceiling.
+        // A nil endpoint id (room-level connection) passes through without a drawer check.
+        for endpoint_id in [stored.source_drawer_id.as_deref(), stored.target_drawer_id.as_deref()].into_iter().flatten() {
+            if let Ok(Some(drawer)) = estate.drawer_by_id(endpoint_id) {
+                if drawer.adjective_sensitivity().raw_value() > admission.maximum_sensitivity.raw_value() {
+                    return Err(());
+                }
+            }
+        }
         match decision {
             V2TunnelDecision::Endorse => {
                 use genius_locus_kit::brain::conflict_projection_sweep::rejection_tier_of_label;
