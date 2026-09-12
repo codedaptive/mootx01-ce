@@ -185,7 +185,11 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                 descriptor("dream", "moot_dream", V2OperationEffect::Write,
                     "Run one on-demand maintenance and dreaming cycle.",
                     &["Run one on-demand maintenance and dreaming cycle."],
-                    json!({"type":"object","properties":{"associates":{"type":"string","enum":["off","all"]},"estate_id":{"type":"string","format":"uuid"},"now":{"type":"string"}},"required":[],"additionalProperties":false})),
+                    // Bespoke schema for associates: enum + declared default + per-value
+                    // description. moot_help renders inputSchema verbatim so this IS the
+                    // help text. Must match the Swift catalog's bespoke schema exactly so
+                    // both ports produce the same canonical JSON for the digest.
+                    json!({"type":"object","properties":{"associates":{"type":"string","enum":["off","all","recent"],"default":"recent","description":"Association sweep mode. \"recent\" probes the 50 most-recently-filed items (default, fast, mirrors the standing-signal cadence). \"all\" runs a full-estate pass (high coverage, slower). \"off\" skips the step entirely."},"estate_id":{"type":"string","format":"uuid"},"now":{"type":"string"}},"required":[],"additionalProperties":false})),
                 descriptor("migration_run", "moot_migration_run", V2OperationEffect::Read,
                     "Evaluate migration plans and return candidates for a separate confirmation.",
                     &["Evaluate migration plans and return candidates for a separate confirmation."],
