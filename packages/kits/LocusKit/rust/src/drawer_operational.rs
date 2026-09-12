@@ -273,10 +273,11 @@ impl DrawerFeatureFlags {
     pub const FACTS_EXTRACTED: i64 = 1 << 28;
 
     /// The bits every content write clears in the same UPDATE that changes
-    /// `content`: bit 19 (retained, always cleared) and bit 27 (the span
-    /// rows describe the previous content). Applied as
-    /// `operational_bitmap & !CLEARED_ON_CONTENT_WRITE`. Mirrors Swift
-    /// `DrawerFeatureFlags.clearedOnContentWrite`.
+    /// `content`: bit 19 (retained, always cleared), bit 27 (the span rows
+    /// describe the previous content), and bit 28 (the extraction that set it
+    /// described the previous content, so the drawer owes a fresh extraction
+    /// attempt). Applied as `operational_bitmap & !CLEARED_ON_CONTENT_WRITE`.
+    /// Mirrors Swift `DrawerFeatureFlags.clearedOnContentWrite`.
     pub const CLEARED_ON_CONTENT_WRITE: i64 =
         Self::HAS_CURRENT_REPRESENTATION | Self::SPAN_INDEXED | Self::FACTS_EXTRACTED;
 }
