@@ -1178,13 +1178,15 @@ enum AriaV2SelectedCatalog {
         let stringArray = JSONValue.object(["type": .string("array"), "items": stringSchema()])
         switch operation {
         case .lensKeystones:
+            // Gated (restricted/secret) rows carry only id and centrality.
+            // Admissible rows also carry subject, bestSpan, and eventTime.
+            // The three dense fields are optional so that a gated row is schema-valid.
+            let keystoneItem = orderedExactObjectSchema([
+                "id": stringSchema(), "centrality": numberSchema(),
+                "subject": stringSchema(), "bestSpan": stringSchema(), "eventTime": dateSchema(),
+            ], required: ["id", "centrality"])
             return orderedExactObjectSchema([
-                "keystones": .object([
-                    "type": .string("array"),
-                    "items": orderedExactObjectSchema(
-                        ["id": stringSchema(), "centrality": numberSchema()],
-                        required: ["id", "centrality"]),
-                ]),
+                "keystones": .object(["type": .string("array"), "items": keystoneItem]),
             ], required: ["keystones"])
         case .lensConstellation:
             return orderedExactObjectSchema([
@@ -1289,9 +1291,16 @@ enum AriaV2SelectedCatalog {
             let confidence = orderedExactObjectSchema([
                 "claimed": numberSchema(), "calibrated": numberSchema(), "isCalibrated": booleanSchema(),
             ], required: ["claimed", "calibrated", "isCalibrated"])
+            // rankedIDs is now an array of objects, not strings.
+            // Gated rows carry only {id}; admissible rows also carry subject, bestSpan, eventTime.
+            // The three dense fields are optional so that a gated row is schema-valid.
+            let rankedIDItem = orderedExactObjectSchema([
+                "id": stringSchema(), "subject": stringSchema(),
+                "bestSpan": stringSchema(), "eventTime": dateSchema(),
+            ], required: ["id"])
             return orderedExactObjectSchema([
                 "context": context,
-                "rankedIDs": .object(["type": .string("array"), "items": stringSchema()]),
+                "rankedIDs": .object(["type": .string("array"), "items": rankedIDItem]),
                 "highTrustCount": integerSchema(),
                 "calibratedConfidences": .object(["type": .string("array"), "items": confidence]),
             ], required: ["context", "rankedIDs", "highTrustCount"])
@@ -1591,13 +1600,27 @@ enum AriaV2SelectedCatalog {
         ], required: ["memory_id", "placement", "fetch"])
     }
 
+    private static func tunnelRowSchema() -> JSONValue {
+        // Each tunnel row on a depth:full memory record.
+        // far_endpoint_id is absent when the far side terminates at a room rather than
+        // a specific drawer, so it is declared here but not required.
+        orderedExactObjectSchema([
+            "tunnel_id": uuidSchema(), "kind": stringSchema(), "lifecycle": stringSchema(),
+            "far_endpoint_id": uuidSchema(),
+        ], required: ["tunnel_id", "kind", "lifecycle"])
+    }
+
     private static func fullMemorySchema() -> JSONValue {
+        // tunnels is present at depth:full (even when empty) and absent at depth:subject
+        // and depth:distilled, so it is declared here but not required.
         orderedExactObjectSchema([
             "memory_id": uuidSchema(), "subject": stringSchema(), "distilled": stringSchema(),
             "content": stringSchema(), "placement": placementSchema(), "filed_at": dateSchema(),
             "event_time": dateSchema(), "state": stringSchema(), "trust": stringSchema(),
             "sensitivity": stringSchema(), "exportability": stringSchema(), "confirmation": stringSchema(),
-            "lineage_id": uuidSchema(), "fetch": fetchSchema(),
+            "lineage_id": uuidSchema(),
+            "tunnels": .object(["type": .string("array"), "items": tunnelRowSchema()]),
+            "fetch": fetchSchema(),
         ], required: ["memory_id", "fetch"])
     }
 
@@ -1703,7 +1726,16 @@ enum AriaV2SelectedCatalog {
         orderedExactObjectSchema(["memory_id": uuidSchema(), "mutation": stringSchema()], required: ["memory_id", "mutation"])
     }
     private static func idReceiptDataSchema() -> JSONValue { orderedExactObjectSchema(["memory_id": uuidSchema()], required: ["memory_id"]) }
-    private static func eraseMemoryDataSchema() -> JSONValue { orderedExactObjectSchema(["memory_id": uuidSchema(), "refused_sibling_memory_ids": uuidArraySchema()], required: ["memory_id", "refused_sibling_memory_ids"]) }
+    private static func eraseMemoryDataSchema() -> JSONValue {
+        // outcome is a closed vocabulary: erased on a full expunge, erased_partially when
+        // lineage siblings survived the audit gate. refused_sibling_memory_ids is always
+        // present — empty on full erase, populated on partial erase.
+        orderedExactObjectSchema([
+            "memory_id": uuidSchema(),
+            "outcome": enumSchema(["erased", "erased_partially"]),
+            "refused_sibling_memory_ids": uuidArraySchema(),
+        ], required: ["memory_id", "outcome", "refused_sibling_memory_ids"])
+    }
     private static func confirmMemoryDataSchema() -> JSONValue { orderedExactObjectSchema(["memory_id": uuidSchema(), "mutation": .object(["const": .string("confirm")])], required: ["memory_id", "mutation"]) }
     private static func moveMemoryDataSchema() -> JSONValue { orderedExactObjectSchema(["memory_id": uuidSchema(), "placement": placementSchema()], required: ["memory_id", "placement"]) }
     private static func tunnelReceiptSchema() -> JSONValue { orderedExactObjectSchema(["tunnel_id": uuidSchema(), "from_id": uuidSchema(), "to_id": uuidSchema(), "kind": stringSchema(), "lifecycle": enumSchema(["active", "proposed", "superseded", "withdrawn"])], required: ["tunnel_id", "kind", "lifecycle"]) }
