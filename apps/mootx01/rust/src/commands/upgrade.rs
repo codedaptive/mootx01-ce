@@ -68,7 +68,7 @@ pub fn run(
 
     // --backfill-only, or a transient estate: estate-only convergence for
     // scripted and benchmark estates. Runs the estate migration steps (schema
-    // 10 → 20 and 19 → 20, manifest refresh, kg_facts identity, projection
+    // 10 → 19 → 20, manifest refresh, kg_facts identity, projection
     // backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense
     // pooling convergence, span encode, vector reclaim) against the selected
     // estate, then exits. No network, no prompts; each step quiesces the
