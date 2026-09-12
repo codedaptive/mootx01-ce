@@ -36,6 +36,17 @@ struct AriaV2RecallLensTests {
         #expect(AriaV2SelectedCatalog.descriptors.contains { $0.publicName == request.operation.rawValue })
     }
 
+    @Test("public selected v2 keeps its documented string keystone arguments")
+    func publicKeystoneStringCompatibility() throws {
+        let request = try AriaV2RecallLensRequest(
+            tool: AriaV2RecallLensOperation.lensKeystones.rawValue,
+            arguments: .object([
+                "wing": .string("work"), "topK": .string("3"), "keystoneOnly": .string("true"),
+            ]))
+        #expect(request.arguments["topK"] == .string("3"))
+        #expect(request.arguments["keystoneOnly"] == .string("true"))
+    }
+
     @Test("extracted recall names call the typed authority directly")
     func selectedRecallDirectCalls() async throws {
         let service = AriaV2RecallLensService(authority: RecallLensAuthority())

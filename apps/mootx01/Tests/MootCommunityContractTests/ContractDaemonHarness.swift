@@ -9,9 +9,8 @@
 // MCP tool calls.
 //
 // The daemon binary is located via the MOOT_CONTRACT_TEST_DAEMON env var or
-// beside the currently executing SwiftPM test products. If the binary does
-// not exist, `ContractDaemonHarness.findDaemonBinary()` returns nil and
-// callers skip their tests with a meaningful message.
+// beside the currently executing SwiftPM test products. The contract-test
+// target depends on that executable, so a missing binary fails conformance.
 //
 // ARCHITECTURE NOTES
 // ──────────────────
