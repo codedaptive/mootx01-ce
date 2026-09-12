@@ -235,9 +235,10 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     public static let factsExtracted = DrawerFeatureFlags(rawValue: 1 << 28)
 
     /// The bits every content write clears in the same UPDATE that changes
-    /// `content`: bit 19 (retained, always cleared) and bit 27 (the span
-    /// rows describe the previous content). Applied as
-    /// `operationalBitmap & ~clearedOnContentWrite`.
+    /// `content`: bit 19 (retained, always cleared), bit 27 (the span rows
+    /// describe the previous content), and bit 28 (the extraction that set it
+    /// described the previous content, so the drawer owes a fresh extraction
+    /// attempt). Applied as `operationalBitmap & ~clearedOnContentWrite`.
     public static let clearedOnContentWrite: Int64 =
         hasCurrentRepresentation.rawValue | spanIndexed.rawValue | factsExtracted.rawValue
 
