@@ -2205,7 +2205,7 @@ impl DrawerStore for DrawerStoreCore {
         // Materialized projection: write the merged adjective snapshot,
         // zero the content blob, stamp tombstonedAt. The content-derived
         // columns (ssc_facts, subject trio) are NULLed and the
-        // content-derived bits (19, 27) cleared in the same statement
+        // content-derived bits (19, 27, 28; factsExtracted) cleared in the same statement
         // (destruction contract, SPEC §2; cookbook §2.4.1).
         let row_store = self.storage.row_store();
         let cleared_op = prior_operational & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
@@ -2319,7 +2319,7 @@ impl DrawerStore for DrawerStoreCore {
                 let sib_op = self
                     .read_drawer_bitmap(sibling_id, "operationalBitmap")
                     .unwrap_or(0);
-                // Tombstone: clear the content-derived bits (19, 27).
+                // Tombstone: clear the content-derived bits (19, 27, 28; factsExtracted).
                 let sib_cleared_op = sib_op & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
                 let mut vals = BTreeMap::new();
                 vals.insert("content".to_string(), TypedValue::Text(String::new()));
@@ -2386,7 +2386,7 @@ impl DrawerStore for DrawerStoreCore {
                 );
 
                 if let Ok(sib_event) = sib_result {
-                    // Tombstone: clear the content-derived bits (19, 27).
+                    // Tombstone: clear the content-derived bits (19, 27, 28; factsExtracted).
                     let sib_cleared_op =
                         sib_operational & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
                     let mut vals = BTreeMap::new();
@@ -6616,7 +6616,9 @@ pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedV
     // Covers every content-derived column: ssc_facts (Encoder Rerank
     // Program §6 — NULL after a content write is the enrichment stage's
     // "needs facts" predicate) and the subject trio (PR-01). The matching
-    // bits (19, 27) clear through CLEARED_ON_CONTENT_WRITE in the same UPDATE.
+    // bits (19, 27, 28; factsExtracted is cleared too — a content write
+    // revokes the prior extraction result) clear through
+    // CLEARED_ON_CONTENT_WRITE in the same UPDATE.
     for column in [
         "ssc_facts",
         "subject",
