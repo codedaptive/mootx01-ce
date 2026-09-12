@@ -128,7 +128,7 @@ public enum LocusKitSchema {
     public static let version = 20
 
     /// The lowest stored schema version `mootx01 upgrade` brings to
-    /// `version` in one hop: the version CE 1.0.35 and 1.0.37 shipped.
+    /// `version` in two hops, v10 → v19 → v20: the version CE 1.0.35 and 1.0.37 shipped.
     public static let supportedUpgradeFloor = 10
 
     /// What an upgrade does with an estate whose LocusKit ledger row carries
