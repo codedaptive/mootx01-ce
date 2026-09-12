@@ -170,10 +170,11 @@ public enum AriaV2Dream {
 
         /// Full-estate association probe ceiling used when `associates="all"`.
         /// The named constant prevents the nil path (unbounded probing) while
-        /// keeping the limit explicit and auditable.  Public so tests can pin
-        /// the value without re-stating the magic number.  Parity with Rust:
+        /// keeping the limit explicit and auditable.  Internal, not public:
+        /// the tests reach it through `@testable import AriaMCP`, so the pin
+        /// costs no public surface.  Parity with Rust:
         /// `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE_PUB = 10_000` in recipe_tools.rs.
-        public static let allModeMaxProbe: Int = 10_000
+        static let allModeMaxProbe: Int = 10_000
 
         public init(kit: GeniusLocusKit) {
             self.kit = kit
