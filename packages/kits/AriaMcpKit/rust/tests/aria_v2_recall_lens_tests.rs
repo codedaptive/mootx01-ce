@@ -434,7 +434,7 @@ fn execute_distilled_recall_reports_savings_over_emitted_rows_only() {
     assert!(display.starts_with("\u{1F331} Distilled: ~"), "{display}");
 
     // The selected surface appends the display line to the compact text.
-    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", "", None);
+    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", None);
     let response = call(&dispatcher, "moot_recall_distilled", serde_json::json!({"query": "savings-probe", "limit": 100}));
     assert_eq!(response["result"]["isError"], false, "{response}");
     let text = response["result"]["content"][0]["text"].as_str().expect("compact text");
@@ -463,7 +463,7 @@ fn execute_distilled_recall_with_no_rows_still_reports_the_zero_distillation_obj
     assert_eq!(value["capabilities"]["distillation"]["returnedTokens"], serde_json::json!(0));
     assert_eq!(value["capabilities"]["distillation"]["originalTokens"], serde_json::json!(0));
     assert_eq!(value["capabilities"]["distillation"]["display"], serde_json::json!(zero));
-    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", "", None);
+    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", None);
     let response = call(&dispatcher, "moot_recall_distilled", serde_json::json!({"query": "savings-probe"}));
     assert_eq!(response["result"]["isError"], false, "{response}");
     assert_eq!(
@@ -487,7 +487,7 @@ fn execute_precise_recall_carries_no_distillation() {
     };
     let value = serde_json::to_value(&data).unwrap();
     assert!(value["capabilities"].get("distillation").is_none(), "{value}");
-    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", "", None);
+    let dispatcher = aria_mcp::dispatcher::Dispatcher::new(registry, "test", "test", "test", None);
     let response = call(&dispatcher, "moot_recall_precise", serde_json::json!({"query": "savings-probe"}));
     assert_eq!(response["result"]["isError"], false, "{response}");
     let text = response["result"]["content"][0]["text"].as_str().expect("compact text");
