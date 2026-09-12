@@ -223,4 +223,78 @@ struct SensitivityWriteGateTests {
         #expect(!isError(result),
             "correct_sensitivity raise on a normal memory must succeed; got: \(result)")
     }
+
+    // MARK: - Ledger ordering: refused write must not dereference
+
+    /// A tracking ledger that counts `recordDereferenced` calls so the
+    /// ledger-ordering test can assert the dereference did not fire.
+    private actor TrackingMemoryUsageLedger: AriaV2MemoryUsageLedger {
+        private(set) var dereferencedCallCount: Int = 0
+
+        func recordSurfaced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
+            // Not under test — ignore.
+        }
+
+        func recordDereferenced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
+            dereferencedCallCount += 1
+        }
+    }
+
+    /// Ledger-ordering proof: a refused write against a Restricted-sensitivity
+    /// memory must NOT fire the reward-trace dereference write.
+    ///
+    /// This test drives `AriaV2MemoryMutations` directly (bypassing
+    /// `ToolDispatcher`) so it can inject a tracking `AriaV2MemoryUsageLedger`
+    /// and observe whether `recordDereferenced` was called.
+    ///
+    /// Pre-fix failure (verbatim — before the ordering fix, `recordDereferenced`
+    /// fired before `gatedStoredMemoryID` was called, so the count rose to 1
+    /// even on a refused write):
+    ///
+    ///     Expectation failed: ledger.dereferencedCallCount == 0
+    ///     refused write against a Restricted memory must not dereference;
+    ///     dereferencedCallCount: 1
+    ///
+    /// Post-fix: dereferencedCallCount remains 0 because `recordDereferenced`
+    /// is only called inside the `do` block that follows the gate check.
+    @Test func refusedWriteDoesNotDereferenceRestricted() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-ledger-order")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Seed a restricted memory — above the default .elevated ceiling.
+        let restricted = try await seed(
+            "restricted — ledger-ordering probe",
+            sensitivity: .restricted,
+            in: handle,
+            kit: kit
+        )
+
+        // Construct AriaV2MemoryMutations directly with a tracking ledger.
+        // The context has the default maximumSensitivity = .elevated, so the
+        // gate fires for the .restricted memory.
+        let ledger = TrackingMemoryUsageLedger()
+        let context = AriaV2MemoryOperationContext(
+            estateID: handle.estateUUID,
+            callerID: "test-caller",
+            serverIdentity: "test-server",
+            usageLedger: ledger
+        )
+        let mutations = AriaV2MemoryMutations(kit: kit, handle: handle, context: context)
+
+        // Run a refused write.
+        let result = try await mutations.update(arguments: JSONValue.object([
+            "memory_id": JSONValue.string(restricted.id),
+            "mutation": JSONValue.string("confirm"),
+        ]))
+
+        // Gate must have refused.
+        #expect(isError(result),
+            "refused write must set isError=true; got: \(result)")
+
+        // Dereference must not have fired.
+        let callCount = await ledger.dereferencedCallCount
+        #expect(callCount == 0,
+            "refused write against a Restricted memory must not dereference; dereferencedCallCount: \(callCount)")
+    }
 }
