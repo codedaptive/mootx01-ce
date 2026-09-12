@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(format_thousands(1234567), "1,234,567");
     }
 
-    // Rounding cases matching the mission spec and Swift unit tests.
+    // Rounding cases matching the Swift unit tests.
 
     #[test]
     fn rounding_33_percent() {
