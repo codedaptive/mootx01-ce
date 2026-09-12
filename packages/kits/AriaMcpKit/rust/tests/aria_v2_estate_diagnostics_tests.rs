@@ -20,6 +20,8 @@ fn context() -> EstateDiagnosticsContext {
         session_id: "session-a".to_owned(),
         clock_millis: 1_700_000_000_000,
         build_serial: "build-20260908".to_owned(),
+        version_skew: String::new(),
+        update_advisory: None,
     }
 }
 

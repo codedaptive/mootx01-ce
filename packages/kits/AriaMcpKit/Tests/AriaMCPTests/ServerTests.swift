@@ -448,13 +448,10 @@ struct ServerTests {
     // MARK: - Version-skew advisory
 
     /// When the host injects a version-skew advisory, both `moot_estate_ping`
-    /// and `moot_estate_status` surface it verbatim under a `version_skew:`
-    /// line. The default (`nil`) case is covered implicitly by every other
-    /// test in this file — none of them mention "version_skew".
-    ///
-    /// v2 reshape: BLOCKED — see the `.disabled` case below.
-    @Test(.disabled("BLOCKED: v2 moot_estate_ping/moot_estate_status never read ToolDispatcher.versionSkewAdvisory at all. The production path (ToolDispatch.swift:848-851, estateDiagnostics.ping/status) is AriaV2EstateDiagnostics backed by AriaV2EstateDiagnosticsContext (AriaV2EstateDiagnostics.swift:12-41), which has no version-skew field, and ToolDispatch.swift:705-714 does not pass versionSkewAdvisory into that context at all. The only code that renders 'version_skew: <advisory>' is the dead legacy runEstateStatus/runEstatePing (ToolDispatch.swift:3621-3622, 3863-3864), unreachable from ToolDispatcher.dispatch(name:arguments:) — their only caller InterfaceTools.dispatch has zero call sites in Sources/. Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. Do not delete; do not weaken to pass."))
-    func testVersionSkewAdvisorySurfacesInPingAndStatus() async throws {
+    /// and `moot_estate_status` surface it verbatim under `version_skew` in
+    /// structuredContent.data.  The default (`nil`) case is covered implicitly
+    /// by every other test in this file — none of them inject an advisory.
+    @Test func testVersionSkewAdvisorySurfacesInPingAndStatus() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-skew-tests")
         let storage = InMemoryStorage(
@@ -483,15 +480,17 @@ struct ServerTests {
                 Issue.record("\(toolName) returned error: \(response.payload)")
                 continue
             }
-            let content = try #require(result.objectValue?["content"]?.arrayValue)
-            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-            #expect(text.contains("version_skew: \(advisory)"),
-                    "\(toolName) must surface the injected version-skew advisory; got: \(text)")
+            // The advisory must appear verbatim in structuredContent.data.version_skew —
+            // the same position as build_serial (see testBuildSerialInEstateStatusAndPing).
+            let data = result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+            #expect(data?["version_skew"] == .string(advisory),
+                    "\(toolName) must surface the injected advisory in structuredContent.data.version_skew; got: \(String(describing: data?["version_skew"]))")
         }
     }
 
-    /// The default (no advisory injected) case must not mention
-    /// `version_skew` at all — the field is opt-in, not a fixed empty slot.
+    /// The default (no advisory injected) case must leave `version_skew`
+    /// absent entirely from the structured data — the key is opt-in, not a
+    /// fixed empty slot.
     @Test func testNoVersionSkewAdvisoryOmitsField() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(
@@ -510,23 +509,29 @@ struct ServerTests {
         }
         let content = try #require(result.objectValue?["content"]?.arrayValue)
         let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+        // Text body must not mention the key either (belt-and-suspenders).
         #expect(!text.contains("version_skew"),
                 "no version_skew field expected when the host injected no advisory; got: \(text)")
+        // Structural gate: the key must be absent from data entirely, not
+        // present as null or empty string.  A test that would pass with the
+        // key always present proves nothing.
+        let data = try #require(result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue,
+                                "estate_status result must carry structuredContent.data")
+        #expect(data["version_skew"] == nil,
+                "version_skew key must be absent from structuredContent.data when no advisory was injected; got: \(String(describing: data["version_skew"]))")
     }
 
     // MARK: - Upstream-release advisory (update_available)
 
     /// When the host injects an update-advisory provider, both
-    /// `moot_estate_ping` and `moot_estate_status` surface its line under
-    /// `update_available:`. A provider returning nil (up to date / feed
-    /// unreachable — the host's advisor collapses both to nil) must leave
-    /// the field out entirely, mirroring version_skew's opt-in shape. The
-    /// no-provider default is covered implicitly by every other test in
-    /// this file — none of them mention "update_available".
-    ///
-    /// v2 reshape: BLOCKED — see the `.disabled` case below.
-    @Test(.disabled("BLOCKED: v2 moot_estate_ping/moot_estate_status never read ToolDispatcher.updateAdvisoryProvider at all. Same wiring gap as testVersionSkewAdvisorySurfacesInPingAndStatus: AriaV2EstateDiagnosticsContext (AriaV2EstateDiagnostics.swift:12-41) carries no update-advisory field, and ToolDispatch.swift:705-714 does not pass updateAdvisoryProvider into it. The only code path that renders 'update_available: <line>' is the dead legacy runEstateStatus/runEstatePing (ToolDispatch.swift:3624-3630, 3870), unreachable from ToolDispatcher.dispatch(name:arguments:) via the dead InterfaceTools.dispatch. Pinned assertion cannot pass against v2 behavior; there is no v2 field to redirect it to. Do not delete; do not weaken to pass."))
-    func testUpdateAdvisorySurfacesInPingAndStatus() async throws {
+    /// `moot_estate_ping` and `moot_estate_status` carry the provider's line
+    /// verbatim at `structuredContent.data.update_available`. A provider
+    /// returning nil (up to date / feed unreachable — the host's advisor
+    /// collapses both to nil) must leave the field out entirely, mirroring
+    /// version_skew's opt-in shape. The no-provider default is covered
+    /// implicitly by every other test in this file — none of them mention
+    /// "update_available".
+    @Test func testUpdateAdvisorySurfacesInPingAndStatus() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-update-tests")
         let storage = InMemoryStorage(
@@ -558,10 +563,12 @@ struct ServerTests {
                 Issue.record("\(toolName) returned error: \(response.payload)")
                 continue
             }
-            let content = try #require(result.objectValue?["content"]?.arrayValue)
-            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-            #expect(text.contains("update_available: \(line)"),
-                    "\(toolName) must surface the provider's update advisory; got: \(text)")
+            // The advisory must appear verbatim in structuredContent.data.update_available
+            // — the same position as version_skew.  Text body is not the gate;
+            // the structured field is.
+            let data = result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+            #expect(data?["update_available"] == .string(line),
+                    "\(toolName) must surface the provider's advisory in structuredContent.data.update_available; got: \(String(describing: data?["update_available"]))")
         }
     }
 
@@ -601,8 +608,16 @@ struct ServerTests {
             }
             let content = try #require(result.objectValue?["content"]?.arrayValue)
             let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+            // Belt-and-suspenders: text body must not mention the key either.
             #expect(!text.contains("update_available"),
                     "\(toolName) must omit update_available when the provider answers nil; got: \(text)")
+            // Structural gate: key must be absent from data entirely, not present as
+            // null or empty string.  A test that would pass with the key always
+            // present proves nothing.
+            let data = try #require(result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue,
+                                    "\(toolName) result must carry structuredContent.data")
+            #expect(data["update_available"] == nil,
+                    "update_available key must be absent from structuredContent.data when provider answers nil; got: \(String(describing: data["update_available"]))")
         }
     }
 }
