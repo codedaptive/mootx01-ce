@@ -375,7 +375,14 @@ pub enum V2MemoryMutationOutcome { Updated, Withdrawn, Erased, ErasedPartially, 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2TunnelReviewReceipt {
     Endorsed { new_endorser: bool, distinct_endorsers: usize, contested: bool },
-    Settled { withdrawn: bool, contested: bool },
+    // is_objection distinguishes the model-rejection path (object_to_tunnel,
+    // render text: "Recorded an objection to tunnel <id>.") from the user-verdict
+    // path (settle_tunnel, render text: "Reviewed tunnel <id>.").  Both paths
+    // emit exactly {tunnel_id, withdrawn, contested} on the wire; is_objection
+    // is render-only and must never appear in any json!() macro or in
+    // structuredContent.data.  The two receipt paths share one variant and one
+    // key set but carry different envelope prose — this field is the discriminant.
+    Settled { withdrawn: bool, contested: bool, is_objection: bool },
 }
 
 /// Per-operation response data required to render the schema-declared output
@@ -665,7 +672,10 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
                 let (withdrawn, contested) = coordinator
                     .object_to_tunnel(&admission.estate_handle, &stored.id, reviewed_by, lens, admission.now_millis)
                     .map_err(|_| ())?;
-                Ok(V2TunnelReviewReceipt::Settled { withdrawn, contested })
+                // is_objection=true: this is a model rejection routed to
+                // object_to_tunnel, so the surface renders "Recorded an objection
+                // to tunnel <id>." rather than the user-verdict text.
+                Ok(V2TunnelReviewReceipt::Settled { withdrawn, contested, is_objection: true })
             }
             // User verdicts only: `accept` is gated at decode, and a user
             // `reject` withdraws permanently.
@@ -680,9 +690,12 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
                         admission.now_millis,
                     )
                     .map_err(|_| ())?;
+                // is_objection=false: this is a user verdict (settle_tunnel),
+                // so the surface renders "Reviewed tunnel <id>."
                 Ok(V2TunnelReviewReceipt::Settled {
                     withdrawn: matches!(decision, V2TunnelDecision::Reject),
                     contested: false,
+                    is_objection: false,
                 })
             }
         }

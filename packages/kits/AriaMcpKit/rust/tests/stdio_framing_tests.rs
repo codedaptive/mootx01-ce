@@ -129,7 +129,8 @@ fn parse_error_emits_null_id_response() {
 
     let resp = parse_first(&output);
     let obj = resp.as_object().unwrap();
-    assert_eq!(obj["id"], serde_json::json!(null));
+    assert!(obj.contains_key("id"), "JSON-RPC 2.0 requires id present on an error response");
+    assert!(obj["id"].is_null(), "JSON-RPC 2.0 requires id null when the request carried no id");
     let error = obj["error"].as_object().unwrap();
     assert_eq!(error["code"], serde_json::json!(-32700_i64));
 }
@@ -191,7 +192,8 @@ fn invalid_request_emits_null_id_response() {
 
     let resp = parse_first(&output);
     let obj = resp.as_object().unwrap();
-    assert_eq!(obj["id"], serde_json::json!(null));
+    assert!(obj.contains_key("id"), "JSON-RPC 2.0 requires id present on an error response");
+    assert!(obj["id"].is_null(), "JSON-RPC 2.0 requires id null when the request carried no id");
     let error = obj["error"].as_object().unwrap();
     assert_eq!(error["code"], serde_json::json!(-32600_i64));
 }
