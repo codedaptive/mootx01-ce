@@ -1826,7 +1826,7 @@ fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry
             | V2RecallLensOperation::LensPrecedence
             | V2RecallLensOperation::LensComplexity
     ) {
-        use crate::v2::recall_lens::V2RecallLensLower;
+        use crate::v2::recall_lens::{V2RecallLensError, V2RecallLensLower};
         let admission = crate::v2::recall_lens::V2RecallLensAdmission {
             estate_id: selected_memory_list_estate_id(registry),
             estate_handle: registry.default.handle.clone(),
@@ -1852,11 +1852,28 @@ fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry
                     "Returned a direct typed lens result.",
                 ).map_err(jsonrpc_internal)
             }
-            Err(()) => Ok(crate::v2::render::refusal(
+            // Callers that construct V2RecallLensRequest directly (bypassing decode)
+            // can reach this arm with an invalid argument. Produce the same
+            // INVALID_PARAMS error the decode path raises so the ToolDispatch
+            // layer converts it to an invalid_argument refusal envelope.
+            Err(V2RecallLensError::InvalidArgument { message, .. }) => {
+                Err(JSONRPCError::new(JSONRPCErrorCode::INVALID_PARAMS, message))
+            }
+            Err(V2RecallLensError::Unavailable) => Ok(crate::v2::render::refusal(
                 tool,
                 &crate::v2::render::V2OperationalRefusal {
                     code: "lens_unavailable".into(),
                     message: "The requested lens operation is unavailable in the selected estate.".into(),
+                    retryable: false,
+                    recovery: None,
+                },
+                meta,
+            )),
+            Err(V2RecallLensError::OutcomeUnverified(_)) => Ok(crate::v2::render::refusal(
+                tool,
+                &crate::v2::render::V2OperationalRefusal {
+                    code: "outcome_unverified".into(),
+                    message: "The lens outcome could not be revalidated.".into(),
                     retryable: false,
                     recovery: None,
                 },
