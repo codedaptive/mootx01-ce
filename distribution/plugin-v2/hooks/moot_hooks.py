@@ -410,6 +410,30 @@ def mode_context(data):
     # Each rung fires once per session: `fired` is the set of rungs already
     # announced, and crossing several at once announces only the highest.
     fired = set(state.get("fired") or [])
+
+    # SELF-HEAL. A rung is disarmed only by PreCompact or a SessionStart
+    # reporting source == "compact". When neither fires -- and in practice
+    # they often do not -- every rung stays marked and the meter is silent for
+    # the rest of the session. Observed on live sessions: fired=[65,75,85,95]
+    # with compacted=False, silent for an hour.
+    #
+    # That matters more than it looks. The model cannot see window fill on its
+    # own; the counter it does see is a session token budget, not fill. This
+    # hook is its only signal, and a silent hook reads exactly like a
+    # comfortable window.
+    #
+    # So if fill dropped a clear margin below the highest rung already fired,
+    # the window emptied. Re-arm everything above where we are now.
+    if fired and pct + 10 < max(fired):
+        fired = {t for t in fired if t <= pct}
+        state["fired"] = sorted(fired)
+        state["compacted"] = False
+        # Persist HERE: if nothing crosses this turn the function returns
+        # below without saving, and the state file would keep showing rungs
+        # that are no longer armed. That file is what someone reads when the
+        # meter seems wrong.
+        save_state(session_id, state)
+
     crossed = [t for t in THRESHOLDS if pct >= t and t not in fired]
     if not crossed:
         return
@@ -441,6 +465,11 @@ def mode_precompact(data):
     session_id = data.get("session_id", "default")
     state = load_state(session_id)
     state["compacted"] = True
+    # Deliberately NOT clearing `fired` here. PreCompact runs while the window
+    # is still full, so re-arming now would re-fire every threshold on the way
+    # out. SessionStart handles it: on source == "compact" it clears `fired`,
+    # clears `compacted`, and prints the recovery message. That is the moment
+    # the window has actually emptied.
     save_state(session_id, state)
     # A hook cannot compose the handoff — the agent gets no further turn
     # once this fires — but it can make a silent loss visible.
