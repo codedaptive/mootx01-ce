@@ -1044,9 +1044,17 @@ fileprivate extension AriaV2FileMemoryRequest {
         return date
     }
 
-    static func enumValue<T: RawRepresentable>(_ raw: String, path: String, type: T.Type) throws -> T where T.RawValue == String {
+    static func enumValue<T: RawRepresentable & CaseIterable>(_ raw: String, path: String, type: T.Type) throws -> T where T.RawValue == String {
         guard let value = T(rawValue: raw) else {
-            throw invalid(path: path, message: "Argument '\(path)' has an unsupported value '\(raw)'.")
+            // Derive the allowed list from all declared cases so the refusal
+            // carries both fields required by the v2 refusal shape rule.
+            // jsonRPCError sorts allowed at emission; no sort needed here.
+            throw AriaV2InvalidArgument(
+                path: path,
+                message: "Argument '\(path)' has an unsupported value '\(raw)'.",
+                allowed: T.allCases.map(\.rawValue),
+                correction: "use a documented \(path) value"
+            ).jsonRPCError
         }
         return value
     }
