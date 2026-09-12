@@ -68,18 +68,19 @@ pub fn run(
 
     // --backfill-only, or a transient estate: estate-only convergence for
     // scripted and benchmark estates. Runs the estate migration steps (schema
-    // 10 → 20 and 19 → 20, manifest refresh, kg_facts identity, shared-content reclaim,
-    // whole-record vacuum, ssc facts, dense pooling convergence, span encode,
-    // vector reclaim) against the selected estate, then exits. No network, no
-    // prompts; each step quiesces the daemon only when a live resident serves
-    // this estate. Ordering matches run_convergence: schema gate →
-    // correctness migration → VACUUM-backed reclaim → whole-record vacuum
-    // (the first estate open, so the 1.6 → 1.7 capsule runs and reports
-    // here) → ssc facts → dense pooling convergence → span encode → vector
-    // reclaim. A refused schema version stops the sequence (every later
-    // step would open the schema and stamp it); otherwise all steps run even
-    // when earlier steps fail (independent + retryable) and the exit is
-    // non-zero when any step reported failure.
+    // 10 → 20 and 19 → 20, manifest refresh, kg_facts identity, projection
+    // backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense
+    // pooling convergence, span encode, vector reclaim) against the selected
+    // estate, then exits. No network, no prompts; each step quiesces the
+    // daemon only when a live resident serves this estate. Ordering matches
+    // run_convergence: schema gate → correctness migration → projection
+    // backfill → VACUUM-backed reclaim → whole-record vacuum (the first
+    // estate open, so the 1.6 → 1.7 capsule runs and reports here) → ssc
+    // facts → dense pooling convergence → span encode → vector reclaim.
+    // A refused schema version stops the sequence (every later step would
+    // open the schema and stamp it); otherwise all steps run even when
+    // earlier steps fail (independent + retryable) and the exit is non-zero
+    // when any step reported failure.
     if estate_only {
         if record.kind == EstateRecordKind::Transient && !backfill_only {
             println!(
@@ -94,13 +95,14 @@ pub fn run(
         retire_legacy_encryption_opt_out(&record);
         refresh_manifest(&record);
         let ok_kg    = run_kg_fact_identity_backfill(&record);
+        let ok_sp    = run_search_projection_backfill(&record);
         let ok_recl  = run_shared_content_reclaim_if_pending(&record);
         let ok_vacuum = run_whole_record_vacuum(&record);
         let ok_facts = run_ssc_facts_backfill(&record);
         let ok_dense = run_dense_pooling_convergence(&record);
         let ok_span  = run_span_encode_backfill(&record);
         let ok_vec   = run_vector_reclaim(&record);
-        if ok_kg && ok_recl && ok_vacuum && ok_facts && ok_dense && ok_span && ok_vec {
+        if ok_kg && ok_sp && ok_recl && ok_vacuum && ok_facts && ok_dense && ok_span && ok_vec {
             return ExitCode::from(exit::OK);
         } else {
             return ExitCode::from(exit::FAILURE);
@@ -152,6 +154,7 @@ pub fn run(
                 retire_legacy_encryption_opt_out(&record);
                 refresh_manifest(&record);
                 run_kg_fact_identity_backfill(&record);
+                run_search_projection_backfill(&record);
                 run_shared_content_reclaim_if_pending(&record);
                 run_whole_record_vacuum(&record);
                 run_ssc_facts_backfill(&record);
@@ -278,6 +281,7 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
         retire_legacy_encryption_opt_out(record);
         refresh_manifest(record);
         let _ = run_kg_fact_identity_backfill(record);
+        let _ = run_search_projection_backfill(record);
         let _ = run_shared_content_reclaim_if_pending(record);
         let _ = run_whole_record_vacuum(record);
         let _ = run_dense_pooling_convergence(record);
@@ -479,6 +483,79 @@ fn run_kg_fact_identity_backfill(record: &EstateRecord) -> bool {
         Err(e) => {
             println!(
                 "  ✗ kg_facts identity backfill failed: {e}\n    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry."
+            );
+            return false;
+        }
+    }
+    true
+}
+
+/// Populate `kg_facts.searchProjection` and
+/// `kg_facts.searchProjectionVersion` for rows that the v19 → v20
+/// migration added those columns to. Before this backfill those rows were
+/// invisible to `FactFirstRecall`'s hard guard (which excludes any fact
+/// with an empty searchProjection). `mootx01 upgrade` is the ONLY
+/// migration vehicle (Bob's ruling) — no detection or prompting lives
+/// anywhere else.
+///
+/// Idempotent: rows whose searchProjectionVersion already matches are
+/// skipped. A second run over a fully-projected estate reports scanned: 0.
+/// Returns `true` on success or when there is nothing to backfill, `false` on failure.
+fn run_search_projection_backfill(record: &EstateRecord) -> bool {
+    use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
+    use persistence_kit::sqlite::SqliteStorage;
+    use uuid::Uuid;
+
+    let estate = record.database_path();
+    // Absent estate means first run — serve creates new estates post-v20;
+    // there is nothing to backfill.
+    if !estate.exists() {
+        return true;
+    }
+
+    // Single-writer discipline: the resident daemon is stopped around the
+    // work only when this is its estate.
+    let Some(result) = with_resident_daemon_quiesced(
+        &record.pid_path(),
+        "kg_facts search-projection backfill",
+        &PlatformDaemon,
+        || {
+        (|| -> Result<locus_kit::kg_fact_search_projection_backfill::KGFactSearchProjectionBackfillReport, String> {
+            let config = EstateConfiguration::new(
+                Uuid::new_v4(),
+                BackendConfiguration::Sqlite {
+                    path: estate.display().to_string(),
+                    busy_timeout_secs: 5.0,
+                },
+            );
+            let storage = SqliteStorage::new(config).map_err(|e| e.to_string())?;
+            // The build function and version are injected via the GeniusLocusKit
+            // gateway because locus-kit sits below fact-extraction-kit and must
+            // not depend on it.
+            let report = genius_locus_kit::kg_fact_search_projection_backfill_gateway::run(&storage)
+                .map_err(|e| e.to_string())?;
+            let _ = storage.close();
+            Ok(report)
+        })()
+        },
+    ) else {
+        return false;
+    };
+
+    match result {
+        Ok(report) => {
+            if report.scanned == 0 {
+                println!("  ✓ kg_facts search-projection: nothing to backfill");
+            } else {
+                println!(
+                    "  ✓ kg_facts search-projection backfill: {} scanned",
+                    report.scanned
+                );
+            }
+        }
+        Err(e) => {
+            println!(
+                "  ✗ kg_facts search-projection backfill failed: {e}\n    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry."
             );
             return false;
         }

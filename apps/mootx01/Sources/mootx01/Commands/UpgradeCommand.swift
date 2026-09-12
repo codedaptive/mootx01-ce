@@ -49,7 +49,7 @@ struct UpgradeCommand: AsyncParsableCommand {
               mootx01 upgrade --check
 
             Use --backfill-only to run only the estate migration steps
-            (schema 10 → 20 and 19 → 20, kg_facts identity, shared-content reclaim, whole-record
+            (schema 10 → 20 and 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record
             vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim)
             against the estate --db selects (the active estate when absent), then exit. No network,
             no download, no plugin convergence, no encryption offer, no restartAgents
@@ -93,9 +93,9 @@ struct UpgradeCommand: AsyncParsableCommand {
     var noRestart: Bool = false
 
     /// Run ONLY the estate migration steps: schema 10 → 20 and 19 → 20, kg_facts
-    /// identity, shared-content reclaim, whole-record vacuum, ssc facts, dense
-    /// pooling convergence, span encode, and vector reclaim. Intended for
-    /// scripted and benchmark estates, which the caller names with
+    /// identity, projection backfill, shared-content reclaim, whole-record vacuum,
+    /// ssc facts, dense pooling convergence, span encode, and vector reclaim.
+    /// Intended for scripted and benchmark estates, which the caller names with
     /// `--db <path>/<name>` (a transient estate) or a registered name. No
     /// network, no download, no plugin convergence, no encryption offer, no
     /// restartAgents cycle. Each step handles its own daemon quiesce and
@@ -106,16 +106,17 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// Ordering matches `runConvergence`: the schema step first (it decides
     /// whether the estate is one this build upgrades at all; a refusal stops
     /// the sequence before any other step can open the schema), kg_facts
-    /// identity second (correctness migration), shared-content reclaim third
-    /// (VACUUM-backed, most I/O), whole-record vacuum fourth (the first estate
-    /// open of the sequence, so the 1.6 to 1.7 capsule runs and reports here),
-    /// ssc facts fifth, dense pooling convergence sixth (retrains stale-format
-    /// provider bases before any other step opens the corpus), span encode
-    /// seventh (needs the registry row and the corpus wired), vector reclaim
-    /// last (deletes what nothing serves any more).
+    /// identity second (correctness migration), projection backfill third
+    /// (restores recall visibility for pre-v20 facts), shared-content reclaim
+    /// fourth (VACUUM-backed, most I/O), whole-record vacuum fifth (the first
+    /// estate open of the sequence, so the 1.6 to 1.7 capsule runs and reports
+    /// here), ssc facts sixth, dense pooling convergence seventh (retrains
+    /// stale-format provider bases before any other step opens the corpus),
+    /// span encode eighth (needs the registry row and the corpus wired), vector
+    /// reclaim last (deletes what nothing serves any more).
     @Flag(
         name: .customLong("backfill-only"),
-        help: "Run only the estate migration steps (schema 10 → 20 and 19 → 20, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
+        help: "Run only the estate migration steps (schema 10 → 20 and 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
     var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
@@ -198,11 +199,11 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
 
         // --backfill-only: headless estate convergence for scripted and
-        // benchmark estates. Runs only the eight estate migration
-        // steps (schema 10 → 20 and 19 → 20, kg_facts identity, shared-content reclaim,
-        // whole-record vacuum, ssc facts, dense pooling convergence, span
-        // encode, vector reclaim) against the estate the catalog selected
-        // above. No network, no download, no plugin
+        // benchmark estates. Runs only the nine estate migration
+        // steps (schema 10 → 20 and 19 → 20, kg_facts identity, projection
+        // backfill, shared-content reclaim, whole-record vacuum, ssc facts,
+        // dense pooling convergence, span encode, vector reclaim) against the
+        // estate the catalog selected above. No network, no download, no plugin
         // convergence, no encryption offer, no restartAgents cycle. Each step
         // owns its daemon quiesce+restore through ResidentDaemonQuiesce, which
         // touches the daemon only for the resident estate. A refused schema
@@ -217,13 +218,14 @@ struct UpgradeCommand: AsyncParsableCommand {
             retireLegacyEncryptionOptOut(estate: estate)
             refreshManifest(estate: estate)
             let okKG     = await runKGFactIdentityBackfill(estate: estate, home: home)
+            let okSP     = await runSearchProjectionBackfill(estate: estate, home: home)
             let okRecl   = await runSharedContentReclaimIfPending(estate: estate, home: home)
             let okVacuum = await runWholeRecordVacuum(estate: estate, home: home)
             let okFacts  = await runSSCFactsBackfill(estate: estate, home: home)
             let okDense  = await runDensePoolingConvergence(estate: estate, home: home)
             let okSpan   = await runSpanEncodeBackfill(estate: estate, home: home)
             let okVec    = await runVectorReclaim(estate: estate, home: home)
-            guard okKG && okRecl && okVacuum && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
+            guard okKG && okSP && okRecl && okVacuum && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
             return
         }
 
@@ -346,6 +348,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                     retireLegacyEncryptionOptOut(estate: estate)
                     refreshManifest(estate: estate)
                     await runKGFactIdentityBackfill(estate: estate, home: home)
+                    await runSearchProjectionBackfill(estate: estate, home: home)
                     await runSharedContentReclaimIfPending(estate: estate, home: home)
                     await runWholeRecordVacuum(estate: estate, home: home)
                     await runSSCFactsBackfill(estate: estate, home: home)
@@ -462,6 +465,16 @@ struct UpgradeCommand: AsyncParsableCommand {
         offerEstateEncryptionIfNeeded(estate: estate, home: home)
     }
 
+    /// The identity key store an upgrade step opens the estate with. The
+    /// catalog decided what kind of estate this is and the kind decides every
+    /// Keychain question: a registered estate resolves its Ed25519 identity
+    /// per backend (nil, the Keychain for SQLite); a transient estate keeps it
+    /// in memory and never touches the Keychain, so a headless sweep over
+    /// scratch estates cannot stall on a consent dialog. Same rule as `serve`.
+    private static func identityKeyStore(for estate: EstateRecord) -> (any EstateIdentityKeyStore)? {
+        estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore()
+    }
+
     /// Schema upgrade: the one product schema migration. Reads the LocusKit
     /// ledger row RAW, before any schema open, and decides with
     /// `LocusKitSchema.upgradePath(storedVersion:)`:
@@ -479,16 +492,6 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
     /// Returns `true` when the estate is at 20 afterwards (or absent).
     @discardableResult
-    /// The identity key store an upgrade step opens the estate with. The
-    /// catalog decided what kind of estate this is and the kind decides every
-    /// Keychain question: a registered estate resolves its Ed25519 identity
-    /// per backend (nil, the Keychain for SQLite); a transient estate keeps it
-    /// in memory and never touches the Keychain, so a headless sweep over
-    /// scratch estates cannot stall on a consent dialog. Same rule as `serve`.
-    private static func identityKeyStore(for estate: EstateRecord) -> (any EstateIdentityKeyStore)? {
-        estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore()
-    }
-
     private func runSchemaUpgrade(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
         let estateURL = estate.databaseURL
@@ -632,6 +635,67 @@ struct UpgradeCommand: AsyncParsableCommand {
             } catch {
                 print("""
                       ✗ kg_facts identity backfill failed: \(error)
+                        Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// Populate `kg_facts.searchProjection` and
+    /// `kg_facts.searchProjectionVersion` for rows that the v19 → v20
+    /// migration added those columns to. Before this backfill those rows
+    /// were invisible to FactFirstRecall's hard guard (which excludes any
+    /// fact with an empty searchProjection). `mootx01 upgrade` is the ONLY
+    /// migration vehicle (Bob's ruling) — no detection or prompting lives
+    /// anywhere else.
+    ///
+    /// Idempotent: rows whose searchProjectionVersion already matches are
+    /// skipped. A second run over a fully-projected estate reports scanned: 0
+    /// and changes nothing.
+    /// Returns `true` on success or when there is nothing to backfill, `false` on failure.
+    @discardableResult
+    private func runSearchProjectionBackfill(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        // Absent estate means first run — serve creates new estates post-v20;
+        // there is nothing to backfill.
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ kg_facts search-projection backfill skipped — estate key unavailable: \(error)")
+            return false
+        }
+
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "kg_facts search-projection backfill",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                let report = try await KGFactSearchProjectionBackfillGateway.run(storage: storage)
+                await storage.close()
+                if report.scanned == 0 {
+                    print("  ✓ kg_facts search-projection: nothing to backfill")
+                } else {
+                    print("  ✓ kg_facts search-projection backfill: \(report.scanned) scanned")
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ kg_facts search-projection backfill failed: \(error)
                         Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
                     """)
                 return false
@@ -1502,6 +1566,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             retireLegacyEncryptionOptOut(estate: estate)
             refreshManifest(estate: estate)
             await runKGFactIdentityBackfill(estate: estate, home: home)
+            await runSearchProjectionBackfill(estate: estate, home: home)
             await runSharedContentReclaimIfPending(estate: estate, home: home)
             await runWholeRecordVacuum(estate: estate, home: home)
             await runDensePoolingConvergence(estate: estate, home: home)
