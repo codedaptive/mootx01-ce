@@ -41,7 +41,7 @@ pub trait MonitoringControl: Send + Sync {
 
 /// Concrete `MonitoringControl` backed by an `observer_sink::StatsStore`.
 ///
-/// Constructed by `run_http_loop` from the `http_stats_store` when available.
+/// Constructed by `serve_http` from the `http_stats_store` when available.
 /// `None` for the store in the `Dispatcher` means this type is never constructed.
 pub struct StatsStoreMonitoringControl {
     pub store: Arc<observer_sink::StatsStore>,

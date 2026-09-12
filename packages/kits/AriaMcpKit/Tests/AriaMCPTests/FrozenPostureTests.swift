@@ -394,3 +394,107 @@ struct FrozenDispatcherTests {
     }
 
 }
+
+// ---------------------------------------------------------------------------
+// MARK: - Advisory field forwarding through ToolDispatcher copy methods
+//
+// Gates that the two copy methods — withMonitoringControl(_:) and
+// registering(_:) — forward versionSkewAdvisory and updateAdvisoryProvider
+// unchanged. These are the Swift seam: a field added later and forgotten in
+// either method drops silently, and nothing else asserts the forwarding.
+//
+// Deleting the `versionSkewAdvisory:` or `updateAdvisoryProvider:` forwarding
+// line from withMonitoringControl or registering will turn the corresponding
+// test RED. The provider assertion goes beyond non-nil: it awaits the closure
+// and compares the returned string, so a forwarded-but-wrong provider also
+// fails.
+// ---------------------------------------------------------------------------
+
+@Suite("Advisory field forwarding")
+struct AdvisoryFieldForwardingTests {
+
+    private static let skewAdvisory = "plugin 1.0.15 expects binary ≥ 1.0.15; binary is 1.0.11 — run `mootx01 upgrade`"
+    private static let updateAdvisory = "v9.9.9 is available (installed 1.0.33) — upgrade with `mootx01 upgrade`"
+
+    private func openInMemoryEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "advisory-forwarding-tests")
+        let configuration = EstateConfiguration(
+            estateID: UUID(),
+            backend: .inMemory
+        )
+        let storage = InMemoryStorage(configuration: configuration)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner,
+                                        identityKeyStore: InMemoryEstateIdentityKeyStore())
+        return (kit, handle)
+    }
+
+    /// Gate: a ToolDispatcher built with non-nil versionSkewAdvisory and
+    /// updateAdvisoryProvider retains both after being copied through
+    /// withMonitoringControl(nil). The provider is awaited and compared —
+    /// not merely tested for non-nil — so a forwarded-but-wrong closure also
+    /// fails. Deleting the `versionSkewAdvisory:` forwarding line from
+    /// withMonitoringControl will turn this RED.
+    @Test func advisoryFieldsForwardedByWithMonitoringControl() async throws {
+        let (kit, handle) = try await openInMemoryEstate()
+        let advisory = Self.updateAdvisory
+        let dispatcher = ToolDispatcher(
+            kit: kit,
+            handle: handle,
+            versionSkewAdvisory: Self.skewAdvisory,
+            updateAdvisoryProvider: { advisory }
+        )
+
+        let copy = dispatcher.withMonitoringControl(nil)
+
+        #expect(
+            copy.versionSkewAdvisory == Self.skewAdvisory,
+            "withMonitoringControl must forward versionSkewAdvisory unchanged — deleting the forwarding line turns this RED"
+        )
+        let provider = try #require(
+            copy.updateAdvisoryProvider,
+            "withMonitoringControl must forward updateAdvisoryProvider — it must not be nil"
+        )
+        let returned = await provider()
+        #expect(
+            returned == Self.updateAdvisory,
+            "the forwarded updateAdvisoryProvider must return the original value when awaited"
+        )
+    }
+
+    /// Gate: a ToolDispatcher built with non-nil versionSkewAdvisory and
+    /// updateAdvisoryProvider retains both after being copied through
+    /// registering(_:). The provider is awaited and compared — not merely
+    /// tested for non-nil — so a forwarded-but-wrong closure also fails.
+    /// Deleting the `updateAdvisoryProvider:` forwarding line from registering
+    /// will turn this RED.
+    @Test func advisoryFieldsForwardedByRegistering() async throws {
+        let (kit, handle) = try await openInMemoryEstate()
+        // Open a second estate to pass to registering(_:); only one needed.
+        let (_, additionalHandle) = try await openInMemoryEstate()
+        let advisory = Self.updateAdvisory
+        let dispatcher = ToolDispatcher(
+            kit: kit,
+            handle: handle,
+            versionSkewAdvisory: Self.skewAdvisory,
+            updateAdvisoryProvider: { advisory }
+        )
+
+        let copy = dispatcher.registering(additionalHandle)
+
+        #expect(
+            copy.versionSkewAdvisory == Self.skewAdvisory,
+            "registering must forward versionSkewAdvisory unchanged — deleting the forwarding line turns this RED"
+        )
+        let provider = try #require(
+            copy.updateAdvisoryProvider,
+            "registering must forward updateAdvisoryProvider — it must not be nil"
+        )
+        let returned = await provider()
+        #expect(
+            returned == Self.updateAdvisory,
+            "the forwarded updateAdvisoryProvider must return the original value when awaited"
+        )
+    }
+}
