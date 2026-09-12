@@ -155,3 +155,222 @@ private struct RefusingAuthority: AriaV2LensLowerAuthority {
         throw AriaV2LensLower.refusal("The lower engine is unavailable.")
     }
 }
+
+// MARK: - Partial-cue mode argument — discrimination tests
+
+/// Integration tests that prove the `mode` argument on `moot_lens_partial_cue`
+/// routes to the correct engine path. Uses a real in-memory estate with three
+/// memories whose structural and conceptual fingerprints are intentionally
+/// arranged so the three modes produce distinct orderings.
+///
+/// Test data design (DrawerFingerprint.swift — four 64-bit blocks):
+///   anchor: sensitivity=normal, UDC="004"
+///   memA:   sensitivity=normal (identical structure block), UDC="530" (different concept block)
+///   memB:   sensitivity=elevated (different structure block), UDC="004" (identical concept block)
+///
+/// feelsLike (match=structure, differ=concept):
+///   memA  score = 1 * differ_concept > 0  (differ_concept > 0 since UDC differs)
+///   memB  score = match_struct * 0 = 0    (differ_concept = 0; same UDC → identical concept block)
+///
+/// aboutThis (match=concept, differ=structure):
+///   memB  score = 1 * differ_struct > 0   (differ_struct > 0; sensitivity differs → structure block differs)
+///   memA  score = match_concept * 0 = 0   (differ_struct = 0; same sensitivity → identical structure block)
+@Suite("moot_lens_partial_cue mode argument — discrimination tests", .serialized)
+struct PartialCueModeTests {
+
+    // Open a fresh in-memory estate each time so tests are fully isolated.
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "partial-cue-mode-test")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: false)
+        return (kit, handle)
+    }
+
+    // Capture one test drawer with the given UDC and sensitivity.
+    private func capture(
+        kit: GeniusLocusKit, handle: EstateHandle,
+        udc: String, sensitivity: AdjectiveSensitivity
+    ) async throws -> Drawer {
+        let frame = CaptureFrame(
+            content: "partial cue mode test memory \(udc)/\(sensitivity)",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc(udc), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1", sensitivity: sensitivity)
+        return try await kit.capture(handle, frame)
+    }
+
+    // Helper: extract results[0]["id"] from a service response envelope.
+    private func firstResultID(from response: JSONValue) -> JSONValue? {
+        response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue?.first?.objectValue?["id"]
+    }
+
+    // Helper: extract results[0]["score"] from a service response envelope.
+    private func firstResultScore(from response: JSONValue) -> JSONValue? {
+        response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue?.first?.objectValue?["score"]
+    }
+
+    @Test("feelsLike mode ranks same-struct/diff-concept memory first")
+    func feelsLikeRanksStructuralMatchFirst() async throws {
+        let (kit, handle) = try await openEstate()
+        let anchor = try await capture(kit: kit, handle: handle, udc: "004", sensitivity: .normal)
+        let memA   = try await capture(kit: kit, handle: handle, udc: "530", sensitivity: .normal)
+        _          = try await capture(kit: kit, handle: handle, udc: "004", sensitivity: .elevated)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+        #expect(firstResultID(from: response) == .string(memA.id),
+                "feelsLike must rank the same-struct/diff-concept memory first")
+    }
+
+    @Test("aboutThis mode ranks same-concept/diff-struct memory first")
+    func aboutThisRanksConceptMatchFirst() async throws {
+        let (kit, handle) = try await openEstate()
+        let anchor = try await capture(kit: kit, handle: handle, udc: "004", sensitivity: .normal)
+        _          = try await capture(kit: kit, handle: handle, udc: "530", sensitivity: .normal)
+        let memB   = try await capture(kit: kit, handle: handle, udc: "004", sensitivity: .elevated)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("aboutThis")]))
+        let response = try await service.execute(request)
+        #expect(firstResultID(from: response) == .string(memB.id),
+                "aboutThis must rank the same-concept/diff-struct memory first")
+    }
+
+    @Test("fromThen mode produces a different top score than feelsLike for the same memories")
+    func fromThenScoreDiffersFromFeelsLike() async throws {
+        let (kit, handle) = try await openEstate()
+        // Only two memories needed: anchor + memA (diff UDC, same sensitivity).
+        // feelsLike score = 1 * differ_concept; fromThen score = match_temporal * differ_concept.
+        // Since lineageHashes are fresh UUIDs, match_temporal < 1 with overwhelming probability.
+        let anchor = try await capture(kit: kit, handle: handle, udc: "004", sensitivity: .normal)
+        _          = try await capture(kit: kit, handle: handle, udc: "530", sensitivity: .normal)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+
+        let feelsLikeRequest = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let feelsLikeResponse = try await service.execute(feelsLikeRequest)
+
+        let fromThenRequest = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("fromThen")]))
+        let fromThenResponse = try await service.execute(fromThenRequest)
+
+        let scoreFL = firstResultScore(from: feelsLikeResponse)
+        let scoreFT = firstResultScore(from: fromThenResponse)
+        #expect(scoreFL != scoreFT,
+                "fromThen scores must differ from feelsLike scores (mode argument is live; different fingerprint blocks used)")
+    }
+
+    // MARK: Finding 1 — both storage spellings tried
+
+    /// The anchor id returned by the v2 API is canonical lowercase (canonicalUUID).
+    /// On Apple platforms, drawers are stored with uppercase ids (UUID().uuidString).
+    /// Passing the lowercase canonical form as anchor_memory_id must still succeed
+    /// because the two-spelling lookup tries the native uppercase form first.
+    ///
+    /// Neuter: revert lensPartialCue to use only `canonicalAnchorID` directly (no
+    /// storageIdentitySpellings), and this test fails with AnchorNotInRecalledSetError
+    /// because lowercase anchor never equals uppercase drawer.id.
+    @Test("anchor lookup succeeds when stored id uses native uppercase and anchor is passed in canonical lowercase")
+    func anchorLookupTriesBothUUIDSpellings() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+        let anchor = try await capture(kit: kit, handle: handle, udc: "004", sensitivity: .normal)
+        _           = try await capture(kit: kit, handle: handle, udc: "530", sensitivity: .normal)
+        // anchor.id is the native uppercase form (UUID().uuidString on Apple).
+        // AriaV2RecallLensRequest.init normalises .uuid arguments via canonicalUUID,
+        // so the decoded anchor_memory_id is lowercase regardless of what we pass.
+        // The two-spelling loop must try the uppercase spelling to match the stored
+        // uppercase drawer.id.
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id)]))
+        let response = try await service.execute(request)
+        #expect(firstResultID(from: response) != nil,
+                "anchor lookup with uppercase-stored id passed through canonical normalisation must return results")
+    }
+
+    // MARK: Finding 4 — banana mode asserted at the shipped envelope path
+
+    /// An unknown mode value must produce a -32602 INVALID_PARAMS protocol error
+    /// (a throw from ToolDispatcher.dispatch), not an isError:true result envelope.
+    ///
+    /// AriaV2RecallLensRequest.init validates the mode enum at decode time so
+    /// an unknown value is refused before AriaSurfaceDecoder builds a request and
+    /// before dispatchV2 is called.  The thrown JSONRPCError propagates from
+    /// dispatch() to the caller — the transport-level error, not a result envelope.
+    ///
+    /// This matches Rust's behaviour: V2RecallLensRequest::decode validates mode
+    /// at parse time and Dispatcher::handle returns an error envelope with code -32602.
+    ///
+    /// Mutation gate: remove the decode-time validation in AriaV2RecallLensRequest.init
+    /// and dispatch() returns a result instead of throwing — the do/catch succeeds on
+    /// the wrong branch and Issue.record fires.
+    @Test("unknown mode value 'banana' produces -32602 INVALID_PARAMS thrown by dispatch via ToolDispatcher")
+    func unknownModeBananaProducesInvalidParamsThrow() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "banana-mode-envelope-test")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: false)
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(
+            kit: kit, handle: handle,
+            environment: [BenchClock.envKey: "2026-09-08T00:00:00Z"])
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_lens_partial_cue",
+                arguments: .object([
+                    "anchor_memory_id": .string("22222222-2222-4222-8222-222222222222"),
+                    "mode": .string("banana"),
+                ]))
+            Issue.record("dispatch must throw for unknown mode value 'banana'; did not throw")
+        } catch let error as JSONRPCError {
+            // Decode-time validation: the thrown error is a -32602 INVALID_PARAMS
+            // protocol fault.  Path convention: Swift uses bare key "mode".
+            #expect(error.code == JSONRPCErrorCode.invalidParams,
+                    "banana mode must yield -32602 INVALID_PARAMS; got code \(error.code)")
+            #expect(error.data?.objectValue?["path"] == .string("mode"),
+                    "error data.path must be 'mode'; got \(String(describing: error.data?.objectValue?["path"]))")
+            // Parity gate: both ports must expose a machine-readable allowed list.
+            // Swift sorts the allowed list alphabetically; assert on the set of
+            // values so this passes regardless of emission order.
+            let allowedValues = error.data?.objectValue?["allowed"]?.arrayValue?
+                .compactMap { $0.stringValue }
+            #expect(allowedValues != nil,
+                    "error data.allowed must be present; got data: \(String(describing: error.data))")
+            #expect(Set(allowedValues ?? []) == Set(["feelsLike", "aboutThis", "fromThen"]),
+                    "error data.allowed must contain exactly the three valid modes; got \(String(describing: allowedValues))")
+            // Parity gate: both ports must expose a machine-readable correction hint.
+            // The hint tells clients which values are valid without parsing the message.
+            let correction = error.data?.objectValue?["correction"]?.stringValue
+            #expect(correction != nil && !(correction ?? "").isEmpty,
+                    "error data.correction must be present and non-empty; got data: \(String(describing: error.data))")
+        } catch {
+            Issue.record("dispatch must throw JSONRPCError, not \(type(of: error)): \(error)")
+        }
+    }
+}
