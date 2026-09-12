@@ -16,6 +16,19 @@ public struct AriaV2EstateDiagnosticsContext: Sendable {
     public let serverIdentity: String
     public let sessionID: String
     public let buildSerial: String
+    /// Version-skew advisory injected at server construction time.  `nil` when
+    /// the host detected no mismatch between the installed plugin and this binary.
+    /// Surfaced verbatim under the `version_skew` key in the structured data of
+    /// `moot_estate_ping` and `moot_estate_status`; omitted entirely when `nil`.
+    public let versionSkewAdvisory: String?
+    /// Upstream-release advisory provider.  Evaluated ONLY inside the `ping`
+    /// and `status` provider methods — both are `async`, so `await` is safe
+    /// there.  `nil` when the host wired no provider (stdio one-shots, the
+    /// aria-mcp dev server).  Mirroring the rate-limiting note on
+    /// `ToolDispatcher.updateAdvisoryProvider`: the host owns the network
+    /// boundary and caches the feed on a TTL; calling it here keeps the probe
+    /// frequency bounded to orientation calls rather than every tool call.
+    public let updateAdvisoryProvider: (@Sendable () async -> String?)?
     public let now: @Sendable () -> Date
     public let accessGate: any AriaV2EstateDiagnosticsAccessGate
 
@@ -26,6 +39,8 @@ public struct AriaV2EstateDiagnosticsContext: Sendable {
         serverIdentity: String,
         sessionID: String,
         buildSerial: String,
+        versionSkewAdvisory: String? = nil,
+        updateAdvisoryProvider: (@Sendable () async -> String?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         accessGate: any AriaV2EstateDiagnosticsAccessGate = AriaV2AllowEstateDiagnosticsAccess()
     ) {
@@ -35,6 +50,8 @@ public struct AriaV2EstateDiagnosticsContext: Sendable {
         self.serverIdentity = serverIdentity
         self.sessionID = sessionID
         self.buildSerial = buildSerial
+        self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisoryProvider = updateAdvisoryProvider
         self.now = now
         self.accessGate = accessGate
     }
@@ -88,6 +105,25 @@ public struct AriaV2EstatePingData: Sendable, Equatable {
     public let estateName: String
     public let state: String
     public let buildSerial: String
+    /// Version-skew advisory forwarded from the context.  `nil` when no skew
+    /// was detected.  Surfaced as `version_skew` in the structured data.
+    /// Defaults to `nil` so call sites that have no advisory need not change.
+    public let versionSkewAdvisory: String?
+    /// Upstream-release advisory resolved from the provider at call time.
+    /// `nil` when the provider is absent or returns nil (up-to-date / feed
+    /// unreachable).  Surfaced as `update_available` in the structured data;
+    /// omitted entirely when `nil`.  Defaults to `nil` so call sites that do
+    /// not supply the provider need not change.
+    public let updateAdvisory: String?
+    public init(estateID: UUID, estateName: String, state: String, buildSerial: String,
+                versionSkewAdvisory: String? = nil, updateAdvisory: String? = nil) {
+        self.estateID = estateID
+        self.estateName = estateName
+        self.state = state
+        self.buildSerial = buildSerial
+        self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisory = updateAdvisory
+    }
 }
 
 public struct AriaV2EstateStatusData: Sendable, Equatable {
@@ -117,6 +153,40 @@ public struct AriaV2EstateStatusData: Sendable, Equatable {
     /// Shared-content reclaim state, present only when a migration record
     /// exists — an estate that never ran detection leaves the shape unchanged.
     public let sharedContentMigration: AriaV2SharedContentMigration?
+    /// Version-skew advisory forwarded from the context.  `nil` when no skew
+    /// was detected.  Surfaced as `version_skew` in the structured data.
+    /// Defaults to `nil` so call sites that have no advisory need not change.
+    public let versionSkewAdvisory: String?
+    /// Upstream-release advisory resolved from the provider at call time.
+    /// `nil` when the provider is absent or returns nil.  Surfaced as
+    /// `update_available` in the structured data; omitted entirely when `nil`.
+    /// Defaults to `nil` so call sites without the provider need not change.
+    public let updateAdvisory: String?
+
+    // Explicit init so existing callers can omit `versionSkewAdvisory` and `updateAdvisory`.
+    public init(
+        estateID: UUID, estateName: String, memoryCount: Int, factCount: Int,
+        drains: [AriaV2DrainStatusEntry], fdcRecalculation: String,
+        recallTraceCount: Int?, syncState: String,
+        subjectsBearing: Int, subjectsEligible: Int,
+        sharedContentMigration: AriaV2SharedContentMigration?,
+        versionSkewAdvisory: String? = nil,
+        updateAdvisory: String? = nil
+    ) {
+        self.estateID = estateID
+        self.estateName = estateName
+        self.memoryCount = memoryCount
+        self.factCount = factCount
+        self.drains = drains
+        self.fdcRecalculation = fdcRecalculation
+        self.recallTraceCount = recallTraceCount
+        self.syncState = syncState
+        self.subjectsBearing = subjectsBearing
+        self.subjectsEligible = subjectsEligible
+        self.sharedContentMigration = sharedContentMigration
+        self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisory = updateAdvisory
+    }
 }
 
 /// Shared-content migration progress, reported by `moot_estate_status` when a
@@ -193,13 +263,19 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
 
     public func ping(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstatePingResult {
         try validate(context)
+        // Evaluate the upstream-release provider here (async, orientation-only).
+        // Not evaluated for other operations — the host rate-limits its network
+        // probe and this is the sole call point for the two orientation tools.
+        let updateAdvisory = await context.updateAdvisoryProvider?()
         switch await kit.mountState(for: handle) {
         case .mounted:
             return .mounted(AriaV2EstatePingData(
                 estateID: handle.estateUUID,
                 estateName: handle.estateName,
                 state: "mounted",
-                buildSerial: context.buildSerial))
+                buildSerial: context.buildSerial,
+                versionSkewAdvisory: context.versionSkewAdvisory,
+                updateAdvisory: updateAdvisory))
         case .quiesced, .draining:
             return .refusal(.init(
                 code: "estate_unavailable",
@@ -215,6 +291,9 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
 
     public func status(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateStatusData {
         try validate(context)
+        // Evaluate the upstream-release provider here (async, orientation-only).
+        // Not evaluated for other operations — identical rationale as ping above.
+        let updateAdvisory = await context.updateAdvisoryProvider?()
         let estate = try await kit.estate(for: handle)
         let drawers = try await estate.allDrawers()
         let visible = drawers.filter { $0.tombstonedAt == nil && $0.adjectiveSensitivity.isBulkExportable }
@@ -264,7 +343,9 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
             syncState: syncState,
             subjectsBearing: subjectBearing.count,
             subjectsEligible: subjectEligible.count,
-            sharedContentMigration: migration)
+            sharedContentMigration: migration,
+            versionSkewAdvisory: context.versionSkewAdvisory,
+            updateAdvisory: updateAdvisory)
     }
 
     public func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData {
@@ -456,12 +537,19 @@ public struct AriaV2EstateDiagnostics: Sendable {
 
 private extension AriaV2EstatePingData {
     var json: JSONValue {
-        .object([
+        var value: [String: JSONValue] = [
             "estate_id": .string(estateID.uuidString.lowercased()),
             "estate_name": .string(estateName),
             "state": .string(state),
             "build_serial": .string(buildSerial),
-        ])
+        ]
+        // Omitted entirely when no skew was detected — never an empty string,
+        // never null.  Clients check for presence; absence means no skew.
+        if let versionSkewAdvisory { value["version_skew"] = .string(versionSkewAdvisory) }
+        // Omitted entirely when the provider is absent or returned nil (up-to-date
+        // or feed unreachable).  Clients check for presence; absence means current.
+        if let updateAdvisory { value["update_available"] = .string(updateAdvisory) }
+        return .object(value)
     }
 }
 
@@ -484,6 +572,11 @@ private extension AriaV2EstateStatusData {
         // Present only when a migration record exists, so an estate that never
         // ran detection keeps the response shape it always had.
         if let sharedContentMigration { value["shared_content_migration"] = sharedContentMigration.json }
+        // Omitted entirely when no skew was detected — never an empty string,
+        // never null.  Clients check for presence; absence means no skew.
+        if let versionSkewAdvisory { value["version_skew"] = .string(versionSkewAdvisory) }
+        // Omitted entirely when the provider is absent or returned nil.
+        if let updateAdvisory { value["update_available"] = .string(updateAdvisory) }
         return .object(value)
     }
 }

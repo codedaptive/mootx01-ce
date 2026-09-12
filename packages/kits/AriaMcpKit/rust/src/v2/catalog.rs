@@ -1206,17 +1206,28 @@ fn estate_diagnostics_data_schema(name: &str) -> Option<Value> {
     let uuid = || json!({"type":"string","format":"uuid"});
     let string = || json!({"type":"string"});
     match name {
-        "moot_estate_ping" => Some(exact_object(serde_json::Map::from_iter([
-            ("estate_id".to_owned(), uuid()),
-            ("estate_name".to_owned(), string()),
-            ("state".to_owned(), json!({"const":"mounted"})),
-            ("build_serial".to_owned(), string()),
-        ]))),
-        // `recall_trace_count` and `shared_content_migration` are the two
-        // optional members: the first is omitted when the count could not be
-        // read, because a fabricated zero cannot be told from an empty trace
-        // table; the second appears only once a migration record exists, so
-        // an estate that never ran detection keeps the shape it always had.
+        // `version_skew` and `update_available` are optional: omitted when no
+        // advisory is present. Cannot use `exact_object` (derives `required`
+        // from ALL keys) — must declare `required` explicitly. Matches Swift
+        // `orderedExactObjectSchema` with required:
+        // ["build_serial","estate_id","estate_name","state"].
+        "moot_estate_ping" => Some(json!({
+            "type": "object",
+            "properties": {
+                "build_serial": string(),
+                "estate_id": uuid(),
+                "estate_name": string(),
+                "state": {"const": "mounted"},
+                "update_available": string(),
+                "version_skew": string(),
+            },
+            // Sorted, matching the Swift port. The required array is ordered,
+            // so a different order is a different catalog.
+            "required": ["build_serial", "estate_id", "estate_name", "state"],
+            "additionalProperties": false,
+        })),
+        // `recall_trace_count`, `shared_content_migration`, `version_skew`,
+        // and `update_available` are optional members. Matches Swift port.
         "moot_estate_status" => Some(json!({
             "type": "object",
             "properties": {
@@ -1240,6 +1251,8 @@ fn estate_diagnostics_data_schema(name: &str) -> Option<Value> {
                     "required": ["state"],
                     "additionalProperties": false,
                 },
+                "update_available": string(),
+                "version_skew": string(),
             },
             // Sorted, matching exact_object and the Swift port. The required
             // array is ordered, so a different order is a different catalog.
