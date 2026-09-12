@@ -680,3 +680,250 @@ fn lens_parity_no_subject_and_multiline_content() {
         "multiline content must normalize to a single line; got: {:?}", hub_row["bestSpan"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// B6 — proposed tunnel lifecycle: moot_link_memories proposed=true, then
+//      moot_review_tunnel accept/reject.
+//
+// Gate: three assertions driven through Dispatcher::handle (the entry point
+// the shipped server reaches):
+//   1. Link with proposed=true → data.lifecycle == "proposed".
+//   2. moot_review_tunnel accept → Settled, withdrawn=false; connection_search
+//      now returns 1 (active tunnel is visible to search).
+//   3. moot_review_tunnel reject → Settled, withdrawn=true; the row persists,
+//      marked withdrawn, and invisible to search.
+//
+// These exact literals must match the Swift gate in
+// AriaV2ProposedTunnelParityTests.swift. Change both or neither.
+//
+// Pre-fix failure:
+//   V2LinkMemoriesRequest has no proposed field; strict_object rejects
+//   the key with -32602 before any link is created.
+// ---------------------------------------------------------------------------
+
+/// Gate: moot_link_memories proposed=true writes a proposed tunnel and
+/// the response envelope carries lifecycle="proposed".
+///
+/// Entry point: Dispatcher::handle → surface::decode → execute_memory_mutation.
+#[test]
+fn proposed_link_envelope_carries_lifecycle_proposed() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+
+    let from = file_api(&dispatcher, "source drawer for proposed link", None);
+    let to   = file_api(&dispatcher, "target drawer for proposed link", None);
+
+    let result = call(&dispatcher, "moot_link_memories", json!({
+        "from_id": from, "to_id": to, "relationship": "relates", "proposed": true,
+    }));
+    assert!(is_success(&result), "proposed link must succeed: {result}");
+
+    // These exact literals must match the Swift gate in
+    // AriaV2ProposedTunnelParityTests.swift. Change both or neither.
+    assert_eq!(
+        data(&result)["lifecycle"].as_str().unwrap_or(""),
+        "proposed",
+        "link envelope lifecycle must be \"proposed\" when proposed=true; got: {:?}",
+        data(&result)["lifecycle"]
+    );
+    assert!(
+        data(&result)["tunnel_id"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "link envelope must carry a non-empty tunnel_id"
+    );
+}
+
+/// Gate: moot_review_tunnel accept flips the proposed tunnel to active.
+///
+/// Proof: a proposed tunnel is invisible to connection_search (lifecycle guard
+/// filters it). After accept, connection_search returns 1 — the tunnel is now
+/// active. The Settled result carries withdrawn=false.
+///
+/// Entry point: Dispatcher::handle → surface::decode → execute_memory_mutation.
+#[test]
+fn review_tunnel_accept_flips_proposed_to_active() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+
+    let from = file_api(&dispatcher, "accept-test source", None);
+    let to   = file_api(&dispatcher, "accept-test target", None);
+
+    // File the proposed link and extract the tunnel_id.
+    let link_result = call(&dispatcher, "moot_link_memories", json!({
+        "from_id": from, "to_id": to, "relationship": "supports", "proposed": true,
+    }));
+    assert!(is_success(&link_result), "proposed link must succeed: {link_result}");
+    let tunnel_id = data(&link_result)["tunnel_id"]
+        .as_str()
+        .expect("link must carry tunnel_id")
+        .to_owned();
+
+    // Before accept: proposed tunnel is invisible to connection_search.
+    let before = call(&dispatcher, "moot_connection_search", json!({
+        "memory_id": from, "direction": "outgoing",
+    }));
+    assert!(is_success(&before));
+    let before_count = data(&before)["edges"]
+        .as_array().map(|v| v.len()).unwrap_or(0);
+    assert_eq!(before_count, 0, "proposed tunnel must be invisible before accept; got {before_count}");
+
+    // Accept: the user settles the proposed link.
+    let accept = call(&dispatcher, "moot_review_tunnel", json!({
+        "tunnel_id": tunnel_id, "decision": "accept",
+    }));
+    assert!(is_success(&accept), "accept must succeed: {accept}");
+
+    // Settled receipt: withdrawn=false. These exact literals must match the
+    // Swift gate in AriaV2ProposedTunnelParityTests.swift. Change both or neither.
+    assert_eq!(
+        data(&accept)["withdrawn"], serde_json::json!(false),
+        "accept receipt must carry withdrawn=false; got: {:?}", data(&accept)["withdrawn"]
+    );
+    assert_eq!(
+        data(&accept)["contested"], serde_json::json!(false),
+        "accept receipt must carry contested=false; got: {:?}", data(&accept)["contested"]
+    );
+
+    // After accept: active tunnel is visible to connection_search.
+    let after = call(&dispatcher, "moot_connection_search", json!({
+        "memory_id": from, "direction": "outgoing",
+    }));
+    assert!(is_success(&after));
+    let after_count = data(&after)["edges"]
+        .as_array().map(|v| v.len()).unwrap_or(0);
+    assert_eq!(after_count, 1, "active tunnel must be visible after accept; got {after_count}");
+}
+
+/// Gate: moot_review_tunnel reject marks the proposed tunnel withdrawn.
+///
+/// The row persists in storage, is marked withdrawn, and is invisible to
+/// search. Proof: after reject, connection_search returns 0 (withdrawn tunnel
+/// is invisible to search). The Settled result carries withdrawn=true.
+///
+/// Entry point: Dispatcher::handle → surface::decode → execute_memory_mutation.
+#[test]
+fn review_tunnel_reject_withdraws_proposed_tunnel() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+
+    let from = file_api(&dispatcher, "reject-test source", None);
+    let to   = file_api(&dispatcher, "reject-test target", None);
+
+    let link_result = call(&dispatcher, "moot_link_memories", json!({
+        "from_id": from, "to_id": to, "relationship": "contradicts", "proposed": true,
+    }));
+    assert!(is_success(&link_result), "proposed link must succeed: {link_result}");
+    let tunnel_id = data(&link_result)["tunnel_id"]
+        .as_str()
+        .expect("link must carry tunnel_id")
+        .to_owned();
+
+    // Before reject: proposed tunnel is invisible to connection_search.
+    // This assertion goes red on the stored lifecycle directly — if the proposed
+    // lifecycle is not carried, the tunnel lands as active and this count is 1,
+    // failing here before the test ever reaches the precondition.
+    let before = call(&dispatcher, "moot_connection_search", json!({
+        "memory_id": from, "direction": "outgoing",
+    }));
+    assert!(is_success(&before));
+    let before_count = data(&before)["edges"]
+        .as_array().map(|v| v.len()).unwrap_or(0);
+    assert_eq!(before_count, 0, "proposed tunnel must be invisible before reject; got {before_count}");
+
+    // Reject: the user withdraws the proposed link.
+    let reject = call(&dispatcher, "moot_review_tunnel", json!({
+        "tunnel_id": tunnel_id, "decision": "reject",
+    }));
+    assert!(is_success(&reject), "reject must succeed: {reject}");
+
+    // Settled receipt: withdrawn=true. These exact literals must match the
+    // Swift gate in AriaV2ProposedTunnelParityTests.swift. Change both or neither.
+    assert_eq!(
+        data(&reject)["withdrawn"], serde_json::json!(true),
+        "reject receipt must carry withdrawn=true; got: {:?}", data(&reject)["withdrawn"]
+    );
+    assert_eq!(
+        data(&reject)["contested"], serde_json::json!(false),
+        "reject receipt must carry contested=false; got: {:?}", data(&reject)["contested"]
+    );
+
+    // After reject: withdrawn tunnel is invisible to connection_search.
+    let after = call(&dispatcher, "moot_connection_search", json!({
+        "memory_id": from, "direction": "outgoing",
+    }));
+    assert!(is_success(&after));
+    let after_count = data(&after)["edges"]
+        .as_array().map(|v| v.len()).unwrap_or(0);
+    assert_eq!(after_count, 0, "withdrawn tunnel must be invisible after reject; got {after_count}");
+}
+
+/// Gate: moot_review_tunnel reject with reviewed_by != "user" routes to the
+/// model-objection branch (object_to_tunnel), not the user-verdict branch
+/// (respond_to_tunnel).
+///
+/// When a standing model endorsement exists, object_to_tunnel returns
+/// withdrawn=false, contested=true — keeping the tunnel proposed so a human
+/// sees the dispute. respond_to_tunnel (the user branch) would return
+/// withdrawn=true regardless of standing endorsements.
+///
+/// This test: model-1 endorses, then model-2 objects. Since model-1's
+/// endorsement stands, the result is withdrawn=false, contested=true.
+///
+/// Entry point: Dispatcher::handle → surface::decode → execute_memory_mutation.
+///
+/// These exact literals must match the Swift gate in
+/// AriaV2ProposedTunnelParityTests.swift. Change both or neither.
+#[test]
+fn review_tunnel_model_reject_routes_to_object_to_tunnel() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+
+    let from = file_api(&dispatcher, "model-reject source", None);
+    let to   = file_api(&dispatcher, "model-reject target", None);
+
+    // File proposed link.
+    let link_result = call(&dispatcher, "moot_link_memories", json!({
+        "from_id": from, "to_id": to, "relationship": "relates", "proposed": true,
+    }));
+    assert!(is_success(&link_result), "proposed link must succeed: {link_result}");
+    let tunnel_id = data(&link_result)["tunnel_id"]
+        .as_str()
+        .expect("link must carry tunnel_id")
+        .to_owned();
+
+    // model-1 endorses. This creates a standing endorsement that object_to_tunnel
+    // will preserve when model-2 objects.
+    let endorse = call(&dispatcher, "moot_review_tunnel", json!({
+        "tunnel_id": tunnel_id, "decision": "endorse", "reviewed_by": "model-1",
+    }));
+    assert!(is_success(&endorse), "model-1 endorse must succeed: {endorse}");
+
+    // model-2 objects (reject with reviewed_by != "user") → model-objection branch.
+    let reject = call(&dispatcher, "moot_review_tunnel", json!({
+        "tunnel_id": tunnel_id, "decision": "reject", "reviewed_by": "model-2",
+    }));
+    assert!(is_success(&reject), "model reject must succeed: {reject}");
+
+    // object_to_tunnel with standing model-1 endorsement: withdrawn=false, contested=true.
+    // These exact literals must match the Swift gate in
+    // AriaV2ProposedTunnelParityTests.swift. Change both or neither.
+    assert_eq!(
+        data(&reject)["withdrawn"], serde_json::json!(false),
+        "model reject with standing endorsement: withdrawn must be false; got: {:?}",
+        data(&reject)["withdrawn"]
+    );
+    assert_eq!(
+        data(&reject)["contested"], serde_json::json!(true),
+        "model reject with standing endorsement: contested must be true; got: {:?}",
+        data(&reject)["contested"]
+    );
+
+    // The tunnel is still proposed (not active, not withdrawn) — invisible to search.
+    let after = call(&dispatcher, "moot_connection_search", json!({
+        "memory_id": from, "direction": "outgoing",
+    }));
+    assert!(is_success(&after));
+    let after_count = data(&after)["edges"]
+        .as_array().map(|v| v.len()).unwrap_or(0);
+    assert_eq!(after_count, 0,
+        "contested tunnel must remain invisible to connection_search; got {after_count}");
+}
