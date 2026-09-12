@@ -482,6 +482,7 @@ mod tests {
                 relationship: "relates".to_owned(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             },
         ));
