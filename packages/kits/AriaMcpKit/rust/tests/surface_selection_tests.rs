@@ -1337,7 +1337,7 @@ fn v2_dream_far_future_now_is_refused_as_invalid_argument() {
         "the error must name the offending argument: {response}"
     );
     assert!(
-        response["result"].is_null(),
+        response.as_object().expect("response must be an object").get("result").is_none(),
         "a refused call must not also produce a result envelope: {response}"
     );
 }
