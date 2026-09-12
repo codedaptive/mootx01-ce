@@ -41,7 +41,23 @@ public enum AriaV2Dream {
             } else {
                 now = nil
             }
-            associates = try decoder.optionalString("associates")
+            // Normalise first, then validate. "OFF" and "ALL" are accepted alongside
+            // their lowercase forms; any other value is refused with -32602 before
+            // the lower engine is reached, so no sweep runs on an unknown mode.
+            if let rawAssociates = try decoder.optionalString("associates") {
+                let normalised = rawAssociates.lowercased()
+                guard normalised == "off" || normalised == "all" else {
+                    throw AriaV2InvalidArgument(
+                        path: "associates",
+                        message: "Argument 'associates' must be \"off\" or \"all\".",
+                        allowed: ["off", "all"],
+                        correction: "Use \"off\" to skip the association sweep or \"all\" for a full-estate pass."
+                    ).jsonRPCError
+                }
+                associates = normalised
+            } else {
+                associates = nil
+            }
         }
     }
 

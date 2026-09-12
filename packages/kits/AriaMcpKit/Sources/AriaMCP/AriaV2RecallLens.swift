@@ -62,6 +62,24 @@ public struct AriaV2RecallLensRequest: Sendable, Equatable {
                 guard canonical[key]?.objectValue != nil else { throw Self.invalid(key, "object") }
             }
         }
+        // Validate the mode enum for moot_lens_partial_cue at decode time so
+        // an unknown value produces a -32602 INVALID_PARAMS transport fault rather
+        // than an isError:true result from the lower.  Matches Rust's decode-time
+        // validation in V2RecallLensRequest::decode (recall_lens.rs).
+        // Path convention: Swift uses a bare key ("mode"); Rust uses "$.mode".
+        // That difference is each port's repo-wide convention and is intentional.
+        if operation == .lensPartialCue, let rawMode = canonical["mode"]?.stringValue {
+            switch rawMode {
+            case "feelsLike", "aboutThis", "fromThen": break
+            default:
+                throw AriaV2InvalidArgument(
+                    path: "mode",
+                    message: "Argument 'mode' must be one of: feelsLike, aboutThis, fromThen.",
+                    allowed: ["feelsLike", "aboutThis", "fromThen"],
+                    correction: "Use \"feelsLike\", \"aboutThis\", or \"fromThen\"."
+                ).jsonRPCError
+            }
+        }
         self.operation = operation
         self.arguments = canonical
         self.estateID = try decoder.optionalUUID("estate_id")
@@ -91,7 +109,7 @@ public struct AriaV2RecallLensRequest: Sendable, Equatable {
         .lensThemeWeather: schema([], [:]), .lensLatentThemes: schema([], [:]),
         .lensBias: schema([], ["reference": .array]), .lensDrift: schema(["splitAt"], ["splitAt": .string]),
         .lensNodeMotion: schema(["memory_id"], ["memory_id": .uuid]), .lensCohesion: schema([], ["dataset_id": .uuid]), .lensContradiction: schema([], [:]),
-        .lensTrustSynthesis: schema([], ["limit": .positiveInteger]), .lensPartialCue: schema(["anchor_memory_id"], ["anchor_memory_id": .uuid, "limit": .positiveInteger]),
+        .lensTrustSynthesis: schema([], ["limit": .positiveInteger]), .lensPartialCue: schema(["anchor_memory_id"], ["anchor_memory_id": .uuid, "limit": .positiveInteger, "mode": .string]),
         .lensAnticipate: schema(["targetKind"], ["targetKind": .string, "limit": .positiveInteger]), .lensSuccessors: schema(["wing", "anchor_memory_id"], ["wing": .string, "anchor_memory_id": .uuid, "limit": .positiveInteger]),
         .lensOverlap: schema(["comparison_estate_id"], ["comparison_estate_id": .uuid]), .lensDivergence: schema(["comparison_estate_id"], ["comparison_estate_id": .uuid]),
         .lensAssociations: schema([], ["dataset_id": .uuid, "limit": .positiveInteger]), .lensConcepts: schema([], ["recall_limit": .positiveInteger, "limit": .positiveInteger]), .lensApriori: schema([], ["limit": .positiveInteger]),

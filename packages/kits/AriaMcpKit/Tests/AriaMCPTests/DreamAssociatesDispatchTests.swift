@@ -18,6 +18,8 @@
 //   4. allModeMaxProbe constant is 10_000 (compile-time pin).
 //   5. associates=all probes more items than the default 50-probe cadence when
 //      the estate has older items beyond the default probe window.
+//   6. associates=<unknown> is refused with JSON-RPC -32602; no write runs.
+//   7. associates=OFF (uppercase) is accepted and behaves as "off".
 
 import Testing
 import Foundation
@@ -412,5 +414,84 @@ struct DreamAssociatesDispatchTests {
         // recency window) and written their associations too.
         #expect(allWritten > defaultWritten,
                 "associates=all must write more associations than default cadence; all=\(allWritten) default=\(defaultWritten)")
+    }
+
+    // MARK: - Test 6 — associates unknown value is refused before any sweep runs
+
+    /// When an unknown value (e.g. "banana") is passed for `associates`, the
+    /// operation is refused with a -32602 invalid-argument error thrown from
+    /// argument decoding — the lower engine is never reached and no association
+    /// sweep runs.
+    ///
+    /// The topology-change signature (audit,tunnel,kgfact) must be identical
+    /// before and after the refused call, proving no tunnel writes occurred.
+    ///
+    /// Mutation gate: removing the enum guard in AriaV2Dream.Request.init lets
+    /// "banana" reach the execution branch, where it falls through to the
+    /// default 50-probe cadence and runs an association sweep — the tunnel
+    /// count advances and the signature changes, failing the assertion.
+    @Test
+    func dreamAssociatesRejectsUnknownValue() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "dream-assoc-banana-test")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        defer { Task { try? await kit.close(handle) } }
+
+        // Capture topology signature (audit,tunnel,kgfact) before the refused call.
+        let signatureBefore = try await kit.topologyChangeSignature(for: handle)
+
+        // "banana" is not a valid associates value — must throw a JSON-RPC
+        // invalid-argument error before the lower engine is reached.
+        await #expect(throws: JSONRPCError.self, "associates='banana' must throw JSONRPCError") {
+            try await dispatcher.dispatch(
+                name: "moot_dream",
+                arguments: .object([
+                    "now": .string("2026-06-11T00:00:00Z"),
+                    "associates": .string("banana"),
+                ]))
+        }
+
+        // Topology signature must be unchanged — no sweep ran.
+        let signatureAfter = try await kit.topologyChangeSignature(for: handle)
+        #expect(signatureBefore == signatureAfter,
+                "topology must not change when associates is refused; before=\(signatureBefore) after=\(signatureAfter)")
+    }
+
+    // MARK: - Test 7 — uppercase OFF is accepted and normalised
+
+    /// Uppercase "OFF" is accepted for `associates` and behaves identically to
+    /// lowercase "off" — the association sweep step is skipped.
+    ///
+    /// The `.lowercased()` normalisation in AriaV2Dream.Request.init runs before
+    /// the enum check, so "OFF" becomes "off" before validation.
+    ///
+    /// Mutation gate: moving the `.lowercased()` call to after the enum check
+    /// (or removing it) makes "OFF" fail validation with a -32602 throw.
+    @Test
+    func dreamAssociatesUppercaseOffIsAccepted() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        // "OFF" must not throw and must behave as "off" — no associationsWritten
+        // appears in the compact text.
+        let result = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-06-11T00:00:00Z"),
+                "associates": .string("OFF"),
+            ]))
+        let obj = result.objectValue ?? [:]
+        let isError = obj["isError"] == .bool(true)
+        #expect(!isError, "associates='OFF' must be accepted (not refused); result: \(result)")
+        // "off" skips the association sweep; associationsWritten must be absent
+        // from structuredContent.data, matching the behaviour of lowercase "off".
+        let data = obj["structuredContent"]?.objectValue?["data"]?.objectValue ?? [:]
+        #expect(data["associationsWritten"] == nil,
+                "associates='OFF' must skip the sweep (no associationsWritten); data: \(data)")
     }
 }
