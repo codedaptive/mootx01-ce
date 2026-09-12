@@ -43,10 +43,29 @@ impl V2DreamRequest {
         } else {
             None
         };
+        // Normalise first, then validate. "OFF" and "ALL" are accepted alongside
+        // their lowercase forms; any other value is refused with -32602 before
+        // the lower engine is reached, so no sweep runs on an unknown mode.
+        let associates = if let Some(raw) = optional_string(object, "associates")? {
+            let normalised = raw.to_lowercase();
+            if normalised != "off" && normalised != "all" {
+                return Err(super::codec::V2InvalidArgument::new(
+                    "associates",
+                    "Argument 'associates' must be \"off\" or \"all\".",
+                )
+                .allowed(["off".to_owned(), "all".to_owned()])
+                .correction(
+                    "Use \"off\" to skip the association sweep or \"all\" for a full-estate pass.",
+                ));
+            }
+            Some(normalised)
+        } else {
+            None
+        };
         Ok(Self {
             estate_id: optional_uuid(object, "estate_id")?,
             now_millis,
-            associates: optional_string(object, "associates")?.map(|s| s.to_owned()),
+            associates,
         })
     }
 }
