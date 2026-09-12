@@ -12,15 +12,15 @@ use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     drawer_store::SUBJECT_LENGTH_CONTRACT,
     frames::{MutationKind, TunnelCaptureFrame},
-    tunnel_operational::TunnelKind,
+    tunnel_operational::{TunnelKind, TunnelLifecycle},
 };
 use uuid::Uuid;
 
 use crate::jsonrpc::JsonValue;
 
 use super::codec::{
-    optional_string, optional_uuid, required_bool, required_string, required_uuid, strict_object, V2DecodeResult,
-    V2InvalidArgument,
+    optional_bool, optional_string, optional_uuid, required_bool, required_string, required_uuid, strict_object,
+    V2DecodeResult, V2InvalidArgument,
 };
 
 pub const UPDATE_MEMORY_TOOL: &str = "moot_update_memory";
@@ -289,11 +289,15 @@ pub struct V2LinkMemoriesRequest {
     pub relationship: String,
     pub confidence: Option<String>,
     pub evidence: Option<String>,
+    /// When false (absent key or explicit false), the lower creates an ACTIVE edge.
+    /// When true, the lower creates a PROPOSED edge: agent-derived, awaiting user
+    /// adjudication via moot_review_tunnel. Mirrors Swift's `proposed: Bool`.
+    pub proposed: bool,
     pub estate_id: Option<Uuid>,
 }
 impl V2LinkMemoriesRequest {
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
-        let object = strict_object(value, ["from_id", "to_id", "relationship", "confidence", "evidence", "estate_id"])?;
+        let object = strict_object(value, ["from_id", "to_id", "relationship", "confidence", "evidence", "proposed", "estate_id"])?;
         let from_id = required_uuid(object, "from_id")?;
         let to_id = required_uuid(object, "to_id")?;
         if from_id == to_id { return Err(V2InvalidArgument::new("$.to_id", "must differ from $.from_id")); }
@@ -309,6 +313,9 @@ impl V2LinkMemoriesRequest {
             from_id, to_id, relationship,
             confidence: optional_string(object, "confidence")?.map(str::to_owned),
             evidence: optional_string(object, "evidence")?.map(str::to_owned),
+            // An absent key means active — the default for callers that do not
+            // supply the flag, matching Swift's `optionalBoolean("proposed") ?? false`.
+            proposed: optional_bool(object, "proposed")?.unwrap_or(false),
             estate_id: optional_uuid(object, "estate_id")?,
         })
     }
@@ -507,21 +514,26 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
         let admitted = self.admit(V2MemoryMutationOperation::LinkMemories, request.estate_id)?;
         // Gate both endpoints through the sensitivity ceiling before writing any edge.
         // resolve_memory returns NotFound for absent and above-ceiling alike (oracle-closure).
+        // The gate fires regardless of lifecycle: a proposed tunnel to a restricted
+        // endpoint is refused exactly like an active one. Mirrors Swift's comment at
+        // AriaV2MemoryMutations.swift:434-435.
         self.authority.resolve_memory(&admitted, request.from_id)?;
         self.authority.resolve_memory(&admitted, request.to_id)?;
         // Capture link payload fields before the lower call borrows request.
         let from_id = request.from_id;
         let to_id = request.to_id;
         let kind = request.relationship.clone();
+        let proposed = request.proposed;
         let tunnel_id = self.lower.link(&admitted, &request).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let mut result = self.finish(admitted, V2MemoryMutationOperation::LinkMemories, V2MemoryMutationOutcome::Linked, None, Some(tunnel_id))?;
         // Declared schema: { tunnel_id, from_id, to_id, kind, lifecycle }.
-        // The Rust request has no proposed flag; the lower always creates active tunnels.
+        // lifecycle mirrors the written tunnel state: "proposed" when proposed=true,
+        // "active" otherwise. Matches Swift's AriaV2MemoryMutations.swift:464.
         result.payload = Some(V2MutationResponsePayload::Link {
             from_id,
             to_id,
             kind,
-            lifecycle: "active".to_owned(),
+            lifecycle: if proposed { "proposed".to_owned() } else { "active".to_owned() },
         });
         Ok(result)
     }
@@ -586,6 +598,12 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
         frame.source_drawer_id = Some(request.from_id.to_string());
         frame.target_drawer_id = Some(request.to_id.to_string());
         frame.kind = relationship_kind(&request.relationship);
+        // Carry the proposed flag through to the tunnel frame so the stored row
+        // reflects the correct lifecycle. Proposed tunnels await user adjudication
+        // via moot_review_tunnel; absent or false means Active (the default).
+        // Mirrors Swift's `lifecycle: request.proposed ? .proposed : .active`
+        // at AriaV2MemoryMutations.swift:452.
+        if request.proposed { frame.lifecycle = TunnelLifecycle::Proposed; }
         let tunnel = estate.capture_tunnel(frame, admission.now_millis).map_err(|_| ())?;
         Uuid::parse_str(&tunnel.id).map_err(|_| ())
     }
