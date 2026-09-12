@@ -357,3 +357,301 @@ fn partial_erase_emits_refused_sibling_ids_with_refused_id() {
         "refused list must contain D1 id ({d1_id}); got: {:?}", refused
     );
 }
+
+// ---------------------------------------------------------------------------
+// B1-B4 — Dense-field presence and security gate for moot_lens_keystones
+//         and moot_lens_trust_synthesis via Dispatcher::handle.
+//
+// D1 established (commit c8e2c74): changing `if ids.is_empty()` to `if true`
+// at lens_lower.rs structured_drawers_by_id makes every row carry no dense
+// fields, yet the Rust suite was 951/0. These tests close that gap.
+//
+// B1: keystones admissible row carries subject + bestSpan + eventTime.
+// B2: trust_synthesis admissible row carries subject + bestSpan + eventTime.
+// B3: keystones restricted row carries only id + centrality.
+// B4: trust_synthesis restricted row carries only id.
+// B5: value parity for no-subject drawer and multiline content.
+//     Both ports assert the SAME literals — "(no subject)" and "line one line two".
+// ---------------------------------------------------------------------------
+
+/// Seed a drawer directly (bypassing moot_file_memory which requires subject)
+/// so that the drawer has no stored subject — subject debt.
+/// Seed a drawer with no subject into the given wing.
+/// CaptureFrame::new() sets wing: None (defaults to "Agentic Memory"), so
+/// we set frame.wing explicitly so the drawer lands in the named wing and is
+/// visible to moot_lens_keystones queries scoped to that wing.
+fn seed_no_subject(registry: &EstateRegistry, content: &str, wing_name: &str) -> String {
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = locus_kit::frames::CaptureFrame::new(
+        content, locus_kit::drawer_operational::CaptureChannel::Typed, "r",
+        locus_kit::estate_types::LatticeAnchor::udc("000"), "test", "test-model",
+    );
+    frame.wing = Some(wing_name.to_owned());
+    coord.capture(
+        &registry.default.handle,
+        frame,
+        1_700_000_000_000,
+    ).expect("capture no-subject").id
+}
+
+/// Seed a restricted-sensitivity drawer.
+fn seed_restricted(registry: &EstateRegistry, content: &str, location: &str) -> String {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::frames::MutationKind;
+    let id = seed_no_subject(registry, content, location);
+    {
+        let coord = registry.coord.lock().unwrap();
+        coord.mutate(
+            &registry.default.handle, &id,
+            MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted), None,
+        ).expect("correct sensitivity to Restricted");
+    }
+    id
+}
+
+// B1 — moot_lens_keystones admissible rows carry dense fields.
+#[test]
+fn lens_keystones_dense_fields_present_for_admissible_row() {
+    // TRANSIENT: no charter drawers, so the node-topology provider has no
+    // tree edges. recall_tunnels returns only stored tunnels, keeping the
+    // keystones graph deterministic and containing only the drawers we seed.
+    use aria_mcp::estate_registry::EstateOpening;
+    let registry = EstateRegistry::new_inmemory_with(EstateOpening::TRANSIENT);
+    // Seed two drawers into the same wing so hub has outbound tunnel degree.
+    let hub_id = seed_no_subject(&registry, "hub-dense-b1", "b1-wing");
+    let spoke_id = seed_no_subject(&registry, "spoke-dense-b1", "b1-wing");
+    // Link hub → spoke so hub becomes a keystone.
+    {
+        use locus_kit::frames::TunnelCaptureFrame;
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        let mut frame = TunnelCaptureFrame::new(
+            "b1-wing", "r", "b1-wing", "r", "relates", "test");
+        frame.source_drawer_id = Some(hub_id.clone());
+        frame.target_drawer_id = Some(spoke_id.clone());
+        estate.capture_tunnel(frame, 1_700_000_000_000)
+            .expect("tunnel capture");
+    }
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let result = call(&dispatcher, "moot_lens_keystones", json!({ "wing": "b1-wing" }));
+    assert!(is_success(&result), "keystones must succeed: {result}");
+
+    let keystones = data(&result)["keystones"]
+        .as_array()
+        .expect("keystones array must be present");
+    assert!(!keystones.is_empty(), "at least one keystone must be returned");
+
+    // The hub is the only connected node — it must be the top keystone.
+    let hub_row = keystones
+        .iter()
+        .find(|k| k["id"].as_str().map_or(false, |s| s.to_lowercase() == hub_id.to_lowercase()))
+        .unwrap_or_else(|| panic!("hub must appear in keystones; got: {keystones:?}"));
+
+    assert!(
+        hub_row.get("subject").is_some(),
+        "admissible keystone row must carry 'subject'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("bestSpan").is_some(),
+        "admissible keystone row must carry 'bestSpan'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("eventTime").is_some(),
+        "admissible keystone row must carry 'eventTime'; got: {hub_row}"
+    );
+}
+
+// B2 — moot_lens_trust_synthesis admissible rows carry dense fields.
+#[test]
+fn lens_trust_synthesis_dense_fields_present_for_admissible_row() {
+    let registry = EstateRegistry::new_inmemory();
+    let id = seed_normal(&registry, "trust-dense-b2");
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let result = call(&dispatcher, "moot_lens_trust_synthesis", json!({}));
+    assert!(is_success(&result), "trust_synthesis must succeed: {result}");
+
+    let ranked = data(&result)["rankedIDs"]
+        .as_array()
+        .expect("rankedIDs array must be present");
+
+    let row = ranked
+        .iter()
+        .find(|r| r["id"].as_str().map_or(false, |s| s.to_lowercase() == id.to_lowercase()))
+        .unwrap_or_else(|| panic!("seeded drawer must appear in rankedIDs; got: {ranked:?}"));
+
+    assert!(
+        row.get("subject").is_some(),
+        "admissible ranked row must carry 'subject'; got: {row}"
+    );
+    assert!(
+        row.get("bestSpan").is_some(),
+        "admissible ranked row must carry 'bestSpan'; got: {row}"
+    );
+    assert!(
+        row.get("eventTime").is_some(),
+        "admissible ranked row must carry 'eventTime'; got: {row}"
+    );
+}
+
+// B3 — moot_lens_keystones restricted row carries only id + centrality.
+#[test]
+fn lens_keystones_restricted_row_has_no_dense_fields() {
+    let registry = EstateRegistry::new_inmemory();
+    let restricted_id = seed_restricted(&registry, "restricted-hub-b3", "b3-wing");
+    let s1 = seed_no_subject(&registry, "spoke-b3-a", "b3-wing");
+    let s2 = seed_no_subject(&registry, "spoke-b3-b", "b3-wing");
+    // Link restricted hub → spokes so it becomes a keystone.
+    {
+        use locus_kit::frames::TunnelCaptureFrame;
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        for spoke_id in &[&s1, &s2] {
+            let mut frame = TunnelCaptureFrame::new(
+                "b3-wing", "r", "b3-wing", "r", "relates", "test");
+            frame.source_drawer_id = Some(restricted_id.clone());
+            frame.target_drawer_id = Some(spoke_id.to_string());
+            estate.capture_tunnel(frame, 1_700_000_000_000)
+                .expect("tunnel capture");
+        }
+    }
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let result = call(&dispatcher, "moot_lens_keystones", json!({ "wing": "b3-wing" }));
+    assert!(is_success(&result), "keystones must succeed: {result}");
+
+    let keystones = data(&result)["keystones"]
+        .as_array()
+        .expect("keystones array must be present");
+
+    // The restricted hub may or may not appear in the ranked list. When it does,
+    // it MUST carry only id and centrality — no dense fields (indistinguishability rule).
+    for k in keystones {
+        if k["id"].as_str().map_or(false, |s| s.to_lowercase() == restricted_id.to_lowercase()) {
+            assert!(
+                k.get("subject").is_none(),
+                "restricted keystone must not expose 'subject'; got: {k}"
+            );
+            assert!(
+                k.get("bestSpan").is_none(),
+                "restricted keystone must not expose 'bestSpan'; got: {k}"
+            );
+            assert!(
+                k.get("eventTime").is_none(),
+                "restricted keystone must not expose 'eventTime'; got: {k}"
+            );
+            assert!(
+                k.get("id").is_some(),
+                "restricted keystone must still carry 'id'; got: {k}"
+            );
+            assert!(
+                k.get("centrality").is_some(),
+                "restricted keystone must still carry 'centrality'; got: {k}"
+            );
+        }
+    }
+}
+
+// B4 — moot_lens_trust_synthesis restricted row carries only id.
+#[test]
+fn lens_trust_synthesis_restricted_row_has_no_dense_fields() {
+    let registry = EstateRegistry::new_inmemory();
+    let restricted_id = seed_restricted(&registry, "restricted-b4", "b4-wing");
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let result = call(&dispatcher, "moot_lens_trust_synthesis", json!({}));
+    assert!(is_success(&result), "trust_synthesis must succeed: {result}");
+
+    let ranked = data(&result)["rankedIDs"]
+        .as_array()
+        .expect("rankedIDs array must be present");
+
+    // When the restricted row appears, it must carry only id.
+    for r in ranked {
+        if r["id"].as_str().map_or(false, |s| s.to_lowercase() == restricted_id.to_lowercase()) {
+            assert!(
+                r.get("subject").is_none(),
+                "restricted ranked row must not expose 'subject'; got: {r}"
+            );
+            assert!(
+                r.get("bestSpan").is_none(),
+                "restricted ranked row must not expose 'bestSpan'; got: {r}"
+            );
+            assert!(
+                r.get("eventTime").is_none(),
+                "restricted ranked row must not expose 'eventTime'; got: {r}"
+            );
+            assert!(
+                r.get("id").is_some(),
+                "restricted ranked row must still carry 'id'; got: {r}"
+            );
+        }
+    }
+}
+
+// B5 — Wire parity: no-subject drawer with multiline content.
+//
+// The exact literals here must match the Swift gate
+// `parityNoSubjectAndMultilineContent` in LensToolsTests.swift.
+// If either port changes these values, BOTH gates must be updated — the
+// shared assertion is what makes this a parity test rather than two
+// independent tests that happen to pass.
+//
+// subject: "(no subject)"     — NO_SUBJECT_MARKER (result_composer.rs:82)
+// bestSpan: "line one line two" — normalize_value("line one\nline two")
+#[test]
+fn lens_parity_no_subject_and_multiline_content() {
+    // TRANSIENT: same rationale as B1 — empty node tree keeps keystones
+    // graph isolated to the drawers we explicitly seed.
+    use aria_mcp::estate_registry::EstateOpening;
+    let registry = EstateRegistry::new_inmemory_with(EstateOpening::TRANSIENT);
+    // Content has an embedded newline. subject is None (CaptureFrame::new
+    // sets subject: None), so candidate_from_drawer returns NO_SUBJECT_MARKER.
+    let hub_id = seed_no_subject(&registry, "line one\nline two", "b5-wing");
+    // Spokes are seeded into the same wing so hub has outbound tunnel degree.
+    let s1 = seed_no_subject(&registry, "spoke-b5-a", "b5-wing");
+    let s2 = seed_no_subject(&registry, "spoke-b5-b", "b5-wing");
+    {
+        // Add tunnels so hub accumulates centrality and is classified as a keystone.
+        use locus_kit::frames::TunnelCaptureFrame;
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        for spoke_id in &[&s1, &s2] {
+            let mut frame = TunnelCaptureFrame::new(
+                "b5-wing", "r", "b5-wing", "r", "relates", "test");
+            frame.source_drawer_id = Some(hub_id.clone());
+            frame.target_drawer_id = Some(spoke_id.to_string());
+            estate.capture_tunnel(frame, 1_700_000_000_000)
+                .expect("tunnel b5");
+        }
+    }
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let result = call(&dispatcher, "moot_lens_keystones", json!({ "wing": "b5-wing" }));
+    assert!(is_success(&result), "keystones must succeed: {result}");
+
+    let keystones = data(&result)["keystones"]
+        .as_array()
+        .expect("keystones array");
+
+    let hub_row = keystones
+        .iter()
+        .find(|k| k["id"].as_str().map_or(false, |s| s.to_lowercase() == hub_id.to_lowercase()))
+        .unwrap_or_else(|| panic!("hub must appear in keystones; got: {keystones:?}"));
+
+    // These exact literals must match the Swift gate. Change both or neither.
+    assert_eq!(
+        hub_row["subject"].as_str().unwrap_or(""),
+        "(no subject)",
+        "no-subject drawer must emit \"(no subject)\", not \"-\"; got: {:?}", hub_row["subject"]
+    );
+    assert_eq!(
+        hub_row["bestSpan"].as_str().unwrap_or(""),
+        "line one line two",
+        "multiline content must normalize to a single line; got: {:?}", hub_row["bestSpan"]
+    );
+}
