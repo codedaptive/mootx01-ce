@@ -131,6 +131,15 @@ pub struct Dispatcher {
     /// server startup via `crate::build_serial::derive()` and stored here
     /// so the filesystem is not touched on every ping call.
     pub(crate) build_serial: String,
+    /// Plugin/binary version-skew advisory injected by the serve host.
+    /// Empty string (the default, set in `new`) means no advisory to report.
+    /// Passed to `surface::execute` → `execute_estate_diagnostics` →
+    /// `EstateDiagnosticsContext.version_skew` where the service populates
+    /// it into `EstatePingData` and `EstateStatusData` when non-empty.
+    /// Mirrors Swift `ToolDispatcher.versionSkewAdvisory`.
+    /// Injected via `with_version_skew`; hosts that have no plugin concept
+    /// (reference stdio server, aria-mcp dev server) leave it at the default.
+    pub(crate) version_skew: String,
     /// Upstream-release advisory provider: returns a one-line "a newer
     /// release exists" message, or `None` when there is nothing to say.
     /// Unlike `version_skew` this is a CLOSURE, not a startup-computed
@@ -192,26 +201,14 @@ impl Dispatcher {
     /// It is surfaced by `moot_estate_ping` so drivers can confirm they are
     /// talking to the most recently compiled binary.
     ///
-    /// `Dispatcher` does not take a version-skew advisory: it does not read
-    /// one anywhere in the v2 request path (`self.surface.execute` never
-    /// receives it, and `surface::execute` itself takes no `version_skew`
-    /// parameter). The Rust v2 surface renders no version-skew advisory at
-    /// all: `interface_tools::dispatch`'s sole in-crate caller is
-    /// `route_tool` (`dispatch.rs:198`, call site at `dispatch.rs:238`),
-    /// which is itself called only from
-    /// `dispatch_tool_with_vault_ledger_and_flag` (`dispatch.rs:132`) — the
-    /// v1 test-helper path this module documents as unreached by the
-    /// running server. Thirteen further call sites exist in
-    /// `tests/dispatch_tests.rs` and `tests/memory_adapter_tests.rs`,
-    /// exercising that same v1 path directly. The `version_skew: &str`
-    /// argument is read by `run_estate_status` (`interface_tools.rs:2956`,
-    /// read at line 3119) and `run_estate_ping` (`interface_tools.rs:3341`,
-    /// read at line 3367); `route_tool` and
-    /// `dispatch_tool_with_vault_ledger_and_flag` also take the argument
-    /// and thread it through unread. The Swift twin does render the
-    /// advisory: `ToolDispatcher` (`Sources/AriaMCP/ToolDispatch.swift:141`)
-    /// appends `"version_skew: \(versionSkewAdvisory)"` in both
-    /// `runEstateStatus` and `runEstatePing` when a skew is present.
+    /// `version_skew` defaults to an empty string (no advisory). Serve hosts
+    /// that know the plugin has a different version from the binary inject it
+    /// via `with_version_skew` after `new`. It is threaded through
+    /// `surface::execute` → `execute_estate_diagnostics` →
+    /// `EstateDiagnosticsContext.version_skew` and surfaces as the optional
+    /// `version_skew` field of `moot_estate_ping` and `moot_estate_status`
+    /// structured data when non-empty. Mirrors Swift
+    /// `ToolDispatcher.versionSkewAdvisory`.
     pub fn new(
         registry: EstateRegistry, name: &str, version: &str, build_serial: &str,
         monitoring_control: Option<std::sync::Arc<dyn crate::monitoring_control::MonitoringControl>>,
@@ -255,6 +252,10 @@ impl Dispatcher {
             vault_ledger: VaultJobLedger::new(),
             sensitivity_ledger: SensitivityGrantLedger::new(),
             build_serial: build_serial.to_owned(),
+            // Wired post-construction via `with_version_skew` — defaults to
+            // empty (no advisory). Serve hosts that know of a plugin/binary
+            // version mismatch inject it after `new`.
+            version_skew: String::new(),
             // Wired post-construction via `with_update_advisory` — the Rust
             // equivalent of Swift's defaulted `updateAdvisoryProvider: nil`
             // initializer parameter, chosen so the many existing
@@ -331,6 +332,17 @@ impl Dispatcher {
     /// `update_available` line.
     pub fn with_update_advisory(mut self, provider: Option<UpdateAdvisoryProvider>) -> Self {
         self.update_advisory = provider;
+        self
+    }
+
+    /// Builder-style injection of the plugin/binary version-skew advisory.
+    /// Called by serve hosts after `new` when the plugin version and the
+    /// binary version are known to differ. Empty string (the default) means
+    /// no advisory; a non-empty value surfaces as `version_skew` in the
+    /// structured data of `moot_estate_ping` and `moot_estate_status`.
+    /// Mirrors Swift `ToolDispatcher.versionSkewAdvisory`.
+    pub fn with_version_skew(mut self, skew: String) -> Self {
+        self.version_skew = skew;
         self
     }
 
@@ -622,6 +634,8 @@ impl Dispatcher {
                 self.monitoring_control.as_deref(),
                 &self.build_serial,
                 now_millis,
+                &self.version_skew,
+                self.update_advisory.as_ref(),
             )?;
 
             // Egress: hint injection and periodic coaching block run inside the

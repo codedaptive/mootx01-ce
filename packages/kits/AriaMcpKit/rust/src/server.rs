@@ -44,11 +44,12 @@ pub struct ServerConfig {
     /// construction via `crate::build_serial::derive()` so the filesystem
     /// is not touched on every ping call.
     pub build_serial: String,
-    /// version-skew advisory (empty ⇒ none to report). This
-    /// reference server has no plugin concept, so it always constructs
-    /// with the empty default via `String::new()` — kept as a real field
-    /// (not a constant) so `Dispatcher::new` has one signature shared by
-    /// every host.
+    /// Plugin/binary version-skew advisory (empty ⇒ none to report). This
+    /// reference server has no plugin concept, so it always constructs with
+    /// `String::new()`. Injected into the dispatcher via `with_version_skew`
+    /// in `run_stdio_loop` and `run_http_loop`, threading through to
+    /// `execute_estate_diagnostics` where it surfaces as the optional
+    /// `version_skew` field of `moot_estate_ping` / `moot_estate_status`.
     pub version_skew: String,
     /// Upstream-release advisory provider (see
     /// `crate::dispatcher::UpdateAdvisoryProvider`) surfaced as an
@@ -263,6 +264,7 @@ pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: Serv
         &config.build_serial,
         None,
     )
+    .with_version_skew(config.version_skew)
     // Forwarded even though resident hosts wire it only for HTTP mode —
     // stdio configs carry None, so ping/status stay advisory-free here.
     .with_update_advisory(config.update_advisory);
