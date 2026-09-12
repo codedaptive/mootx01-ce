@@ -201,19 +201,26 @@ struct DreamAssociatesDispatchTests {
             "associates=off must not produce associationsWritten in data")
     }
 
-    // MARK: - Test 3 — associates=all is bounded (cap holds)
+    // MARK: - Test 3 — associates=all reaches the sweep
 
-    /// `moot_dream` with `associates: "all"` must use a server-side probe bound
-    /// (10_000) rather than an unlimited sweep.  The server-side constant is
-    /// `AriaV2Dream.GeniusLocusLower.allModeMaxProbe`.  This test confirms the
-    /// field is present (step 3.5 ran) and that the non-unique-probe count is
-    /// within the documented bound.
+    /// What this test proves: `associates: "all"` reaches step 3.5 and the
+    /// sweep reports back.  The discriminating assertion is the `#require` on
+    /// `associationsNonUniqueProbes` being PRESENT — absence means the sweep
+    /// was skipped or the mode never reached the lower.
     ///
-    /// `associationsNonUniqueProbes` carries the count of kNN candidate pairs
-    /// that were already in the settled set (deduplicated within the sweep),
-    /// NOT the total number of items probed.  It equals the probe count only
-    /// when every item's kNN neighbours were already associated — i.e. at full
-    /// saturation.
+    /// What it does NOT prove: the probe cap.  With two planted items the
+    /// `<= allModeMaxProbe` comparison holds for every possible limit,
+    /// including an unbounded one, so it cannot discriminate.  The cap is
+    /// gated by `dreamAssociatesAllSelectsMoreAssociationsThanDefault` below,
+    /// which needs an estate larger than the default probe window.
+    ///
+    /// `associationsNonUniqueProbes` is NOT a probe count and NOT a dedup
+    /// count.  Per `AssociateSweepReport.nonUniqueProbes` it counts
+    /// (probe, lane) scans whose entire ladder pool was one distance tie
+    /// group, so no clean cut existed and the lane contributed zero pairs.
+    /// It is incremented once per probe PER LANE, so it can exceed `probed`.
+    /// Pairs skipped for an existing association are the separate
+    /// `deduplicated` field.
     ///
     /// Parity: `dream_all_mode_uses_bounded_probe_limit_not_unlimited` in Rust
     /// `dispatch_tests.rs`.
@@ -361,7 +368,12 @@ struct DreamAssociatesDispatchTests {
         let defaultData = try #require(
             defaultObj["structuredContent"]?.objectValue?["data"]?.objectValue,
             "default-mode structuredContent.data must be present")
-        let defaultWritten = defaultData["associationsWritten"]?.integerValue ?? 0
+        // #require, not `?? 0`: a missing key would silently degrade the
+        // comparison below to `allWritten > 0`, which passes for reasons that
+        // have nothing to do with the probe window.
+        let defaultWritten = try #require(
+            defaultData["associationsWritten"]?.integerValue,
+            "default-mode dream must report associationsWritten")
 
         // --- Estate 2: all-mode run (same content, fresh estate) ---
         let (allDispatcher, allKit, allHandle) = try await makeDispatcher()
