@@ -1149,7 +1149,7 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 --check                 Print the latest available version and exit without downloading.\n\
             \x20 --yes                   Skip the confirmation prompt before downloading a new release.\n\
             \x20 --no-restart            Copy the binary but skip restarting the background agents.\n\
-            \x20 --backfill-only         Run only the estate migration steps (schema 10 → 19, manifest refresh, kg_facts identity, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
+            \x20 --backfill-only         Run only the estate migration steps (schema 10 → 20 and 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no service manager, no prompts — for scripted and benchmark estates.".into(),
         "unlock" => "Authenticate and issue a sensitivity-tier grant to the resident daemon.\n\
             \n\
             USAGE: mootx01 unlock <private|secret>\n\
