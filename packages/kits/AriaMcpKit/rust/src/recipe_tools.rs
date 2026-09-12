@@ -2421,7 +2421,7 @@ fn run_walk_recall_tool(
 }
 
 /// Parse an ISO8601 UTC instant string (e.g. "2026-06-11T00:00:00Z") to Unix
-/// epoch seconds. Returns `None` for any malformed or out-of-range input.
+/// epoch milliseconds. Returns `None` for any malformed or out-of-range input.
 ///
 /// Supports the two formats the substrate uses:
 ///   - `YYYY-MM-DDTHH:MM:SSZ`          (no fractional seconds)

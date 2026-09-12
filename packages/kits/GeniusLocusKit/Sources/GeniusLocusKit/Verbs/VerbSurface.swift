@@ -608,8 +608,11 @@ public extension GeniusLocusKit {
     /// Delegates to `Estate.allAssociations`. Peer of the Rust
     /// `EstateCoordinator::recall_associations`.
     ///
+    /// Public so cross-kit tests (e.g. AriaMcpKitTests) can read associations
+    /// after a dream cycle without reimplementing the estate lookup path.
+    ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    func recallAssociations(_ handle: EstateHandle) async throws -> [Association] {
+    public func recallAssociations(_ handle: EstateHandle) async throws -> [Association] {
         let estate = try estate(for: handle)
         return try await estate.allAssociations()
     }
