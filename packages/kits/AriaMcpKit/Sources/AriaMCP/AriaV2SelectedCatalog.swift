@@ -324,7 +324,8 @@ enum AriaV2SelectedCatalog {
             identity: "lens_partial_cue", name: AriaV2RecallLensOperation.lensPartialCue.rawValue,
             effect: .read, description: "Retrieve memories by partial-cue similarity to an anchor.",
             intents: ["Retrieve memories by partial-cue similarity to an anchor."],
-            properties: ["anchor_memory_id": uuidSchema(), "limit": positiveIntegerSchema(), "estate_id": uuidSchema()],
+            properties: ["anchor_memory_id": uuidSchema(), "limit": positiveIntegerSchema(), "estate_id": uuidSchema(),
+                         "mode": enumSchema(["feelsLike", "aboutThis", "fromThen"])],
             required: ["anchor_memory_id"], dataSchema: lensDataSchema(.lensPartialCue)
         ),
         descriptor(
@@ -626,7 +627,7 @@ enum AriaV2SelectedCatalog {
             properties: [
                 "estate_id": uuidSchema(),
                 "now": stringSchema(),
-                "associates": stringSchema(),
+                "associates": enumSchema(["off", "all"]),
             ],
             includeEmptyRequired: true,
             dataSchema: dreamDataSchema()

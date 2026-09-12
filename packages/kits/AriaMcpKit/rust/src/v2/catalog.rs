@@ -185,7 +185,7 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                 descriptor("dream", "moot_dream", V2OperationEffect::Write,
                     "Run one on-demand maintenance and dreaming cycle.",
                     &["Run one on-demand maintenance and dreaming cycle."],
-                    json!({"type":"object","properties":{"associates":{"type":"string"},"estate_id":{"type":"string","format":"uuid"},"now":{"type":"string"}},"required":[],"additionalProperties":false})),
+                    json!({"type":"object","properties":{"associates":{"type":"string","enum":["off","all"]},"estate_id":{"type":"string","format":"uuid"},"now":{"type":"string"}},"required":[],"additionalProperties":false})),
                 descriptor("migration_run", "moot_migration_run", V2OperationEffect::Read,
                     "Evaluate migration plans and return candidates for a separate confirmation.",
                     &["Evaluate migration plans and return candidates for a separate confirmation."],
@@ -777,7 +777,7 @@ fn lens_input_schema(name: &str) -> Option<Value> {
             json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1},"estate_id":uuid()},"required":[],"additionalProperties":false}),
         ),
         "moot_lens_partial_cue" => Some(
-            json!({"type":"object","properties":{"anchor_memory_id":uuid(),"limit":{"type":"integer","minimum":1},"estate_id":uuid()},"required":["anchor_memory_id"],"additionalProperties":false}),
+            json!({"type":"object","properties":{"anchor_memory_id":uuid(),"limit":{"type":"integer","minimum":1},"estate_id":uuid(),"mode":{"type":"string","enum":["feelsLike","aboutThis","fromThen"]}},"required":["anchor_memory_id"],"additionalProperties":false}),
         ),
         "moot_lens_anticipate" => Some(
             json!({"type":"object","properties":{"targetKind":string(),"limit":{"type":"integer","minimum":1},"estate_id":uuid()},"required":["targetKind"],"additionalProperties":false}),
