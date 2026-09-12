@@ -25,6 +25,11 @@ public enum AriaV2LensLower {
         /// The caller's already-authorized read scope.  Engines retain this
         /// frame rather than reconstructing an unscoped estate recall.
         public let authorizationFrame: RecallFrame
+        /// The stable provider supplies its verified policy explicitly for
+        /// aggregate projections that otherwise do not consume a drawer frame.
+        /// Nil keeps the selected-public v2 path unchanged.
+        public let maximumSensitivity: AdjectiveSensitivity?
+        public let exportableOnly: Bool
         /// Comparison estates the host has separately authorized for this
         /// request.  The lower adapter cannot open a peer from an opaque UUID.
         public let comparisonHandles: [UUID: EstateHandle]
@@ -33,11 +38,15 @@ public enum AriaV2LensLower {
             estateID: UUID,
             now: Date,
             authorizationFrame: RecallFrame = .init(filterChain: []),
+            maximumSensitivity: AdjectiveSensitivity? = nil,
+            exportableOnly: Bool = false,
             comparisonHandles: [UUID: EstateHandle] = [:]
         ) {
             self.estateID = estateID
             self.now = now
             self.authorizationFrame = authorizationFrame
+            self.maximumSensitivity = maximumSensitivity
+            self.exportableOnly = exportableOnly
             self.comparisonHandles = comparisonHandles
         }
     }
@@ -101,9 +110,24 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // bestSpan to "-". Rust get_drawers_matching_frame always loads full rows
             // (P6-secfix), so full hydration here keeps both ports on the same path.
             // The sensitivity gate still applies via BitmapEvaluator on the filterChain.
-            let drawersByID = try await RecipeTools.structuredDrawersByID(
-                ids: ranked.map { $0.id }, estate: estate, hydrationLevel: .full)
-            return .init(data: .object(["keystones": .array(ranked.map { keystone in
+            let drawersByID: [String: Drawer]
+            if context.maximumSensitivity != nil {
+                let admitted = try await estate.getDrawers(
+                    ids: ranked.map(\.id), matchingFrame: context.authorizationFrame,
+                    hydrationLevel: .full).admissible
+                drawersByID = Dictionary(uniqueKeysWithValues: admitted.map { ($0.id, $0) })
+            } else {
+                drawersByID = try await RecipeTools.structuredDrawersByID(
+                    ids: ranked.map { $0.id }, estate: estate, hydrationLevel: .full)
+            }
+            let keystoneOnly = try boolean(request, "keystoneOnly", defaultValue: false)
+            let admittedRanked = context.maximumSensitivity == nil ? ranked : ranked.filter {
+                drawersByID[$0.id] != nil || drawersByID[$0.id.lowercased()] != nil
+            }
+            let projectedRanked = keystoneOnly ? admittedRanked.filter { keystone in
+                (drawersByID[keystone.id] ?? drawersByID[keystone.id.lowercased()])?.hasFeatureFlag(.isKeystone) == true
+            } : admittedRanked
+            return .init(data: .object(["keystones": .array(projectedRanked.map { keystone in
                 let id = keystone.id.lowercased()
                 guard let drawer = drawersByID[keystone.id] ?? drawersByID[keystone.id.lowercased()] else {
                     // Gated (restricted/secret) row: id and centrality only.
@@ -122,7 +146,7 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                     "bestSpan": .string(span.isEmpty ? "-" : span),
                     "eventTime": .string(ResultComposer.iso8601(drawer.eventTime)),
                 ])
-            })]), compactText: "Found \(ranked.count) keystones.")
+            })]), compactText: "Found \(projectedRanked.count) keystones.")
 
         case .lensConstellation:
             let constellation = try await ConstellationLens.run(
@@ -567,11 +591,28 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
     private func boundedStringInteger(
         _ request: AriaV2RecallLensRequest, _ key: String, defaultValue: Int, maximum: Int
     ) throws -> Int {
-        guard let raw = request.arguments[key]?.stringValue else { return defaultValue }
-        guard let value = Int(raw), value >= 1, value <= maximum else {
+        guard let supplied = request.arguments[key] else { return defaultValue }
+        let value: Int
+        if let integer = supplied.integerValue {
+            value = Int(integer)
+        } else if let raw = supplied.stringValue, let parsed = Int(raw) {
+            value = parsed
+        } else {
+            throw AriaV2LensLower.refusal("Lens argument '\(key)' must be an integer in 1...\(maximum).")
+        }
+        guard value >= 1, value <= maximum else {
             throw AriaV2LensLower.refusal("Lens argument '\(key)' must be an integer in 1...\(maximum).")
         }
         return value
+    }
+
+    private func boolean(
+        _ request: AriaV2RecallLensRequest, _ key: String, defaultValue: Bool
+    ) throws -> Bool {
+        guard let supplied = request.arguments[key] else { return defaultValue }
+        if let value = supplied.boolValue { return value }
+        if let raw = supplied.stringValue, let value = Bool(raw) { return value }
+        throw AriaV2LensLower.refusal("Lens argument '\(key)' must be a boolean.")
     }
 
     private func positiveInteger(

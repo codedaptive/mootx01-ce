@@ -41,8 +41,8 @@
 //
 // BINARY LOCATION:
 //   The daemon binary is located by findDaemonBinary() (MOOT_CONTRACT_TEST_DAEMON
-//   env var or canonical scratch-build path).  If absent, all tests are skipped
-//   with a clear message.
+//   env var or canonical scratch-build path). If absent, daemon-dependent
+//   tests fail: the test target depends on the contract-host executable.
 //
 // FIXTURE DIGEST:
 //   Bundle digest is verified once at suite startup via BundleDigest.  A mismatch
@@ -158,7 +158,7 @@ struct MootCommunityContractTests {
     var binary: URL {
         get throws {
             guard let b = findDaemonBinary() else {
-                throw SkipError.daemonBinaryMissing
+                throw HarnessError.daemonBinaryNotFound
             }
             return b
         }
@@ -977,34 +977,16 @@ struct MootCommunityContractTests {
         let binary = try binary
 
         try ContractDaemonHarness.withDaemon(binary: binary) { harness, session in
-            // tools/list on the authenticated first-party lane must include all 35
-            // community tools that CommunityContractDispatch.communityToolList emits.
-            // The exact count (35) matches the number of `case "moot_community_*":` arms
-            // in CommunityContractDispatch.dispatch() — verified at source-code level.
+            // This contract host intentionally installs Community only. Its
+            // authenticated list must therefore be exactly the frozen 35-name
+            // Community catalog; a full resident composition additionally
+            // carries the independent stable-provider 26-name catalog.
             let toolNames = try harness.listTools(session: &session)
-            let communityNames = toolNames.filter { $0.hasPrefix("moot_community_") }
-            let count = communityNames.count
-
-            // Smoke: at least 35 tools with the community prefix must be present.
-            // The count will be exactly 35 when all six coordinator families are
-            // wired.  A higher count is not expected but would not fail the test.
-            if count < 35 {
-                Issue.record(
-                    "P-01: production composition returned only \(count) community tools via tools/list (expected 35). Check CommunityResidentMain.makeCommunityDispatch coordinator wiring."
-                )
-            }
-
-            // Cross-check: the authenticated lane must ALSO not expose tools that are not
-            // community or GLK — an unknown tool name leaking into the list is a bug.
-            let unknownPrefix = toolNames.filter { name in
-                !name.hasPrefix("moot_community_") &&
-                !name.hasPrefix("moot_") &&
-                !name.hasPrefix("locus_") &&
-                !name.hasPrefix("aria_")
-            }
-            if !unknownPrefix.isEmpty {
-                Issue.record("P-01: tools/list contained unexpected tool names: \(unknownPrefix)")
-            }
+            let expectedNames = Set((ContractFixtures.contract["endpoints"] as? [[String: Any]] ?? [])
+                .compactMap { $0["name"] as? String })
+            #expect(expectedNames.count == 35)
+            #expect(Set(toolNames) == expectedNames)
+            #expect(toolNames.count == expectedNames.count)
         }
     }
 
@@ -1086,15 +1068,10 @@ struct MootCommunityContractTests {
 // MARK: - Skip error
 
 private enum SkipError: Error, CustomStringConvertible {
-    case daemonBinaryMissing
     case digestMismatch(computed: String, stored: String)
 
     var description: String {
         switch self {
-        case .daemonBinaryMissing:
-            return "mootx01-daemon binary not found — build with:\n" +
-                   "swift build --package-path apps/mootx01 " +
-                   "-c debug --product mootx01-daemon"
         case .digestMismatch(let c, let s):
             return "fixture bundle digest mismatch: computed \(c), stored \(s)"
         }
