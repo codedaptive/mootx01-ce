@@ -75,7 +75,7 @@ enum AriaV2Coach {
     /// The "no query" case from §12.5 cannot fire on v2 because the decoder
     /// requires exactly one of `query` or `near`; absence is an invalidParams error
     /// that never reaches the coaching path. The long-query trigger is the
-    /// active pre-flight check for moot_memory_search on v2.
+    /// active before-dispatch check for moot_memory_search on v2.
     private static func hintForMemorySearch(
         req: AriaV2MemorySearchRequest,
         result: JSONValue
@@ -96,13 +96,13 @@ enum AriaV2Coach {
 
     /// moot_file_memory: content over 4,000 characters or duplicate result.
     private static func hintForFileMemory(content: String, result: JSONValue) -> String? {
-        // Trigger: content over 4,000 Unicode scalars (pre-flight on decoded request).
+        // Trigger: content over 4,000 Unicode scalars (checked on the decoded request).
         if content.unicodeScalars.count > 4_000 {
             return "Content over 4,000 characters is harder to recall precisely. " +
                    "Consider splitting into smaller, focused memories so each one " +
                    "surfaces on the right query."
         }
-        // Trigger: duplicate result (post-flight on the operation result).
+        // Trigger: duplicate result (checked on the operation result).
         if resultTextContains(result, "duplicate") || resultTextContains(result, "already filed") {
             return "This content may duplicate an existing memory. " +
                    "Use moot_memory_search to find and review existing entries " +

@@ -174,7 +174,7 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // so an estate with three contradictions reports one and the
             // caller is told the estate is more consistent than it is. For a
             // contradiction lens the count IS the product. The rows stay
-            // redacted; only the tally is honest.
+            // redacted; only the tally is complete.
             let allContradictions = (try await estate.allTunnels()).filter {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
                     && ($0.lifecycle == .active || $0.lifecycle == .proposed)

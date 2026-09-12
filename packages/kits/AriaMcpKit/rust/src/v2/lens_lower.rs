@@ -331,7 +331,7 @@ impl CoordinatorRecallLensLower {
         // makes a restricted contradiction vanish from the total, so an estate
         // with three contradictions reports one and reads as more consistent
         // than it is. For a contradiction lens the count IS the product; the
-        // rows stay redacted, only the tally is honest.
+        // rows stay redacted, only the tally is complete.
         let all_contradictions = coordinator
             .all_tunnels(&admission.estate_handle)
             .map_err(|_| ())?

@@ -264,7 +264,7 @@ fn gate_b_empty_projection_fact_excluded() {
     let sources = HashMap::from([(source_id.into(), source)]);
 
     // Fact with a correct search_projection_version but an empty search_projection —
-    // the honest shape for isolating the empty-projection guards. Subject/object
+    // the exact shape for isolating the empty-projection guards. Subject/object
     // match the query so only the empty-projection guards prevent a hit.
     let empty_fact = KGFact {
         search_projection: String::new(),
