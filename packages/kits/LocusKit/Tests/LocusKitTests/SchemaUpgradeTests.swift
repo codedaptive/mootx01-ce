@@ -219,6 +219,8 @@ struct SchemaUpgradeTests {
         let factRows = try await storage.rowStore.query(
             table: "kg_facts", where: nil, orderBy: [], limit: nil, offset: nil)
         let row = try #require(factRows.first)
+        // F3: the primary key survives the hop unchanged.
+        #expect(row["id"] == .some(.text(factID)))
         // Text columns: declared DEFAULT ''.
         #expect(row["evidenceQuote"] == .some(.text("")))
         #expect(row["sourceDigest"] == .some(.text("")))
@@ -235,11 +237,142 @@ struct SchemaUpgradeTests {
         #expect(row["evidenceEndUTF8Byte"] == .some(.int(-1)))
 
         // d. fact_extractor_models was created by the hop and holds zero rows.
+        //    This table is in the DECLARED table list (LocusKitSchema.swift line ~179,
+        //    schema.rs line ~163), so the runner creates it on any open — this assertion
+        //    documents the table rather than discriminating the hop.
         #expect(await columnsExist(storage, table: "fact_extractor_models", columns: ["recipe_id", "is_active"]))
         #expect(try await storage.rowStore.count(table: "fact_extractor_models", where: nil) == 0)
 
         // e. A value written at v19 into an existing column reads back unchanged.
         #expect(row["predicate"] == .some(.text("is")))
+        await storage.close()
+    }
+
+    // MARK: — Gate A
+
+    /// Gate A: the search-projection backfill writes the injected build result
+    /// to every row that lacks a projection, leaves s/p/o unchanged, and is
+    /// idempotent (second run reports scanned: 0).
+    ///
+    /// The build function is a deterministic test double — joining s/p/o with
+    /// " | " — whose output can be computed independently to verify the stored
+    /// value. Using an injected test double rather than the real
+    /// FactSearchProjection.build is intentional: LocusKit tests must not
+    /// depend on FactExtractionKit; the layering rule is the point of injection.
+    @Test("Gate A: search-projection backfill writes correct projection and is idempotent")
+    func gateASearchProjectionBackfill() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+
+        // Deterministic test build function (not FactSearchProjection.build —
+        // LocusKit tests cannot import FactExtractionKit).
+        let testVersion = "test-sp-v1"
+        let testBuild: @Sendable (String, String, String) -> String = { s, p, o in
+            "\(s) | \(p) | \(o)"
+        }
+
+        let drawerID = "d-gate-a"
+        // Three facts: distinct s/p/o, one with leading whitespace, one where
+        // subject repeats object (tests that the build function receives the
+        // raw stored values without transformation at the backfill layer).
+        let facts: [(id: String, subject: String, predicate: String, object: String)] = [
+            ("f-gate-a-1", "sky",      "is",      "blue"),
+            ("f-gate-a-2", "  sun  ",  "shines",  "bright"),  // leading/trailing whitespace
+            ("f-gate-a-3", "rain",     "equals",  "rain"),    // subject repeats object
+        ]
+
+        // 1. Stamp at schema 19 and insert three facts.
+        do {
+            let stamp = TestStorage.sqlite(url)
+            try await stamp.open(schema: Self.schema19)
+            _ = try await stamp.rowStore.insert(table: "drawers", values: [
+                "id": .text(drawerID), "content": .text("gate-a drawer"),
+                "parent_node_id": .text("n1"), "addedBy": .text("test"),
+                "filedAt": .text("2024-01-01T00:00:00Z"), "embeddingModelID": .text("t1"),
+                "provenance": .int(0), "adjectiveBitmap": .int(0), "operationalBitmap": .int(0),
+                "lineageID": .text(""), "udcCode": .text(""),
+            ])
+            for fact in facts {
+                _ = try await stamp.rowStore.insert(table: "kg_facts", values: [
+                    "id": .text(fact.id), "subject": .text(fact.subject),
+                    "predicate": .text(fact.predicate), "object": .text(fact.object),
+                    "sourceDrawerID": .text(drawerID),
+                    "adjectiveBitmap": .int(0), "operationalBitmap": .int(0),
+                    "provenanceBitmap": .int(0), "filedAt": .text("2024-01-01T00:00:00Z"),
+                    "addedBy": .text(""), "foreignSourceKey": .text(""), "foreignRecordID": .text(""),
+                ])
+            }
+            await stamp.close()
+        }
+
+        // 2. Open through the full v20 schema (applies the v19 → v20 hop).
+        let storage = TestStorage.sqlite(url)
+        try await storage.open(schema: LocusKitSchema.schema)
+
+        // 3. Pre-state assertion: every fact has an empty searchProjection
+        //    after the schema hop (the column was added with DEFAULT '').
+        let rowsBefore = try await storage.rowStore.query(
+            table: "kg_facts", where: nil, orderBy: [], limit: nil, offset: nil)
+        #expect(rowsBefore.count == facts.count, "fact count before backfill")
+        for row in rowsBefore {
+            #expect(row["searchProjection"] == .some(.text("")), "projection empty before backfill")
+            #expect(row["searchProjectionVersion"] == .some(.text("")), "version empty before backfill")
+        }
+
+        // 4. Run the backfill.
+        let report = try await KGFactSearchProjectionBackfill.run(
+            storage: storage,
+            buildProjection: testBuild,
+            projectionVersion: testVersion
+        )
+        #expect(report.scanned == facts.count)
+        #expect(report.updated == facts.count)
+
+        // 5. Post-state: every fact has the expected projection and version;
+        //    s/p/o are unchanged; row count is still N.
+        let rowsAfter = try await storage.rowStore.query(
+            table: "kg_facts", where: nil, orderBy: [], limit: nil, offset: nil)
+        #expect(rowsAfter.count == facts.count, "fact count after backfill")
+        // Sort rows by the "id" string extracted from TypedValue (TypedValue is
+        // not Comparable, so we can't sort by the raw optional directly).
+        func rowID(_ r: StorageRow) -> String {
+            if case let .text(v) = r["id"] { return v }
+            return ""
+        }
+        for (expected, row) in zip(
+            facts.sorted(by: { $0.id < $1.id }),
+            rowsAfter.sorted(by: { rowID($0) < rowID($1) })
+        ) {
+            // Extract to plain String locals so the #expect macro can infer types
+            // without fighting the named-tuple member accessor path.
+            let eid = expected.id
+            let esub = expected.subject
+            let epred = expected.predicate
+            let eobj = expected.object
+            let expectedProjection = testBuild(esub, epred, eobj)
+            #expect(row["searchProjection"] == .some(.text(expectedProjection)),
+                    "projection for \(eid)")
+            #expect(row["searchProjectionVersion"] == .some(.text(testVersion)),
+                    "version for \(eid)")
+            #expect(row["subject"] == .some(.text(esub)), "subject unchanged \(eid)")
+            #expect(row["predicate"] == .some(.text(epred)), "predicate unchanged \(eid)")
+            #expect(row["object"] == .some(.text(eobj)), "object unchanged \(eid)")
+        }
+
+        // 6. Second run: all rows already have the target version — scanned: 0.
+        let second = try await KGFactSearchProjectionBackfill.run(
+            storage: storage,
+            buildProjection: testBuild,
+            projectionVersion: testVersion
+        )
+        #expect(second.scanned == 0, "second run must scan nothing")
+        #expect(second.updated == 0, "second run must update nothing")
+
+        // Row state unchanged after the second run.
+        let rowsAfterSecond = try await storage.rowStore.query(
+            table: "kg_facts", where: nil, orderBy: [], limit: nil, offset: nil)
+        #expect(rowsAfterSecond.count == facts.count, "fact count unchanged after second run")
+
         await storage.close()
     }
 
