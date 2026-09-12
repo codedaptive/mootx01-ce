@@ -16,7 +16,7 @@
 //! Presence is not the question: a `mootx01` predating the estate catalog
 //! reads that value as a bare estate NAME, serves something else, and the
 //! post-swap read comes back empty — a red suite on any machine carrying an
-//! older install, where the honest outcome is a skip. Each candidate is asked
+//! older install, where the right outcome is a skip. Each candidate is asked
 //! what it can do, in search-path order, so a freshly built binary ahead on
 //! PATH wins over an older install behind it.
 
