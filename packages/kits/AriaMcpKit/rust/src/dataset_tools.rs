@@ -225,32 +225,16 @@ pub fn file_dataset_snapshot(
     let schema = parse_result.schema;
     let typed_rows = parse_result.rows;
     let dataset_id = Uuid::new_v4();
-    let storage = open.store.storage().ok_or_else(|| {
-        "moot_file_dataset: estate storage does not support datasets (no storage layer)".to_owned()
-    })?;
-    let dataset_store = storage.dataset_store().map_err(|error| format!(
-        "moot_file_dataset: estate storage does not support datasets: {error}"
-    ))?;
-    dataset_store.create_dataset(dataset_id, &schema, &[]).map_err(|error| format!(
-        "moot_file_dataset: failed to create dataset table: {error}"
-    ))?;
-    if !typed_rows.is_empty() {
-        if let Err(error) = dataset_store.append_rows(dataset_id, &typed_rows) {
-            let _ = dataset_store.drop_dataset(dataset_id);
-            return Err(format!("moot_file_dataset: failed to append rows (table dropped): {error}"));
-        }
-    }
     let column_summaries: Vec<DatasetColumnSummary> = schema.columns.iter().map(|column| {
         DatasetColumnSummary { name: column.name.clone(), data_type: column_type_label(column.column_type) }
     }).collect();
     let coord = open.coord.lock().map_err(|_| "moot_file_dataset: estate coordinator lock poisoned".to_owned())?;
-    let estate = coord.estate_for(&open.handle).map_err(|error| format!(
-        "moot_file_dataset: estate not accessible: {}", describe_glk_error(&error)
-    ))?;
-    let drawer = match estate.capture_dataset_handle(
+    let drawer = coord.file_dataset(
+        &open.handle,
         dataset_id,
+        &schema,
+        &typed_rows,
         column_summaries.clone(),
-        i64::try_from(typed_rows.len()).map_err(|_| "moot_file_dataset: row count overflow".to_owned())?,
         &source_description,
         input.wing,
         input.location,
@@ -258,13 +242,13 @@ pub fn file_dataset_snapshot(
         input.sensitivity_raw,
         "000",
         input.now_millis,
-    ) {
-        Ok(drawer) => drawer,
-        Err(error) => {
-            let _ = dataset_store.drop_dataset(dataset_id);
-            return Err(format!("moot_file_dataset: handle creation failed (table dropped): {error}"));
-        }
-    };
+    ).map_err(|error| format!("moot_file_dataset: {error:?}"))?;
+    let storage = open.store.storage().ok_or_else(|| {
+        "moot_file_dataset: estate storage does not support datasets (no storage layer)".to_owned()
+    })?;
+    let dataset_store = storage.dataset_store().map_err(|error| format!(
+        "moot_file_dataset: estate storage does not support datasets: {error}"
+    ))?;
     let mut signatures = "computed".to_owned();
     let signature_result: Result<(), String> = (|| {
         let sampled_rows = dataset_store.query_rows(
@@ -275,8 +259,9 @@ pub fn file_dataset_snapshot(
             stats.insert(column.name.clone(), dataset_store.column_stats(dataset_id, &column.name)
                 .map_err(|error| error.to_string())?);
         }
-        compute_dataset_signatures(estate, &drawer.id, &column_summaries, &stats, &sampled_rows)
-            .map_err(|error| error.to_string())?;
+        coord.compute_dataset_signatures(
+            &open.handle, &drawer.id, &column_summaries, &stats, &sampled_rows,
+        ).map_err(|error| format!("{error:?}"))?;
         Ok(())
     })();
     if let Err(error) = signature_result {

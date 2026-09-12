@@ -230,6 +230,17 @@ struct PermissionsWriterTests {
         }
     }
 
+    @Test("retired WorkPacket tools are omitted from installer authorization inventory")
+    func retiredWorkPacketToolsAreNotAuthorized() {
+        let retired = ["moot_file_packet", "moot_packet_get", "moot_packet_list", "moot_packet_lineage"]
+        let entries = Set(PermissionsWriter.permissionEntries(toolNames: ["moot_memory_get"] + retired))
+
+        #expect(entries.contains("\(PermissionsWriter.mcpPrefix)moot_memory_get"))
+        for tool in retired {
+            #expect(!entries.contains("\(PermissionsWriter.mcpPrefix)\(tool)"))
+        }
+    }
+
     // MARK: - mergeTiered (the install default) — both namespaces
 
     @Test("mergeTiered writes each tool into its tier, under BOTH namespace prefixes")

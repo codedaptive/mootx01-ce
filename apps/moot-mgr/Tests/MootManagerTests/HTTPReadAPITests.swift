@@ -76,6 +76,18 @@ private func httpRequest(
 
 struct HTTPReadAPIReadTests {
 
+    @Test("GET /api/packets is retired while GET /api/server remains healthy")
+    func workPacketRouteIsRetired() async throws {
+        let (host, port) = try await makeStartedHost()
+        defer { Task { await host.stop() } }
+
+        let (retiredStatus, _) = try await httpRequest(port: port, method: "GET", path: "/api/packets")
+        #expect(retiredStatus == 404)
+
+        let (serverStatus, _) = try await httpRequest(port: port, method: "GET", path: "/api/server")
+        #expect(serverStatus == 200)
+    }
+
     @Test("GET /api/server returns the server summary shape from a seeded store")
     func serverEndpoint() async throws {
         let (host, port) = try await makeStartedHost { store in

@@ -56,9 +56,9 @@
 //! it has already finished synchronously. The `moot_vault_job` tool is present,
 //! schema-identical to Swift, and never returns `methodNotFound`.
 
-use crate::dispatch::{describe_glk_error, error_result, text_result};
+use crate::dispatch::{error_result, text_result};
 use crate::estate_registry::{EstateRegistry, OpenEstate};
-use genius_locus_kit::dataset_signatures::{compute_dataset_signatures, DATASET_SIGNATURE_SAMPLE_SIZE};
+use genius_locus_kit::dataset_signatures::DATASET_SIGNATURE_SAMPLE_SIZE;
 use genius_locus_kit::EncodeSpeed;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode};
 use locus_kit::dataset_handle::{DatasetColumnSummary, DatasetHandleContent};
@@ -650,8 +650,8 @@ pub fn launch_import(
     // Dataset notes are excluded from the bridge import because DrawerMapping
     // does not re-honour `contentKind` on import — importing them via the
     // standard bridge path would create drawers with contentKind=0 (wrong).
-    // Instead, they are imported directly via `capture_dataset_handle` after
-    // the bridge finishes (MX-TAB-7b §6).
+    // Instead, they are imported through GLK's governed `file_dataset` path
+    // after the bridge finishes (MX-TAB-7b §6).
     //
     // Scan failure is non-fatal: fall back to a full (unfiltered) bridge import.
     let dataset_notes = scan_dataset_notes(vault_path).unwrap_or_default();
@@ -744,11 +744,7 @@ pub fn launch_import(
     // Release the &mut coord borrow (bridge drops here).
     drop(bridge);
 
-    // Step 6: import dataset notes via the direct estate path.
-    //
-    // `locus_estate` borrows from `coord` (the MutexGuard). Both must be in
-    // scope for the duration of the dataset import loop. `coord` is dropped
-    // at the end of this function, after the loop completes.
+    // Step 6: file dataset notes through the narrow GLK filing seam.
     let mut dataset_imported = 0usize;
     let mut dataset_warnings: Vec<String> = Vec::new();
 
@@ -759,27 +755,15 @@ pub fn launch_import(
                     "vault_import: estate has no DatasetStore — dataset notes skipped".to_string(),
                 );
             }
-            Some(ref ds) => {
-                match coord.estate_for(&open.handle) {
-                    Err(e) => {
-                        dataset_warnings.push(format!(
-                            "vault_import: estate not accessible for dataset import ({}); dataset notes skipped",
-                            describe_glk_error(&e)
-                        ));
-                    }
-                    Ok(locus_estate) => {
-                        dataset_imported = import_dataset_notes(
-                            vault_path,
-                            &dataset_notes,
-                            ds.as_ref(),
-                            locus_estate,
-                            &open.handle,
-                            now_ms,
-                            &mut dataset_warnings,
-                        );
-                    }
-                }
-            }
+            Some(ref ds) => dataset_imported = import_dataset_notes(
+                vault_path,
+                &dataset_notes,
+                ds.as_ref(),
+                &coord,
+                &open.handle,
+                now_ms,
+                &mut dataset_warnings,
+            ),
         }
     }
 
@@ -2030,30 +2014,27 @@ fn export_dataset_csvs(vault_path: &Path, open: &OpenEstate) -> (usize, Vec<Stri
     (count, warnings)
 }
 
-/// Import dataset handle notes from the vault via the direct estate path.
+/// Import dataset handle notes from the vault through GLK's filing seam.
 ///
 /// For each `(rel_path, frontmatter, body)` dataset note triple:
 ///   1. Decode `DatasetHandleContent` from the note body JSON.
 ///   2. Locate the companion `.csv` file at the same path with `.csv` extension.
 ///   3. Parse the CSV using column types from the handle content.
-///   4. Call `DatasetStore::create_dataset` + `append_rows` (idempotent on create).
-///   5. Call `Estate::capture_dataset_handle` (authorised creation path).
+///   4. Call `EstateCoordinator::file_dataset` for create, append, rollback,
+///      and typed handle capture.
 ///   6. Compute signatures non-fatally (reports "pending" on failure).
 ///
 /// This is the same code path as `moot_file_dataset` for the CSV→handle flow.
-/// `locus_estate` borrows from the caller's `coord` (MutexGuard) and must not
-/// outlive it — both must be in scope for the duration of this call.
 #[allow(clippy::too_many_arguments)]
 fn import_dataset_notes(
     vault_path: &Path,
     dataset_notes: &[(String, HashMap<String, String>, String)],
     dataset_store: &dyn persistence_kit::dataset_store::DatasetStore,
-    locus_estate: &locus_kit::estate::Estate,
+    coord: &genius_locus_kit::EstateCoordinator,
     handle: &genius_locus_kit::handle::EstateHandle,
     now_ms: i64,
     warnings: &mut Vec<String>,
 ) -> usize {
-    let _ = handle; // EstateHandle is not used after locus_estate is obtained.
     let mut imported = 0usize;
 
     for (rel_path, frontmatter, body) in dataset_notes {
@@ -2176,28 +2157,7 @@ fn import_dataset_notes(
             typed_rows.push(row);
         }
 
-        // --- Create dataset table (idempotent: CREATE TABLE IF NOT EXISTS) ---
-        if let Err(e) = dataset_store.create_dataset(dataset_id, &schema, &[]) {
-            warnings.push(format!(
-                "vault_import: {rel_path} — create_dataset failed ({e}); skipped"
-            ));
-            continue;
-        }
-
-        // --- Append rows (atomic intent: drop table on failure) ---
-        if !typed_rows.is_empty() {
-            if let Err(e) = dataset_store.append_rows(dataset_id, &typed_rows) {
-                let _ = dataset_store.drop_dataset(dataset_id);
-                warnings.push(format!(
-                    "vault_import: {rel_path} — append_rows failed ({e}); table dropped"
-                ));
-                continue;
-            }
-        }
-
-        // --- Capture dataset handle drawer ---
-        // capture_dataset_handle is the ONLY authorised creation path for
-        // ContentKind::Dataset drawers.
+        // --- File backend table and typed handle through GLK ---
         let sensitivity_raw = vault_sensitivity_to_raw(
             frontmatter.get("sensitivity").map(|s| s.as_str()),
         );
@@ -2217,24 +2177,26 @@ fn import_dataset_notes(
         // original data_type labels for signature parity.
         let column_summaries: Vec<DatasetColumnSummary> = handle_content.columns.clone();
 
-        let drawer = match locus_estate.capture_dataset_handle(
-            dataset_id,
-            column_summaries.clone(),
-            typed_rows.len() as i64,
-            &handle_content.source_description,
-            wing_opt,
-            room,
-            "aria-mcp-vault-import",
-            sensitivity_raw,
-            udc,
-            now_ms,
+        let drawer = match coord.file_dataset(
+            handle, dataset_id, &schema, &typed_rows, column_summaries.clone(),
+            &handle_content.source_description, wing_opt, room,
+            "aria-mcp-vault-import", sensitivity_raw, udc, now_ms,
         ) {
             Ok(d) => d,
-            Err(e) => {
-                let _ = dataset_store.drop_dataset(dataset_id);
-                warnings.push(format!(
-                    "vault_import: {rel_path} — capture_dataset_handle failed ({e}); table dropped"
-                ));
+            Err(genius_locus_kit::DatasetFilingError::StorageUnavailable(e)) => {
+                warnings.push(format!("vault_import: {rel_path} — no DatasetStore ({e}); skipped"));
+                continue;
+            }
+            Err(genius_locus_kit::DatasetFilingError::CreateFailed(e)) => {
+                warnings.push(format!("vault_import: {rel_path} — create_dataset failed ({e}); skipped"));
+                continue;
+            }
+            Err(genius_locus_kit::DatasetFilingError::AppendFailed(e)) => {
+                warnings.push(format!("vault_import: {rel_path} — append_rows failed ({e}); table dropped"));
+                continue;
+            }
+            Err(genius_locus_kit::DatasetFilingError::HandleFailed(e)) => {
+                warnings.push(format!("vault_import: {rel_path} — capture_dataset_handle failed ({e}); table dropped"));
                 continue;
             }
         };
@@ -2260,8 +2222,8 @@ fn import_dataset_notes(
                     .map_err(|e| e.to_string())?;
                 stats.insert(col.name.clone(), s);
             }
-            compute_dataset_signatures(locus_estate, &drawer.id, &column_summaries, &stats, &sampled)
-                .map_err(|e| e.to_string())
+            coord.compute_dataset_signatures(handle, &drawer.id, &column_summaries, &stats, &sampled)
+                .map_err(|error| format!("{error:?}"))
         })();
 
         imported += 1;

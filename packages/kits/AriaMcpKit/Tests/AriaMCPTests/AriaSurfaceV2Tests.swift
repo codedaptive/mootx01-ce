@@ -42,7 +42,7 @@ private struct V2CommunityHandlerSpy: CommunityToolHandler {
 
     func isCommunityTool(_ name: String) -> Bool {
         log.routeChecks += 1
-        return true
+        return name == "moot_community_test"
     }
 
     var communityToolList: [ProjectedTool] {
@@ -89,6 +89,30 @@ private actor V2FirstPartyHandlerSpy: FirstPartyToolHandler {
     func invocationCounts() -> (toolListReads: Int, routeChecks: Int, dispatches: Int) {
         (toolListReads, routeChecks, dispatches)
     }
+}
+
+private actor V2StableProviderSpy: FirstPartyProvider {
+    private var calls: [String] = []
+
+    func isFirstPartyProviderTool(_ name: String) async -> Bool {
+        FirstPartyProviderCatalog.registry.operation(named: name) != nil
+    }
+
+    var firstPartyProviderToolList: [ProjectedTool] {
+        get async { FirstPartyProviderCatalog.projectedTools }
+    }
+
+    func dispatchFirstPartyProviderTool(
+        name: String,
+        arguments: JSONValue,
+        context: FirstPartyProviderCallContext
+    ) async throws -> JSONValue {
+        _ = (arguments, context)
+        calls.append(name)
+        return .object(["implementation": .string("v2-provider")])
+    }
+
+    func calledTools() -> [String] { calls }
 }
 
 @Suite("ARIA v2 selected surface", .serialized)
@@ -1029,6 +1053,19 @@ struct AriaSurfaceV2Tests {
         for dispatcher in [direct, authenticated, publicLane] {
             #expect(try await listedToolNames(dispatcher).isEmpty)
             try await expectInactiveTeachmeRejected(dispatcher)
+            let communityResponse = try #require(await dispatcher.handle(JSONRPCRequest(
+                id: .integer(1),
+                method: "tools/call",
+                params: .object([
+                    "name": .string("moot_community_test"),
+                    "arguments": .object([:]),
+                ])
+            )))
+            guard case .error(let error) = communityResponse.payload else {
+                Issue.record("an unverified Community call unexpectedly reached a handler")
+                return
+            }
+            #expect(error.code == JSONRPCErrorCode.methodNotFound)
         }
 
         #expect(communityLog.toolListReads == 0)
@@ -1039,5 +1076,90 @@ struct AriaSurfaceV2Tests {
         #expect(firstPartyCounts.routeChecks == 0)
         #expect(firstPartyCounts.dispatches == 0)
     }
-}
 
+    @Test func authenticatedNamespacesStayIndependentAndLegacyTupleStaysOnItsV2Route() async throws {
+        let (tooling, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        let publicDispatcher = ARIA_MCPDispatcher(
+            info: .init(name: "aria-v2-test", version: "test"),
+            tooling: tooling)
+        let publicNames = try await listedToolNames(publicDispatcher)
+        #expect(publicNames.count == 80)
+        #expect(publicNames.contains("moot_dream"))
+
+        let communityLog = V2CommunityHandlerInvocationLog()
+        let provider = V2StableProviderSpy()
+        let authenticatedRequest = FirstPartyAuthenticatedRequest(
+            sessionIdentifier: Array(repeating: 7, count: FirstPartyAuthProtocol.sessionIdentifierByteCount),
+            sequence: 1,
+            body: Data(),
+            restrictsRecallToExportable: false)
+        let providerLane = ARIA_MCPDispatcher(
+            info: .init(name: "aria-v2-test", version: "test"),
+            communityHandler: V2CommunityHandlerSpy(log: communityLog),
+            firstPartyProvider: provider
+        ).withVerifiedFirstPartyRequest(authenticatedRequest, identity: testIdentity())
+        let providerNames = try await listedToolNames(providerLane)
+        #expect(providerNames.count == 27)
+        #expect(!providerNames.contains("moot_dream"))
+        #expect(providerNames.contains("moot_community_test"))
+        #expect(Set(providerNames) == Set(FirstPartyProviderCatalog.projectedTools.map(\.name))
+            .union(["moot_community_test"]))
+
+        let communityCall = try #require(await providerLane.handle(JSONRPCRequest(
+            id: .integer(1),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_community_test"),
+                "arguments": .object([:]),
+            ])
+        )))
+        guard case .result(let communityResult) = communityCall.payload else {
+            Issue.record("an admitted Community tool did not reach the Community handler")
+            return
+        }
+        #expect(communityResult.objectValue?["source"] == .string("community"))
+        #expect(await provider.calledTools().isEmpty)
+
+        let legacyCall = try #require(await providerLane.handle(JSONRPCRequest(
+            id: .integer(2),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_memory_get"),
+                "first_party_provider": .object([
+                    "contract_version": .string(FirstPartyProviderCatalog.legacyContractVersion),
+                    "aria_supported_version": .string(FirstPartyProviderCatalog.supportedARIAVersion),
+                    "capability_digest": .string(FirstPartyProviderCatalog.legacyCapabilityDigest),
+                ]),
+                "arguments": .object([
+                    "memory_id": .string("11111111-2222-3333-4444-555555555555"),
+                ]),
+            ])
+        )))
+        guard case .result(let legacyResult) = legacyCall.payload else {
+            Issue.record("the admitted provider 1.0 tuple did not reach the v2 provider implementation")
+            return
+        }
+        #expect(legacyResult.objectValue?["implementation"] == .string("v2-provider"))
+        #expect(await provider.calledTools() == ["moot_memory_get"])
+
+        let publicLeak = try #require(await providerLane.handle(JSONRPCRequest(
+            id: .integer(3),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_dream"),
+                "first_party_provider": FirstPartyProviderCatalog.discovery.jsonValue,
+                "arguments": .object([:]),
+            ])
+        )))
+        guard case .error(let error) = publicLeak.payload else {
+            Issue.record("a public-only selected operation leaked into the fixed provider lane")
+            return
+        }
+        #expect(error.code == JSONRPCErrorCode.methodNotFound)
+        #expect(await provider.calledTools() == ["moot_memory_get"])
+        #expect(communityLog.toolListReads == 1)
+        #expect(communityLog.routeChecks == 3)
+        #expect(communityLog.dispatches == 1)
+    }
+}
