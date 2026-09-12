@@ -395,7 +395,14 @@ fn mode_arg_in_every_tool_schema() {
         global_modifiers.contains("mode"),
         "global_modifiers entry must describe the mode modifier"
     );
-    // Byte-identity with the constant (same as fixture check below).
+    // Gates that the help directory emits the canonical constant — not a paraphrase,
+    // a truncation, or a second constant that could diverge silently. It does NOT pin
+    // the constant's own content: help.rs inserts GLOBAL_MODIFIERS_HELP_TEXT verbatim,
+    // so a corrupted constant moves both sides together and this assertion stays green.
+    // Constant integrity is guarded separately by the fixture test below, which compares
+    // GLOBAL_MODIFIERS_HELP_TEXT against Tests/Conformance/global_modifiers_help_fixture.json.
+    // The two checks are complementary — delete either one and a class of corruption
+    // goes undetected.
     assert_eq!(global_modifiers, GLOBAL_MODIFIERS_HELP_TEXT,
         "help directory global_modifiers must equal GLOBAL_MODIFIERS_HELP_TEXT");
 
