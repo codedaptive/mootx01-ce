@@ -291,9 +291,12 @@ struct SensitivityLinkReviewGateTests {
             "tunnel seeded from a .restricted source must have .restricted own sensitivity")
 
         // Record tunnel state before the refused call.
+        // #require both rows so an absent fixture fails loudly instead of
+        // passing silently through nil == nil comparisons.
         let estateBefore = try await kit.estate(for: handle)
-        let tunnelBefore = try await estateBefore.getTunnel(id: tunnel.id)
-        let lifecycleBefore = tunnelBefore?.lifecycle
+        let tunnelBefore = try #require(
+            await estateBefore.getTunnel(id: tunnel.id),
+            "fixture tunnel must exist in the estate before the refused call")
 
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
         let result = try await dispatcher.dispatch(
@@ -310,12 +313,14 @@ struct SensitivityLinkReviewGateTests {
 
         // State must be unchanged: compare the full tunnel row (Tunnel is Equatable).
         let estateAfter = try await kit.estate(for: handle)
-        let tunnelAfter = try await estateAfter.getTunnel(id: tunnel.id)
-        #expect(tunnelAfter?.lifecycle == lifecycleBefore,
+        let tunnelAfter = try #require(
+            await estateAfter.getTunnel(id: tunnel.id),
+            "tunnel must still exist after the refused review call")
+        #expect(tunnelAfter.lifecycle == tunnelBefore.lifecycle,
             "refused review must not change tunnel lifecycle")
-        #expect(tunnelAfter?.ext == tunnelBefore?.ext,
+        #expect(tunnelAfter.ext == tunnelBefore.ext,
             "refused review must not change tunnel ext / review ledger")
-        #expect(tunnelAfter?.adjectiveBitmap == tunnelBefore?.adjectiveBitmap,
+        #expect(tunnelAfter.adjectiveBitmap == tunnelBefore.adjectiveBitmap,
             "refused review must not change tunnel adjective bitmap")
     }
 
@@ -371,34 +376,35 @@ struct SensitivityLinkReviewGateTests {
             "above-ceiling and nonexistent must produce the same retryable flag")
     }
 
-    // MARK: - Gate 5: far-endpoint above ceiling refuses (second part of the rule)
+    // MARK: - Gate 5: two-part review gate — per-part isolators
 
-    /// The far-endpoint part of the two-part rule: a tunnel whose own sensitivity
-    /// is within the ceiling but whose far-endpoint drawer is above the ceiling
-    /// must also be refused. This is the half most likely to be skipped.
+    /// Isolates Part 2 of the two-part review gate: refuses a tunnel whose own
+    /// stamped sensitivity is within the ceiling but whose far-endpoint drawer is
+    /// above it (AriaV2MemoryMutations.swift:491-497).
     ///
-    /// Pre-fix failure: a tunnel with a normal-sensitivity tunnel label but a
-    /// restricted far endpoint would succeed — the far-endpoint check was absent.
+    /// Fixture design: both endpoints are seeded .normal so the tunnel's stamped
+    /// sensitivity is .normal (within the default .elevated ceiling). The stamp
+    /// assertion on the stored row is load-bearing — it confirms Part 1 will NOT
+    /// fire. Only then is the target endpoint raised to .restricted via
+    /// correctSensitivity, ensuring the only path to refusal is the Part 2
+    /// far-endpoint check. Deleting the Part 2 loop while keeping Part 1 makes
+    /// this test RED and the Part 1 isolator GREEN.
     @Test func reviewTunnelFarEndpointAboveCeilingRefuses() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "slrg-gate5")
         let handle = try await openEstate(in: kit, owner: owner)
 
-        // Source is normal so the tunnel's own sensitivity is normal (within ceiling).
+        // Both endpoints .normal so the tunnel stamp is .normal (within the ceiling).
         let source = try await seedDrawer(
-            "normal source — tunnel own sensitivity is normal",
+            "normal source — tunnel stamp will be normal",
             sensitivity: .normal,
             in: handle, kit: kit)
-        // Target is restricted — the far-endpoint check must fire.
         let target = try await seedDrawer(
-            "restricted target — far-endpoint check must refuse",
-            sensitivity: .restricted,
+            "normal target — raised to restricted after capture",
+            sensitivity: .normal,
             in: handle, kit: kit)
 
-        // Capture a tunnel directly. Use .proposed lifecycle so endorseTunnel can
-        // run when the gate is absent (proving RED). The DB-stamped sensitivity
-        // is determined from the endpoint drawers by DrawerStore.addTunnel; the
-        // far-endpoint gate path also fires because the target drawer is .restricted.
+        // Capture the tunnel while both endpoints are .normal.
         let estate = try await kit.estate(for: handle)
         var frame = TunnelCaptureFrame(
             sourceWing: "slrg-wing", sourceRoom: "slrg-room",
@@ -406,32 +412,111 @@ struct SensitivityLinkReviewGateTests {
             label: "relates", addedBy: "slrg-tests",
             sourceDrawerId: source.id, targetDrawerId: target.id, kind: .references)
         frame.lifecycle = .proposed
-        let tunnel = try await estate.capture(frame)
+        let captured = try await estate.capture(frame)
 
-        // Confirm the capture() return value (pre-DB-stamping) shows .normal sensitivity.
-        // The DB-stamped version may differ (endpoint-derived); the gate checks the DB
-        // row via getTunnel(), which may fire on own-sensitivity or far-endpoint.
-        // Either way the result must be mutation_unavailable — this test verifies that
-        // a .restricted endpoint triggers a refusal regardless of which check fires.
-        #expect(tunnel.adjectiveSensitivity.rawValue <= AdjectiveSensitivity.elevated.rawValue,
-            "capture() return (pre-stamp) sensitivity must be within ceiling; got: \(tunnel.adjectiveSensitivity)")
+        // Read back the stored row and assert on the DB-stamped sensitivity.
+        // This assertion is load-bearing: if the stamp is above .elevated the
+        // fixture is wrong and the test would prove nothing about Part 2 isolation
+        // (Part 1 would fire instead).
+        let tunnel = try #require(
+            await estate.getTunnel(id: captured.id),
+            "tunnel must exist immediately after capture")
+        #expect(tunnel.adjectiveSensitivity == .normal,
+            "tunnel stamped from two .normal endpoints must be .normal; got: \(tunnel.adjectiveSensitivity)")
+
+        // Raise the target endpoint above the ceiling. The tunnel's own stamp
+        // remains .normal, so only the Part 2 far-endpoint check can cause the
+        // refusal — Part 1 cannot fire.
+        try await estate.mutate(rowID: target.id, kind: .correctSensitivity(.restricted))
 
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
         let result = try await dispatcher.dispatch(
             name: "moot_review_tunnel",
             arguments: .object([
-                "tunnel_id": .string(tunnel.id),
+                "tunnel_id": .string(captured.id),
                 "decision": .string("endorse"),
                 "reviewed_by": .string("test-reviewer"),
             ])
         )
 
         #expect(isError(result),
-            "review_tunnel endorse must be blocked when far endpoint is .restricted; got: \(result)")
+            "review_tunnel endorse must be blocked when the far endpoint is .restricted and the tunnel stamp is .normal; got: \(result)")
 
         let err = try #require(errorObject(result))
         #expect(err["code"]?.stringValue == "mutation_unavailable",
-            "far-endpoint gate must use mutation_unavailable code (matching nonexistent tunnel); got: \(String(describing: err["code"]))")
+            "far-endpoint gate must use mutation_unavailable code; got: \(String(describing: err["code"]))")
+    }
+
+    /// Isolates Part 1 of the two-part review gate: refuses a tunnel whose own
+    /// stamped sensitivity exceeds the ceiling, even after every far-endpoint
+    /// drawer has been corrected to within the ceiling
+    /// (AriaV2MemoryMutations.swift:488-490).
+    ///
+    /// Fixture design: source is seeded .restricted so the tunnel stamp is
+    /// .restricted. The stamp assertion on the stored row is load-bearing — it
+    /// confirms the tunnel stamp does exceed the ceiling. Both endpoints are then
+    /// corrected to .normal via correctSensitivity. The stale stamp is not
+    /// re-derived after creation, so the tunnel remains .restricted. With all
+    /// endpoints within the ceiling, Part 2 cannot fire; only the stale stamp
+    /// triggers the refusal. Deleting the Part 1 check while keeping Part 2 makes
+    /// this test RED and the Part 2 isolator GREEN.
+    @Test func reviewTunnelOwnSensitivityAboveCeilingRefuses() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "slrg-gate5b")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Source .restricted so the tunnel stamp is .restricted (max of endpoints).
+        let source = try await seedDrawer(
+            "restricted source — tunnel stamp will be restricted",
+            sensitivity: .restricted,
+            in: handle, kit: kit)
+        let target = try await seedDrawer(
+            "normal target",
+            sensitivity: .normal,
+            in: handle, kit: kit)
+
+        // Capture the tunnel while source is .restricted.
+        let estate = try await kit.estate(for: handle)
+        var frame = TunnelCaptureFrame(
+            sourceWing: "slrg-wing", sourceRoom: "slrg-room",
+            targetWing: "slrg-wing", targetRoom: "slrg-room",
+            label: "relates", addedBy: "slrg-tests",
+            sourceDrawerId: source.id, targetDrawerId: target.id, kind: .references)
+        frame.lifecycle = .proposed
+        let captured = try await estate.capture(frame)
+
+        // Read back the stored row and assert on the DB-stamped sensitivity.
+        // This assertion is load-bearing: if the stamp is not .restricted the
+        // fixture is wrong and the test would not isolate Part 1.
+        let tunnel = try #require(
+            await estate.getTunnel(id: captured.id),
+            "tunnel must exist immediately after capture")
+        #expect(tunnel.adjectiveSensitivity == .restricted,
+            "tunnel stamped from a .restricted source must be .restricted; got: \(tunnel.adjectiveSensitivity)")
+
+        // Lower both endpoints to .normal. The tunnel's stamped sensitivity is not
+        // re-derived after creation, so it remains .restricted — the stale stamp is
+        // the only remaining trigger. Part 2 cannot fire because both endpoints are
+        // now .normal (within the default .elevated ceiling).
+        try await estate.mutate(rowID: source.id, kind: .correctSensitivity(.normal))
+        try await estate.mutate(rowID: target.id, kind: .correctSensitivity(.normal))
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let result = try await dispatcher.dispatch(
+            name: "moot_review_tunnel",
+            arguments: .object([
+                "tunnel_id": .string(captured.id),
+                "decision": .string("endorse"),
+                "reviewed_by": .string("test-reviewer"),
+            ])
+        )
+
+        #expect(isError(result),
+            "review_tunnel endorse must be blocked when the tunnel's own stamp is .restricted even after both endpoints are .normal; got: \(result)")
+
+        let err = try #require(errorObject(result))
+        #expect(err["code"]?.stringValue == "mutation_unavailable",
+            "own-sensitivity gate must use mutation_unavailable code; got: \(String(describing: err["code"]))")
     }
 
     // MARK: - Gate 6: link between readable rows still succeeds
