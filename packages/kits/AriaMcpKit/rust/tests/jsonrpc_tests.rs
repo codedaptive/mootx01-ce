@@ -77,7 +77,8 @@ fn error_response_carries_code_and_message() {
     let resp = JSONRPCResponse::failure(JsonValue::Null, err);
     let encoded = serde_json::to_value(&resp).unwrap();
     let obj = encoded.as_object().unwrap();
-    assert_eq!(obj["id"], serde_json::json!(null));
+    assert!(obj.contains_key("id"), "JSON-RPC 2.0 requires id present on an error response");
+    assert!(obj["id"].is_null(), "JSON-RPC 2.0 requires id null when the request carried no id");
     let err_obj = obj["error"].as_object().unwrap();
     assert_eq!(err_obj["code"], serde_json::json!(-32601_i64));
     assert_eq!(err_obj["message"], serde_json::json!("no such method"));
