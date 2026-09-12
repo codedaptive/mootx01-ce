@@ -900,10 +900,6 @@ fn provisioned_coaching_calls_two_fires_on_call_two() {
     );
 }
 
-/// BLOCKED: `aria_mcp::teachme_guides` is a v1-only surface with no v2 equivalent.
-/// `moot_help` is the v2 discovery surface but does not expose a static guide string
-/// to assert byte-identity against; it returns dynamic content.
-
 /// Gate: `GLOBAL_MODIFIERS_HELP_TEXT` must be byte-identical to the shared
 /// fixture `Tests/Conformance/global_modifiers_help_fixture.json`.
 ///
