@@ -137,3 +137,106 @@ fn missing_entities_and_a_tied_head_both_fall_through() {
         FactFirstRecallDecision::FallThrough
     );
 }
+
+// Gate B: a fact with a stale search_projection_version is excluded from recall
+// by FactFirstRecall's version guard. Once the correct version is stamped (the
+// exact bytes the backfill writes), the fact wins the query. Twin of Swift Gate B.
+//
+// Design — inverted so the test discriminates:
+//   f-unprojected (Jack) carries the content the query asks for, but
+//   search_projection_version = "" (wrong, backfill not yet run). The version
+//   guard at fact_first_recall.rs lines 92-93 excludes it.
+//   f-projected (Jill) has the correct version but scores poorly: coverage 0.5
+//   and entity_containment = 0 (Jill ≠ Jack).
+//
+//   Phase 1: f-unprojected excluded by the version guard. Jill scores 0.5 <
+//   0.70 and has containment 0 → FallThrough.
+//   Phase 2: f-unprojected receives FactSearchProjection::VERSION — the exact
+//   bytes the gateway writes. Jack scores ≥ 0.70, margin ≥ 0.20, containment
+//   = 1 → Solid(f-unprojected).
+//
+// Discrimination: deleting lines 92-93 from fact_first_recall.rs (the version
+// guard block) makes f-unprojected eligible in Phase 1; Jack scores ≥ 0.70 and
+// wins, so Phase 1's FallThrough assertion fails → red. Restoring those lines
+// returns the test to green.
+//
+// Note on empty search_projection (the actual schema DEFAULT): for facts where
+// search_projection = "", lines 92-93 and the downstream tokens.is_empty() guard
+// both exclude the fact. Removing lines 92-93 alone does not expose an
+// empty-string fact because default_keyword_tokens("") always returns []. This
+// test exercises line 93 (the version check) — the condition the backfill satisfies.
+#[test]
+fn gate_b_un_projected_fact_is_invisible_to_recall() {
+    let source_id = "source-b";
+    let source = drawer(source_id, "Jack's birthday is in June.");
+    let sources = HashMap::from([(source_id.into(), source)]);
+
+    // Fact 1 (the winning candidate): Jack, with the correct projection content
+    // but search_projection_version = "" (wrong — backfill has not yet stamped
+    // the version). The version guard (line 93) excludes this fact.
+    let jack_projection = FactSearchProjection::build("Jack", "birthday", "June", &[]);
+    let un_projected = KGFact {
+        search_projection: jack_projection.clone(),
+        search_projection_version: String::new(),   // wrong — excluded by version guard
+        ..KGFact::new(
+            "f-unprojected".into(), "Jack".into(), "birthday".into(), "June".into(),
+            source_id.into(), 1_800_000_000,
+        )
+    };
+
+    // Fact 2 (the decoy): Jill, correctly versioned, but low-scoring.
+    // "jack birthday" ∩ {"jill", "birthday", "june"} = {"birthday"} → coverage 0.5,
+    // below 0.70; entity_containment = 0 (Jill ≠ Jack).
+    let jill_projection = FactSearchProjection::build("Jill", "birthday", "June", &[]);
+    let projected = KGFact {
+        search_projection: jill_projection,
+        search_projection_version: FactSearchProjection::VERSION.into(),
+        ..KGFact::new(
+            "f-projected".into(), "Jill".into(), "birthday".into(), "June".into(),
+            source_id.into(), 1_800_000_000,
+        )
+    };
+
+    // Phase 1: guard active — f-unprojected (Jack) excluded by the version guard.
+    // Jill is the only eligible candidate but scores 0.5 and has containment 0
+    // → FallThrough.
+    let decision = FactFirstRecallStage::decide(
+        "jack birthday",
+        &["Jack".into()],
+        &[un_projected.clone(), projected.clone()],
+        &sources,
+        None,
+        FactFirstRecallThresholds::default(),
+    );
+    assert_eq!(
+        decision,
+        FactFirstRecallDecision::FallThrough,
+        "Phase 1: stale-versioned Jack fact must not be returned; \
+         Jill alone fails score floor and entity containment"
+    );
+
+    // Phase 2: f-unprojected (Jack) receives FactSearchProjection::VERSION —
+    // the exact bytes the gateway writes. Coverage 2/2 = 1.0, margin ≥ 0.20,
+    // containment = 1 → Solid(f-unprojected).
+    let now_projected = KGFact {
+        search_projection: jack_projection,
+        search_projection_version: FactSearchProjection::VERSION.into(),   // backfill's stamp
+        ..un_projected
+    };
+
+    let after_decision = FactFirstRecallStage::decide(
+        "jack birthday",
+        &["Jack".into()],
+        &[now_projected, projected],
+        &sources,
+        None,
+        FactFirstRecallThresholds::default(),
+    );
+    let FactFirstRecallDecision::Solid(family) = after_decision else {
+        panic!("Phase 2: expected Solid after version stamp; got {:?}", after_decision)
+    };
+    assert_eq!(
+        family.fact.id, "f-unprojected",
+        "Phase 2: the formerly-stale Jack fact must win once the version is stamped"
+    );
+}
