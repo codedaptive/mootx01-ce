@@ -96,19 +96,30 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // Restricted/secret rows are absent from drawersByID and receive no structured
             // fields; they still appear with id and centrality (indistinguishability rule).
             let estate = try await kit.estate(for: handle)
+            // Full hydration so drawer.content is populated — structured hydration
+            // returns content == "" (Swift spec §7.3) which would collapse every
+            // bestSpan to "-". Rust get_drawers_matching_frame always loads full rows
+            // (P6-secfix), so full hydration here keeps both ports on the same path.
+            // The sensitivity gate still applies via BitmapEvaluator on the filterChain.
             let drawersByID = try await RecipeTools.structuredDrawersByID(
-                ids: ranked.map { $0.id }, estate: estate)
+                ids: ranked.map { $0.id }, estate: estate, hydrationLevel: .full)
             return .init(data: .object(["keystones": .array(ranked.map { keystone in
                 let id = keystone.id.lowercased()
-                guard let drawer = drawersByID[keystone.id] else {
+                guard let drawer = drawersByID[keystone.id] ?? drawersByID[keystone.id.lowercased()] else {
                     // Gated (restricted/secret) row: id and centrality only.
                     return .object(["id": .string(id), "centrality": .double(keystone.centrality)])
                 }
+                // Normalize bestSpan through the shared ResultComposer helper so
+                // newlines and whitespace runs collapse to spaces (matching Rust's
+                // normalize_value path in result_composer.rs). The noSubjectMarker
+                // matches Rust's NO_SUBJECT_MARKER = "(no subject)" via
+                // ARIAServerConstants, keeping both ports on the same wire value.
+                let span = ResultComposer.normalizeValue(drawer.content)
                 return .object([
                     "id": .string(id),
                     "centrality": .double(keystone.centrality),
-                    "subject": .string(drawer.subject ?? "-"),
-                    "bestSpan": .string(drawer.content.isEmpty ? "-" : drawer.content),
+                    "subject": .string(drawer.subject ?? ResultComposer.noSubjectMarker),
+                    "bestSpan": .string(span.isEmpty ? "-" : span),
                     "eventTime": .string(ResultComposer.iso8601(drawer.eventTime)),
                 ])
             })]), compactText: "Found \(ranked.count) keystones.")
@@ -300,9 +311,11 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             let output = try await TrustLens.run(
                 kit: kit, handle: handle, frame: frame(request, context: context))
             // Dense-row hydration through the sensitivity gate (empty filterChain).
+            // Full hydration so drawer.content is populated for bestSpan computation;
+            // structured hydration returns content == "" per Swift spec §7.3.
             let trustEstate = try await kit.estate(for: handle)
             let trustDrawersByID = try await RecipeTools.structuredDrawersByID(
-                ids: output.rankedIDs, estate: trustEstate)
+                ids: output.rankedIDs, estate: trustEstate, hydrationLevel: .full)
             return .init(
                 data: trustData(output, drawersByID: trustDrawersByID),
                 compactText: "Synthesized \(output.rankedIDs.count) trust-ranked memories.")
@@ -732,13 +745,19 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         // Gated rows carry only {id}; admissible rows carry {id, subject, bestSpan, eventTime}.
         let rankedRows: JSONValue = .array(output.rankedIDs.map { id in
             let lowID = id.lowercased()
-            guard let drawer = drawersByID[id] else {
+            // Case-normalised lookup: dict keys come from $0.id (estate-fetched IDs)
+            // which may differ in case from the IDs that flow through ranked output.
+            guard let drawer = drawersByID[id] ?? drawersByID[lowID] else {
                 return .object(["id": .string(lowID)])
             }
+            // Normalize through shared helpers — mirrors Rust result_composer.rs
+            // candidate_from_drawer + normalize_value so both ports emit identical
+            // values for subject-debt drawers and multiline content.
+            let span = ResultComposer.normalizeValue(drawer.content)
             return .object([
                 "id": .string(lowID),
-                "subject": .string(drawer.subject ?? "-"),
-                "bestSpan": .string(drawer.content.isEmpty ? "-" : drawer.content),
+                "subject": .string(drawer.subject ?? ResultComposer.noSubjectMarker),
+                "bestSpan": .string(span.isEmpty ? "-" : span),
                 "eventTime": .string(ResultComposer.iso8601(drawer.eventTime)),
             ])
         })

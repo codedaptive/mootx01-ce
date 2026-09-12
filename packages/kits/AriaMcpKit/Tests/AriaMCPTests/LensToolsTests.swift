@@ -868,13 +868,17 @@ extension LensToolsTests {
             content: "golden trust memory", room: "study")
 
         // Derive expected values independently from the stored drawer.
-        // AriaV2LensLower.trustData uses drawer.subject ?? "-" and
-        // drawer.content for bestSpan (empty content → "-").
+        // AriaV2LensLower.trustData uses the shared composer helpers:
+        // noSubjectMarker for absent subjects, normalizeValue for bestSpan
+        // (matching Rust result_composer.rs NO_SUBJECT_MARKER + normalize_value).
         let estate = try await kit.estate(for: handle)
-        let fetched = try await estate.getDrawers(ids: [id], hydrationLevel: .structured)
+        // Full hydration mirrors the lens lower path: structured returns content == ""
+        // (spec §7.3), so the expected bestSpan must be derived from a full fetch.
+        let fetched = try await estate.getDrawers(ids: [id], hydrationLevel: .full)
         let drawer = try #require(fetched.first, "captured drawer must be retrievable from estate")
-        let expectedSubject = drawer.subject ?? "-"
-        let expectedBestSpan = drawer.content.isEmpty ? "-" : drawer.content
+        let expectedSubject = drawer.subject ?? ResultComposer.noSubjectMarker
+        let rawSpan = ResultComposer.normalizeValue(drawer.content)
+        let expectedBestSpan = rawSpan.isEmpty ? "-" : rawSpan
         let expectedEventTime = ResultComposer.iso8601(drawer.eventTime)
 
         let result = try await dispatcher.dispatch(
@@ -891,9 +895,9 @@ extension LensToolsTests {
         #expect(row["id"]?.stringValue == id.lowercased(),
             "row id must equal the captured drawer id; got: \(String(describing: row["id"]))")
         #expect(row["subject"]?.stringValue == expectedSubject,
-            "row subject must equal drawer.subject ?? \"-\"; expected: \(expectedSubject), got: \(String(describing: row["subject"]))")
+            "row subject must equal noSubjectMarker when nil; expected: \(expectedSubject), got: \(String(describing: row["subject"]))")
         #expect(row["bestSpan"]?.stringValue == expectedBestSpan,
-            "row bestSpan must equal drawer content; expected: \(expectedBestSpan), got: \(String(describing: row["bestSpan"]))")
+            "row bestSpan must equal normalizeValue(content); expected: \(expectedBestSpan), got: \(String(describing: row["bestSpan"]))")
         #expect(row["eventTime"]?.stringValue == expectedEventTime,
             "row eventTime must equal ISO-8601 event time; expected: \(expectedEventTime), got: \(String(describing: row["eventTime"]))")
     }
@@ -920,12 +924,17 @@ extension LensToolsTests {
             try await addTunnel(kit, handle, wing: "study", src: hubID, tgt: spokeID)
         }
 
-        // Derive expected values from the stored hub drawer.
+        // Derive expected values from the stored hub drawer using the shared
+        // composer helpers: noSubjectMarker for absent subjects, normalizeValue
+        // for bestSpan. Matches Rust NO_SUBJECT_MARKER + normalize_value.
         let estate = try await kit.estate(for: handle)
-        let fetched = try await estate.getDrawers(ids: [hubID], hydrationLevel: .structured)
+        // Full hydration mirrors the lens lower path: structured returns content == ""
+        // (spec §7.3), so the expected bestSpan must be derived from a full fetch.
+        let fetched = try await estate.getDrawers(ids: [hubID], hydrationLevel: .full)
         let hubDrawer = try #require(fetched.first, "hub drawer must be retrievable from estate")
-        let expectedSubject = hubDrawer.subject ?? "-"
-        let expectedBestSpan = hubDrawer.content.isEmpty ? "-" : hubDrawer.content
+        let expectedSubject = hubDrawer.subject ?? ResultComposer.noSubjectMarker
+        let rawSpan = ResultComposer.normalizeValue(hubDrawer.content)
+        let expectedBestSpan = rawSpan.isEmpty ? "-" : rawSpan
         let expectedEventTime = ResultComposer.iso8601(hubDrawer.eventTime)
 
         let result = try await dispatcher.dispatch(
@@ -944,11 +953,57 @@ extension LensToolsTests {
         #expect(hub["id"]?.stringValue == hubID.lowercased(),
             "hub id must equal the captured drawer id; got: \(String(describing: hub["id"]))")
         #expect(hub["subject"]?.stringValue == expectedSubject,
-            "hub subject must equal drawer.subject ?? \"-\"; expected: \(expectedSubject), got: \(String(describing: hub["subject"]))")
+            "hub subject must equal noSubjectMarker when nil; expected: \(expectedSubject), got: \(String(describing: hub["subject"]))")
         #expect(hub["bestSpan"]?.stringValue == expectedBestSpan,
-            "hub bestSpan must equal drawer content; expected: \(expectedBestSpan), got: \(String(describing: hub["bestSpan"]))")
+            "hub bestSpan must equal normalizeValue(content); expected: \(expectedBestSpan), got: \(String(describing: hub["bestSpan"]))")
         #expect(hub["eventTime"]?.stringValue == expectedEventTime,
             "hub eventTime must equal ISO-8601 event time; expected: \(expectedEventTime), got: \(String(describing: hub["eventTime"]))")
+    }
+
+    /// Wire parity: a no-subject drawer with multiline content produces the
+    /// canonical sentinel values in both ports.
+    ///
+    /// subject must be `"(no subject)"` (ARIAServerConstants.noSubjectMarker),
+    /// NOT `"-"`. bestSpan must be the normalized content with newlines
+    /// collapsed to spaces, NOT the raw multi-line string.
+    ///
+    /// The exact literals asserted here must match the Rust gate
+    /// `lens_parity_no_subject_and_multiline_content` in
+    /// aria_v2_wire_parity_tests.rs so cross-port divergence cannot hide.
+    @Test func parityNoSubjectAndMultilineContent() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "parity-ns"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Content has an embedded newline — must be normalized to a space.
+        // No subject is set on the CaptureFrame (the `capture` helper never
+        // sets one), so the wire value must be the noSubjectMarker sentinel.
+        let hubID = try await capture(
+            kit, handle, content: "line one\nline two", room: "study")
+        let s1 = try await capture(kit, handle, content: "spoke a", room: "study")
+        let s2 = try await capture(kit, handle, content: "spoke b", room: "study")
+        for spokeID in [s1, s2] {
+            try await addTunnel(kit, handle, wing: "study", src: hubID, tgt: spokeID)
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_lens_keystones",
+            arguments: .object(["wing": .string("study")]))
+
+        let body = try data(result)
+        let keystones = try #require(body["keystones"]?.arrayValue)
+        let hubRow = keystones.first {
+            $0.objectValue?["id"]?.stringValue == hubID.lowercased()
+        }
+        let hub = try #require(hubRow?.objectValue, "hub must appear in keystones")
+
+        // These exact literals must match the Rust gate — changing them
+        // without updating the Rust test is a parity break.
+        #expect(hub["subject"]?.stringValue == "(no subject)",
+            "no-subject drawer must emit \"(no subject)\", not \"-\"; got: \(String(describing: hub["subject"]))")
+        #expect(hub["bestSpan"]?.stringValue == "line one line two",
+            "multiline content must be normalized to a single line; got: \(String(describing: hub["bestSpan"]))")
     }
 
     /// Sensitivity gate: a restricted drawer that ranks as a keystone yields
