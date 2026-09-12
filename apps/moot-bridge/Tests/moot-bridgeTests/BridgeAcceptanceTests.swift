@@ -33,7 +33,7 @@ private let mempalaceMCPPath: String? = whichBinary("mempalace-mcp")
 /// selector; a `mootx01` predating the estate catalog reads that value as a
 /// bare estate NAME, serves something else, and the post-swap read returns no
 /// content — a red suite on any machine carrying an older install, where the
-/// honest outcome is a skip. So each candidate is asked what it can do.
+/// right outcome is a skip. So each candidate is asked what it can do.
 private let mootx01BinPath: String? = whichCapableBinary("mootx01", capability: serveAcceptsDirectoryAndName)
 /// The version string of the newest-listed mootx01 that failed the capability
 /// probe, for the skip message. Nil when none was found at all.
