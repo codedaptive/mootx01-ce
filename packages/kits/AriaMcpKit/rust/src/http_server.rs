@@ -14,7 +14,7 @@
 //!
 //! # Concurrency model
 //!
-//! `run_http_loop` spawns one thread per accepted connection, bounded by a
+//! `serve_http` spawns one thread per accepted connection, bounded by a
 //! `ConcurrencyGate` (default maxConcurrent=64, maxQueued=256). The accept
 //! loop uses a TWO-PHASE gate protocol so it never parks inside the gate:
 //!
@@ -79,7 +79,7 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 // ─────────────────────────────────────────────────────────────────────────────
 // MARK: - Transport metrics
 //
-// All counters are process-global atomics. `run_http_loop` reads env vars to
+// All counters are process-global atomics. `serve_http` reads env vars to
 // configure the gate once; counters accumulate for the process lifetime.
 //
 // Metric parity with Swift HTTPServer:
@@ -177,7 +177,7 @@ fn update_inflight_hwm(current: usize) {
 // Sizing mirrors the Swift ConcurrencyGate defaults:
 //   max_concurrent = 64, max_queued = 256
 // Both are configurable via env vars (MOOTX01_HTTP_MAX_CONCURRENT,
-// MOOTX01_HTTP_MAX_QUEUED) read once at `run_http_loop` entry.
+// MOOTX01_HTTP_MAX_QUEUED) read once at `serve_http` entry.
 //
 // IMPORTANT: The accept loop uses a TWO-PHASE protocol so it never
 // parks inside the gate:
@@ -376,7 +376,7 @@ pub fn send_shed_response(stream: &mut TcpStream) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MARK: - run_http_loop (hardened, multi-threaded)
+// MARK: - HTTP server entry points: run_http_loop (bind) and serve_http (hardened, multi-threaded)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Maximum concurrent SSE connections (CAND-025 hardening).
@@ -391,8 +391,34 @@ const MAX_SSE_CONNECTIONS: usize = 16;
 /// Run the resident loopback HTTP MCP transport on `127.0.0.1:port` until the
 /// process is terminated. Returns only if the bind fails.
 ///
-/// Spawns one thread per accepted connection (bounded by `ConcurrencyGate`).
-/// Connections beyond `max_concurrent + max_queued` receive HTTP 503 immediately.
+/// Binds the listener then delegates to [`serve_http`], which owns the gate
+/// configuration, the dispatcher construction and the accept loop; see that
+/// function for the concurrency and SSE-isolation behaviour and for the
+/// `stats_store` parameter. This function is the bind half and nothing else.
+///
+/// The split exists so a test can drive the real `ServerConfig` to `Dispatcher`
+/// construction: it calls [`serve_http`] with a pre-bound listener and
+/// `connection_limit: Some(n)` instead of mocking or bypassing the seam.
+///
+/// The advisory gate sits at [`serve_http`] and [`crate::server::dispatcher_from_config`],
+/// not here. This two-line wrapper has no test coverage of its own — patching
+/// the advisory fields between the bind and the delegation leaves the test
+/// suite green because the construction seam is in `serve_http`, not in this
+/// function.
+pub fn run_http_loop(
+    port: u16,
+    max_body_bytes: usize,
+    config: ServerConfig,
+    stats_store: Option<Arc<StatsStore>>,
+) -> std::io::Result<()> {
+    let listener = bind_loopback(port)?;
+    serve_http(listener, max_body_bytes, config, stats_store, None)
+}
+
+/// Accept loop for the loopback HTTP MCP transport.
+///
+/// Spawns one thread per accepted connection (bounded by [`ConcurrencyGate`]).
+/// Connections beyond `max_concurrent + max_queued` receive HTTP 503.
 ///
 /// SSE isolation (CAND-025): SSE streams (`GET /api/events`) use a SEPARATE
 /// SSE gate (default `MAX_SSE_CONNECTIONS` concurrent, maxQueued=0). The
@@ -400,12 +426,23 @@ const MAX_SSE_CONNECTIONS: usize = 16;
 /// slot is then acquired and held for the full stream lifetime. Normal POST /
 /// JSON-RPC traffic is never blocked by idle SSE clients.
 ///
+/// `connection_limit`: when `None`, serve forever (production). When
+/// `Some(n)`, return after accepting at least `n` connections; `Some(0)`
+/// accepts one because the accepted counter increments before the limit check.
+/// The minimum meaningful value is `Some(1)`. The bounded variant is how tests
+/// drive the REAL `ServerConfig → Dispatcher` construction without leaking a
+/// thread — the test spawns `serve_http(..., Some(1))`, sends one request,
+/// reads the response, then joins the server thread.
+/// Shipping behaviour (`connection_limit: None`) is unchanged.
+///
 /// `stats_store`: optional stats store for topology snapshot reads.
-pub fn run_http_loop(
-    port: u16,
+#[doc(hidden)]
+pub fn serve_http(
+    listener: std::net::TcpListener,
     max_body_bytes: usize,
     config: ServerConfig,
     stats_store: Option<Arc<StatsStore>>,
+    connection_limit: Option<usize>,
 ) -> std::io::Result<()> {
     // Read gate configuration from env (same keys as Swift, same defaults).
     let max_concurrent = std::env::var("MOOTX01_HTTP_MAX_CONCURRENT")
@@ -430,9 +467,9 @@ pub fn run_http_loop(
     let gate = ConcurrencyGate::new(max_concurrent, max_queued);
     let sse_gate = Arc::new(ConcurrencyGate::new(max_sse, 0));
 
-    // build the monitoring control from the stats store when
-    // available. The concrete type lives here (AriaResident is the Swift mirror)
-    // so AriaMcpKit never imports observer_sink directly.
+    // Build the monitoring control from the stats store when available.
+    // The concrete type lives here (AriaResident is the Swift mirror) so
+    // AriaMcpKit never imports observer_sink directly.
     // `None` when no stats store is configured (stdio, provision-less contexts).
     let monitoring_control: Option<Arc<dyn crate::monitoring_control::MonitoringControl>> =
         stats_store.as_ref().map(|s| {
@@ -446,38 +483,34 @@ pub fn run_http_loop(
     // the same throughput profile as the previous sequential model but
     // allows concurrent read-only routing (GET endpoints) to proceed without
     // waiting on active dispatches.
-    // Hoisted before the constructor call so these values survive the
-    // partial move of config.registry below. Note the dispatcher Mutex
-    // serializes tool dispatch: a provider probe blocks other calls for
-    // its duration, which is why the host bounds it (curl --max-time) and
-    // caches it (once per 24h TTL) — worst case is one bounded stall per
-    // cache window, not per call.
-    let update_advisory = config.update_advisory.clone();
-    let version_skew = config.version_skew.clone();
+    // Note the dispatcher Mutex serializes tool dispatch: a provider probe
+    // blocks other calls for its duration, which is why the host bounds it
+    // (curl --max-time) and caches it (once per 24h TTL) — worst case is one
+    // bounded stall per cache window, not per call.
+    //
+    // Advisory fields are wired through `dispatcher_from_config`, the shared
+    // construction function called by both server loops. Deleting either builder
+    // call there simultaneously breaks this loop AND the stdio loop.
     let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(
-            config.registry,
-            &config.server_name,
-            &config.server_version,
-            &config.build_serial,
-            monitoring_control,
-        )
-        .with_version_skew(version_skew)
-        .with_update_advisory(update_advisory),
+        crate::server::dispatcher_from_config(config, monitoring_control),
     ));
 
-    let listener = bind_loopback(port)?;
     let bound = listener.local_addr()?.port();
     eprintln!("aria-mcp: HTTP listening on 127.0.0.1:{bound} (max body {max_body_bytes} bytes, max_concurrent={max_concurrent}, max_queued={max_queued}, max_sse={max_sse})");
 
+    let mut accepted = 0usize;
     loop {
         let (mut stream, _) = match listener.accept() {
             Ok(pair) => pair,
             Err(e) => {
                 eprintln!("aria-mcp: accept error: {e}");
-                continue;
+                continue; // failed accepts do not count toward connection_limit
             }
         };
+
+        accepted += 1;
+        // Compute once so both the shed path and the spawn path use the same value.
+        let at_limit = connection_limit.map_or(false, |n| accepted >= n);
 
         // Phase 1 (accept thread, NON-BLOCKING): depth check only. try_enqueue
         // increments `admitted` and returns false immediately when the gate is
@@ -488,6 +521,7 @@ pub fn run_http_loop(
         if !gate.try_enqueue() {
             GLOBAL_SHED_COUNTER.fetch_add(1, Ordering::Relaxed);
             send_shed_response(&mut stream);
+            if at_limit { break; }
             continue;
         }
 
@@ -624,7 +658,13 @@ pub fn run_http_loop(
             // connection is dropped silently — no response written, consistent
             // with the serve_stream behavior.
         });
+
+        // For the bounded variant (connection_limit = Some(n)): exit the accept
+        // loop after n connections so the test can join the serve_http thread.
+        // The spawned worker holds its own Arcs and finishes independently.
+        if at_limit { break; }
     }
+    Ok(())
 }
 
 /// A trivial RAII guard that runs a closure on drop. The guard MUST be bound to
@@ -657,6 +697,11 @@ pub fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
 /// the worker thread (blocking Condvar wait), request read before the
 /// dispatcher lock. Enables integration tests that drive real threaded
 /// behavior without the process-lifetime loop.
+///
+/// Sibling: [`serve_http`] takes a `ServerConfig` and constructs the dispatcher
+/// itself; this function takes an already-constructed `Arc<Mutex<Dispatcher>>`
+/// so tests that pre-build their dispatcher can use it without going through
+/// config construction.
 ///
 /// Gate is provided by the caller so tests can configure capacity precisely.
 /// `sse_gate` is provided separately (CAND-025) so SSE isolation tests can
@@ -828,7 +873,7 @@ impl HttpRequest {
 
 /// Serve one connection: read the request, route it, write the response.
 /// Updates the 4xx, 5xx, and rpc counters for normal (non-SSE) calls.
-/// Gate and latency counters are managed by the caller in run_http_loop's
+/// Gate and latency counters are managed by the caller in serve_http's
 /// thread body.
 ///
 /// SSE fast path: `GET /api/events` with `Accept: text/event-stream` (or
