@@ -77,6 +77,19 @@ pub struct EstateDiagnosticsContext {
     pub session_id: String,
     pub clock_millis: i64,
     pub build_serial: String,
+    /// Plugin/binary version-skew advisory. Empty string means no skew to
+    /// report; a non-empty value is included as `version_skew` in the
+    /// structured data of `moot_estate_ping` and `moot_estate_status`.
+    /// Mirrors Swift `AriaV2EstateDiagnosticsContext.versionSkewAdvisory`.
+    pub version_skew: String,
+    /// Upstream-release advisory, evaluated from the host provider for
+    /// `moot_estate_ping` and `moot_estate_status` only. `None` for all
+    /// other operations and when no provider is wired. Mirrors Swift
+    /// `AriaV2EstateDiagnosticsContext.updateAdvisoryProvider` (evaluated
+    /// at call time rather than stored as a closure because Rust's sync
+    /// surface evaluates in `surface::execute_estate_diagnostics` before
+    /// building the context).
+    pub update_advisory: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +256,14 @@ pub struct EstateStatusData {
     pub subjects_eligible: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_content_migration: Option<SharedContentMigration>,
+    /// Plugin/binary version-skew advisory. Omitted from the serialized
+    /// object when no advisory was injected (mirrors `EstatePingData.version_skew`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_skew: Option<String>,
+    /// Upstream-release advisory. Omitted when no provider is wired or the
+    /// provider returned `None`. Mirrors Swift `AriaV2EstateStatusData.updateAdvisory`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -269,6 +290,16 @@ pub struct EstatePingData {
     pub estate_name: String,
     pub state: &'static str,
     pub build_serial: String,
+    /// Plugin/binary version-skew advisory. Omitted from the serialized
+    /// object when no advisory was injected (matches Swift's optional
+    /// `versionSkewAdvisory` on `AriaV2EstatePingData`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_skew: Option<String>,
+    /// Upstream-release advisory. Omitted from the serialized object when
+    /// no provider was wired or the provider returned `None`. Mirrors
+    /// Swift `AriaV2EstatePingData.updateAdvisory`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -329,6 +360,8 @@ impl<P: EstateDiagnosticsAuthority> EstateDiagnosticsService<P> {
             subjects_bearing: snapshot.subjects_bearing,
             subjects_eligible: snapshot.subjects_eligible,
             shared_content_migration: snapshot.shared_content_migration,
+            version_skew: if context.version_skew.is_empty() { None } else { Some(context.version_skew.clone()) },
+            update_available: context.update_advisory.clone(),
         })
     }
 
@@ -367,6 +400,8 @@ impl<P: EstateDiagnosticsAuthority> EstateDiagnosticsService<P> {
             estate_name: snapshot.estate_name,
             state: "mounted",
             build_serial: context.build_serial.clone(),
+            version_skew: if context.version_skew.is_empty() { None } else { Some(context.version_skew.clone()) },
+            update_available: context.update_advisory.clone(),
         })
     }
 
