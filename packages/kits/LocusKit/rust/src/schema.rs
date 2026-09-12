@@ -103,9 +103,11 @@ pub const SUPPORTED_UPGRADE_FLOOR: i32 = 10;
 /// `SchemaUpgradePath`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemaUpgradePath {
-    /// No ledger row (0): a fresh estate; opening creates the v19 layout.
+    /// No ledger row (0): a fresh estate; opening creates the v20 layout.
     Fresh,
-    /// The supported floor (10): opening applies the single v10 → v19 hop.
+    /// A supported upgrade floor (10 or 19): opening applies the ladder hop
+    /// to v20. A v10 estate traverses both hops (v10 → v19 and v19 → v20);
+    /// a v19 estate traverses only the second hop.
     Upgrade { from: i32 },
     /// Already at the current version: nothing to apply.
     Current,
@@ -118,7 +120,7 @@ pub enum SchemaUpgradePath {
 /// Decide the upgrade path for `stored_version`. Read the ledger raw and
 /// call this BEFORE `Storage::open`: the runner stamps `SCHEMA_VERSION`
 /// whenever no ladder entry matches, so an unsupported estate opened blind
-/// would be marked current with none of the v19 objects in place. Mirrors
+/// would be marked current with none of the v20 objects in place. Mirrors
 /// Swift `LocusKitSchema.upgradePath(storedVersion:)`.
 pub fn upgrade_path(stored_version: i32) -> SchemaUpgradePath {
     match stored_version {
@@ -164,15 +166,15 @@ pub fn schema() -> SchemaDeclaration {
         ],
         indices: indices(),
         migrations: vec![
-            // ONE hop, v10 → v19: every delta that survives at v19 and nothing
-            // that was retired on the way (no adornment tables or column, no
-            // distilled columns). Every operation is idempotent — AddColumn
-            // skips a present column (PRAGMA table_info probe), CreateTable
-            // and AddIndex are IF NOT EXISTS — so a fresh estate, which the
-            // runner creates at the current layout before replaying the ladder,
-            // is unchanged by it. Populated estates exist at 10 (CE
-            // 1.0.35/1.0.37) and at 19; nothing in between is supported here
-            // (see `upgrade_path`). Matches Swift LocusKitSchema v10 → v19.
+            // TWO hops: v10 → v19 and v19 → v20. A v10 estate (CE 1.0.35/
+            // 1.0.37) traverses both; a v19 estate receives only the second.
+            // Every operation is idempotent — AddColumn skips a present column
+            // (PRAGMA table_info probe), CreateTable and AddIndex are IF NOT
+            // EXISTS — so a fresh estate, which the runner creates at the
+            // current layout before replaying the ladder, is unchanged by
+            // either hop. Populated estates exist at 10 or 19; nothing in
+            // between is supported here (see `upgrade_path`).
+            // Matches Swift LocusKitSchema two-hop ladder.
             Migration {
                 from_version: SUPPORTED_UPGRADE_FLOOR,
                 to_version: 19,
