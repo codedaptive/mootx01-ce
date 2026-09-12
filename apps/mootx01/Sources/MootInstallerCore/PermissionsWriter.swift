@@ -77,11 +77,24 @@ public enum PermissionsWriter {
     /// Every namespace prefix a tool name must be written under.
     public static let allPrefixes = [mcpPrefix, pluginMcpPrefix]
 
+    /// Tool names retired from the installer authorization inventory. A stale
+    /// server projection must not cause the installer to grant or refresh them.
+    public static let retiredToolNames: Set<String> = [
+        "moot_file_packet",
+        "moot_packet_get",
+        "moot_packet_list",
+        "moot_packet_lineage",
+    ]
+
+    private static func authorizedToolNames(from toolNames: [String]) -> [String] {
+        toolNames.filter { !retiredToolNames.contains($0) }
+    }
+
     /// `mcp__mootx01__<name>` for each injected tool name (direct namespace
     /// only — used by the allow-all `merge`, which historically only wrote
     /// this one prefix; see `mergeTiered` for the both-namespaces writer).
     public static func permissionEntries(toolNames: [String]) -> [String] {
-        toolNames.map { "\(mcpPrefix)\($0)" }
+        authorizedToolNames(from: toolNames).map { "\(mcpPrefix)\($0)" }
     }
 
     // MARK: - Tier classification
@@ -272,7 +285,7 @@ public enum PermissionsWriter {
         }
 
         var added = (allow: 0, ask: 0, deny: 0)
-        for tool in toolNames {
+        for tool in authorizedToolNames(from: toolNames) {
             // Computed from the pre-existing state, once per tool and before
             // either entry is appended. Scanning every prefix rather than
             // only "the other one" is equivalent here and stays correct if a
@@ -369,7 +382,7 @@ public enum PermissionsWriter {
         // foreign tool, or a non-MCP permission string, is never a
         // candidate key and is never inspected, let alone moved.
         var moved = 0
-        for tool in toolNames {
+        for tool in authorizedToolNames(from: toolNames) {
             let targetTier = classify(tool)
             for prefix in allPrefixes {
                 let entry = "\(prefix)\(tool)"
@@ -438,7 +451,8 @@ public enum PermissionsWriter {
         var allow = permissions["allow"] as? [String] ?? []
 
         let existing = Set(allow)
-        let entries = toolNames.flatMap { tool in allPrefixes.map { "\($0)\(tool)" } }
+        let entries = authorizedToolNames(from: toolNames)
+            .flatMap { tool in allPrefixes.map { "\($0)\(tool)" } }
         for entry in entries where !existing.contains(entry) {
             allow.append(entry)
         }

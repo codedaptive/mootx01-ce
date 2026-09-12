@@ -338,7 +338,7 @@ public extension GeniusLocusKit {
             let renewalKey = "\(Self.conflictProposalLabelPrefix)\(outcome.ruleID)@\(outcome.ruleVersion)"
             let label = "\(renewalKey) result=\(outcome.resultID)"
             if let id = try await fileProposal(
-                estate: estate, state: &state,
+                handle: handle, estate: estate, state: &state,
                 pair: TieredContradictionCore.pairKey(a, b), a: a, b: b,
                 tier: 1, renewalKey: renewalKey, label: label) {
                 proposed.append(id)
@@ -365,7 +365,7 @@ public extension GeniusLocusKit {
                 let renewalKey =
                     "\(Self.tier2ProposalLabelPrefix)\(finding.cueKind ?? "")@\(Self.conflictCueVersion)"
                 if let id = try await fileProposal(
-                    estate: estate, state: &state,
+                    handle: handle, estate: estate, state: &state,
                     pair: finding.pairKey,
                     a: finding.drawerA, b: finding.drawerB,
                     tier: 2, renewalKey: renewalKey,
@@ -377,7 +377,7 @@ public extension GeniusLocusKit {
                 let renewalKey =
                     "\(Self.tier3ProposalLabelPrefix)\(finding.cueKind ?? "")@\(Self.conflictCueVersion)"
                 if let id = try await fileProposal(
-                    estate: estate, state: &state,
+                    handle: handle, estate: estate, state: &state,
                     pair: finding.pairKey,
                     a: finding.drawerA, b: finding.drawerB,
                     tier: 3, renewalKey: renewalKey,
@@ -412,6 +412,7 @@ public extension GeniusLocusKit {
     /// as `.proposed`. Returns the new tunnel id, or nil when the
     /// filing was suppressed or its endpoints could not resolve.
     private func fileProposal(
+        handle: EstateHandle,
         estate: LocusKit.Estate,
         state: inout ProposalFilingState,
         pair: String, a: String, b: String,
@@ -437,7 +438,7 @@ public extension GeniusLocusKit {
             parentNodeIds: [da.parentNodeId, db.parentNodeId])
         guard let aNames = names[da.parentNodeId],
               let bNames = names[db.parentNodeId] else { return nil }
-        let tunnel = try await estate.capture(TunnelCaptureFrame(
+        let tunnel = try await captureTunnel(handle, TunnelCaptureFrame(
             sourceWing: aNames.wing,
             sourceRoom: aNames.room,
             targetWing: bNames.wing,
@@ -498,7 +499,7 @@ public extension GeniusLocusKit {
             // Source = the SUPERSEDING drawer, target = the superseded
             // one (LocusKit supersedes convention). ACTIVE because the
             // controlled grammar's Replaces line IS the acceptance.
-            let tunnel = try await estate.capture(TunnelCaptureFrame(
+            let tunnel = try await captureTunnel(handle, TunnelCaptureFrame(
                 sourceWing: nNames.wing,
                 sourceRoom: nNames.room,
                 targetWing: oNames.wing,

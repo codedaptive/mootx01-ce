@@ -482,6 +482,9 @@ struct FirstPartySession: Sendable {
     /// revokes it.
     let credentialGeneration: UInt64
     let descriptorGeneration: UInt64
+    /// Set only by an authenticated control frame; a session can narrow but
+    /// never widen its recall authority.
+    var restrictsRecallToExportable: Bool
 }
 
 /// The result of authenticating one request.
@@ -492,6 +495,8 @@ public struct FirstPartyAuthenticatedRequest: Sendable, Equatable {
     public let sequence: UInt64
     /// The exact body, verified by the request MAC.
     public let body: Data
+    /// Authority copied from the verified session record.
+    public let restrictsRecallToExportable: Bool
 }
 
 // MARK: - The server
@@ -710,7 +715,8 @@ public actor FirstPartyAuthServer {
             idleExpiry: challenge.idleExpiry,
             replay: ReplayWindow(),
             credentialGeneration: descriptor.credentialGeneration,
-            descriptorGeneration: descriptor.descriptorGeneration
+            descriptorGeneration: descriptor.descriptorGeneration,
+            restrictsRecallToExportable: false
         )
         return FirstPartyAuthProtocol.establishmentProof(
             sessionKey: sessionKey, transcript: challenge.transcript
@@ -811,8 +817,22 @@ public actor FirstPartyAuthServer {
         sessions[sessionIdentifier] = session
 
         return FirstPartyAuthenticatedRequest(
-            sessionIdentifier: sessionIdentifier, sequence: sequence, body: request.body
+            sessionIdentifier: sessionIdentifier,
+            sequence: sequence,
+            body: request.body,
+            restrictsRecallToExportable: session.restrictsRecallToExportable
         )
+    }
+
+    /// Permanently narrow a verified session. The authenticated record is an
+    /// unforgeable input: callers cannot name an arbitrary session.
+    public func restrictRecallToExportable(
+        authenticated: FirstPartyAuthenticatedRequest
+    ) -> Bool {
+        guard var session = sessions[authenticated.sessionIdentifier] else { return false }
+        session.restrictsRecallToExportable = true
+        sessions[authenticated.sessionIdentifier] = session
+        return true
     }
 
     /// Compute the response MAC for an authenticated exchange.
