@@ -9332,8 +9332,10 @@ fn recall_distilled_schema_has_no_ack_param() {
         .find(|t| t["name"].as_str() == Some("moot_recall_distilled"))
         .expect("moot_recall_distilled must appear in tools list");
     let props = &tool["inputSchema"]["properties"];
-    assert!(props["ack"].is_null(),
-        "moot_recall_distilled schema must NOT have an 'ack' property; schema: {props:?}");
+    assert!(
+        props.as_object().expect("properties must be an object").get("ack").is_none(),
+        "moot_recall_distilled schema must NOT have an 'ack' property; schema: {props:?}"
+    );
     let desc = tool["description"].as_str().unwrap_or("");
     assert!(!desc.contains("CONTRACT CHANGE"),
         "description must carry no ceremony vocabulary; got: {desc:?}");
