@@ -165,6 +165,21 @@ struct KGFactSearchProjectionBackfillGatewayTests {
         //    it is returned. This closes the loop: the gateway writes exactly what
         //    FactFirstRecall's version guard (FactFirstRecall.swift lines 79-80)
         //    requires for the fact to participate in scoring.
+        //
+        //    Crucially, searchProjection and searchProjectionVersion are read back
+        //    from the database row — not recomputed from the symbols the test
+        //    already has. If the gateway had written nothing (or written wrong
+        //    bytes), this recall assertion would fail, not only the step-5 equality
+        //    assertions. That is what "closing the loop" means: the recall step is
+        //    testing the bytes the gateway actually stored.
+        guard case let .text(storedProjection) = row["searchProjection"] else {
+            Issue.record("searchProjection must be present and text in the stored row after gateway run")
+            return
+        }
+        guard case let .text(storedVersion) = row["searchProjectionVersion"] else {
+            Issue.record("searchProjectionVersion must be present and text in the stored row after gateway run")
+            return
+        }
         let sourceDrawer = Drawer(
             id: drawerID, content: "Jack's birthday is in June.",
             parentNodeId: "n1", addedBy: "test", filedAt: now,
@@ -174,8 +189,8 @@ struct KGFactSearchProjectionBackfillGatewayTests {
         let backfilledFact = KGFact(
             id: factID, subject: subject, predicate: predicate, object: object,
             sourceDrawerID: drawerID,
-            searchProjection: expectedProjection,
-            searchProjectionVersion: FactSearchProjection.version,
+            searchProjection: storedProjection,
+            searchProjectionVersion: storedVersion,
             filedAt: now)
         let decision = FactFirstRecallStage.decide(
             query: "jack birthday", queryEntities: ["Jack"],
