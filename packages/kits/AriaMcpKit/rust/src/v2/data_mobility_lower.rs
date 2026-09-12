@@ -202,8 +202,8 @@ impl V2DataMobilityLower for DirectDataMobilityLower<'_> {
             && request.limit.is_none()
             && skipped_non_candidate_changes == 0
         {
-            open.store
-                .set_meta(FDC_RECALCED_DATA_VERSION_META_KEY, &fdc_recalculation_version)
+            open.coord.lock().unwrap()
+                .stamp_fdc_recalculation_floor(&open.handle, &fdc_recalculation_version)
                 .map_err(|_| ())?;
             floor_after = Some(fdc_recalculation_version.clone());
             "stamped".to_owned()
@@ -565,6 +565,40 @@ mod tests {
             },
         ).expect("typed dataset_stats");
         assert_eq!(stats.stats["score"].count, 2);
+    }
+
+    #[test]
+    fn selected_dataset_filing_refuses_quiesced_handle_before_creating_a_handle() {
+        let registry = EstateRegistry::new_inmemory_bare();
+        let lower = DirectDataMobilityLower::new(&registry);
+        let admitted = admission(&registry);
+        {
+            let mut coordinator = registry.default.coord.lock().unwrap();
+            coordinator
+                .quiesce(&registry.default.handle)
+                .expect("quiesce selected estate");
+        }
+
+        let filing = lower.file_dataset(
+            &admitted,
+            &V2FileDatasetRequest {
+                name: "must-not-file".to_owned(),
+                location: "lab/blocked".to_owned(),
+                columns: Some(vec![JsonValue::from(serde_json::json!({"name":"label","type":"text"}))]),
+                rows: Some(vec![JsonValue::from(serde_json::json!({"label":"blocked"}))]),
+                csv_path: None,
+                wing: None,
+                sensitivity: None,
+                estate_id: None,
+            },
+        );
+        assert_eq!(filing, Err(()), "typed filing must reject before DDL/handle capture");
+        let coordinator = registry.default.coord.lock().unwrap();
+        let estate = coordinator
+            .estate_for(&registry.default.handle)
+            .expect("quiesced estate remains readable for regression inspection");
+        assert!(estate.all_drawers().expect("drawer inventory").is_empty(),
+            "quiesced selected filing must not create a dataset handle");
     }
 
     #[test]

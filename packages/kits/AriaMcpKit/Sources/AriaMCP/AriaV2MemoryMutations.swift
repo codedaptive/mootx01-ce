@@ -442,7 +442,7 @@ public struct AriaV2MemoryMutations: Sendable {
             guard let sourcePlacement = names[source.parentNodeId], let targetPlacement = names[target.parentNodeId] else {
                 return unavailable("moot_link_memories")
             }
-            let tunnel = try await estate.capture(.init(
+            let tunnel = try await kit.captureTunnel(handle, .init(
                 sourceWing: sourcePlacement.wing, sourceRoom: sourcePlacement.room,
                 targetWing: targetPlacement.wing, targetRoom: targetPlacement.room,
                 label: request.evidence ?? request.relationship, addedBy: context.serverIdentity,
@@ -485,13 +485,17 @@ public struct AriaV2MemoryMutations: Sendable {
             // and the outer catch returns unavailable, which is byte-identical to the
             // above-ceiling refusal: both are mutation_unavailable.
             if let tunnel = storedTunnel {
-                guard tunnel.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue else {
+                guard tunnel.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue,
+                      !context.exportableOnly || tunnelExportability(tunnel) == .public_ else {
                     return unavailable("moot_review_tunnel")
                 }
                 let endpointIDs = [tunnel.sourceDrawerId, tunnel.targetDrawerId].compactMap { $0 }
                 if !endpointIDs.isEmpty {
                     let endpoints = (try? await estate.getDrawers(ids: endpointIDs, hydrationLevel: .bitmapOnly)) ?? []
-                    if endpoints.contains(where: { $0.adjectiveSensitivity.rawValue > context.maximumSensitivity.rawValue }) {
+                    if endpoints.contains(where: {
+                        $0.adjectiveSensitivity.rawValue > context.maximumSensitivity.rawValue ||
+                            (context.exportableOnly && $0.exportability != .public_)
+                    }) {
                         return unavailable("moot_review_tunnel")
                     }
                 }
@@ -523,7 +527,13 @@ public struct AriaV2MemoryMutations: Sendable {
                 // User verdicts only: `accept` is gated at decode, and a user
                 // `reject` withdraws permanently — those pairs are never
                 // re-proposed.
-                try await estate.respondToTunnel(id: storedTunnelID, accept: request.decision == .accept, changedBy: request.reviewedBy, reason: request.note)
+                try await kit.settleTunnel(
+                    handle,
+                    tunnelID: storedTunnelID,
+                    accept: request.decision == .accept,
+                    changedBy: request.reviewedBy,
+                    reason: request.note,
+                    now: context.now())
                 return success(tool: "moot_review_tunnel", data: .object([
                     "tunnel_id": .string(tunnelID), "withdrawn": .bool(request.decision == .reject), "contested": .bool(false),
                 ]), text: "Reviewed tunnel \(tunnelID).")
@@ -578,10 +588,15 @@ public struct AriaV2MemoryMutations: Sendable {
         }
         // Above-ceiling rows are treated as absent so the caller cannot
         // distinguish a restricted row from a missing one (oracle-closure).
-        guard match.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue else {
+        guard match.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue,
+              !context.exportableOnly || match.exportability == .public_ else {
             throw MemoryNotFoundError()
         }
         return match
+    }
+
+    private func tunnelExportability(_ tunnel: Tunnel) -> AdjectiveExportability {
+        AdjectiveExportability(rawValue: Int((tunnel.adjectiveBitmap >> 12) & 0x3F)) ?? .private_
     }
 
     private func success(tool: String, data: JSONValue, text: String) -> JSONValue {
