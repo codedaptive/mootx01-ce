@@ -4,6 +4,7 @@ import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
+import PersistenceKitSQLite
 import LoopbackHTTP
 @testable import AriaMCP
 
@@ -735,6 +736,123 @@ struct FirstPartyHTTPLaneTests {
     typealias Vectors = FirstPartyAuthProtocolTests
     typealias ServerFixtures = FirstPartyAuthServerTests
 
+    private struct NoopCommunityHandler: CommunityToolHandler {
+        func isCommunityTool(_ name: String) -> Bool { false }
+        var communityToolList: [ProjectedTool] { [] }
+        func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
+            throw JSONRPCError(code: JSONRPCErrorCode.methodNotFound, message: "Method not found: \(name)")
+        }
+    }
+
+    private final class CommunityInvocationLog: @unchecked Sendable {
+        var dispatches = 0
+    }
+
+    /// A nonempty fixture for the authenticated aggregate test. Keep
+    /// NoopCommunityHandler in the stable-provider tests: those fixtures prove
+    /// that an installed empty Community composition cannot leak a tool.
+    private struct OneCommunityHandler: CommunityToolHandler {
+        let log: CommunityInvocationLog
+
+        func isCommunityTool(_ name: String) -> Bool {
+            name == "moot_community_http_test"
+        }
+
+        var communityToolList: [ProjectedTool] {
+            [ProjectedTool(
+                name: "moot_community_http_test",
+                description: "Exercise the authenticated Community route.",
+                inputSchema: .object(["type": .string("object")]),
+                provenance: .community)]
+        }
+
+        func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
+            log.dispatches += 1
+            return .object(["source": .string("community-http")])
+        }
+    }
+
+    private actor FixedEstateExecutorContext: FirstPartyProviderExecutorContext {
+        let kit: GeniusLocusKit
+        let handle: EstateHandle
+
+        init(kit: GeniusLocusKit, handle: EstateHandle) {
+            self.kit = kit
+            self.handle = handle
+        }
+
+        func currentEstateSession() async throws -> FirstPartyProviderEstateSession {
+            FirstPartyProviderEstateSession(kit: kit, handle: handle)
+        }
+    }
+
+    private actor RotatingEstateExecutorContext: FirstPartyProviderExecutorContext {
+        private let kit: GeniusLocusKit
+        private let owner: OwnerCredentials
+        private let estateID: UUID
+        private let url: URL
+        private let identityKeyStore: InMemoryEstateIdentityKeyStore
+        private var handle: EstateHandle
+
+        init(kit: GeniusLocusKit, owner: OwnerCredentials, handle: EstateHandle, url: URL,
+             identityKeyStore: InMemoryEstateIdentityKeyStore) {
+            self.kit = kit
+            self.owner = owner
+            self.estateID = handle.estateUUID
+            self.url = url
+            self.identityKeyStore = identityKeyStore
+            self.handle = handle
+        }
+
+        func currentEstateSession() async throws -> FirstPartyProviderEstateSession {
+            FirstPartyProviderEstateSession(kit: kit, handle: handle)
+        }
+
+        func closeActive() async throws { try await kit.close(handle) }
+
+        func reopen() async throws {
+            let storage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: estateID, backend: .sqlite(url: url, busyTimeout: 5.0)))
+            _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+            handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
+        }
+    }
+
+    private actor FirstPartyHTTPProvider: FirstPartyProvider {
+        private(set) var contexts: [FirstPartyProviderCallContext] = []
+
+        func isFirstPartyProviderTool(_ name: String) async -> Bool {
+            name == "stable.first_party.http"
+        }
+
+        var firstPartyProviderToolList: [ProjectedTool] {
+            get async {
+                [ProjectedTool(
+                    name: "stable.first_party.http",
+                    description: "Exercise a verified stable provider route.",
+                    inputSchema: .object(["type": .string("object")]),
+                    provenance: .product)]
+            }
+        }
+
+        func dispatchFirstPartyProviderTool(
+            name: String, arguments: JSONValue, context: FirstPartyProviderCallContext
+        ) async throws -> JSONValue {
+            contexts.append(context)
+            return .object(["source": .string("stable-first-party-http")])
+        }
+
+        func callCount() -> Int { contexts.count }
+    }
+
+    private struct FixedFirstPartyRecallPolicyAuthority: FirstPartyRecallPolicyAuthority {
+        func currentFirstPartyRecallPolicy(
+            for caller: FirstPartyProviderCallContext
+        ) async -> FirstPartyRecallPolicy {
+            FirstPartyRecallPolicy(maximumSensitivity: .restricted, exportability: .exportableOnly)
+        }
+    }
+
     private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-first-party-tests")
@@ -747,6 +865,18 @@ struct FirstPartyHTTPLaneTests {
         )
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "1.1.0")
         return ARIA_MCPDispatcher(info: info, tooling: ToolDispatcher(kit: kit, handle: handle))
+    }
+
+    private func makeProviderDispatcher(
+        _ provider: any FirstPartyProvider,
+        communityHandler: any CommunityToolHandler = NoopCommunityHandler(),
+        recallPolicyAuthority: any FirstPartyRecallPolicyAuthority = FirstPartyNoGrantRecallPolicyAuthority()
+    ) -> ARIA_MCPDispatcher {
+        ARIA_MCPDispatcher(
+            info: .init(name: "ARIA_MCP", version: "1.1.0"),
+            communityHandler: communityHandler,
+            firstPartyProvider: provider,
+            firstPartyRecallPolicyAuthority: recallPolicyAuthority)
     }
 
     /// Serve on an OS-assigned port, optionally with the first-party lane armed.
@@ -814,6 +944,51 @@ struct FirstPartyHTTPLaneTests {
         response?.components(separatedBy: "\r\n").first ?? ""
     }
 
+    private func stableProviderCompatibilityJSON(
+        digest: String = FirstPartyProviderCatalog.capabilityDigest
+    ) -> String {
+        #"{"contract_version":"\#(FirstPartyProviderCatalog.contractVersion)","aria_supported_version":"\#(FirstPartyProviderCatalog.supportedARIAVersion)","capability_digest":"\#(digest)"}"#
+    }
+
+    private func legacyStableProviderCompatibilityJSON() -> String {
+        #"{"contract_version":"\#(FirstPartyProviderCatalog.legacyContractVersion)","aria_supported_version":"\#(FirstPartyProviderCatalog.supportedARIAVersion)","capability_digest":"\#(FirstPartyProviderCatalog.legacyCapabilityDigest)"}"#
+    }
+
+    private func signedDescriptor(for estateID: UUID) -> FirstPartyDescriptor {
+        var descriptor = ServerFixtures.signedDescriptor()
+        descriptor.estateIdentifier = estateID
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput())
+        return descriptor
+    }
+
+    private func responseObject(_ response: String?) throws -> [String: Any] {
+        let body = try #require(response?.components(separatedBy: "\r\n\r\n").last)
+        return try #require(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+    }
+
+    private func sqliteBytes(_ url: URL) throws -> [Data] {
+        try [url, URL(fileURLWithPath: url.path + "-wal"), URL(fileURLWithPath: url.path + "-shm")].map {
+            FileManager.default.fileExists(atPath: $0.path) ? try Data(contentsOf: $0) : Data()
+        }
+    }
+
+    private func authenticatedRequest(
+        port: UInt16, session: (sessionIdentifier: [UInt8], sessionKey: [UInt8]),
+        sequence: UInt64, body: String
+    ) -> String? {
+        let mac = FirstPartyAuthProtocol.requestMAC(
+            sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier, sequence: sequence,
+            method: "POST", path: "/mcp/first-party", contentType: "application/json", body: Data(body.utf8))
+        return send(port: port, raw: rawRequest(target: "/mcp/first-party", headers: [
+            ("Content-Type", "application/json"),
+            ("Authorization", "Mootx01Session " + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier)),
+            ("Mootx01-Sequence", String(sequence)),
+            ("Mootx01-Request-MAC", FirstPartyAuthProtocol.base64URLEncode(mac)),
+        ], body: body))
+    }
+
     // MARK: Dark by default
 
     @Test("With no first-party server the entire subtree is unavailable")
@@ -855,6 +1030,531 @@ struct FirstPartyHTTPLaneTests {
     }
 
     // MARK: Armed lane
+
+    @Test("authenticated stable provider admits before mutation and never leaks Community into selected v2")
+    func authenticatedStableProviderCaptureAndReadback() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FirstPartyProviderHTTP-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("estate.sqlite")
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-stable-provider-http")
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let identityKeyStore = InMemoryEstateIdentityKeyStore()
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
+        defer { Task { try? await kit.close(handle) } }
+
+        let descriptor = signedDescriptor(for: handle.estateUUID)
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor,
+            serverName: "ARIA_MCP", now: { 1_766_000_000 }, randomBytes: { Array(repeating: 7, count: $0) })
+        let provider = FirstPartyProviderExecutor()
+        let context = RotatingEstateExecutorContext(kit: kit, owner: owner, handle: handle, url: url,
+                                                    identityKeyStore: identityKeyStore)
+        await provider.installFirstPartyProviderExecutorContext(context)
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+
+        func request(_ sequence: UInt64, _ body: String) -> String? {
+            authenticatedRequest(port: port, session: session, sequence: sequence, body: body)
+        }
+
+        let initialize = request(1, #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#)
+        #expect(statusLine(initialize).contains("200"))
+        #expect(initialize?.contains("\"first_party_provider\"") == true)
+
+        let listed = request(2, #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
+        #expect(statusLine(listed).contains("200"))
+        #expect(listed?.contains("moot_file_memory") == true)
+        #expect(listed?.contains("moot_community_contract") == false)
+        #expect(listed?.contains("moot_dream") == false)
+
+        let bytesBeforeMismatch = try sqliteBytes(url)
+        let undeclared = request(3, #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_file_memory","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"content":"must not persist","subject":"bad","location":"test","undeclared":"must reject"}}}"#)
+        #expect(undeclared?.contains("Undeclared argument") == true)
+        #expect(try sqliteBytes(url) == bytesBeforeMismatch, "fixed-schema refusal must precede any estate mutation")
+
+        let mismatched = request(4, #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"moot_file_memory","first_party_provider":{"contract_version":"0.0.0","aria_supported_version":"v2","capability_digest":"bad"},"arguments":{"content":"must not persist","subject":"bad","location":"test"}}}"#)
+        #expect(statusLine(mismatched).contains("200"))
+        #expect(mismatched?.contains("matching first_party_provider compatibility record") == true)
+        #expect(try sqliteBytes(url) == bytesBeforeMismatch, "compatibility refusal must precede any estate mutation")
+
+        let capture = request(5, #"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"moot_file_memory","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"content":"stable native capture","subject":"provider readback","location":"HTTP integration"}}}"#)
+        let captureObject = try responseObject(capture)
+        let captureResult = try #require(captureObject["result"] as? [String: Any])
+        let structured = try #require(captureResult["structuredContent"] as? [String: Any])
+        let data = try #require(structured["data"] as? [String: Any])
+        let memoryID = try #require(data["memory_id"] as? String)
+
+        let read = request(6, #"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"moot_memory_get","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"memory_id":"\#(memoryID)"}}}"#)
+        #expect(statusLine(read).contains("200"))
+        #expect(read?.contains("stable native capture") == true)
+        let recall = request(7, #"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"moot_recall_precise","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"query":"stable native capture"}}}"#)
+        #expect(recall?.contains("\"isError\":false") == true)
+
+        try await context.closeActive()
+        let stale = request(8, #"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"moot_memory_get","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"memory_id":"\#(memoryID)"}}}"#)
+        #expect(stale?.contains("estate_unavailable") == true)
+
+        try await context.reopen()
+        let refreshed = request(9, #"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"moot_file_memory","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"content":"refreshed daemon estate","subject":"reopen","location":"HTTP integration"}}}"#)
+        #expect(statusLine(refreshed).contains("200"))
+        #expect(refreshed?.contains("\"isError\":false") == true)
+    }
+
+    @Test("authenticated composition aggregates installed Community tools without weakening provider admission")
+    func authenticatedCompositionKeepsCommunityAndStableProviderContractsSeparate() async throws {
+        let estateID = UUID()
+        let descriptor = signedDescriptor(for: estateID)
+        let auth = FirstPartyAuthServer(
+            rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot),
+            descriptor: descriptor,
+            serverName: "ARIA_MCP",
+            now: { 1_766_000_000 },
+            randomBytes: { Array(repeating: 17, count: $0) }
+        )
+        let provider = FirstPartyHTTPProvider()
+        let communityLog = CommunityInvocationLog()
+        let (port, stop) = try startServing(
+            makeProviderDispatcher(provider, communityHandler: OneCommunityHandler(log: communityLog)),
+            firstPartyAuth: auth
+        )
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+
+        let listed = authenticatedRequest(
+            port: port,
+            session: session,
+            sequence: 1,
+            body: #"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#
+        )
+        let listedObject = try responseObject(listed)
+        let listedResult = try #require(listedObject["result"] as? [String: Any])
+        let listedTools = try #require(listedResult["tools"] as? [[String: Any]])
+        let listedNames = Set(listedTools.compactMap { $0["name"] as? String })
+        #expect(listedNames == ["stable.first_party.http", "moot_community_http_test"])
+        #expect(listedTools.count == 2)
+
+        let community = authenticatedRequest(
+            port: port,
+            session: session,
+            sequence: 2,
+            body: #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_community_http_test","arguments":{}}}"#
+        )
+        let communityObject = try responseObject(community)
+        let communityResult = try #require(communityObject["result"] as? [String: Any])
+        #expect(communityResult["source"] as? String == "community-http")
+        #expect(communityLog.dispatches == 1)
+        #expect(await provider.callCount() == 0)
+
+        let missingProviderTuple = authenticatedRequest(
+            port: port,
+            session: session,
+            sequence: 3,
+            body: #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"stable.first_party.http","arguments":{}}}"#
+        )
+        let missingTupleObject = try responseObject(missingProviderTuple)
+        let missingTupleError = try #require(missingTupleObject["error"] as? [String: Any])
+        #expect(missingTupleError["code"] as? Int == JSONRPCErrorCode.invalidParams)
+        #expect(await provider.callCount() == 0)
+
+        let unknown = authenticatedRequest(
+            port: port,
+            session: session,
+            sequence: 4,
+            body: #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"moot_unknown_authenticated_name","arguments":{}}}"#
+        )
+        let unknownObject = try responseObject(unknown)
+        let unknownError = try #require(unknownObject["error"] as? [String: Any])
+        #expect(unknownError["code"] as? Int == JSONRPCErrorCode.methodNotFound)
+        #expect(await provider.callCount() == 0)
+
+        let publicCall = send(port: port, raw: rawRequest(
+            target: "/mcp",
+            headers: [("Content-Type", "application/json")],
+            body: #"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"moot_community_http_test","arguments":{}}}"#
+        ))
+        let publicObject = try responseObject(publicCall)
+        let publicError = try #require(publicObject["error"] as? [String: Any])
+        #expect(publicError["code"] as? Int == JSONRPCErrorCode.methodNotFound)
+        #expect(communityLog.dispatches == 1)
+        #expect(await provider.callCount() == 0)
+
+        let unauthenticated = send(port: port, raw: rawRequest(
+            target: "/mcp/first-party",
+            headers: [("Content-Type", "application/json")],
+            body: #"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"moot_community_http_test","arguments":{}}}"#
+        ))
+        #expect(statusLine(unauthenticated).contains("401"))
+        #expect(communityLog.dispatches == 1)
+        #expect(await provider.callCount() == 0)
+    }
+
+    @Test("native mutation grammar executes through the real stable provider dispatch")
+    func stableProviderAcceptsNativeMutationGrammarAndRetainsWing() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-stable-provider-native-mutations")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+
+        func capture(_ subject: String, room: String = "native grammar", wing: String = LocusKit.defaultWingName) async throws -> Drawer {
+            try await kit.capture(handle, CaptureFrame(
+                content: "native grammar \(subject)", channel: .actuator, room: room,
+                latticeAnchor: LatticeAnchor(udcCode: "000", udcFacets: nil, wikidataQID: nil, wikidataQidsSecondary: nil),
+                addedBy: "test", embeddingModelID: "default", sensitivity: .normal, kind: .prose,
+                provenanceChannel: .mcpAgent, sourceType: .imported, eventTime: nil,
+                exportability: .private_, wing: wing, subject: subject))
+        }
+        let updateTarget = try await capture("update target")
+        let withdrawTarget = try await capture("withdraw target")
+        let eraseTarget = try await capture("erase target")
+        let confirmTarget = try await capture("confirm target")
+        let moveTarget = try await capture("move target", room: "old room", wing: "Retained Native Wing")
+        let tunnelSource = try await capture("tunnel source")
+        let tunnelTarget = try await capture("tunnel target")
+        let tunnel = try await kit.captureTunnel(handle, TunnelCaptureFrame(
+            sourceWing: LocusKit.defaultWingName, sourceRoom: "native grammar", targetWing: LocusKit.defaultWingName,
+            targetRoom: "native grammar", label: "native grammar review", addedBy: "test", sourceDrawerId: tunnelSource.id,
+            targetDrawerId: tunnelTarget.id, kind: .validates, originClass: .derived, lifecycle: .proposed))
+        let fact = try await kit.captureKGFact(handle, subject: "native grammar fact", predicate: "status", object: "active",
+                                               sourceDrawerID: updateTarget.id, addedBy: "test", now: Date())
+
+        let descriptor = signedDescriptor(for: handle.estateUUID)
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor,
+                                        serverName: "ARIA_MCP", now: { 1_766_000_000 }, randomBytes: { Array(repeating: 13, count: $0) })
+        let provider = FirstPartyProviderExecutor()
+        await provider.installFirstPartyProviderExecutorContext(FixedEstateExecutorContext(kit: kit, handle: handle))
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        func call(_ sequence: UInt64, _ name: String, _ arguments: String) -> String? {
+            authenticatedRequest(port: port, session: session, sequence: sequence,
+                body: #"{"jsonrpc":"2.0","id":\#(sequence),"method":"tools/call","params":{"name":"\#(name)","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":\#(arguments)}}"#)
+        }
+        let responses = [
+            call(1, "moot_update_memory", #"{"id":"\#(updateTarget.id)","mutation":"set_subject","subject":"updated through native id"}"#),
+            call(2, "moot_withdraw_memory", #"{"id":"\#(withdrawTarget.id)"}"#),
+            call(3, "moot_erase_memory", #"{"id":"\#(eraseTarget.id)","confirmed":true}"#),
+            call(4, "moot_confirm_memory", #"{"id":"\#(confirmTarget.id)"}"#),
+            call(5, "moot_move_memory", #"{"id":"\#(moveTarget.id)","location":"new room"}"#),
+            call(6, "moot_review_tunnel", #"{"tunnel_id":"\#(tunnel.id)","verdict":"accept"}"#),
+            call(7, "moot_retire_fact", #"{"id":"\#(fact.id)"}"#),
+        ]
+        for response in responses { #expect(response?.contains("\"isError\":false") == true) }
+
+        let estate = try await kit.estate(for: handle)
+        let persisted = try await estate.allDrawers()
+        #expect(persisted.first(where: { $0.id == updateTarget.id })?.subject == "updated through native id")
+        #expect(persisted.first(where: { $0.id == withdrawTarget.id })?.state == .withdrawn)
+        let erased = try #require(persisted.first(where: { $0.id == eraseTarget.id }))
+        #expect(erased.tombstonedAt != nil)
+        #expect(erased.content.isEmpty)
+        #expect(persisted.first(where: { $0.id == confirmTarget.id })?.confirmation == .userConfirmed)
+        let moved = try #require(persisted.first(where: { $0.id == moveTarget.id }))
+        let placement = try #require(try await kit.resolveNodeNames(handle, parentNodeIds: [moved.parentNodeId])[moved.parentNodeId])
+        #expect(placement.wing == "Retained Native Wing")
+        #expect(placement.room == "new room")
+        #expect(try await estate.getTunnel(id: tunnel.id)?.lifecycle == .active)
+        #expect(try await kit.recallKGFacts(handle).contains(where: { $0.id == fact.id }) == false)
+    }
+
+    @Test("stable provider exact fact inventory cannot select or retire another miner's facts")
+    func stableProviderExactFactInventoryIsMinerScoped() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-stable-provider-miner-scope")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        func anchor(_ subject: String) async throws -> Drawer {
+            try await kit.capture(handle, CaptureFrame(content: "source anchor \(subject)", channel: .actuator, room: "miners",
+                latticeAnchor: LatticeAnchor(udcCode: "000", udcFacets: nil, wikidataQID: nil, wikidataQidsSecondary: nil),
+                addedBy: "test", embeddingModelID: "default", sensitivity: .normal, kind: .prose, provenanceChannel: .mcpAgent,
+                sourceType: .imported, eventTime: nil, exportability: .private_, wing: LocusKit.defaultWingName, subject: subject))
+        }
+        let calendarAnchor = try await anchor("calendar miner")
+        let healthAnchor = try await anchor("health miner")
+        let calendarFact = try await kit.captureKGFact(handle, subject: "calendar.event.ev-1", predicate: "scheduled", object: "calendar-owned", sourceDrawerID: calendarAnchor.id, addedBy: "test", now: Date())
+        let substringFact = try await kit.captureKGFact(handle, subject: "calendar.event.ev-10", predicate: "scheduled", object: "calendar-substring", sourceDrawerID: calendarAnchor.id, addedBy: "test", now: Date())
+        let healthFact = try await kit.captureKGFact(handle, subject: "calendar.event.ev-1", predicate: "scheduled", object: "health-owned", sourceDrawerID: healthAnchor.id, addedBy: "test", now: Date())
+        let sourcelessFact = try await kit.captureKGFact(handle, subject: "hand-filed", predicate: "status", object: "sourceless", sourceDrawerID: "", addedBy: "test", now: Date())
+        let descriptor = signedDescriptor(for: handle.estateUUID)
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor, serverName: "ARIA_MCP", now: { 1_766_000_000 }, randomBytes: { Array(repeating: 11, count: $0) })
+        let provider = FirstPartyProviderExecutor()
+        await provider.installFirstPartyProviderExecutorContext(FixedEstateExecutorContext(kit: kit, handle: handle))
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        let exact = authenticatedRequest(port: port, session: session, sequence: 1,
+            body: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"moot_fact_search","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"source_id_exact":"\#(calendarAnchor.id)","subject_exact":"calendar.event.ev-1","limit":500}}}"#)
+        #expect(exact?.contains(calendarFact.id.lowercased()) == true)
+        #expect(exact?.contains(substringFact.id.lowercased()) == false)
+        #expect(exact?.contains(healthFact.id.lowercased()) == false)
+        let retired = authenticatedRequest(port: port, session: session, sequence: 2,
+            body: #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_retire_fact","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"fact_id":"\#(calendarFact.id)"}}}"#)
+        #expect(retired?.contains("\"isError\":false") == true)
+        let activeIDs = Set(try await kit.recallKGFacts(handle).map(\.id))
+        #expect(!activeIDs.contains(calendarFact.id))
+        #expect(activeIDs.contains(substringFact.id))
+        #expect(activeIDs.contains(healthFact.id))
+        let sourceless = authenticatedRequest(port: port, session: session, sequence: 3,
+            body: #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_fact_search","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"source_id_exact":""}}}"#)
+        #expect(sourceless?.contains(sourcelessFact.id.lowercased()) == true)
+        let legacyRead = authenticatedRequest(port: port, session: session, sequence: 4,
+            body: #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"moot_fact_search","first_party_provider":\#(legacyStableProviderCompatibilityJSON()),"arguments":{}}}"#)
+        #expect(legacyRead?.contains("\"isError\":false") == true)
+        let dishonestLegacy = authenticatedRequest(port: port, session: session, sequence: 5,
+            body: #"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"moot_fact_search","first_party_provider":\#(legacyStableProviderCompatibilityJSON()),"arguments":{"source_id_exact":""}}}"#)
+        #expect(dishonestLegacy?.contains("require FirstPartyProvider 1.1.0") == true)
+    }
+
+    @Test("caller-requested exportable recall omits private rows on the stable dispatch path")
+    func stableProviderCallerExportableFilterNarrowsRecall() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-stable-provider-export-filter")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        func capture(_ marker: String, _ exportability: AdjectiveExportability) async throws -> Drawer {
+            try await kit.capture(handle, CaptureFrame(content: "provider-export-filter-signal \(marker)", channel: .actuator, room: "recall",
+                latticeAnchor: LatticeAnchor(udcCode: "000", udcFacets: nil, wikidataQID: nil, wikidataQidsSecondary: nil),
+                addedBy: "test", embeddingModelID: "default", sensitivity: .normal, kind: .prose, provenanceChannel: .mcpAgent,
+                sourceType: .imported, eventTime: nil, exportability: exportability, wing: LocusKit.defaultWingName, subject: marker))
+        }
+        let publicDrawer = try await capture("public", .public_)
+        let privateDrawer = try await capture("private", .private_)
+        let descriptor = signedDescriptor(for: handle.estateUUID)
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor, serverName: "ARIA_MCP", now: { 1_766_000_000 }, randomBytes: { Array(repeating: 12, count: $0) })
+        let provider = FirstPartyProviderExecutor()
+        await provider.installFirstPartyProviderExecutorContext(FixedEstateExecutorContext(kit: kit, handle: handle))
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        for (sequence, tool) in [(UInt64(1), "moot_memory_search"), (UInt64(2), "moot_recall_precise")] {
+            let response = authenticatedRequest(port: port, session: session, sequence: sequence,
+                body: #"{"jsonrpc":"2.0","id":\#(sequence),"method":"tools/call","params":{"name":"\#(tool)","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"query":"provider-export-filter-signal","filter":"exportable","limit":20}}}"#)
+            #expect(response?.contains("\"isError\":false") == true)
+            #expect(response?.lowercased().contains(publicDrawer.id.lowercased()) == true)
+            #expect(response?.lowercased().contains(privateDrawer.id.lowercased()) == false)
+        }
+    }
+
+    @Test("restrictive real provider policy filters direct reads and closes aggregate reads")
+    func restrictivePolicyCannotBypassRealProviderReads() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FirstPartyProviderPolicy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("estate.sqlite")
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-stable-provider-policy")
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let descriptor = signedDescriptor(for: handle.estateUUID)
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor, serverName: "ARIA_MCP", now: { 1_766_000_000 }, randomBytes: { Array(repeating: 8, count: $0) })
+        let provider = FirstPartyProviderExecutor()
+        await provider.installFirstPartyProviderExecutorContext(FixedEstateExecutorContext(kit: kit, handle: handle))
+        let (port, stop) = try startServing(makeProviderDispatcher(provider, recallPolicyAuthority: FixedFirstPartyRecallPolicyAuthority()), firstPartyAuth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        let captured = authenticatedRequest(port: port, session: session, sequence: 1,
+            body: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"moot_file_memory","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"content":"private policy row","subject":"private row","location":"policy","exportability":"private"}}}"#)
+        let object = try responseObject(captured)
+        let result = try #require(object["result"] as? [String: Any])
+        let structured = try #require(result["structuredContent"] as? [String: Any])
+        let data = try #require(structured["data"] as? [String: Any])
+        let memoryID = try #require(data["memory_id"] as? String)
+        let bytesBeforeReads = try sqliteBytes(url)
+        let get = authenticatedRequest(port: port, session: session, sequence: 2,
+            body: #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_memory_get","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"memory_id":"\#(memoryID)"}}}"#)
+        #expect(get?.contains("private policy row") == false)
+        let mutation = authenticatedRequest(port: port, session: session, sequence: 3,
+            body: #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_update_memory","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"memory_id":"\#(memoryID)","mutation":"correct_exportability","exportability":"public"}}}"#)
+        // The selected v2 sensitivity gate intentionally collapses a hidden
+        // target into the same opaque refusal as an absent target.  Pin the
+        // wire-level failure rather than restoring the pre-int3 diagnostic.
+        #expect(mutation?.contains("\"isError\":true") == true)
+        #expect(try sqliteBytes(url) == bytesBeforeReads)
+        let aggregateRequests: [(UInt64, String, String)] = [
+            (4, "moot_memory_list", #"{"wing":"Agentic Memory"}"#),
+            (5, "moot_fact_search", "{}"),
+            (6, "moot_read_journal", "{}"),
+            (7, "moot_list_lenses", "{}"),
+        ]
+        for (sequence, name, arguments) in aggregateRequests {
+            let response = authenticatedRequest(port: port, session: session, sequence: sequence,
+                body: #"{"jsonrpc":"2.0","id":\#(sequence),"method":"tools/call","params":{"name":"\#(name)","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":\#(arguments)}}"#)
+            #expect(response?.contains("recall_policy_restricted") == true)
+            #expect(response?.contains("private policy row") == false)
+        }
+        #expect(try sqliteBytes(url) == bytesBeforeReads)
+    }
+
+    @Test("no-grant real provider hides rows facts and tunnels before mutation")
+    func noGrantPolicyCannotRelabelSecretMemory() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-stable-provider-no-grant")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        func capture(_ content: String, sensitivity: AdjectiveSensitivity) async throws -> Drawer {
+            try await kit.capture(handle, CaptureFrame(content: content, channel: .actuator, room: "policy",
+                latticeAnchor: LatticeAnchor(udcCode: "000", udcFacets: nil, wikidataQID: nil, wikidataQidsSecondary: nil),
+                addedBy: "test", embeddingModelID: "default", sensitivity: sensitivity, kind: .prose, provenanceChannel: .mcpAgent,
+                sourceType: .imported, eventTime: nil, exportability: .private_, wing: LocusKit.defaultWingName, subject: content))
+        }
+        let secret = try await capture("secret no grant row", sensitivity: .secret)
+        let visible = try await capture("visible tunnel endpoint", sensitivity: .normal)
+        let fact = try await kit.captureKGFact(handle, subject: "secret subject", predicate: "has", object: "secret fact", sourceDrawerID: secret.id, addedBy: "test", now: Date())
+        let tunnel = try await kit.captureTunnel(handle, TunnelCaptureFrame(sourceWing: LocusKit.defaultWingName, sourceRoom: "policy", targetWing: LocusKit.defaultWingName, targetRoom: "policy", label: "secret source proposal", addedBy: "test", sourceDrawerId: secret.id, targetDrawerId: visible.id, kind: .contradicts, originClass: .derived, lifecycle: .proposed))
+        let descriptor = signedDescriptor(for: handle.estateUUID)
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor, serverName: "ARIA_MCP", now: { 1_766_000_000 }, randomBytes: { Array(repeating: 10, count: $0) })
+        let provider = FirstPartyProviderExecutor()
+        await provider.installFirstPartyProviderExecutorContext(FixedEstateExecutorContext(kit: kit, handle: handle))
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        let update = authenticatedRequest(port: port, session: session, sequence: 1,
+            body: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"moot_update_memory","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"memory_id":"\#(secret.id)","mutation":"correct_sensitivity","sensitivity":"normal"}}}"#)
+        // Hidden and nonexistent rows remain deliberately indistinguishable.
+        #expect(update?.contains("\"isError\":true") == true)
+        let retire = authenticatedRequest(port: port, session: session, sequence: 2,
+            body: #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"moot_retire_fact","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"fact_id":"\#(fact.id)"}}}"#)
+        #expect(retire?.contains("\"isError\":true") == true)
+        let review = authenticatedRequest(port: port, session: session, sequence: 3,
+            body: #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_review_tunnel","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"tunnel_id":"\#(tunnel.id)","decision":"accept"}}}"#)
+        #expect(review?.contains("\"isError\":true") == true)
+        let estate = try await kit.estate(for: handle)
+        #expect(try await estate.allDrawers().first(where: { $0.id == secret.id })?.adjectiveSensitivity == .secret)
+        #expect(try await kit.recallKGFacts(handle).contains(where: { $0.id == fact.id }))
+        #expect(try await estate.getTunnel(id: tunnel.id)?.lifecycle == .proposed)
+        let keystones = authenticatedRequest(port: port, session: session, sequence: 4,
+            body: #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"moot_lens_keystones","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"wing":"\#(LocusKit.defaultWingName)","topK":10,"keystoneOnly":false}}}"#)
+        #expect(keystones?.lowercased().contains(secret.id.lowercased()) == false)
+    }
+
+    @Test("real provider rejects a verified cross-estate caller before a capture mutates")
+    func crossEstateRealProviderRefusesBeforeMutation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FirstPartyProviderCrossEstate-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("estate.sqlite")
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-stable-provider-cross-estate")
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .sqlite(url: url, busyTimeout: 5.0)))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        var foreignEstate = UUID(); while foreignEstate == handle.estateUUID { foreignEstate = UUID() }
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: signedDescriptor(for: foreignEstate), serverName: "ARIA_MCP", now: { 1_766_000_000 }, randomBytes: { Array(repeating: 9, count: $0) })
+        let provider = FirstPartyProviderExecutor()
+        await provider.installFirstPartyProviderExecutorContext(FixedEstateExecutorContext(kit: kit, handle: handle))
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let descriptor = signedDescriptor(for: foreignEstate)
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        let bytesBefore = try sqliteBytes(url)
+        let response = authenticatedRequest(port: port, session: session, sequence: 1,
+            body: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"moot_file_memory","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"content":"foreign estate mutation","subject":"must refuse","location":"cross estate"}}}"#)
+        #expect(response?.contains("estate_unavailable") == true)
+        #expect(try sqliteBytes(url) == bytesBefore)
+    }
+
+    @Test("each verified HTTP session reaches a stable provider with its own bound caller context")
+    func stableProviderReceivesDistinctVerifiedSessionContexts() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor,
+                                        serverName: "ARIA_MCP", now: { clock.seconds }, randomBytes: { counter.next($0) })
+        let provider = FirstPartyHTTPProvider()
+        let (port, stop) = try startServing(makeProviderDispatcher(provider, recallPolicyAuthority: FixedFirstPartyRecallPolicyAuthority()), firstPartyAuth: auth)
+        defer { stop() }
+        for requestID in [1, 2] {
+            let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+            let body = #"{"jsonrpc":"2.0","id":\#(requestID),"method":"tools/call","params":{"name":"stable.first_party.http","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{}}}"#
+            let response = authenticatedRequest(port: port, session: session, sequence: 1, body: body)
+            #expect(statusLine(response).contains("200"))
+            #expect(response?.contains("stable-first-party-http") == true)
+        }
+        let contexts = await provider.contexts
+        #expect(contexts.count == 2)
+        #expect(contexts[0].sessionIdentifier != contexts[1].sessionIdentifier)
+        #expect(contexts.allSatisfy { $0.sequence == 1 })
+        #expect(contexts.allSatisfy { $0.estateIdentifier == descriptor.estateIdentifier })
+        #expect(contexts.allSatisfy { $0.instanceIdentifier == descriptor.instanceIdentifier })
+        #expect(contexts.allSatisfy { $0.recallPolicy.maximumSensitivity == .restricted && $0.recallPolicy.exportability == .exportableOnly })
+    }
+
+    @Test("an authenticated session restriction is daemon-owned and does not narrow the owner session")
+    func authenticatedSessionRestrictionBindsProviderAuthority() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor,
+                                        serverName: "ARIA_MCP", now: { clock.seconds }, randomBytes: { counter.next($0) })
+        let provider = FirstPartyHTTPProvider()
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let lanSession = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        let restricted = authenticatedRequest(port: port, session: lanSession, sequence: 1,
+                                              body: #"{"jsonrpc":"2.0","id":1,"method":"mootx01/session/restrict-recall-to-exportable"}"#)
+        #expect(restricted?.contains("\"restricted\":true") == true)
+        let lanRead = authenticatedRequest(port: port, session: lanSession, sequence: 2,
+                                           body: #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"stable.first_party.http","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{}}}"#)
+        #expect(lanRead?.contains("stable-first-party-http") == true)
+        let ownerSession = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        let ownerRead = authenticatedRequest(port: port, session: ownerSession, sequence: 1,
+                                             body: #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"stable.first_party.http","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{}}}"#)
+        #expect(ownerRead?.contains("stable-first-party-http") == true)
+        let contexts = await provider.contexts
+        #expect(contexts.count == 2)
+        #expect(contexts[0].recallPolicy.exportability == .exportableOnly)
+        #expect(contexts[1].recallPolicy == .noGrant)
+    }
+
+    @Test("stable provider is untouched by invalid MAC and replayed authenticated requests")
+    func stableProviderRejectsInvalidAndReplayedRequestsBeforeDispatch() async throws {
+        let descriptor = ServerFixtures.signedDescriptor()
+        let clock = ManualClock()
+        let counter = RandomCounter()
+        let auth = FirstPartyAuthServer(rootProvider: FixedFirstPartyRootProvider(root: Vectors.fixedRoot), descriptor: descriptor,
+                                        serverName: "ARIA_MCP", now: { clock.seconds }, randomBytes: { counter.next($0) })
+        let provider = FirstPartyHTTPProvider()
+        let (port, stop) = try startServing(makeProviderDispatcher(provider), firstPartyAuth: auth)
+        defer { stop() }
+        let session = try await ServerFixtures.handshake(auth, descriptor: descriptor)
+        let body = #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"stable.first_party.http","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{}}}"#
+        let validMAC = FirstPartyAuthProtocol.requestMAC(sessionKey: session.sessionKey, sessionIdentifier: session.sessionIdentifier,
+                                                          sequence: 1, method: "POST", path: "/mcp/first-party", contentType: "application/json", body: Data(body.utf8))
+        let invalid = send(port: port, raw: rawRequest(target: "/mcp/first-party", headers: [
+            ("Content-Type", "application/json"), ("Authorization", "Mootx01Session " + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier)),
+            ("Mootx01-Sequence", "1"), ("Mootx01-Request-MAC", FirstPartyAuthProtocol.base64URLEncode([UInt8](repeating: 0, count: validMAC.count))),
+        ], body: body))
+        #expect(statusLine(invalid).contains("401"))
+        #expect(await provider.contexts.isEmpty)
+        let valid = send(port: port, raw: rawRequest(target: "/mcp/first-party", headers: [
+            ("Content-Type", "application/json"), ("Authorization", "Mootx01Session " + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier)),
+            ("Mootx01-Sequence", "1"), ("Mootx01-Request-MAC", FirstPartyAuthProtocol.base64URLEncode(validMAC)),
+        ], body: body))
+        #expect(statusLine(valid).contains("200"))
+        #expect(await provider.contexts.count == 1)
+        let replay = send(port: port, raw: rawRequest(target: "/mcp/first-party", headers: [
+            ("Content-Type", "application/json"), ("Authorization", "Mootx01Session " + FirstPartyAuthProtocol.base64URLEncode(session.sessionIdentifier)),
+            ("Mootx01-Sequence", "1"), ("Mootx01-Request-MAC", FirstPartyAuthProtocol.base64URLEncode(validMAC)),
+        ], body: body))
+        #expect(statusLine(replay).contains("409"))
+        #expect(await provider.contexts.count == 1)
+    }
 
     @Test("A full handshake and an authenticated request succeed with a verifiable response MAC")
     func authenticatedRoundTrip() async throws {

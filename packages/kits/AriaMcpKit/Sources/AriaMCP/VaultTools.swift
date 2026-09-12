@@ -455,7 +455,7 @@ enum VaultTools {
         // Dataset notes are excluded from the bridge import because DrawerMapping
         // does not re-honour `contentKind` on import — importing them through the
         // standard path creates drawers with contentKind=0 (wrong). They are instead
-        // imported via the direct estate path after the bridge finishes (MX-TAB-7b §6).
+        // filed through governed `kit.fileDataset` typed GLK filing after the bridge finishes (MX-TAB-7b §6).
         let datasetNotes = VaultTools.scanDatasetNotes(vaultURL: vaultURL)
         let datasetNotePaths = Set(datasetNotes.map { $0.path })
         let nonDatasetPaths: Set<String> = datasetNotes.isEmpty
@@ -492,7 +492,7 @@ enum VaultTools {
                         now: Date(), mode: mode)
                 }
 
-                // Step B: import dataset notes via the direct estate path (MX-TAB-7b §6).
+                // Step B: import dataset notes through GLK's governed filing path (MX-TAB-7b §6).
                 // Non-fatal — dataset import failures do not discard the bridge result.
                 _ = await VaultTools.importDatasetNotes(
                     vaultURL: vaultURL,
@@ -1424,14 +1424,14 @@ enum VaultTools {
         return (count, warnings)
     }
 
-    /// Import dataset handle notes via the direct estate path (bypasses DrawerMapping).
+    /// Import dataset handle notes through GLK's governed filing path (bypasses DrawerMapping).
     ///
     /// For each `VaultDatasetNoteRecord` with `contentKind: 7`:
     ///   1. Decode `DatasetHandleContent` from note body.
     ///   2. Validate column identifiers before DDL.
     ///   3. Read companion `.csv` at same path with `.csv` extension.
     ///   4. Parse CSV; check size cap.
-    ///   5. `createDataset` → `appendRows` → `captureDatasetHandle`.
+    ///   5. `fileDataset` coordinates `createDataset` → `appendRows` → typed handle capture.
     ///   6. Compute signatures non-fatally.
     ///
     /// Returns `(importedCount, warnings)`.
@@ -1449,13 +1449,6 @@ enum VaultTools {
             datasetStore = try await kit.datasetStore(for: handle)
         } catch {
             return (0, ["vault_import: no DatasetStore; dataset notes skipped: \(error.localizedDescription)"])
-        }
-
-        let estate: LocusKit.Estate
-        do {
-            estate = try await kit.estate(for: handle)
-        } catch {
-            return (0, ["vault_import: estate not accessible for dataset import; dataset notes skipped: \(error.localizedDescription)"])
         }
 
         var imported = 0
@@ -1553,27 +1546,8 @@ enum VaultTools {
                 typedRows.append(row)
             }
 
-            // 6a. Create dataset table (idempotent via CREATE TABLE IF NOT EXISTS).
-            do {
-                try await datasetStore.createDataset(id: datasetId, schema: schema, indexes: [])
-            } catch {
-                warnings.append("vault_import: \(note.path): createDataset failed (\(error.localizedDescription)); skipped")
-                continue
-            }
-
-            // 6b. Append rows. On failure, drop the table (atomic intent).
-            if !typedRows.isEmpty {
-                do {
-                    try await datasetStore.appendRows(id: datasetId, rows: typedRows)
-                } catch {
-                    try? await datasetStore.dropDataset(id: datasetId)
-                    warnings.append("vault_import: \(note.path): appendRows failed (\(error.localizedDescription)); table dropped")
-                    continue
-                }
-            }
-
-            // 6c. captureDatasetHandle — the ONLY authorised creation path for .dataset drawers.
-            // Source description preserved from the original handle content (audit-trail fidelity).
+            // 6. File backend table and typed handle through GLK. Source
+            // description stays faithful to the original handle for audit.
             let sensitivity = vaultSensitivityToAdjectiveSensitivity(
                 from: note.frontmatter["sensitivity"])
             let udc = note.frontmatter["udc"].flatMap { $0.isEmpty ? nil : $0 } ?? "000"
@@ -1584,23 +1558,36 @@ enum VaultTools {
 
             let drawer: Drawer
             do {
-                drawer = try await estate.captureDatasetHandle(
-                    datasetId: datasetId,
+                drawer = try await kit.fileDataset(handle, DatasetFilingFrame(
+                    datasetID: datasetId,
+                    schema: schema,
+                    rows: typedRows,
                     columns: columnSummaries,
-                    rowCount: typedRows.count,
                     sourceDescription: handleContent.sourceDescription,
                     wing: note.frontmatter["wing"].flatMap { $0.isEmpty ? nil : $0 },
                     room: room,
                     addedBy: "aria-mcp-vault-import",
                     sensitivity: sensitivity,
-                    latticeAnchor: LatticeAnchor.udc(udc))
+                    udcCode: udc))
             } catch {
-                try? await datasetStore.dropDataset(id: datasetId)
-                warnings.append("vault_import: \(note.path): captureDatasetHandle failed (\(error.localizedDescription)); table dropped")
+                if let filing = error as? DatasetFilingError {
+                    switch filing {
+                    case .storageUnavailable:
+                        warnings.append("vault_import: \(note.path): no DatasetStore; skipped")
+                    case .createFailed:
+                        warnings.append("vault_import: \(note.path): createDataset failed (\(error.localizedDescription)); skipped")
+                    case .appendFailed:
+                        warnings.append("vault_import: \(note.path): appendRows failed (\(error.localizedDescription)); table dropped")
+                    case .handleFailed:
+                        warnings.append("vault_import: \(note.path): captureDatasetHandle failed (\(error.localizedDescription)); table dropped")
+                    }
+                } else {
+                    warnings.append("vault_import: \(note.path): captureDatasetHandle failed (\(error.localizedDescription)); table dropped")
+                }
                 continue
             }
 
-            // 6d. Signatures (MX-TAB-5) — non-fatal.
+            // 7. Signatures (MX-TAB-5) — non-fatal.
             // The dataset and handle are already committed; signature failure is recoverable.
             do {
                 let sampledRows = try await datasetStore.queryRows(
