@@ -436,6 +436,8 @@ pub(crate) fn execute(
     monitoring_control: Option<&dyn MonitoringControl>,
     build_id: &str,
     now_millis: i64,
+    version_skew: &str,
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let meta = crate::v2::render::V2ResultMeta::incomplete(
         build_id,
@@ -492,7 +494,7 @@ pub(crate) fn execute(
         SurfaceRequest::MigrationConfirm(request) => execute_migration_confirm(request, registry, &meta),
         SurfaceRequest::FederatedRecall(request) => execute_federated_recall(request, registry, &meta),
         SurfaceRequest::EstateDiagnostics { operation, request } =>
-            execute_estate_diagnostics(operation, request, registry, build_id, now_millis, &meta),
+            execute_estate_diagnostics(operation, request, registry, build_id, now_millis, version_skew, update_advisory, &meta),
         SurfaceRequest::VaultLifecycle(request) =>
             execute_vault_lifecycle(request, registry, vault_ledger, &meta, now_millis),
         SurfaceRequest::TranscriptRecall(request) =>
@@ -1946,6 +1948,8 @@ fn execute_estate_diagnostics(
     registry: &crate::estate_registry::EstateRegistry,
     build_id: &str,
     now_millis: i64,
+    version_skew: &str,
+    update_advisory: Option<&crate::dispatcher::UpdateAdvisoryProvider>,
     meta: &crate::v2::render::V2ResultMeta,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use crate::v2::estate_diagnostics::EstateDiagnosticsOperation;
@@ -1957,11 +1961,23 @@ fn execute_estate_diagnostics(
         EstateDiagnosticsOperation::Rebuild => crate::v2::estate_diagnostics::REBUILD_STATUS_TOOL,
         EstateDiagnosticsOperation::Timing => crate::v2::estate_diagnostics::TIMING_REPORT_TOOL,
     };
+    // Evaluate the upstream-release provider only for the two orientation tools.
+    // The host owns rate limiting and the network boundary; calling it here for
+    // every estate operation would turn one bounded probe per cache window into
+    // one per tool call (same rationale as Swift ToolDispatch.swift:3764-3766).
+    let resolved_update_advisory = match operation {
+        EstateDiagnosticsOperation::Ping | EstateDiagnosticsOperation::Status => {
+            update_advisory.and_then(|p| (p)())
+        }
+        _ => None,
+    };
     let context = crate::v2::estate_diagnostics::EstateDiagnosticsContext {
         caller_binding: registry.server_identity.clone(),
         session_id: "selected-v2-public".to_owned(),
         clock_millis: now_millis,
         build_serial: build_id.to_owned(),
+        version_skew: version_skew.to_owned(),
+        update_advisory: resolved_update_advisory,
     };
     let service = crate::v2::estate_diagnostics::EstateDiagnosticsService::new(
         crate::v2::estate_diagnostics_provider::SelectedEstateDiagnosticsAuthority::new(registry),

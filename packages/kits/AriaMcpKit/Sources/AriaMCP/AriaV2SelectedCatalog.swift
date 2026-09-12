@@ -1778,21 +1778,31 @@ enum AriaV2SelectedCatalog {
     }
 
     private static func estatePingDataSchema() -> JSONValue {
-        exactObjectSchema([
+        // `version_skew` and `update_available` are optional — emitted only
+        // when the host detects a mismatch or a newer release is available.
+        // `orderedExactObjectSchema` with an explicit `required` list keeps the
+        // four required fields marked as such while allowing both optional
+        // properties to appear or be absent without schema violation.  The
+        // required array is sorted to match what `exactObjectSchema` would emit
+        // and to stay byte-identical to the Rust port's array.
+        return orderedExactObjectSchema([
             "estate_id": uuidSchema(),
             "estate_name": stringSchema(),
             "state": .object(["const": .string("mounted")]),
             "build_serial": stringSchema(),
-        ])
+            "update_available": stringSchema(),
+            "version_skew": stringSchema(),
+        ], required: ["build_serial", "estate_id", "estate_name", "state"])
     }
 
     private static func estateStatusDataSchema() -> JSONValue {
         let count = JSONValue.object(["type": .string("integer"), "minimum": .integer(0)])
-        // `recall_trace_count` and `shared_content_migration` are the two
-        // optional members: the first is omitted when the count could not be
-        // read, because a fabricated zero would be indistinguishable from an
-        // empty trace table; the second only appears once a migration record
-        // exists, so an estate that never ran detection keeps its old shape.
+        // `recall_trace_count`, `shared_content_migration`, `version_skew`,
+        // and `update_available` are optional members: the first is omitted
+        // when the count could not be read; the second appears only once a
+        // migration record exists; the third is omitted when no plugin/binary
+        // version mismatch was detected; the fourth is omitted when no newer
+        // release is available.
         return orderedExactObjectSchema([
             "estate_id": uuidSchema(),
             "estate_name": stringSchema(),
@@ -1814,6 +1824,8 @@ enum AriaV2SelectedCatalog {
                 "required": .array([.string("state")]),
                 "additionalProperties": .bool(false),
             ]),
+            "update_available": stringSchema(),
+            "version_skew": stringSchema(),
         // Sorted, matching what exactObjectSchema emits and what the Rust port
         // produces — the required array is ordered, so a different order is a
         // different catalog and the shared digest diverges.
