@@ -587,19 +587,26 @@ fn execute_memory_mutation(
         MemoryMutationRequest::Review(request) => (
             crate::v2::memory_mutations::REVIEW_TUNNEL_TOOL, service.review(request)),
     };
+    // Fire the reward-trace dereference write for every outcome EXCEPT NotFound.
+    // NotFound means the row was absent or above the sensitivity ceiling — the
+    // caller was never entitled to name it, so no reward trace.  Every other
+    // outcome (Ok, Unavailable, OutcomeUnverified) cleared the ceiling: a
+    // successful write, an unrelated write failure, or a write that landed but
+    // whose readback failed all preserve the entitlement the caller demonstrated
+    // by surfacing the row's id at recall time.
+    if !matches!(&result, Err(V2MemoryMutationError::NotFound)) {
+        if let Some(memory_id) = dereference_id {
+            let canonical = memory_id.hyphenated().to_string();
+            // Both spellings: the two portable writers disagree on UUID case and
+            // mark_recall_used matches trace rows by the stored id.
+            for spelling in [canonical.clone(), canonical.to_uppercase()] {
+                crate::interface_tools::note_usage(
+                    &spelling, &registry.default, surfaced_recall_ledger, posture);
+            }
+        }
+    }
     match result {
         Ok(result) => {
-            // Gate passed.  Fire the reward-trace dereference write now, post-gate,
-            // so a row the caller was never entitled to see earns no write.
-            if let Some(memory_id) = dereference_id {
-                let canonical = memory_id.hyphenated().to_string();
-                // Both spellings: the two portable writers disagree on UUID case and
-                // mark_recall_used matches trace rows by the stored id.
-                for spelling in [canonical.clone(), canonical.to_uppercase()] {
-                    crate::interface_tools::note_usage(
-                        &spelling, &registry.default, surfaced_recall_ledger, posture);
-                }
-            }
             crate::v2::render::success(
             tool,
             &match result.tunnel_review {
@@ -3587,6 +3594,113 @@ mod tests {
             probe_count > 0,
             "refused write must not fire note_usage — probe found {} rows \
              still unused (should be >0); note_usage fired pre-gate",
+            probe_count
+        );
+    }
+
+    /// Dereference fires on an admitted write that fails at the lower layer.
+    ///
+    /// A write that clears the sensitivity ceiling (resolve_memory returns Ok)
+    /// but then fails for an unrelated lower-layer reason must still fire the
+    /// reward-trace dereference write.  The caller was entitled to name the
+    /// row; only a NotFound refusal (absent or above-ceiling) withholds the
+    /// trace.
+    ///
+    /// Drive: Move with an empty wing string so reanchor returns
+    /// InvalidContent → Unavailable after resolve_memory succeeds.
+    ///
+    /// After the call, probe mark_recall_used.  A return of 0 (nothing left to
+    /// mark) proves note_usage already fired — the trace rows are marked used.
+    /// A return > 0 means note_usage did NOT fire.
+    ///
+    /// Pre-fix failure (success-only ordering): probe returns > 0 because
+    /// note_usage never ran on the Err(Unavailable) arm.
+    #[test]
+    fn sensitivity_write_gate_dereferences_admitted_lower_failure() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use locus_kit::recall_trace_item::RecallTraceItem;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2MoveMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        // 1. Capture a normal row (Elevated, within the default ceiling).
+        let id_str = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("lower-failure dereference probe target",
+                    CaptureChannel::Typed, "default", LatticeAnchor::udc("000"),
+                    "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+        let uuid = Uuid::parse_str(&id_str).expect("parse uuid");
+
+        // 2. Insert a recall trace row for the drawer.
+        {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.insert_recall_traces(
+                &handle,
+                &[RecallTraceItem::new(
+                    "trace-lower-failure-1",
+                    &id_str,
+                    "2023-11-14T22:13:20Z",
+                    Some(0.9),
+                    0, // unused flag starts clear
+                )],
+            ).expect("insert recall trace");
+        }
+
+        // 3. Pre-populate the SurfacedRecallLedger so note_usage fires when called.
+        let ledger = SurfacedRecallLedger::new();
+        ledger.record_surfaced(&[id_str.clone(), id_str.to_uppercase()], NOW / 1000);
+
+        // 4. Run a Move request with an empty wing string.
+        //    resolve_memory succeeds (row is Elevated, within the default ceiling),
+        //    but reanchor rejects the empty wing with InvalidContent → Unavailable.
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Move(V2MoveMemoryRequest {
+                memory_id: uuid,
+                wing: String::new(), // empty wing → reanchor InvalidContent → Unavailable
+                room: "test-room".to_owned(),
+                estate_id: None,
+            }),
+            &registry, &meta, NOW + 100,
+            EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("execute_memory_mutation must not return a JSONRPCError");
+
+        assert_eq!(
+            response["isError"], true,
+            "lower-failure write must set isError=true; got: {}", response
+        );
+
+        // 5. Probe: note_usage should have fired before this call, so
+        //    mark_recall_used finds 0 rows still unused (already marked used).
+        let probe_count = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.mark_recall_used(
+                &handle, &id_str,
+                "2000-01-01T00:00:00Z", // since: far past
+                "3000-01-01T00:00:00Z", // now: far future
+            ).expect("probe mark_recall_used must not error")
+        };
+        assert_eq!(
+            probe_count, 0,
+            "admitted lower-failure write must fire note_usage — probe found {} rows \
+             still unused (should be 0); note_usage did not fire",
             probe_count
         );
     }
