@@ -1,6 +1,6 @@
 {
  "schema": "cross-encoder-fuse-parity-v1",
- "source": "benchmark-ee/cross-encoder-lab lab.py fuse over fixtures/minilm6-reference.json plus synthetic cases",
+ "source": "the cross-encoder lab's lab.py fuse over fixtures/minilm6-reference.json plus synthetic cases",
  "cases": [
   {
    "name": "boiling",
