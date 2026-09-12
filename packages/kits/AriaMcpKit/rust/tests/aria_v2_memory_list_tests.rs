@@ -191,7 +191,16 @@ fn revision_matches_shared_swift_vector_and_preserves_projection_nulls() {
     let page = MemoryListService::new(Arc::clone(&provider), uuid(material["estate_id"].as_str().unwrap()))
         .list(request, NOW).unwrap();
     assert_eq!(page.revision, fixture["expected_sha256"].as_str().unwrap());
-    assert_eq!(page.memories[0]["subject"], Value::Null);
-    assert_eq!(page.memories[1]["provenance"], Value::Null);
+    // The test-local fixture's projection() helper (lines 63-70 in this file) explicitly
+    // inserts "subject" and "provenance" as Value::Null when the argument is None — so
+    // the keys are genuinely present here and null. The production builder
+    // (public_projection in memory_list_snapshot_provider.rs) OMITS absent fields rather
+    // than nulling them; the two shapes are deliberately different and correct for their
+    // respective builders. (The revision test loads its rows from the fixture JSON, which
+    // also carries explicit nulls for these fields.)
+    assert!(page.memories[0].contains_key("subject"), "test-local fixture emits subject key even when null");
+    assert!(page.memories[0]["subject"].is_null(), "test-local fixture sets subject null when no subject provided");
+    assert!(page.memories[1].contains_key("provenance"), "test-local fixture emits provenance key even when null");
+    assert!(page.memories[1]["provenance"].is_null(), "test-local fixture sets provenance null when no provenance provided");
     assert_eq!(page.memories[1]["context"], "planning");
 }
