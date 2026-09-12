@@ -31,9 +31,11 @@ impl V2MemoryMutationAuthority for Authority {
         Ok(V2MemoryMutationAdmission {
             estate_id: uuid(ESTATE), estate_handle: EstateHandle::new([1; 16], 0, 0).unwrap(),
             caller_binding: "caller-a".to_owned(), now_millis: 100, authorization_generation: "g1".to_owned(),
+            maximum_sensitivity: locus_kit::adjectives::AdjectiveSensitivity::Elevated,
         })
     }
     fn revalidate(&self, _: &V2MemoryMutationAdmission) -> Result<(), ()> { if self.fail_revalidate { Err(()) } else { Ok(()) } }
+    fn resolve_memory(&self, _: &V2MemoryMutationAdmission, memory_id: Uuid) -> Result<Uuid, V2MemoryMutationError> { Ok(memory_id) }
 }
 
 struct Lower {
