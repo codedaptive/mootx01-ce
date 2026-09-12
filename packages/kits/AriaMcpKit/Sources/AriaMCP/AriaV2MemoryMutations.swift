@@ -286,15 +286,15 @@ public struct AriaV2MemoryMutations: Sendable {
     public func update(_ request: AriaV2UpdateMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
         do {
-            // Acting on a surfaced row is a dereference: the estate helped and
-            // the reward sweep should know. Fires BEFORE the mutation, as in
-            // v1 — the caller acted on the id whether or not the write then
-            // succeeds, and a mutation that fails for an unrelated reason does
-            // not un-help the recall that produced the id.
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
+            // Gate passed.  Fire the reward-trace dereference write after the gate,
+            // not before.  The prior ordering held for rows the caller could read
+            // whose write then failed for an unrelated reason; it does not hold when
+            // the sensitivity gate is itself the failure — a row the caller was never
+            // entitled to name must not receive a reward-trace write.
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.mutate(handle, .init(
                 rowID: storedID,
                 kind: try request.lowerKind(),
@@ -311,15 +311,12 @@ public struct AriaV2MemoryMutations: Sendable {
     public func withdraw(_ request: AriaV2WithdrawMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
         do {
-            // Acting on a surfaced row is a dereference: the estate helped and
-            // the reward sweep should know. Fires BEFORE the mutation, as in
-            // v1 — the caller acted on the id whether or not the write then
-            // succeeds, and a mutation that fails for an unrelated reason does
-            // not un-help the recall that produced the id.
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
+            // Gate passed.  Fire the reward-trace dereference write after the gate,
+            // not before.  See update(_:) for the full rationale.
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.withdraw(handle, .init(rowID: storedID, reason: request.reason))
             return success(tool: "moot_withdraw_memory", data: .object(["memory_id": .string(id(request.memoryID))]), text: "Withdrew memory \(id(request.memoryID)).")
         } catch is MemoryNotFoundError {
@@ -358,15 +355,12 @@ public struct AriaV2MemoryMutations: Sendable {
     public func confirm(_ request: AriaV2ConfirmMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
         do {
-            // Acting on a surfaced row is a dereference: the estate helped and
-            // the reward sweep should know. Fires BEFORE the mutation, as in
-            // v1 — the caller acted on the id whether or not the write then
-            // succeeds, and a mutation that fails for an unrelated reason does
-            // not un-help the recall that produced the id.
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
+            // Gate passed.  Fire the reward-trace dereference write after the gate,
+            // not before.  See update(_:) for the full rationale.
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.mutate(handle, .init(rowID: storedID, kind: .confirm))
             return success(tool: "moot_confirm_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)), "mutation": .string("confirm"),
@@ -379,15 +373,12 @@ public struct AriaV2MemoryMutations: Sendable {
     public func move(_ request: AriaV2MoveMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
         do {
-            // Acting on a surfaced row is a dereference: the estate helped and
-            // the reward sweep should know. Fires BEFORE the mutation, as in
-            // v1 — the caller acted on the id whether or not the write then
-            // succeeds, and a mutation that fails for an unrelated reason does
-            // not un-help the recall that produced the id.
+            let storedID = try await gatedStoredMemoryID(request.memoryID)
+            // Gate passed.  Fire the reward-trace dereference write after the gate,
+            // not before.  See update(_:) for the full rationale.
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
             try await kit.reanchor(handle, .init(rowID: storedID, toRoom: request.room, toWing: request.wing))
             return success(tool: "moot_move_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)),

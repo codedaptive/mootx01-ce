@@ -555,27 +555,22 @@ fn execute_memory_mutation(
         },
         CoordinatorMemoryMutationLower::new(Arc::clone(&registry.default.coord)),
     );
-    // Acting on a surfaced row is a dereference, so the reward sweep hears
-    // about it. Fires BEFORE the mutation, as in v1: the caller acted on the id
-    // whether or not the write then succeeds. Erase is excluded — v1 did not
-    // reward a row it was destroying — as are link and review, which name a
-    // tunnel rather than a surfaced memory.
-    let dereferenced = match &request {
+    // The target id is captured here, before the request is consumed by the
+    // match below, so the reward-trace write can fire AFTER the gate succeeds.
+    // A caller who was never entitled to name a restricted row must not receive
+    // a reward-trace write even if they hold its UUID.  The prior ordering —
+    // "BEFORE the mutation" — held for rows the caller could read whose write
+    // then failed for an unrelated reason; it does not hold when the sensitivity
+    // gate is itself the failure.  Erase is excluded — v1 did not reward a row
+    // it was destroying — as are link and review, which name a tunnel rather
+    // than a surfaced memory.
+    let dereference_id: Option<Uuid> = match &request {
         MemoryMutationRequest::Update(request) => Some(request.memory_id),
         MemoryMutationRequest::Withdraw(request) => Some(request.memory_id),
         MemoryMutationRequest::Confirm(request) => Some(request.memory_id),
         MemoryMutationRequest::Move(request) => Some(request.memory_id),
         _ => None,
     };
-    if let Some(memory_id) = dereferenced {
-        let canonical = memory_id.hyphenated().to_string();
-        // Both spellings: the two portable writers disagree on UUID case and
-        // mark_recall_used matches trace rows by the stored id.
-        for spelling in [canonical.clone(), canonical.to_uppercase()] {
-            crate::interface_tools::note_usage(
-                &spelling, &registry.default, surfaced_recall_ledger, posture);
-        }
-    }
     let (tool, result) = match request {
         MemoryMutationRequest::Update(request) => (
             crate::v2::memory_mutations::UPDATE_MEMORY_TOOL, service.update(request)),
@@ -593,7 +588,19 @@ fn execute_memory_mutation(
             crate::v2::memory_mutations::REVIEW_TUNNEL_TOOL, service.review(request)),
     };
     match result {
-        Ok(result) => crate::v2::render::success(
+        Ok(result) => {
+            // Gate passed.  Fire the reward-trace dereference write now, post-gate,
+            // so a row the caller was never entitled to see earns no write.
+            if let Some(memory_id) = dereference_id {
+                let canonical = memory_id.hyphenated().to_string();
+                // Both spellings: the two portable writers disagree on UUID case and
+                // mark_recall_used matches trace rows by the stored id.
+                for spelling in [canonical.clone(), canonical.to_uppercase()] {
+                    crate::interface_tools::note_usage(
+                        &spelling, &registry.default, surfaced_recall_ledger, posture);
+                }
+            }
+            crate::v2::render::success(
             tool,
             &match result.tunnel_review {
                 Some(crate::v2::memory_mutations::V2TunnelReviewReceipt::Endorsed {
@@ -667,7 +674,8 @@ fn execute_memory_mutation(
             },
             &packet_meta(meta, crate::v2::operation::V2OperationEffect::Write),
             "Applied the selected typed memory mutation.",
-        ).map_err(jsonrpc_internal),
+        ).map_err(jsonrpc_internal)
+        }
         Err(error) => {
             let (code, message, retryable) = match error {
                 V2MemoryMutationError::Unavailable => (
@@ -3192,6 +3200,394 @@ mod tests {
              got extras {:?} and missing {:?}",
             actual_keys.difference(&declared_keys).collect::<std::collections::BTreeSet<_>>(),
             declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sensitivity write-gate tests (SENS_WRITE_GATE Unit 1)
+    //
+    // These tests drive execute_memory_mutation with a real
+    // SensitivityGrantLedger (empty = ceiling Elevated) against a
+    // Restricted-sensitivity row.  They are structural: deleting the two
+    // ceiling-comparison lines in SelectedMemoryMutationAuthority::resolve_memory
+    // causes every assertion to fail.
+    // -----------------------------------------------------------------------
+
+    /// Helper: seed a row and raise its sensitivity to Restricted.
+    /// Returns the drawer's UUID (hyphenated lowercase).
+    fn seed_restricted(registry: &crate::estate_registry::EstateRegistry, content: &str) -> String {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::{CaptureFrame, MutationKind};
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let id = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &registry.default.handle,
+                CaptureFrame::new(content, CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("000"), "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+        {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.mutate(
+                &registry.default.handle, &id,
+                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted), None,
+            ).expect("raise sensitivity to Restricted");
+        }
+        id
+    }
+
+    /// Gate: every write verb refuses a Restricted-sensitivity row with an
+    /// empty grant ledger (ceiling Elevated), returning error code
+    /// `memory_not_found` and message `memory not found`.
+    ///
+    /// Pre-fix failure: the ceiling check did not exist; every verb succeeded
+    /// against the restricted row, returning `isError: false`.
+    ///
+    /// Post-fix: isError is true, code is `memory_not_found`.
+    #[test]
+    fn sensitivity_write_gate_refuses_restricted_row_for_each_verb() {
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{
+            V2ConfirmMemoryRequest, V2EraseMemoryRequest,
+            V2MoveMemoryRequest, V2UpdateMemoryRequest, V2UpdateMutation,
+            V2WithdrawMemoryRequest,
+        };
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let id_str = seed_restricted(&registry, "restricted — gate must refuse all write verbs");
+        let uuid = Uuid::parse_str(&id_str).expect("parse uuid");
+
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+        // Empty grant ledger → ceiling = Elevated; Restricted row is above it.
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+
+        struct Verb { name: &'static str, request: MemoryMutationRequest }
+        let verbs = vec![
+            Verb { name: "update/confirm",
+                   request: MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                       memory_id: uuid, mutation: V2UpdateMutation::Confirm, note: None, estate_id: None }) },
+            Verb { name: "update/correct_sensitivity",
+                   request: MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                       memory_id: uuid,
+                       mutation: V2UpdateMutation::CorrectSensitivity(locus_kit::adjectives::AdjectiveSensitivity::Normal),
+                       note: None, estate_id: None }) },
+            Verb { name: "withdraw",
+                   request: MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
+                       memory_id: uuid, reason: None, estate_id: None }) },
+            Verb { name: "erase",
+                   request: MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                       memory_id: uuid, confirmation: true, reason: None, estate_id: None }) },
+            Verb { name: "confirm",
+                   request: MemoryMutationRequest::Confirm(V2ConfirmMemoryRequest {
+                       memory_id: uuid, estate_id: None }) },
+            Verb { name: "move",
+                   request: MemoryMutationRequest::Move(V2MoveMemoryRequest {
+                       memory_id: uuid, wing: "w".into(), room: "r".into(), estate_id: None }) },
+        ];
+
+        for verb in verbs {
+            let response = execute_memory_mutation(
+                verb.request, &registry, &meta, NOW + 100,
+                EstatePosture::Live, &ledger, &grant_ledger,
+            ).expect("execute_memory_mutation must not return a JSONRPCError");
+
+            assert_eq!(
+                response["isError"], true,
+                "{}: gate must set isError=true for a Restricted row; got: {}",
+                verb.name, response
+            );
+            assert_eq!(
+                response["structuredContent"]["error"]["code"], "memory_not_found",
+                "{}: error code must be memory_not_found; got: {}",
+                verb.name, response["structuredContent"]["error"]["code"]
+            );
+            assert_eq!(
+                response["structuredContent"]["error"]["message"], "memory not found",
+                "{}: error message must be 'memory not found'; got: {}",
+                verb.name, response["structuredContent"]["error"]["message"]
+            );
+        }
+    }
+
+    /// Oracle-closure: the refusal for a Restricted row is byte-equal to the
+    /// refusal for a freshly generated nonexistent UUID, for each write verb.
+    ///
+    /// Pre-fix failure: the restricted row returned a success response, which
+    /// cannot be equal to the not-found refusal for a nonexistent id.
+    #[test]
+    fn sensitivity_write_gate_refusal_matches_nonexistent_for_each_verb() {
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{
+            V2ConfirmMemoryRequest, V2EraseMemoryRequest,
+            V2MoveMemoryRequest, V2UpdateMemoryRequest, V2UpdateMutation,
+            V2WithdrawMemoryRequest,
+        };
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let restricted_str = seed_restricted(&registry, "oracle-closure restricted row");
+        let restricted_uuid = Uuid::parse_str(&restricted_str).expect("parse restricted uuid");
+        let nonexistent_uuid = Uuid::new_v4();
+
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+
+        // Build both requests for each verb, run them, and compare error objects.
+        macro_rules! compare_refusals {
+            ($name:expr, $req_restricted:expr, $req_nonexistent:expr) => {{
+                let restricted_response = execute_memory_mutation(
+                    $req_restricted, &registry, &meta, NOW + 100,
+                    EstatePosture::Live, &ledger, &grant_ledger,
+                ).expect("restricted execute must not error");
+                let nonexistent_response = execute_memory_mutation(
+                    $req_nonexistent, &registry, &meta, NOW + 100,
+                    EstatePosture::Live, &ledger, &grant_ledger,
+                ).expect("nonexistent execute must not error");
+                let r_err = &restricted_response["structuredContent"]["error"];
+                let n_err = &nonexistent_response["structuredContent"]["error"];
+                assert_eq!(
+                    r_err["code"], n_err["code"],
+                    "{}: restricted and nonexistent must produce same code", $name
+                );
+                assert_eq!(
+                    r_err["message"], n_err["message"],
+                    "{}: restricted and nonexistent must produce same message", $name
+                );
+                assert_eq!(
+                    r_err["retryable"], n_err["retryable"],
+                    "{}: restricted and nonexistent must produce same retryable", $name
+                );
+            }};
+        }
+
+        compare_refusals!("update/confirm",
+            MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                memory_id: restricted_uuid, mutation: V2UpdateMutation::Confirm,
+                note: None, estate_id: None }),
+            MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                memory_id: nonexistent_uuid, mutation: V2UpdateMutation::Confirm,
+                note: None, estate_id: None }));
+
+        compare_refusals!("update/correct_sensitivity",
+            MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                memory_id: restricted_uuid,
+                mutation: V2UpdateMutation::CorrectSensitivity(locus_kit::adjectives::AdjectiveSensitivity::Normal),
+                note: None, estate_id: None }),
+            MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                memory_id: nonexistent_uuid,
+                mutation: V2UpdateMutation::CorrectSensitivity(locus_kit::adjectives::AdjectiveSensitivity::Normal),
+                note: None, estate_id: None }));
+
+        compare_refusals!("withdraw",
+            MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
+                memory_id: restricted_uuid, reason: None, estate_id: None }),
+            MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
+                memory_id: nonexistent_uuid, reason: None, estate_id: None }));
+
+        compare_refusals!("erase",
+            MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                memory_id: restricted_uuid, confirmation: true, reason: None, estate_id: None }),
+            MemoryMutationRequest::Erase(V2EraseMemoryRequest {
+                memory_id: nonexistent_uuid, confirmation: true, reason: None, estate_id: None }));
+
+        compare_refusals!("confirm",
+            MemoryMutationRequest::Confirm(V2ConfirmMemoryRequest {
+                memory_id: restricted_uuid, estate_id: None }),
+            MemoryMutationRequest::Confirm(V2ConfirmMemoryRequest {
+                memory_id: nonexistent_uuid, estate_id: None }));
+
+        compare_refusals!("move",
+            MemoryMutationRequest::Move(V2MoveMemoryRequest {
+                memory_id: restricted_uuid, wing: "w".into(), room: "r".into(), estate_id: None }),
+            MemoryMutationRequest::Move(V2MoveMemoryRequest {
+                memory_id: nonexistent_uuid, wing: "w".into(), room: "r".into(), estate_id: None }));
+    }
+
+    /// Gate passes: correct_sensitivity RAISE (normal → restricted) on a normal
+    /// row must succeed because the row is readable before the mutation lands.
+    ///
+    /// Pre-fix: this always passed; it is the green-side verification that the
+    /// gate is not over-blocking readable rows.
+    #[test]
+    fn sensitivity_write_gate_passes_for_readable_normal_row() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2UpdateMemoryRequest, V2UpdateMutation};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+        let id_str = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("normal row — gate must pass for readable row",
+                    CaptureChannel::Typed, "default", LatticeAnchor::udc("000"),
+                    "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+        let uuid = Uuid::parse_str(&id_str).expect("parse uuid");
+
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+
+        // Raise sensitivity: normal → restricted.  The row is readable (normal ≤ elevated
+        // ceiling) so the gate passes and the mutation succeeds.
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                memory_id: uuid,
+                mutation: V2UpdateMutation::CorrectSensitivity(
+                    locus_kit::adjectives::AdjectiveSensitivity::Restricted),
+                note: None,
+                estate_id: None,
+            }),
+            &registry, &meta, NOW + 100,
+            EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("execute_memory_mutation must not return a JSONRPCError");
+
+        assert_eq!(
+            response["isError"], false,
+            "correct_sensitivity raise on a normal row must succeed; got: {}", response
+        );
+    }
+
+    /// Ledger ordering proof: a refused write against a Restricted row must NOT
+    /// fire the reward-trace dereference write (note_usage / mark_recall_used).
+    ///
+    /// Setup: seed a normal row, insert a recall trace row for it so
+    /// mark_recall_used has something to mark, pre-populate the
+    /// SurfacedRecallLedger so note_usage fires when called, then raise the
+    /// row to Restricted — making it above the ceiling.
+    ///
+    /// After the refused write, probe mark_recall_used with a wide window.
+    /// If the probe returns > 0, the trace row was NOT yet marked used, proving
+    /// note_usage did not fire.  If the probe returns 0, note_usage fired
+    /// pre-gate — the red case before the fix.
+    ///
+    /// Pre-fix failure: probe returns 0 (all trace rows marked used by the
+    /// pre-gate note_usage call despite the write being refused).
+    #[test]
+    fn sensitivity_write_gate_does_not_dereference_refused_row() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::{CaptureFrame, MutationKind};
+        use locus_kit::recall_trace_item::RecallTraceItem;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2WithdrawMemoryRequest};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        // 1. Capture a normal row.
+        let id_str = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("dereference-ledger probe target",
+                    CaptureChannel::Typed, "default", LatticeAnchor::udc("000"),
+                    "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+        let uuid = Uuid::parse_str(&id_str).expect("parse uuid");
+
+        // 2. Insert a recall trace row so mark_recall_used has something to update.
+        {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.insert_recall_traces(
+                &handle,
+                &[RecallTraceItem::new(
+                    "trace-ledger-test-1",
+                    &id_str,
+                    "2023-11-14T22:13:20Z", // matches NOW in ISO8601
+                    Some(0.9),
+                    0, // unused flag starts clear
+                )],
+            ).expect("insert recall trace");
+        }
+
+        // 3. Pre-populate the SurfacedRecallLedger with the drawer id (both
+        //    spellings) so note_usage would call mark_recall_used if invoked.
+        let ledger = SurfacedRecallLedger::new();
+        ledger.record_surfaced(&[id_str.clone(), id_str.to_uppercase()], NOW / 1000);
+
+        // 4. Raise the row to Restricted — now above the Elevated ceiling.
+        {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.mutate(
+                &handle, &id_str,
+                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted), None,
+            ).expect("raise to Restricted");
+        }
+
+        // 5. Run a refused write (empty ledger → ceiling Elevated, row Restricted).
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
+                memory_id: uuid, reason: None, estate_id: None,
+            }),
+            &registry, &meta, NOW + 100,
+            EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("execute_memory_mutation must not return a JSONRPCError");
+
+        assert_eq!(
+            response["isError"], true,
+            "refused write must set isError=true; got: {}", response
+        );
+
+        // 6. Probe: call mark_recall_used with a window guaranteed to cover the
+        //    test's trace row.  A non-zero result proves the trace row is still
+        //    unused — note_usage did NOT fire.
+        let probe_count = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.mark_recall_used(
+                &handle, &id_str,
+                "2000-01-01T00:00:00Z", // since: far past
+                "3000-01-01T00:00:00Z", // now: far future
+            ).expect("probe mark_recall_used must not error")
+        };
+        assert!(
+            probe_count > 0,
+            "refused write must not fire note_usage — probe found {} rows \
+             still unused (should be >0); note_usage fired pre-gate",
+            probe_count
         );
     }
 }
