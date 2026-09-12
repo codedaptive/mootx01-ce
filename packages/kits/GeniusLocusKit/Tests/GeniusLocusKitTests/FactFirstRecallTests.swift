@@ -65,6 +65,94 @@ struct FactFirstRecallTests {
             vectorScores: ["weak": 1]) == .fallThrough)
     }
 
+    // MARK: — Gate B
+
+    /// Gate B: a fact with a stale searchProjectionVersion is excluded from
+    /// recall by FactFirstRecall's version guard. Once the correct version is
+    /// stamped (exactly what the backfill writes), the fact wins the query.
+    ///
+    /// Design — inverted so the test discriminates:
+    ///   f-unprojected (Jack) carries the content the query asks for, but its
+    ///   searchProjectionVersion = "" (wrong, as if the backfill has not run).
+    ///   f-projected (Jill) has the correct version but scores poorly on the
+    ///   "jack birthday" query: coverage 0.5 and entity containment 0.
+    ///
+    ///   Phase 1: f-unprojected is excluded by the version guard (line 80 of
+    ///   FactFirstRecall.swift). Jill scores 0.5 < 0.70 and has containment 0.
+    ///   Decision: fallThrough.
+    ///
+    ///   Phase 2: f-unprojected receives FactSearchProjection.version — the
+    ///   exact bytes the backfill writes. Jack now scores ≥ 0.70, margin ≥ 0.20,
+    ///   containment = 1. Decision: .solid(f-unprojected).
+    ///
+    /// Discrimination proof: temporarily deleting lines 79-80 from
+    /// FactFirstRecall.swift makes f-unprojected (Jack) eligible in Phase 1;
+    /// Jack scores ≥ 0.70 and wins, so Phase 1's fallThrough assertion fails →
+    /// the test goes red. Restoring those lines returns it to green.
+    ///
+    /// Note on empty searchProjection (the actual schema DEFAULT): for facts
+    /// where searchProjection = "", line 79's explicit isEmpty check and the
+    /// downstream !tokens.isEmpty guard both exclude the fact. Removing
+    /// lines 79-80 alone does not expose an empty-string fact because
+    /// defaultKeywordTokens("") always returns []. This test exercises line 80
+    /// (the version check) — the specific condition the backfill satisfies.
+    @Test("Gate B: stale-versioned fact is invisible to recall; versioned fact wins")
+    func gateBSearchProjectionRecallConsequence() {
+        let sourceID = "source-b"
+        let source = drawer(id: sourceID, content: "Jack's birthday is in June.", settled: true)
+        let sources = [sourceID: source]
+
+        // Fact 1 (the winning candidate): Jack, with the correct projection
+        // content but searchProjectionVersion = "" (wrong — the backfill has
+        // not yet stamped the version). The version guard (line 80) excludes it.
+        let jackProjection = FactSearchProjection.build(
+            subject: "Jack", predicate: "birthday", object: "June", aliases: [])
+        let unProjected = KGFact(
+            id: "f-unprojected", subject: "Jack", predicate: "birthday", object: "June",
+            sourceDrawerID: sourceID, searchProjection: jackProjection,
+            searchProjectionVersion: "",   // wrong — excluded by the version guard
+            filedAt: now)
+
+        // Fact 2 (the decoy): Jill, correctly versioned, but low-scoring.
+        // "jack birthday" ∩ {"jill", "birthday", "june"} = {"birthday"} → 0.5,
+        // below the 0.70 floor; entity containment = 0 (Jill ≠ Jack).
+        let jillProjection = FactSearchProjection.build(
+            subject: "Jill", predicate: "birthday", object: "June", aliases: [])
+        let projected = KGFact(
+            id: "f-projected", subject: "Jill", predicate: "birthday", object: "June",
+            sourceDrawerID: sourceID, searchProjection: jillProjection,
+            searchProjectionVersion: FactSearchProjection.version, filedAt: now)
+
+        // Phase 1 — guard active: f-unprojected (Jack) excluded by the version
+        // guard. Jill is the only eligible candidate but scores 0.5 and has
+        // entity containment 0 → fallThrough.
+        let decision = FactFirstRecallStage.decide(
+            query: "jack birthday", queryEntities: ["Jack"],
+            facts: [unProjected, projected], sourceDrawers: sources)
+        #expect(decision == .fallThrough,
+                "Phase 1: stale-versioned Jack fact must not be returned; Jill alone fails the 0.70 score floor and entity containment gate")
+
+        // Phase 2 — after backfill: Jack receives FactSearchProjection.version —
+        // the exact bytes the gateway writes. Coverage 2/2 = 1.0, margin ≥ 0.20,
+        // containment = 1 → .solid(f-unprojected).
+        let nowProjected = KGFact(
+            id: "f-unprojected", subject: "Jack", predicate: "birthday", object: "June",
+            sourceDrawerID: sourceID, searchProjection: jackProjection,
+            searchProjectionVersion: FactSearchProjection.version,   // backfill's stamp
+            filedAt: now)
+
+        let afterDecision = FactFirstRecallStage.decide(
+            query: "jack birthday", queryEntities: ["Jack"],
+            facts: [nowProjected, projected], sourceDrawers: sources)
+
+        guard case let .solid(family) = afterDecision else {
+            Issue.record("Phase 2: expected .solid after version stamp; got \(afterDecision)")
+            return
+        }
+        #expect(family.fact.id == "f-unprojected",
+                "Phase 2: the formerly-stale Jack fact must win once the version is stamped")
+    }
+
     private func fact(
         id: String, subject: String, object: String, source: String, projection: String
     ) -> KGFact {
