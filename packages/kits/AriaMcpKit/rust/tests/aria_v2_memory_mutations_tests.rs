@@ -64,8 +64,11 @@ impl V2MemoryMutationLower for Lower {
             V2TunnelDecision::Endorse => V2TunnelReviewReceipt::Endorsed {
                 new_endorser: true, distinct_endorsers: 1, contested: false,
             },
+            // Mock uses is_objection=false; the lower-level discriminant is
+            // irrelevant for the service-unit tests (they verify routing, not text).
             V2TunnelDecision::Accept | V2TunnelDecision::Reject => V2TunnelReviewReceipt::Settled {
                 withdrawn: matches!(decision, V2TunnelDecision::Reject), contested: false,
+                is_objection: false,
             },
         })
     }
