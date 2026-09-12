@@ -45,7 +45,7 @@ struct SprintDXAssertionTests {
     /// + FactExtractionSignal (signal 13, distilled-fact drain).
     /// The set is the list in DefaultStandingSignals.swift `defaultStandingSignalNames`
     /// (thirteen names). The GENIUSLOCUSKIT_SPEC.md inventory table is one row
-    /// short of it (no fact-extraction row); see docs_internal/status/OPEN_ITEMS.md.
+    /// short of it (no fact-extraction row).
     @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 13 (includes FactExtractionSignal)")
     func defaultStandingSignalNamesCountIsThirteen() {
         #expect(GeniusLocusKit.defaultStandingSignalNames.count == 13,
