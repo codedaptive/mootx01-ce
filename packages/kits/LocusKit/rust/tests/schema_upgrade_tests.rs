@@ -330,6 +330,8 @@ fn schema_19_populated_estate_lands_at_20_preserving_data() {
     // c. All twelve new kg_facts extraction columns carry their declared defaults
     //    on the pre-existing row.
     let row = &all_facts[0];
+    // F3: primary key survives the hop unchanged.
+    assert_eq!(row.get("id"), Some(&TypedValue::Text(fact_id.into())), "id preserved after hop");
     // Text columns: declared DEFAULT ''.
     assert_eq!(row.get("evidenceQuote"),           Some(&TypedValue::Text(String::new())), "evidenceQuote default");
     assert_eq!(row.get("sourceDigest"),            Some(&TypedValue::Text(String::new())), "sourceDigest default");
@@ -346,6 +348,9 @@ fn schema_19_populated_estate_lands_at_20_preserving_data() {
     assert_eq!(row.get("evidenceEndUTF8Byte"), Some(&TypedValue::Int(-1)), "evidenceEndUTF8Byte default");
 
     // d. fact_extractor_models was created by the hop and holds zero rows.
+    //    This table is in the DECLARED table list (LocusKitSchema.swift line ~179,
+    //    schema.rs line ~163), so the runner creates it on any open — this assertion
+    //    documents the table rather than discriminating the hop.
     assert!(
         columns_exist(&storage, "fact_extractor_models", &["recipe_id", "is_active"]),
         "fact_extractor_models must exist after hop"
@@ -358,6 +363,132 @@ fn schema_19_populated_estate_lands_at_20_preserving_data() {
 
     // e. A value written at v19 into an existing column reads back unchanged.
     assert_eq!(row.get("predicate"), Some(&TypedValue::Text("is".into())), "predicate preserved after hop");
+
+    storage.close().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Gate A: search-projection backfill writes the injected build result to
+// every row that lacks a projection, leaves s/p/o unchanged, and is
+// idempotent (second run reports scanned: 0). Twin of Swift Gate A test.
+// ---------------------------------------------------------------------------
+#[test]
+fn gate_a_search_projection_backfill() {
+    let db = TempDb::new();
+    let drawer_id = "d-gate-a";
+    let test_version = "test-sp-v1";
+    // Deterministic test build function — not FactSearchProjection::build; locus-kit
+    // tests cannot depend on fact-extraction-kit. Joins s/p/o with " | ".
+    let test_build = |s: &str, p: &str, o: &str| -> String {
+        format!("{} | {} | {}", s, p, o)
+    };
+
+    // Three facts: distinct s/p/o, one with leading whitespace, one where subject
+    // repeats object.
+    let facts: Vec<(&str, &str, &str, &str)> = vec![
+        ("f-ga-1", "sky",     "is",      "blue"),
+        ("f-ga-2", "  sun  ", "shines",  "bright"),  // leading/trailing whitespace
+        ("f-ga-3", "rain",    "equals",  "rain"),    // subject repeats object
+    ];
+
+    // 1. Stamp at schema 19 and insert three facts.
+    {
+        let storage = open(&db.path);
+        storage.open(&schema_19()).expect("stamp schema 19");
+        let mut drawer: BTreeMap<String, TypedValue> = BTreeMap::new();
+        drawer.insert("id".into(), TypedValue::Text(drawer_id.into()));
+        drawer.insert("content".into(), TypedValue::Text("gate-a drawer".into()));
+        drawer.insert("parent_node_id".into(), TypedValue::Text("n1".into()));
+        drawer.insert("addedBy".into(), TypedValue::Text("test".into()));
+        drawer.insert("filedAt".into(), TypedValue::Text("2024-01-01T00:00:00Z".into()));
+        drawer.insert("embeddingModelID".into(), TypedValue::Text("t1".into()));
+        drawer.insert("provenance".into(), TypedValue::Int(0));
+        drawer.insert("adjectiveBitmap".into(), TypedValue::Int(0));
+        drawer.insert("operationalBitmap".into(), TypedValue::Int(0));
+        drawer.insert("lineageID".into(), TypedValue::Text(String::new()));
+        drawer.insert("udcCode".into(), TypedValue::Text(String::new()));
+        storage.row_store().insert("drawers", drawer).expect("insert drawer");
+        for (id, subject, predicate, object) in &facts {
+            let mut fact: BTreeMap<String, TypedValue> = BTreeMap::new();
+            fact.insert("id".into(), TypedValue::Text((*id).into()));
+            fact.insert("subject".into(), TypedValue::Text((*subject).into()));
+            fact.insert("predicate".into(), TypedValue::Text((*predicate).into()));
+            fact.insert("object".into(), TypedValue::Text((*object).into()));
+            fact.insert("sourceDrawerID".into(), TypedValue::Text(drawer_id.into()));
+            fact.insert("adjectiveBitmap".into(), TypedValue::Int(0));
+            fact.insert("operationalBitmap".into(), TypedValue::Int(0));
+            fact.insert("provenanceBitmap".into(), TypedValue::Int(0));
+            fact.insert("filedAt".into(), TypedValue::Text("2024-01-01T00:00:00Z".into()));
+            fact.insert("addedBy".into(), TypedValue::Text(String::new()));
+            fact.insert("foreignSourceKey".into(), TypedValue::Text(String::new()));
+            fact.insert("foreignRecordID".into(), TypedValue::Text(String::new()));
+            storage.row_store().insert("kg_facts", fact).expect("insert fact");
+        }
+        storage.close().unwrap();
+    }
+
+    // 2. Open through the full v20 schema (applies the v19 → v20 hop).
+    let storage = open(&db.path);
+    storage.open(&schema::schema()).expect("open at 20");
+
+    // 3. Pre-state: every fact has an empty searchProjection after the schema hop.
+    let rows_before = storage.row_store().query("kg_facts", None, &[], None, None).unwrap();
+    assert_eq!(rows_before.len(), facts.len(), "fact count before backfill");
+    for row in &rows_before {
+        assert_eq!(
+            row.get("searchProjection"), Some(&TypedValue::Text(String::new())),
+            "projection empty before backfill"
+        );
+        assert_eq!(
+            row.get("searchProjectionVersion"), Some(&TypedValue::Text(String::new())),
+            "version empty before backfill"
+        );
+    }
+
+    // 4. Run the backfill.
+    // storage is Arc<dyn Storage>; deref to &dyn Storage with &* before passing.
+    let report = locus_kit::kg_fact_search_projection_backfill::run(
+        &*storage,
+        &|s, p, o| test_build(s, p, o),
+        test_version,
+    ).unwrap();
+    assert_eq!(report.scanned, facts.len(), "scanned count");
+    assert_eq!(report.updated, facts.len(), "updated count");
+
+    // 5. Post-state: every fact has the expected projection; s/p/o unchanged.
+    let mut rows_after = storage.row_store().query("kg_facts", None, &[], None, None).unwrap();
+    rows_after.sort_by_key(|r| match r.get("id") {
+        Some(TypedValue::Text(s)) => s.clone(),
+        _ => String::new(),
+    });
+    assert_eq!(rows_after.len(), facts.len(), "fact count after backfill");
+    let mut expected_sorted = facts.clone();
+    expected_sorted.sort_by_key(|(id, _, _, _)| id.to_string());
+    for ((id, subject, predicate, object), row) in expected_sorted.iter().zip(rows_after.iter()) {
+        let expected_projection = test_build(subject, predicate, object);
+        assert_eq!(
+            row.get("searchProjection"),
+            Some(&TypedValue::Text(expected_projection.clone())),
+            "projection for {id}"
+        );
+        assert_eq!(
+            row.get("searchProjectionVersion"),
+            Some(&TypedValue::Text(test_version.into())),
+            "version for {id}"
+        );
+        assert_eq!(row.get("subject"), Some(&TypedValue::Text((*subject).into())), "subject unchanged {id}");
+        assert_eq!(row.get("predicate"), Some(&TypedValue::Text((*predicate).into())), "predicate unchanged {id}");
+        assert_eq!(row.get("object"), Some(&TypedValue::Text((*object).into())), "object unchanged {id}");
+    }
+
+    // 6. Second run: all rows already carry the target version — scanned: 0.
+    let second = locus_kit::kg_fact_search_projection_backfill::run(
+        &*storage,
+        &|s, p, o| test_build(s, p, o),
+        test_version,
+    ).unwrap();
+    assert_eq!(second.scanned, 0, "second run must scan nothing");
+    assert_eq!(second.updated, 0, "second run must update nothing");
 
     storage.close().unwrap();
 }
