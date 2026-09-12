@@ -1067,7 +1067,7 @@ public enum LocusKitSchema {
             "maximum_input_characters"  INTEGER NOT NULL,
             "maximum_facts_per_source"  INTEGER NOT NULL,
             "is_active"                 INTEGER NOT NULL DEFAULT 0,
-            "ext"                       TEXT NULL,
+            "ext"                       BLOB,
             PRIMARY KEY ("recipe_id")
         )
         """
