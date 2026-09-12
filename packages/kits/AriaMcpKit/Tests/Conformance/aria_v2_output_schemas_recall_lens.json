@@ -451,6 +451,16 @@
                 },
                 "centrality": {
                   "type": "number"
+                },
+                "subject": {
+                  "type": "string"
+                },
+                "bestSpan": {
+                  "type": "string"
+                },
+                "eventTime": {
+                  "type": "string",
+                  "format": "date-time"
                 }
               },
               "required": [
@@ -992,7 +1002,26 @@
           "rankedIDs": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                },
+                "bestSpan": {
+                  "type": "string"
+                },
+                "eventTime": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false
             }
           },
           "highTrustCount": {
