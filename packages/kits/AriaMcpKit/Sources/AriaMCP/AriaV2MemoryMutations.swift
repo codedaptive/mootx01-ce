@@ -429,12 +429,15 @@ public struct AriaV2MemoryMutations: Sendable {
     public func link(_ request: AriaV2LinkMemoriesRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
         do {
+            // Gate both endpoints through the sensitivity ceiling before writing any edge.
+            // An absent or above-ceiling endpoint refuses with notFoundRefusal so the
+            // caller cannot distinguish the two cases (oracle-closure). The proposed
+            // path is gated identically — a proposed edge to a restricted row is refused
+            // exactly like an active one. gatedDrawer returns a fully-hydrated Drawer so
+            // parentNodeId is available for placement without a second estate call.
+            let source = try await gatedDrawer(request.fromID)
+            let target = try await gatedDrawer(request.toID)
             let estate = try await kit.estate(for: handle)
-            let drawers = try await estate.allDrawers()
-            guard let source = drawers.first(where: { UUID(uuidString: $0.id) == request.fromID }),
-                  let target = drawers.first(where: { UUID(uuidString: $0.id) == request.toID }) else {
-                return unavailable("moot_link_memories")
-            }
             let names = try await estate.resolveNodeNames(parentNodeIds: [source.parentNodeId, target.parentNodeId])
             guard let sourcePlacement = names[source.parentNodeId], let targetPlacement = names[target.parentNodeId] else {
                 return unavailable("moot_link_memories")
@@ -458,6 +461,10 @@ public struct AriaV2MemoryMutations: Sendable {
             ]), text: request.proposed
                 ? "Proposed a link between memories \(id(request.fromID)) and \(id(request.toID)); review it with moot_review_tunnel."
                 : "Linked memories \(id(request.fromID)) and \(id(request.toID)).")
+        } catch is MemoryNotFoundError {
+            // An absent or above-ceiling endpoint (oracle-closure: both produce the
+            // same refusal so neither can be distinguished from the other).
+            return notFoundRefusal("moot_link_memories")
         } catch { return unavailable("moot_link_memories") }
     }
 
@@ -469,6 +476,25 @@ public struct AriaV2MemoryMutations: Sendable {
             var storedTunnel: Tunnel?
             for candidate in AriaV2ArgumentDecoder.storageIdentitySpellings(request.tunnelID) where storedTunnel == nil {
                 storedTunnel = try await estate.getTunnel(id: candidate)
+            }
+            // Two-part tunnel sensitivity gate (mirrors loadTunnels / visibleTunnels):
+            // refuse when the tunnel's own sensitivity exceeds the ceiling, and refuse
+            // when a known far-endpoint drawer exceeds the ceiling. A nil far endpoint
+            // passes through (room-level connection, no drawer to check). A nonexistent
+            // tunnel (storedTunnel == nil) is not gated here — the lower call throws
+            // and the outer catch returns unavailable, which is byte-identical to the
+            // above-ceiling refusal: both are mutation_unavailable.
+            if let tunnel = storedTunnel {
+                guard tunnel.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue else {
+                    return unavailable("moot_review_tunnel")
+                }
+                let endpointIDs = [tunnel.sourceDrawerId, tunnel.targetDrawerId].compactMap { $0 }
+                if !endpointIDs.isEmpty {
+                    let endpoints = (try? await estate.getDrawers(ids: endpointIDs, hydrationLevel: .bitmapOnly)) ?? []
+                    if endpoints.contains(where: { $0.adjectiveSensitivity.rawValue > context.maximumSensitivity.rawValue }) {
+                        return unavailable("moot_review_tunnel")
+                    }
+                }
             }
             let storedTunnelID = storedTunnel?.id ?? request.tunnelID.uuidString
             let label = storedTunnel?.label ?? ""
@@ -516,22 +542,31 @@ public struct AriaV2MemoryMutations: Sendable {
     /// cases so neither can oracle the other.
     private struct MemoryNotFoundError: Error {}
 
-    /// Resolve the physical storage spelling through a sensitivity ceiling check.
-    /// Returns the stored ID spelling when the memory exists AND its sensitivity
-    /// is within the caller's ceiling. Throws `MemoryNotFoundError` when the ID
-    /// is absent OR when the row sits above `context.maximumSensitivity`. Both
-    /// outcomes produce the same `memory_not_found` refusal so neither case can
-    /// be distinguished by the caller (oracle-closure).
+    /// Resolve the physical storage ID through a sensitivity ceiling check.
+    /// Delegates to `gatedDrawer` and returns the stored ID spelling.
+    private func gatedStoredMemoryID(_ memoryID: UUID) async throws -> String {
+        try await gatedDrawer(memoryID).id
+    }
+
+    /// Returns the `Drawer` whose stored identity matches `memoryID` and whose
+    /// sensitivity adjective is at or below the caller's ceiling.
+    /// Throws `MemoryNotFoundError` for absent IDs and for above-ceiling IDs alike
+    /// (oracle-closure: the two cases are indistinguishable to the caller).
     ///
     /// Uses the lifecycle-agnostic `getDrawers(ids:hydrationLevel:)` — not
     /// `getDrawers(ids:matchingFrame:)` — so that write operations on
     /// non-active rows (e.g. reject on contested, confirm on active, withdraw
     /// on any state) are not excluded by lifecycle filters. Only the sensitivity
     /// adjective is gated here; lifecycle validity is enforced by the lower kit.
-    private func gatedStoredMemoryID(_ memoryID: UUID) async throws -> String {
+    ///
+    /// `.structured` hydration is used (not `.bitmapOnly`) so that `parentNodeId`
+    /// is available when the caller needs it for placement (e.g. `link`). The
+    /// sensitivity comparison is the ONLY ceiling check in this file — both
+    /// `gatedStoredMemoryID` and `link` route through here.
+    private func gatedDrawer(_ memoryID: UUID) async throws -> Drawer {
         let candidates = AriaV2ArgumentDecoder.storageIdentitySpellings(memoryID)
         let estate = try await kit.estate(for: handle)
-        let rows = try await estate.getDrawers(ids: candidates, hydrationLevel: .bitmapOnly)
+        let rows = try await estate.getDrawers(ids: candidates, hydrationLevel: .structured)
         guard let match = rows.first(where: {
             AriaV2ArgumentDecoder.matchingStorageIdentity(memoryID, among: [$0.id]) != nil
         }) else {
@@ -542,7 +577,7 @@ public struct AriaV2MemoryMutations: Sendable {
         guard match.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue else {
             throw MemoryNotFoundError()
         }
-        return match.id
+        return match
     }
 
     private func success(tool: String, data: JSONValue, text: String) -> JSONValue {
