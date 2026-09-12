@@ -480,7 +480,7 @@ pub(crate) fn execute(
         SurfaceRequest::ContradictionProposal(request) =>
             execute_contradiction_proposal(request, registry, &selected_surface.contradiction_analyses, &meta, now_millis),
         SurfaceRequest::MemoryMutation(request) =>
-            execute_memory_mutation(request, registry, &meta, now_millis, posture, surfaced_recall_ledger),
+            execute_memory_mutation(request, registry, &meta, now_millis, posture, surfaced_recall_ledger, sensitivity_ledger),
         SurfaceRequest::KnowledgeJournal(request) =>
             execute_knowledge_journal(request, registry, sensitivity_ledger, &meta, now_millis),
         SurfaceRequest::CognitionCatalog { operation, request } =>
@@ -540,12 +540,19 @@ fn execute_memory_mutation(
     now_millis: i64,
     posture: crate::estate_posture::EstatePosture,
     surfaced_recall_ledger: &crate::surfaced_recall_ledger::SurfacedRecallLedger,
+    sensitivity_ledger: &crate::sensitivity_grant_ledger::SensitivityGrantLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use crate::v2::memory_mutations::{
         CoordinatorMemoryMutationLower, V2MemoryMutationError, V2MemoryMutationService,
     };
     let service = V2MemoryMutationService::new(
-        SelectedMemoryMutationAuthority { registry, now_millis },
+        SelectedMemoryMutationAuthority {
+            registry,
+            now_millis,
+            maximum_sensitivity: sensitivity_ledger
+                .ceiling_sensitivity(now_millis)
+                .unwrap_or(locus_kit::adjectives::AdjectiveSensitivity::Elevated),
+        },
         CoordinatorMemoryMutationLower::new(Arc::clone(&registry.default.coord)),
     );
     // Acting on a surfaced row is a dereference, so the reward sweep hears
@@ -667,6 +674,10 @@ fn execute_memory_mutation(
                     "estate_unavailable", "The requested memory mutation is unavailable.", true),
                 V2MemoryMutationError::OutcomeUnverified(_) => (
                     "outcome_unverified", "The mutation may have landed but its outcome could not be revalidated.", false),
+                // Absent and above-ceiling rows produce the same refusal so
+                // neither can be distinguished by the caller (oracle-closure).
+                V2MemoryMutationError::NotFound => (
+                    "memory_not_found", "memory not found", false),
             };
             Ok(crate::v2::render::refusal(
                 tool,
@@ -2199,10 +2210,13 @@ fn selected_memory_list_estate_id(registry: &crate::estate_registry::EstateRegis
 
 /// Selected-v2 mutation admission stays bound to the single public estate.
 /// The lower service revalidates this binding after every write before the
-/// surface can claim a completed result.
+/// surface can claim a completed result.  The sensitivity ceiling is carried
+/// so that write paths gate identically to the read path — a caller holding
+/// only a UUID cannot mutate a row it cannot read.
 struct SelectedMemoryMutationAuthority<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     now_millis: i64,
+    maximum_sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
 }
 
 impl crate::v2::memory_mutations::V2MemoryMutationAuthority
@@ -2226,6 +2240,7 @@ impl crate::v2::memory_mutations::V2MemoryMutationAuthority
                 "selected-v2-public:{}:{}",
                 estate.estate_id.hyphenated(), self.registry.server_identity,
             ),
+            maximum_sensitivity: self.maximum_sensitivity,
         })
     }
 
@@ -2238,6 +2253,32 @@ impl crate::v2::memory_mutations::V2MemoryMutationAuthority
             && admission.caller_binding == self.registry.server_identity)
             .then_some(())
             .ok_or(())
+    }
+
+    fn resolve_memory(
+        &self,
+        admission: &crate::v2::memory_mutations::V2MemoryMutationAdmission,
+        memory_id: Uuid,
+    ) -> Result<Uuid, crate::v2::memory_mutations::V2MemoryMutationError> {
+        use crate::v2::memory_mutations::V2MemoryMutationError;
+        let coord = self.registry.default.coord.lock()
+            .map_err(|_| V2MemoryMutationError::Unavailable)?;
+        let estate = coord.estate_for(&admission.estate_handle)
+            .map_err(|_| V2MemoryMutationError::Unavailable)?;
+        let canonical = memory_id.hyphenated().to_string();
+        // Both portable-lowercase and Swift-uppercase spellings are tried because
+        // Swift-authored estates store the uppercase form of the UUID while Rust
+        // estates store canonical lowercase.
+        let drawer = [canonical.clone(), canonical.to_uppercase()]
+            .into_iter()
+            .find_map(|id| estate.drawer_by_id(&id).ok().flatten())
+            .ok_or(V2MemoryMutationError::NotFound)?;
+        // Treat above-ceiling rows as absent (oracle-closure: the caller cannot
+        // distinguish an absent ID from a restricted one).
+        if drawer.adjective_sensitivity().raw_value() > admission.maximum_sensitivity.raw_value() {
+            return Err(V2MemoryMutationError::NotFound);
+        }
+        Uuid::parse_str(&drawer.id).map_err(|_| V2MemoryMutationError::Unavailable)
     }
 }
 
@@ -2531,6 +2572,7 @@ mod tests {
             NOW + 200,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("erase must succeed");
 
         // The "outcome" field is at structuredContent.data.outcome in the
@@ -2599,6 +2641,7 @@ mod tests {
             NOW + 200,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("full erase must succeed");
 
         assert_eq!(
@@ -2674,6 +2717,7 @@ mod tests {
             NOW + 100,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("withdraw must succeed");
 
         // Expected key set from the declared schema (catalog.rs remaining_data_schema).
@@ -2760,6 +2804,7 @@ mod tests {
             NOW + 100,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("erase must succeed");
 
         let surface = SelectedSurface::selected(false, true);
@@ -2842,6 +2887,7 @@ mod tests {
             NOW + 100,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("confirm must succeed");
 
         let surface = SelectedSurface::selected(false, true);
@@ -2926,6 +2972,7 @@ mod tests {
             NOW + 100,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("move must succeed");
 
         let surface = SelectedSurface::selected(false, true);
@@ -3021,6 +3068,7 @@ mod tests {
             NOW + 100,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("link must succeed");
 
         let surface = SelectedSurface::selected(false, true);
@@ -3112,6 +3160,7 @@ mod tests {
             NOW + 100,
             EstatePosture::Live,
             &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
         ).expect("update must succeed");
 
         // Expected key set from the declared schema (catalog.rs remaining_data_schema).
