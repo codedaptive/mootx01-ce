@@ -83,6 +83,10 @@ struct SensitivityWriteGateTests {
         "gate blocks write verbs on above-ceiling memories",
         arguments: [
             ("moot_update_memory",   JSONValue.object(["mutation": .string("set_subject"), "subject": .string("blocked")])),
+            // correct_sensitivity is the mutation a regression would most plausibly re-open;
+            // the gate is kind-independent (gatedStoredMemoryID runs before lowerKind()),
+            // but the suite must name it explicitly so a per-kind guard escape is caught.
+            ("moot_update_memory",   JSONValue.object(["mutation": .string("correct_sensitivity"), "sensitivity": .string("normal")])),
             ("moot_withdraw_memory", JSONValue.object([:])),
             ("moot_erase_memory",    JSONValue.object(["confirmation": .bool(true)])),
             ("moot_confirm_memory",  JSONValue.object([:])),
@@ -141,6 +145,11 @@ struct SensitivityWriteGateTests {
         "oracle closure: restricted row and nonexistent UUID produce identical refusals",
         arguments: [
             ("moot_update_memory",   JSONValue.object(["mutation": .string("set_subject"), "subject": .string("blocked")])),
+            // correct_sensitivity is named explicitly for the same reason as the
+            // gate-blocks test above: the gate is kind-independent but the suite
+            // must prove it for the mutation kind a regression would most plausibly
+            // re-open.
+            ("moot_update_memory",   JSONValue.object(["mutation": .string("correct_sensitivity"), "sensitivity": .string("normal")])),
             ("moot_withdraw_memory", JSONValue.object([:])),
             ("moot_erase_memory",    JSONValue.object(["confirmation": .bool(true)])),
             ("moot_confirm_memory",  JSONValue.object([:])),
@@ -296,5 +305,118 @@ struct SensitivityWriteGateTests {
         let callCount = await ledger.dereferencedCallCount
         #expect(callCount == 0,
             "refused write against a Restricted memory must not dereference; dereferencedCallCount: \(callCount)")
+    }
+
+    // MARK: - Finding A: non-NotFound resolution failure still dereferences
+
+    /// Resolution-failure dereference proof (Finding A).
+    ///
+    /// A non-NotFound failure inside `gatedStoredMemoryID` — for example, the
+    /// estate handle is not open in the supplied kit — must still fire the
+    /// reward-trace dereference write.  The caller demonstrated entitlement by
+    /// surfacing the row's id at recall time; a backend failure unrelated to
+    /// sensitivity does not revoke it.
+    ///
+    /// Drive: create `AriaV2MemoryMutations` with a fresh `GeniusLocusKit` that
+    /// has no estates open.  `gatedStoredMemoryID` calls `freshKit.estate(for:
+    /// handle)`, which throws `GeniusLocusKitError.estateNotOpen` — a non-
+    /// MemoryNotFoundError.
+    ///
+    /// Pre-fix failure (the bug): the non-NotFound error fell through to the
+    /// outer generic `catch`, which returned `refusal` without firing the
+    /// dereference — `dereferencedCallCount == 0`.
+    ///
+    /// Post-fix: the new inner `catch` clause fires the dereference before
+    /// returning `unavailable`, so `dereferencedCallCount == 1`.
+    @Test func admittedResolutionFailureDereferences() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-resolution-failure")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Seed a normal row to obtain a valid UUID.
+        let normal = try await seed("resolution-failure dereference probe", in: handle, kit: kit)
+
+        // A fresh kit with no estate open.  kit.estate(for: handle) throws
+        // GeniusLocusKitError.estateNotOpen — a non-NotFound resolution failure.
+        let freshKit = GeniusLocusKit()
+
+        let ledger = TrackingMemoryUsageLedger()
+        let context = AriaV2MemoryOperationContext(
+            estateID: handle.estateUUID,
+            callerID: "test-caller",
+            serverIdentity: "test-server",
+            usageLedger: ledger
+        )
+        // freshKit has no estate open for this handle.
+        let mutations = AriaV2MemoryMutations(kit: freshKit, handle: handle, context: context)
+
+        let result = try await mutations.update(arguments: JSONValue.object([
+            "memory_id": JSONValue.string(normal.id),
+            "mutation": JSONValue.string("confirm"),
+        ]))
+
+        // Non-NotFound resolution failure must return an error (unavailable).
+        #expect(isError(result),
+            "non-NotFound resolution failure must set isError=true; got: \(result)")
+
+        // Dereference must have fired despite the resolution failure.
+        let callCount = await ledger.dereferencedCallCount
+        #expect(callCount == 1,
+            "non-NotFound resolution failure must still dereference; dereferencedCallCount: \(callCount)")
+    }
+
+    // MARK: - Finding C: admitted lower-kit failure still dereferences
+
+    /// Lower-kit-failure dereference proof (Finding C).
+    ///
+    /// An admitted write (gatedStoredMemoryID succeeds) that the lower kit then
+    /// refuses for a reason unrelated to sensitivity must still fire the
+    /// reward-trace dereference write.  The caller demonstrated entitlement at
+    /// recall time; a state-transition failure at the lower layer does not
+    /// revoke it.
+    ///
+    /// Drive: `update` with mutation `"reject"` on an active row.  LocusKit's
+    /// state automaton admits only pending and contested rows for the reject
+    /// transition; calling it on an active row throws `disciplineViolation`.
+    /// `gatedStoredMemoryID` succeeds (normal row, within the default elevated
+    /// ceiling), so the dereference fires before the lower-kit call, and then
+    /// `kit.mutate` throws — the `update` function returns a refusal response.
+    ///
+    /// Pre-fix: if `recordDereferenced` were placed after `kit.mutate` (the
+    /// success-only ordering), the probe returns 0.  With the current placement
+    /// (before `kit.mutate`), `dereferencedCallCount == 1`.
+    @Test func admittedLowerFailureDereferences() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-lower-failure")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Seed a normal active row — visible to the gate, but active → rejected
+        // is not a valid state transition so kit.mutate throws disciplineViolation.
+        let normal = try await seed("lower-failure dereference probe", in: handle, kit: kit)
+
+        let ledger = TrackingMemoryUsageLedger()
+        let context = AriaV2MemoryOperationContext(
+            estateID: handle.estateUUID,
+            callerID: "test-caller",
+            serverIdentity: "test-server",
+            usageLedger: ledger
+        )
+        let mutations = AriaV2MemoryMutations(kit: kit, handle: handle, context: context)
+
+        // reject on an active row: gatedStoredMemoryID succeeds (normal, within
+        // the default elevated ceiling), then kit.mutate throws disciplineViolation.
+        let result = try await mutations.update(arguments: JSONValue.object([
+            "memory_id": JSONValue.string(normal.id),
+            "mutation": JSONValue.string("reject"),
+        ]))
+
+        // Lower-kit state-transition refusal must return an error.
+        #expect(isError(result),
+            "lower-kit disciplineViolation must set isError=true; got: \(result)")
+
+        // Dereference must have fired before the lower-kit call returned.
+        let callCount = await ledger.dereferencedCallCount
+        #expect(callCount == 1,
+            "admitted lower-kit failure must fire dereference; dereferencedCallCount: \(callCount)")
     }
 }
