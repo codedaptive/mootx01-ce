@@ -71,10 +71,11 @@ public enum AriaV2Dream {
     public enum Failure: Error, Sendable, Equatable {
         case refusal(AriaV2OperationalRefusal)
         /// Caller-supplied argument was structurally valid but semantically out
-        /// of range (e.g. `now` more than 24 hours in the future).  The service
-        /// converts this to a JSON-RPC -32602 thrown error, never a refusal
-        /// envelope, because the destructive paths must not be reached with a
-        /// far-future clock.
+        /// of range (e.g. `now` more than 24 hours in the future).  In Swift,
+        /// `executeV2Core` catches the thrown `JSONRPCError.invalidParams` and
+        /// wraps it in a refusal envelope (isError: true).  In Rust, the service
+        /// raises a transport-level -32602 error directly.  Both prevent
+        /// destructive paths from being reached with an out-of-range clock.
         case invalidArgument(String)
     }
 
@@ -131,23 +132,6 @@ public enum AriaV2Dream {
             self.associationsNonUniqueProbes = associationsNonUniqueProbes
         }
 
-        init(
-            report: DreamingCycleReport,
-            hunt: ContradictionHuntReport,
-            subjectsBackfilled: Int?,
-            association: AssociateSweepReport
-        ) {
-            self.init(
-                candidatesConsidered: report.candidatesConsidered,
-                proposalsEmitted: report.proposalsEmitted.map(\.target),
-                suppressedDuplicates: report.suppressedDuplicates,
-                belowThreshold: report.belowThreshold,
-                contradictionsProposed: hunt.proposed.count,
-                contradictionCandidatesBorderline: hunt.borderline.count,
-                subjectsBackfilled: subjectsBackfilled,
-                associationsWritten: association.written,
-                associationsNonUniqueProbes: association.nonUniqueProbes)
-        }
     }
 
     public enum SourceOutcome: Sendable, Equatable {
@@ -186,9 +170,10 @@ public enum AriaV2Dream {
 
         /// Full-estate association probe ceiling used when `associates="all"`.
         /// The named constant prevents the nil path (unbounded probing) while
-        /// keeping the limit explicit and auditable.  Parity with Rust:
-        /// `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE = 10_000` in recipe_tools.rs.
-        static let allModeMaxProbe: Int = 10_000
+        /// keeping the limit explicit and auditable.  Public so tests can pin
+        /// the value without re-stating the magic number.  Parity with Rust:
+        /// `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE_PUB = 10_000` in recipe_tools.rs.
+        public static let allModeMaxProbe: Int = 10_000
 
         public init(kit: GeniusLocusKit) {
             self.kit = kit
