@@ -240,3 +240,81 @@ fn gate_b_un_projected_fact_is_invisible_to_recall() {
         "Phase 2: the formerly-stale Jack fact must win once the version is stamped"
     );
 }
+
+// Gate B extension: the literal schema DEFAULT shape.
+//
+// Every pre-upgrade kg_facts row has search_projection = "" and
+// search_projection_version = "" (the v19→v20 migration DEFAULT). This test
+// verifies that such a fact is not returned by recall and that stamping it
+// with the real FactSearchProjection values makes it win.
+//
+// Two independent mechanisms exclude an empty-projection fact:
+//   1. fact_first_recall.rs lines 92-93: `fact.search_projection.is_empty()` check.
+//   2. `tokens.is_empty()` guard (default_keyword_tokens("") returns []).
+//
+// This test CANNOT discriminate between the two mechanisms: removing
+// lines 92-93 alone does not make Phase 1 go red, because an empty
+// search_projection produces no tokens and the fact is excluded by the second
+// guard anyway. No single condition can be toggled to isolate the is_empty path
+// from the tokens path. The test documents a defended invariant — both guards
+// cover the schema-DEFAULT shape — without claiming a discrimination it does
+// not have.
+#[test]
+fn gate_b_empty_projection_fact_excluded() {
+    let source_id = "source-empty";
+    let source = drawer(source_id, "Jack's birthday is in June.");
+    let sources = HashMap::from([(source_id.into(), source)]);
+
+    // Fact with the schema-DEFAULT shape: search_projection = "" and
+    // search_projection_version = "", exactly as the v19→v20 migration
+    // leaves every pre-upgrade row. Subject/object match the query so
+    // only the exclusion guards prevent a hit.
+    let empty_fact = KGFact {
+        search_projection: String::new(),
+        search_projection_version: String::new(),
+        ..KGFact::new(
+            "f-empty".into(), "Jack".into(), "birthday".into(), "June".into(),
+            source_id.into(), 1_800_000_000,
+        )
+    };
+
+    // Phase 1: the empty-projection fact is excluded. No eligible fact
+    // remains → FallThrough.
+    let decision = FactFirstRecallStage::decide(
+        "jack birthday",
+        &["Jack".into()],
+        &[empty_fact.clone()],
+        &sources,
+        None,
+        FactFirstRecallThresholds::default(),
+    );
+    assert_eq!(
+        decision,
+        FactFirstRecallDecision::FallThrough,
+        "empty-projection fact must not be returned; excluded by is_empty guard and downstream tokens.is_empty() guard"
+    );
+
+    // Phase 2: stamp the fact with the real FactSearchProjection values —
+    // the exact bytes the backfill writes. Now it must win.
+    let stamped = KGFact {
+        search_projection: FactSearchProjection::build("Jack", "birthday", "June", &[]),
+        search_projection_version: FactSearchProjection::VERSION.into(),
+        ..empty_fact
+    };
+
+    let after_decision = FactFirstRecallStage::decide(
+        "jack birthday",
+        &["Jack".into()],
+        &[stamped],
+        &sources,
+        None,
+        FactFirstRecallThresholds::default(),
+    );
+    let FactFirstRecallDecision::Solid(family) = after_decision else {
+        panic!("Phase 2: expected Solid after stamp; got {:?}", after_decision)
+    };
+    assert_eq!(
+        family.fact.id, "f-empty",
+        "Phase 2: the stamped fact must win recall"
+    );
+}
