@@ -241,37 +241,34 @@ fn gate_b_un_projected_fact_is_invisible_to_recall() {
     );
 }
 
-// Gate B extension: the literal schema DEFAULT shape.
+// Gate B extension: the empty-projection shape after a correct-version backfill.
 //
-// Every pre-upgrade kg_facts row has search_projection = "" and
-// search_projection_version = "" (the v19→v20 migration DEFAULT). This test
-// verifies that such a fact is not returned by recall and that stamping it
-// with the real FactSearchProjection values makes it win.
+// A post-migration-plus-wrong-order scenario: the fact's search_projection_version
+// is correct (the backfill stamped the version) but search_projection is "" (the
+// backfill wrote an empty string, which is the actual schema DEFAULT for unextracted
+// rows). The version guard passes; only the empty-projection guards remain.
 //
-// Two independent mechanisms exclude an empty-projection fact:
+// Two mechanisms exclude the empty-projection fact:
 //   1. fact_first_recall.rs lines 92-93: `fact.search_projection.is_empty()` check.
 //   2. `tokens.is_empty()` guard (default_keyword_tokens("") returns []).
 //
-// This test CANNOT discriminate between the two mechanisms: removing
-// lines 92-93 alone does not make Phase 1 go red, because an empty
-// search_projection produces no tokens and the fact is excluded by the second
-// guard anyway. No single condition can be toggled to isolate the is_empty path
-// from the tokens path. The test documents a defended invariant — both guards
-// cover the schema-DEFAULT shape — without claiming a discrimination it does
-// not have.
+// This test CANNOT discriminate between the two mechanisms: an empty
+// search_projection triggers both at once — the is_empty check fires first, and
+// even if it were removed, the downstream tokens guard would exclude the fact.
+// The test documents a defended invariant — both guards cover the empty-projection
+// shape — without claiming a discrimination it does not have.
 #[test]
 fn gate_b_empty_projection_fact_excluded() {
     let source_id = "source-empty";
     let source = drawer(source_id, "Jack's birthday is in June.");
     let sources = HashMap::from([(source_id.into(), source)]);
 
-    // Fact with the schema-DEFAULT shape: search_projection = "" and
-    // search_projection_version = "", exactly as the v19→v20 migration
-    // leaves every pre-upgrade row. Subject/object match the query so
-    // only the exclusion guards prevent a hit.
+    // Fact with a correct search_projection_version but an empty search_projection —
+    // the honest shape for isolating the empty-projection guards. Subject/object
+    // match the query so only the empty-projection guards prevent a hit.
     let empty_fact = KGFact {
         search_projection: String::new(),
-        search_projection_version: String::new(),
+        search_projection_version: FactSearchProjection::VERSION.into(),
         ..KGFact::new(
             "f-empty".into(), "Jack".into(), "birthday".into(), "June".into(),
             source_id.into(), 1_800_000_000,
