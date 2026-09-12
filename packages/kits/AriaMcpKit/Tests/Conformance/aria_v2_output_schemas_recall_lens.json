@@ -1,7 +1,7 @@
 {
   "purpose": "Operation-specific ARIA v2 envelope data schemas for the frozen Mission02 recall and lens slice. Source anchors are metadata only and are not JSON Schema keywords.",
   "schema_version": "1.0",
-  "contract": "docs_internal/specs/ARIA_V2_CONTRACT.md#Search-and-projection",
+  "contract": "ARIA_V2_CONTRACT.md#Search-and-projection",
   "catalog_indices": {
     "first": 36,
     "last": 67,
