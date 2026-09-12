@@ -499,11 +499,23 @@ fn lens_trust_synthesis_dense_fields_present_for_admissible_row() {
 // B3 — moot_lens_keystones restricted row carries only id + centrality.
 #[test]
 fn lens_keystones_restricted_row_has_no_dense_fields() {
-    let registry = EstateRegistry::new_inmemory();
-    let restricted_id = seed_restricted(&registry, "restricted-hub-b3", "b3-wing");
+    // TRANSIENT: no charter drawers, so the node-topology provider has no
+    // tree edges. recall_tunnels returns only stored tunnels, keeping the
+    // keystones graph deterministic and containing only the drawers we seed.
+    use aria_mcp::estate_registry::EstateOpening;
+    let registry = EstateRegistry::new_inmemory_with(EstateOpening::TRANSIENT);
+
+    // Capture the hub with Normal sensitivity and create both outgoing tunnels
+    // BEFORE restricting the hub. Tunnels inherit the max endpoint sensitivity
+    // at capture time (LocusKit § 5.6): capturing first keeps the tunnels at
+    // Normal so recall_tunnels (includingRestricted: false) includes them.
+    // If the hub were restricted before tunnel capture, the tunnels would
+    // inherit Restricted sensitivity, be excluded from the keystones graph,
+    // and the hub would never rank — making the gate vacuous.
+    let hub_id = seed_no_subject(&registry, "restricted-hub-b3", "b3-wing");
     let s1 = seed_no_subject(&registry, "spoke-b3-a", "b3-wing");
     let s2 = seed_no_subject(&registry, "spoke-b3-b", "b3-wing");
-    // Link restricted hub → spokes so it becomes a keystone.
+    // Link hub → spokes while hub is still Normal.
     {
         use locus_kit::frames::TunnelCaptureFrame;
         let coord = registry.coord.lock().unwrap();
@@ -512,11 +524,21 @@ fn lens_keystones_restricted_row_has_no_dense_fields() {
         for spoke_id in &[&s1, &s2] {
             let mut frame = TunnelCaptureFrame::new(
                 "b3-wing", "r", "b3-wing", "r", "relates", "test");
-            frame.source_drawer_id = Some(restricted_id.clone());
+            frame.source_drawer_id = Some(hub_id.clone());
             frame.target_drawer_id = Some(spoke_id.to_string());
             estate.capture_tunnel(frame, 1_700_000_000_000)
                 .expect("tunnel capture");
         }
+    }
+    // Now restrict the hub. Tunnels retain Normal sensitivity (set at capture time).
+    {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::frames::MutationKind;
+        let coord = registry.coord.lock().unwrap();
+        coord.mutate(
+            &registry.default.handle, &hub_id,
+            MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted), None,
+        ).expect("correct sensitivity to Restricted");
     }
 
     let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
@@ -527,32 +549,35 @@ fn lens_keystones_restricted_row_has_no_dense_fields() {
         .as_array()
         .expect("keystones array must be present");
 
-    // The restricted hub may or may not appear in the ranked list. When it does,
-    // it MUST carry only id and centrality — no dense fields (indistinguishability rule).
-    for k in keystones {
-        if k["id"].as_str().map_or(false, |s| s.to_lowercase() == restricted_id.to_lowercase()) {
-            assert!(
-                k.get("subject").is_none(),
-                "restricted keystone must not expose 'subject'; got: {k}"
-            );
-            assert!(
-                k.get("bestSpan").is_none(),
-                "restricted keystone must not expose 'bestSpan'; got: {k}"
-            );
-            assert!(
-                k.get("eventTime").is_none(),
-                "restricted keystone must not expose 'eventTime'; got: {k}"
-            );
-            assert!(
-                k.get("id").is_some(),
-                "restricted keystone must still carry 'id'; got: {k}"
-            );
-            assert!(
-                k.get("centrality").is_some(),
-                "restricted keystone must still carry 'centrality'; got: {k}"
-            );
-        }
-    }
+    // The restricted hub is the only connected node (two outgoing Normal tunnels);
+    // it MUST appear in keystones. It must carry id and centrality but NO dense
+    // fields (indistinguishability rule).
+    let hub_row = keystones
+        .iter()
+        .find(|k| k["id"].as_str().map_or(false, |s| s.to_lowercase() == hub_id.to_lowercase()))
+        .unwrap_or_else(|| panic!(
+            "restricted hub must appear in keystones after stale-edge fix; got: {keystones:?}"
+        ));
+    assert!(
+        hub_row.get("subject").is_none(),
+        "restricted keystone must not expose 'subject'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("bestSpan").is_none(),
+        "restricted keystone must not expose 'bestSpan'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("eventTime").is_none(),
+        "restricted keystone must not expose 'eventTime'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("id").is_some(),
+        "restricted keystone must still carry 'id'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("centrality").is_some(),
+        "restricted keystone must still carry 'centrality'; got: {hub_row}"
+    );
 }
 
 // B4 — moot_lens_trust_synthesis restricted row carries only id.
