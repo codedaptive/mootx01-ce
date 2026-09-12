@@ -12,7 +12,9 @@
 //   2. associates=off → the step is entirely skipped; `associationsWritten`
 //      is absent from structuredContent.data.
 //   3. associates=all with 2 items → `associationsNonUniqueProbes` is present
-//      (non-unique pair attempts during the kNN scan); bounded by allModeMaxProbe.
+//      (count of (probe, lane) scans whose whole ladder pool was one tie group;
+//      incremented once per lane, so it can exceed `probed` and is not bounded
+//      by allModeMaxProbe, which caps the probe set only).
 //   4. allModeMaxProbe constant is 10_000 (compile-time pin).
 //   5. associates=all probes more items than the default 50-probe cadence when
 //      the estate has older items beyond the default probe window.
