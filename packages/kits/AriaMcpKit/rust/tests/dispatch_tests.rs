@@ -23,8 +23,9 @@ use std::collections::BTreeMap;
 use aria_mcp::estate_posture::EstatePosture;
 use aria_mcp::{
     dispatch::{dispatch_tool, dispatch_tool_with_vault_flag},
-    estate_registry::EstateRegistry,
-    jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue},
+    dispatcher::Dispatcher,
+    estate_registry::{EstateOpening, EstateRegistry},
+    jsonrpc::{JSONRPCError, JSONRPCErrorCode, JSONRPCRequest, JsonValue},
     surfaced_recall_ledger::SurfacedRecallLedger,
     tool_list::{build_tool_list, vault_enabled},
     v2::catalog::{selected_tools_for_registry, selected_registry_with_vault},
@@ -5586,6 +5587,309 @@ fn lens_partial_cue_unknown_anchor_returns_tool_error() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// moot_lens_partial_cue mode argument — discrimination tests
+// AR_FCA_PARTIAL_CUE_MODE_001..004
+//
+// These tests MUST route through the production v2 surface path
+// (Dispatcher::handle) rather than dispatch_tool. dispatch_tool routes through
+// dispatch.rs → lens_tools::dispatch(), which is the v1 lens path that uses the
+// old argument key "anchorID" and does not understand the "mode" argument.
+// The v2 path (surface.rs → V2RecallLensRequest::decode → lens_lower.rs
+// CoordinatorRecallLensLower::partial_cue) uses "anchor_memory_id" and wires
+// the CueMode argument.
+// ---------------------------------------------------------------------------
+
+/// Build a transient (no charter drawers) in-memory registry for partial-cue
+/// mode tests.  Charter drawers seeded by `new_inmemory()` carry predictable
+/// IDs (`00000000-0000-0000-0000-000000000001` etc.) and normal provenance
+/// sensitivity, so they compete with the test memories and can rank first,
+/// breaking the ranking assertions.  A TRANSIENT estate starts empty and only
+/// contains what the test seeds, giving deterministic results.
+fn new_cue_registry() -> EstateRegistry {
+    EstateRegistry::new_inmemory_with(EstateOpening::TRANSIENT)
+}
+
+/// Build a single-estate v2 Dispatcher from a registry, using the same pattern
+/// as aria_v2_lens_dispatch_coverage_tests.  The registry is consumed.
+fn make_cue_dispatcher(registry: EstateRegistry) -> Dispatcher {
+    Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None)
+        .with_posture(EstatePosture::Live)
+}
+
+/// Wrap arguments into a well-formed tools/call JSON-RPC 2.0 request for the
+/// v2 surface path.
+fn cue_tools_call(name: &str, arguments: serde_json::Value) -> JSONRPCRequest {
+    JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments }
+    }))
+    .expect("tools/call request must decode")
+}
+
+/// Dispatch through Dispatcher::handle, assert no protocol-level error, and
+/// return the result value for inspection.  Protocol errors mean the tool was
+/// not found or a framing error occurred — either is a hard test failure.
+fn cue_dispatch_unwrap(dispatcher: &Dispatcher, request: JSONRPCRequest) -> serde_json::Value {
+    let response = serde_json::to_value(dispatcher.handle(&request))
+        .expect("JSONRPCResponse must serialize");
+    assert!(
+        response.get("error").is_none(),
+        "expected a result response, not a JSON-RPC protocol error; full response: {response:?}"
+    );
+    response["result"].clone()
+}
+
+/// Seed a memory with a specific UDC lattice anchor and provenance sensitivity
+/// directly into the default estate. Used by partial-cue mode tests to set up
+/// controlled FingerprintBlock content:
+/// - block0 (structure) is driven by provenance sensitivity bitmap bits
+/// - block1 (concept)   is driven by the UDC lattice anchor
+/// - block2 (temporal)  is driven by random lineageHash + captureWeekBucket
+fn seed_cue_memory(
+    registry: &EstateRegistry,
+    content: &str,
+    udc_code: &str,
+    sensitivity: locus_kit::provenance::Sensitivity,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "cue-mode-test",
+        LatticeAnchor::udc(udc_code),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.provenance_sensitivity = sensitivity;
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("seed_cue_memory capture must succeed")
+        .id
+}
+
+#[test]
+fn lens_partial_cue_mode_feels_like_ranks_struct_match_first() {
+    // AR_FCA_PARTIAL_CUE_MODE_001. feelsLike uses structure block (block0) as
+    // the match dimension and concept block (block1) as the differ dimension.
+    //
+    // anchor: Normal sensitivity, UDC "004"
+    // memA:   Normal sensitivity (same structure), UDC "530" (different concept)
+    //         → feelsLike score = match_struct(1.0) * differ_concept(>0) → positive
+    // memB:   Elevated sensitivity (different structure), UDC "004" (same concept)
+    //         → feelsLike score = match_struct(<1) * differ_concept(0) = 0
+    //
+    // Expected: memA ranked first because its score > 0 while memB's score == 0.
+    //
+    // Routes through the v2 surface (Dispatcher::handle) rather than
+    // dispatch_tool because the v1 lens_tools path uses the old argument key
+    // "anchorID" and ignores the "mode" argument entirely.
+    use locus_kit::provenance::Sensitivity;
+
+    // TRANSIENT (no charter drawers) so only the seeded memories compete.
+    let registry = new_cue_registry();
+    // Seed memories before consuming the registry in the dispatcher.
+    let anchor_id = seed_cue_memory(&registry, "cue-mode anchor memory", "004", Sensitivity::Normal);
+    let mem_a_id  = seed_cue_memory(&registry, "cue-mode feels-like target", "530", Sensitivity::Normal);
+    let _mem_b_id = seed_cue_memory(&registry, "cue-mode about-this target", "004", Sensitivity::Elevated);
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "feelsLike must succeed; got: {result:?}");
+    let top_id = result["structuredContent"]["data"]["results"][0]["id"]
+        .as_str()
+        .expect("results[0].id must be present");
+    assert_eq!(
+        top_id, mem_a_id,
+        "feelsLike must rank same-structure / different-concept memory first"
+    );
+}
+
+#[test]
+fn lens_partial_cue_mode_about_this_ranks_concept_match_first() {
+    // AR_FCA_PARTIAL_CUE_MODE_002. aboutThis uses concept block (block1) as the
+    // match dimension and structure block (block0) as the differ dimension.
+    //
+    // anchor: Normal sensitivity, UDC "004"
+    // memA:   Normal sensitivity (same structure), UDC "530" (different concept)
+    //         → aboutThis score = match_concept(<1) * differ_struct(0) = 0
+    // memB:   Elevated sensitivity (different structure), UDC "004" (same concept)
+    //         → aboutThis score = match_concept(1.0) * differ_struct(>0) → positive
+    //
+    // Expected: memB ranked first because its score > 0 while memA's score == 0.
+    //
+    // Routes through the v2 surface (Dispatcher::handle) — see
+    // lens_partial_cue_mode_feels_like_ranks_struct_match_first for rationale.
+    use locus_kit::provenance::Sensitivity;
+
+    // TRANSIENT (no charter drawers) so only the seeded memories compete.
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(&registry, "cue-mode anchor memory", "004", Sensitivity::Normal);
+    let _mem_a_id = seed_cue_memory(&registry, "cue-mode feels-like target", "530", Sensitivity::Normal);
+    let mem_b_id  = seed_cue_memory(&registry, "cue-mode about-this target", "004", Sensitivity::Elevated);
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "aboutThis",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "aboutThis must succeed; got: {result:?}");
+    let top_id = result["structuredContent"]["data"]["results"][0]["id"]
+        .as_str()
+        .expect("results[0].id must be present");
+    assert_eq!(
+        top_id, mem_b_id,
+        "aboutThis must rank same-concept / different-structure memory first"
+    );
+}
+
+#[test]
+fn lens_partial_cue_mode_from_then_score_differs_from_feels_like() {
+    // AR_FCA_PARTIAL_CUE_MODE_003. fromThen uses temporal block (block2, which
+    // includes a random lineageHash) as the match dimension. Because lineageHashes
+    // are drawn independently, match_temporal ≠ match_struct with overwhelming
+    // probability, so the top result score changes between modes.
+    //
+    // Assertion: the score returned for the same top result differs between
+    // feelsLike and fromThen runs. Probability of false failure ≈ 2^-64.
+    //
+    // Routes through the v2 surface (Dispatcher::handle) — see
+    // lens_partial_cue_mode_feels_like_ranks_struct_match_first for rationale.
+    use locus_kit::provenance::Sensitivity;
+
+    // TRANSIENT (no charter drawers) so only the seeded memories compete.
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(&registry, "cue-mode anchor fromThen", "004", Sensitivity::Normal);
+    seed_cue_memory(&registry, "cue-mode fromThen peer", "530", Sensitivity::Normal);
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let fl_result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    let ft_result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "fromThen",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&fl_result), "feelsLike must succeed; got: {fl_result:?}");
+    assert!(is_success(&ft_result), "fromThen must succeed; got: {ft_result:?}");
+
+    let fl_score = fl_result["structuredContent"]["data"]["results"][0]["score"]
+        .as_f64()
+        .expect("feelsLike results[0].score must be present");
+    let ft_score = ft_result["structuredContent"]["data"]["results"][0]["score"]
+        .as_f64()
+        .expect("fromThen results[0].score must be present");
+
+    assert_ne!(
+        fl_score, ft_score,
+        "fromThen top score ({ft_score}) must differ from feelsLike top score ({fl_score})"
+    );
+}
+
+#[test]
+fn lens_partial_cue_unknown_mode_returns_invalid_params() {
+    // AR_FCA_PARTIAL_CUE_MODE_004. An unknown mode value must be rejected at
+    // decode time as INVALID_PARAMS — not silently coerced to a default and not
+    // returned as an isError:true operational refusal.
+    //
+    // In the v2 surface path, V2RecallLensRequest::decode validates mode at
+    // schema decode time (recall_lens.rs) and propagates a V2InvalidArgument
+    // → INVALID_PARAMS. The Dispatcher::handle response therefore carries
+    // `error.code == INVALID_PARAMS` rather than a `result` with isError:true.
+    //
+    // A valid anchor is not required — the mode guard fires at decode, before
+    // the anchor is resolved.
+    //
+    // Routes through the v2 surface (Dispatcher::handle) — see
+    // lens_partial_cue_mode_feels_like_ranks_struct_match_first for rationale.
+    // TRANSIENT (no charter drawers) — the mode guard fires at decode time
+    // so the estate contents do not affect the outcome.
+    let registry = new_cue_registry();
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let response = serde_json::to_value(
+        dispatcher.handle(&cue_tools_call(
+            "moot_lens_partial_cue",
+            serde_json::json!({
+                "anchor_memory_id": "00000000-0000-0000-0000-000000000001",
+                "mode": "banana"
+            }),
+        ))
+    )
+    .expect("response must serialize");
+
+    // Protocol-level error (not isError:true) because decode fails before the
+    // tool runner is invoked.
+    assert!(
+        response.get("error").is_some(),
+        "unknown mode must produce a protocol error response; got: {response:?}"
+    );
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(JSONRPCErrorCode::INVALID_PARAMS),
+        "unknown mode must produce INVALID_PARAMS; got response: {response:?}"
+    );
+    // Parity gate: both ports must expose a machine-readable allowed list so
+    // clients can enumerate valid modes without parsing the message string.
+    // Assert on the set of values rather than order — Rust emits declaration
+    // order while Swift sorts alphabetically.
+    let allowed = &response["error"]["data"]["allowed"];
+    assert!(
+        allowed.is_array(),
+        "error data.allowed must be an array; got: {response:?}"
+    );
+    let mut allowed_values: Vec<String> = allowed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    allowed_values.sort();
+    assert_eq!(
+        allowed_values,
+        vec!["aboutThis", "feelsLike", "fromThen"],
+        "error data.allowed must contain exactly the three valid mode values; got: {allowed:?}"
+    );
+    // Parity gate: both ports must expose a machine-readable correction hint.
+    // The hint tells clients which values are valid without parsing the message.
+    let correction = &response["error"]["data"]["correction"];
+    assert!(
+        correction.is_string() && !correction.as_str().unwrap_or("").is_empty(),
+        "error data.correction must be a non-empty string; got: {response:?}"
+    );
+}
+
 #[test]
 fn lens_with_unknown_estate_returns_invalid_params() {
     let registry = EstateRegistry::new_inmemory();
@@ -9477,6 +9781,118 @@ fn dream_associates_all_sweeps_dedups_on_second_dream() {
         assert!(line.contains("deduplicated: "), "got: {line}");
         assert!(line.starts_with("associationsWritten: 0 "), "re-run writes nothing: {line}");
     }
+}
+
+/// `associates` with an unknown value is refused at decode time and the shipped
+/// refusal is asserted through `Dispatcher::handle` — the live server route.
+///
+/// Entry point: `Dispatcher::handle` (the v2 path the running server uses), not
+/// `dispatch_tool` (v1 helper; `dispatch.rs` header: "The running server does not
+/// call it").  Tests through `dispatch_tool` proved nothing about the refusal the
+/// server returns: neutering the `v2/dream.rs` guard left the v1 test green because
+/// `dispatch_tool` routes through `recipe_tools::run_dream_tool` which has its own
+/// guard, and the test was gating that guard, not the shipped one.
+///
+/// Observable: diary-entry count (strongest available).  A completed dream cycle
+/// always writes at least one diary entry; a refused call writes none.  Tunnel count
+/// alone is weaker because an empty estate writes zero tunnels on both a refused
+/// call and a successful call with associates="all" (no proximity pairs to link).
+/// Diary-entry count distinguishes "refused before any work" from "completed but
+/// wrote no tunnels".  Matches the audit component of Swift's topologyChangeSignature.
+///
+/// Mutation gate: neutering the guard in `v2/dream.rs` lets "banana" reach the
+/// execution branch, a dream cycle completes, and the diary-entry count changes —
+/// failing the count assertion.
+///
+/// Parity: `dreamAssociatesRejectsUnknownValue` in Swift `DreamAssociatesDispatchTests.swift`.
+#[test]
+fn dream_associates_rejects_unknown_value() {
+    let registry = EstateRegistry::new_inmemory();
+    // Clone the DrawerStore Arc before moving registry into Dispatcher so we can
+    // observe diary-entry count before and after the refused call without needing
+    // EstateRegistry to implement Clone.  Arc::clone is a reference-count increment;
+    // the store is the same allocation the Dispatcher's coordinator holds.
+    let store = std::sync::Arc::clone(&registry.default.store);
+
+    // Diary-entry count before the refused call.
+    // Chosen as the observable because a completed dream cycle always writes at
+    // least one diary entry, so "refused before any work" is cleanly distinguishable
+    // from "completed but wrote no tunnels" (tunnel count stays 0 in both cases on
+    // an empty estate).  Matches the audit component of Swift's topologyChangeSignature.
+    let diary_before = store.all_diary_entries().expect("all_diary_entries before").len();
+
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+
+    // "banana" is not a valid associates value.  The response must carry a
+    // top-level "error" with code -32602 and data.path == "associates".
+    let request = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": "moot_dream", "arguments": { "associates": "banana" } }
+    }))
+    .expect("tools/call request must decode");
+    let response = serde_json::to_value(dispatcher.handle(&request))
+        .expect("response must serialize");
+
+    // Diary-entry count after the refused call — must not have moved.
+    let diary_after = store.all_diary_entries().expect("all_diary_entries after").len();
+
+    // Assert refusal shape from the shipped path.
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "associates='banana' must yield -32602 INVALID_PARAMS via Dispatcher::handle; response: {response:?}"
+    );
+    assert_eq!(
+        response["error"]["data"]["path"],
+        serde_json::json!("associates"),
+        "error data.path must be 'associates'; response: {response:?}"
+    );
+
+    // No execution ran — no diary entry was written.
+    assert_eq!(
+        diary_before,
+        diary_after,
+        "diary-entry count must not change when associates is refused; before={diary_before} after={diary_after}"
+    );
+}
+
+/// Uppercase "OFF" is accepted for `associates` and behaves identically to
+/// lowercase "off" — the `.to_lowercase()` normalisation in `V2DreamRequest::decode`
+/// runs before the enum check, so "OFF" → "off" → accepted.
+///
+/// Mutation gate: moving `.to_lowercase()` to after the enum check (or removing it)
+/// makes "OFF" fail validation with a -32602 error.
+///
+/// Parity: `dreamAssociatesUppercaseOffIsAccepted` in Swift `DreamAssociatesDispatchTests.swift`.
+#[test]
+fn dream_associates_uppercase_off_is_accepted() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+
+    let request = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "moot_dream",
+            "arguments": { "associates": "OFF" }
+        }
+    }))
+    .expect("tools/call request must decode");
+    let response = serde_json::to_value(dispatcher.handle(&request))
+        .expect("response must serialize");
+
+    // "OFF" must not produce a protocol-level error.
+    assert!(
+        response.get("error").is_none(),
+        "associates='OFF' must not produce a protocol error; response: {response:?}"
+    );
+    // "off" skips the sweep; isError must be false.
+    assert_eq!(
+        response["result"]["isError"],
+        serde_json::json!(false),
+        "associates='OFF' must succeed (isError:false); response: {response:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
