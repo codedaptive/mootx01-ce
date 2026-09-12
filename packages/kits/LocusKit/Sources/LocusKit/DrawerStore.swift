@@ -1465,7 +1465,7 @@ public actor DrawerStore {
             // Materialized projection: write the merged adjective
             // snapshot, zero the content blob, stamp tombstonedAt. The
             // content-derived columns (ssc_facts, subject trio) are NULLed
-            // and the content-derived bits (19, 27) cleared in the same
+            // and the content-derived bits (19, 27, 28; factsExtracted) cleared in the same
             // statement (destruction contract, cookbook §2.4.1).
             let clearedOp = priorOperational & ~DrawerFeatureFlags.clearedOnContentWrite
             _ = try await txn.rowStore.update(
@@ -1589,7 +1589,7 @@ public actor DrawerStore {
                     )
                     if case .success(let sibEvent) = sibResult {
                         // Gate accepted: update state bitmap, zero content, stamp.
-                        // The content-derived bits (19, 27) clear alongside the
+                        // The content-derived bits (19, 27, 28; factsExtracted) clear alongside the
                         // content-derived columns (cookbook §2.4.1).
                         let sibEventWithReason = sibEvent.withReason(
                             "lineage expunge cascade from \(drawerId)")
@@ -4910,7 +4910,7 @@ public actor DrawerStore {
         //
         // Wrapped in a serializable transaction to read the current
         // operationalBitmap before writing, so the content-derived bits
-        // (19, 27) can be cleared in the same statement as
+        // (19, 27, 28; factsExtracted) can be cleared in the same statement as
         // the four distillation columns (§4 invariant: bit and columns
         // travel together). Pre-read cost is acceptable — dataset-content
         // writes are rare (signature computation only).
@@ -4924,7 +4924,7 @@ public actor DrawerStore {
             // same contract as the un-wrapped call). Compute the cleared
             // bitmap using the prior value, or 0 if the row is not found.
             let currentOp = rows.first.map { Self.int64($0["operationalBitmap"]) } ?? 0
-            // Content changed: clear the content-derived bits (19, 27) so the
+            // Content changed: clear the content-derived bits (19, 27, 28; factsExtracted) so the
             // span rows are re-encoded, in the same UPDATE that NULLs the
             // content-derived columns below.
             let clearedOp = currentOp & ~DrawerFeatureFlags.clearedOnContentWrite
@@ -5392,8 +5392,9 @@ public actor DrawerStore {
     /// regeneration trigger). Covers `ssc_facts` (Encoder Rerank Program
     /// §6: a NULL after a content write is the enrichment stage's "needs
     /// facts" predicate) and the subject trio (PR-01). The matching bits
-    /// (19, 27) clear through `DrawerFeatureFlags.clearedOnContentWrite` in
-    /// the same statement.
+    /// (19, 27, 28; `factsExtracted` is cleared too — a content write
+    /// revokes the prior extraction result) clear through
+    /// `DrawerFeatureFlags.clearedOnContentWrite` in the same statement.
     private static let clearedRepresentationValues: [String: TypedValue] = [
         "ssc_facts": .null,
         "subject": .null,

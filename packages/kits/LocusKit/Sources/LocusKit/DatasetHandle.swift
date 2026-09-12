@@ -461,7 +461,7 @@ public extension Estate {
 
         // AND-in the cleared operational bitmap to lower the room/wing
         // operationalAND aggregate. updateDatasetContent clears the
-        // content-derived bits (19, 27) on a live (non-tombstoned) drawer;
+        // content-derived bits (19, 27, 28; factsExtracted) on a live (non-tombstoned) drawer;
         // a room AND that still showed those bits set would misreport the
         // room's state to any AND-check. Lowering is always safe
         // (under-approximation). Tombstone/expunge paths need no AND-in —
