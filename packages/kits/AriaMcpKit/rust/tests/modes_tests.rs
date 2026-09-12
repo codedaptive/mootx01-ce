@@ -360,6 +360,7 @@ fn mode_arg_in_every_tool_schema() {
         "moot_reclassify_fdc",  // FDC mode: suspectOnly|all
         "moot_palace_import",   // import mode: foreground|background (json import)
         "moot_vault_import",    // import mode: foreground|background
+        "moot_lens_partial_cue", // cue mode: feelsLike|aboutThis|fromThen
     ]
     .iter()
     .copied()
