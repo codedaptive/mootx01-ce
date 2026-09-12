@@ -255,10 +255,29 @@ public protocol AriaV2KnowledgeJournalBackend: Sendable {
     func connectionMap(_ request: AriaV2ConnectionMapRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeTunnel]
     func fileFact(_ request: AriaV2FileFactRequest, context: AriaV2MemoryOperationContext) async throws -> AriaV2KnowledgeFact
     func factSearch(_ request: AriaV2FactSearchRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeFact]
+    /// Fixed-provider-only exact selectors. The selected v2 request remains
+    /// selector-free; this requirement lets the concrete first-party backend
+    /// receive the private contract values through an existential service.
+    func factSearch(_ request: AriaV2FactSearchRequest, context: AriaV2MemoryOperationContext, sourceIDExact: String?, subjectExact: String?) async throws -> [AriaV2KnowledgeFact]
     func retireFact(_ request: AriaV2RetireFactRequest, context: AriaV2MemoryOperationContext) async throws
     func factTimeline(_ request: AriaV2FactTimelineRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeFact]
     func writeJournal(_ request: AriaV2WriteJournalRequest, context: AriaV2MemoryOperationContext) async throws -> AriaV2KnowledgeJournalEntry
     func readJournal(_ request: AriaV2ReadJournalRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeJournalEntry]
+}
+
+extension AriaV2KnowledgeJournalBackend {
+    /// The selected-public grammar has no exact selectors. The authenticated
+    /// provider supplies them through its fixed contract, while test doubles
+    /// and public adapters retain the ordinary fact-search implementation.
+    func factSearch(
+        _ request: AriaV2FactSearchRequest,
+        context: AriaV2MemoryOperationContext,
+        sourceIDExact: String?,
+        subjectExact: String?
+    ) async throws -> [AriaV2KnowledgeFact] {
+        _ = (sourceIDExact, subjectExact)
+        return try await factSearch(request, context: context)
+    }
 }
 
 /// Direct provider over the public GeniusLocusKit and LocusKit surfaces.
@@ -343,11 +362,36 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
     }
 
     public func factSearch(_ request: AriaV2FactSearchRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeFact] {
+        try await factSearch(request, context: context, sourceIDExact: nil, subjectExact: nil)
+    }
+
+    public func factSearch(
+        _ request: AriaV2FactSearchRequest,
+        context: AriaV2MemoryOperationContext,
+        sourceIDExact: String?,
+        subjectExact: String?
+    ) async throws -> [AriaV2KnowledgeFact] {
         try validateEstate(request.estateID, context: context)
-        let facts = try await kit.recallKGFacts(handle)
-        return try (try await visibleFacts(facts, estate: try await kit.estate(for: handle), context: context))
+        let estate = try await kit.estate(for: handle)
+        let facts: [KGFact]
+        if sourceIDExact != nil || subjectExact != nil {
+            facts = try await estate.kgFacts(
+                subjectEq: subjectExact,
+                sourceDrawerIDEq: sourceIDExact)
+        } else {
+            facts = try await kit.recallKGFacts(handle)
+        }
+        return try (try await visibleFacts(facts, estate: estate, context: context))
             .filter { fact in
-                Self.matches(fact, query: request.query, subject: request.subject, predicate: request.predicate, object: request.object)
+                // The provider's source/subject selectors are its own stable
+                // 1.1 contract. Keep the SQL equality predicates above for
+                // normal stores, then enforce both exact values again at this
+                // boundary so a storage implementation cannot broaden a
+                // first-party inventory. The selected public v2 grammar never
+                // supplies either selector (both are nil there).
+                (sourceIDExact == nil || fact.sourceDrawerID == sourceIDExact)
+                    && (subjectExact == nil || fact.subject == subjectExact)
+                    && Self.matches(fact, query: request.query, subject: request.subject, predicate: request.predicate, object: request.object)
             }
             .prefix(request.limit)
             .map { try factProjection($0) }
@@ -357,8 +401,13 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
         try validateEstate(request.estateID, context: context)
         _ = request.reason // The lower retirement verb has no reason field.
         let facts = try await kit.recallKGFacts(handle)
-        let storedID = AriaV2ArgumentDecoder.matchingStorageIdentity(
-            request.factID, among: facts.map(\.id)) ?? AriaV2ArgumentDecoder.canonicalUUID(request.factID)
+        let visible = try await visibleFacts(facts, estate: try await kit.estate(for: handle), context: context)
+        guard let storedID = AriaV2ArgumentDecoder.matchingStorageIdentity(request.factID, among: visible.map(\.id)) else {
+            throw AriaV2InvalidArgument(
+                code: "fact_unavailable", path: "fact_id",
+                message: "The target fact is not available to this caller."
+            ).jsonRPCError
+        }
         try await kit.retireKGFact(handle, rowID: storedID)
     }
 
@@ -433,10 +482,16 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
     }
 
     private func visibleFacts(_ facts: [KGFact], estate: Estate, context: AriaV2MemoryOperationContext) async throws -> [KGFact] {
-        let ceilingFacts = facts.filter { $0.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue }
+        let ceilingFacts = facts.filter {
+            $0.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue &&
+                (!context.exportableOnly || $0.exportability == .public_)
+        }
         let sourceIDs = Set(ceilingFacts.map(\.sourceDrawerID).filter { !$0.isEmpty })
         let drawers = try await estate.getDrawers(ids: Array(sourceIDs), hydrationLevel: .structured)
-        let visibleSources = Set(drawers.filter { $0.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue }.map(\.id))
+        let visibleSources = Set(drawers.filter {
+            $0.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue &&
+                (!context.exportableOnly || $0.exportability == .public_)
+        }.map(\.id))
         return ceilingFacts.filter { $0.sourceDrawerID.isEmpty || visibleSources.contains($0.sourceDrawerID) }
     }
 
@@ -481,6 +536,20 @@ public struct AriaV2KnowledgeJournalService: Sendable {
     public func connectionMap(arguments: JSONValue) async throws -> JSONValue { try await connectionMap(.init(arguments: arguments)) }
     public func fileFact(arguments: JSONValue) async throws -> JSONValue { try await fileFact(.init(arguments: arguments)) }
     public func factSearch(arguments: JSONValue) async throws -> JSONValue { try await factSearch(.init(arguments: arguments)) }
+
+    /// Fixed-provider-only selectors that deliberately stay outside the
+    /// selected-public fact-search decoder and catalog.
+    public func factSearch(
+        arguments: JSONValue,
+        sourceIDExact: String?,
+        subjectExact: String?
+    ) async throws -> JSONValue {
+        try await factSearch(
+            .init(arguments: arguments),
+            sourceIDExact: sourceIDExact,
+            subjectExact: subjectExact
+        )
+    }
     public func retireFact(arguments: JSONValue) async throws -> JSONValue { try await retireFact(.init(arguments: arguments)) }
     public func factTimeline(arguments: JSONValue) async throws -> JSONValue { try await factTimeline(.init(arguments: arguments)) }
     public func writeJournal(arguments: JSONValue) async throws -> JSONValue { try await writeJournal(.init(arguments: arguments)) }
@@ -510,8 +579,21 @@ public struct AriaV2KnowledgeJournalService: Sendable {
     }
 
     public func factSearch(_ request: AriaV2FactSearchRequest) async throws -> JSONValue {
+        try await factSearch(request, sourceIDExact: nil, subjectExact: nil)
+    }
+
+    public func factSearch(
+        _ request: AriaV2FactSearchRequest,
+        sourceIDExact: String?,
+        subjectExact: String?
+    ) async throws -> JSONValue {
         if let refusal = await accessGate.admit(.factSearch, context: context) { return Self.refusal(.factSearch, refusal) }
-        let facts = try await backend.factSearch(request, context: context)
+        let facts = try await backend.factSearch(
+            request,
+            context: context,
+            sourceIDExact: sourceIDExact,
+            subjectExact: subjectExact
+        )
         return Self.success(.factSearch, effect: .read, data: .object(["facts": .array(facts.map(Self.fact))]), text: "Found \(facts.count) authorized facts.")
     }
 

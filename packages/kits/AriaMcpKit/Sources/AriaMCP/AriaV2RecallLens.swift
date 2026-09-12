@@ -53,6 +53,16 @@ public struct AriaV2RecallLensRequest: Sendable, Equatable {
                 guard let integer = try decoder.optionalInteger(key), integer >= 1 else {
                     throw AriaV2InvalidArgument(path: key, message: "Argument '\(key)' must be an integer at least 1.").jsonRPCError
                 }
+            case .positiveIntegerOrString:
+                if let integer = canonical[key]?.integerValue, integer >= 1 { break }
+                guard let raw = canonical[key]?.stringValue, Int(raw).map({ $0 >= 1 }) == true else {
+                    throw AriaV2InvalidArgument(path: key, message: "Argument '\(key)' must be an integer at least 1.").jsonRPCError
+                }
+            case .booleanOrString:
+                if canonical[key]?.boolValue != nil { break }
+                guard let raw = canonical[key]?.stringValue, Bool(raw) != nil else {
+                    throw AriaV2InvalidArgument(path: key, message: "Argument '\(key)' must be a boolean.").jsonRPCError
+                }
             case .uuid:
                 let uuid = try decoder.optionalUUID(key)!
                 canonical[key] = .string(AriaV2ArgumentDecoder.canonicalUUID(uuid))
@@ -85,7 +95,7 @@ public struct AriaV2RecallLensRequest: Sendable, Equatable {
         self.estateID = try decoder.optionalUUID("estate_id")
     }
 
-    private enum Kind { case string, boolean, positiveInteger, uuid, array, object }
+    private enum Kind { case string, boolean, positiveInteger, positiveIntegerOrString, booleanOrString, uuid, array, object }
     private struct Schema { let required: Set<String>; let keys: [String: Kind] }
     private static func invalid(_ key: String, _ expected: String) -> JSONRPCError {
         AriaV2InvalidArgument(path: key, message: "Argument '\(key)' must be an \(expected).").jsonRPCError
@@ -103,7 +113,10 @@ public struct AriaV2RecallLensRequest: Sendable, Equatable {
         // the shaped-recall engine clamps [64, 256] internally.
         .recallShaped: schema(["query"], recall.merging(["preset": .string, "frontier_k": .positiveInteger]) { _, n in n }),
         .recallDistilled: schema(["query"], recall), .recallVague: schema(["query"], recall), .recallWalk: schema(["query"], recall),
-        .lensKeystones: schema(["wing"], ["wing": .string, "topK": .string, "keystoneOnly": .string]),
+        // Public-v2 retains its documented string wire fields. The fixed
+        // provider admits native integer/bool forms before building this
+        // shared v2 request.
+        .lensKeystones: schema(["wing"], ["wing": .string, "topK": .positiveIntegerOrString, "keystoneOnly": .booleanOrString]),
         .lensConstellation: schema(["wing"], ["wing": .string]),
         .lensFreeAssociation: schema(["wing", "seed_memory_id"], ["wing": .string, "seed_memory_id": .uuid, "walkLength": .string, "k": .string]),
         .lensThemeWeather: schema([], [:]), .lensLatentThemes: schema([], [:]),
@@ -134,7 +147,18 @@ public protocol AriaV2RecallLensAuthority: Sendable {
 public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
     public let kit: GeniusLocusKit
     public let handle: EstateHandle
-    public init(kit: GeniusLocusKit, handle: EstateHandle) { self.kit = kit; self.handle = handle }
+    /// Server-owned policy narrowed in addition to request filters. Public-v2
+    /// calls leave this nil; the stable provider supplies its verified frame.
+    public let authorizationFilter: LocusKit.Filter?
+    public init(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        authorizationFilter: LocusKit.Filter? = nil
+    ) {
+        self.kit = kit
+        self.handle = handle
+        self.authorizationFilter = authorizationFilter
+    }
 
     public func execute(_ request: AriaV2RecallLensRequest) async throws -> AriaV2RecallLensOutcome {
         guard request.estateID == nil || request.estateID == handle.estateUUID else {
@@ -217,7 +241,8 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         let query = args["query"]!.stringValue!
         let limit = Int(args["limit"]?.integerValue ?? 20)
         let pool = min(Int(args["pool"]?.integerValue ?? Int64(PreciseRecall.defaultPool)), 500)
-        let base = try filter(args["filter"]?.stringValue)
+        let requested = try filter(args["filter"]?.stringValue)
+        let base = authorizationFilter.map { LocusKit.Filter.all([requested, $0]) } ?? requested
         let scoped: LocusKit.Filter
         if let wing = args["wing"]?.stringValue { scoped = .all([base, .inWing(wing)]) } else { scoped = base }
         let composition = args["composition"]?.stringValue
