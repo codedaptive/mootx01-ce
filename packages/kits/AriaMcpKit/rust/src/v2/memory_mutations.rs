@@ -68,6 +68,12 @@ pub struct V2MemoryMutationAdmission {
     pub caller_binding: String,
     pub now_millis: i64,
     pub authorization_generation: String,
+    /// Sensitivity ceiling for this caller.  A memory whose sensitivity
+    /// adjective exceeds this ceiling is treated as absent for every write
+    /// operation, producing an identical `memory_not_found` refusal regardless
+    /// of whether the row exists.  Both outcomes are indistinguishable to the
+    /// caller so neither can oracle the other.
+    pub maximum_sensitivity: AdjectiveSensitivity,
 }
 
 /// Surface-owned authority.  A refusal is intentionally indistinguishable
@@ -81,6 +87,16 @@ pub trait V2MemoryMutationAuthority: Send + Sync {
     ) -> Result<V2MemoryMutationAdmission, ()>;
 
     fn revalidate(&self, admission: &V2MemoryMutationAdmission) -> Result<(), ()>;
+
+    /// Resolve a caller-supplied UUID to a confirmed, admissible storage UUID.
+    /// Returns `Err(NotFound)` when the ID does not exist OR when the row's
+    /// sensitivity exceeds `admission.maximum_sensitivity`.  Both cases are
+    /// indistinguishable to the caller (oracle-closure).
+    fn resolve_memory(
+        &self,
+        admission: &V2MemoryMutationAdmission,
+        memory_id: Uuid,
+    ) -> Result<Uuid, V2MemoryMutationError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,7 +420,16 @@ pub struct V2MemoryMutationResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum V2MemoryMutationError { Unavailable, OutcomeUnverified(V2MemoryMutationOperation) }
+pub enum V2MemoryMutationError {
+    /// The mutation cannot be applied, or the estate is unreachable.
+    Unavailable,
+    /// The mutation landed but the readback confirmation failed.
+    OutcomeUnverified(V2MemoryMutationOperation),
+    /// No row matched the requested ID, OR the row exists but sits above the
+    /// caller's sensitivity ceiling.  Both conditions produce this variant so
+    /// neither can be distinguished by the caller (oracle-closure).
+    NotFound,
+}
 
 /// Direct lower-kit interface.  `CoordinatorMemoryMutationLower` is the only
 /// production implementation; keeping this narrow trait makes the typed
@@ -427,6 +452,7 @@ impl<A, L> V2MemoryMutationService<A, L> { pub fn new(authority: A, lower: L) ->
 impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationService<A, L> {
     pub fn update(&self, request: V2UpdateMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::UpdateMemory, request.estate_id)?;
+        self.authority.resolve_memory(&admitted, request.memory_id)?;
         self.lower.mutate(&admitted, request.memory_id, &request.mutation, request.note.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
         // Capture the wire name before finish() so the payload carries the mutation
         // string that the declared output schema requires (`memory_id` + `mutation`).
@@ -437,6 +463,7 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn withdraw(&self, request: V2WithdrawMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::WithdrawMemory, request.estate_id)?;
+        self.authority.resolve_memory(&admitted, request.memory_id)?;
         self.lower.withdraw(&admitted, request.memory_id, request.reason.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let mut result = self.finish(admitted, V2MemoryMutationOperation::WithdrawMemory, V2MemoryMutationOutcome::Withdrawn, Some(request.memory_id), None)?;
         // Declared schema: { memory_id }.
@@ -445,6 +472,7 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn erase(&self, request: V2EraseMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::EraseMemory, request.estate_id)?;
+        self.authority.resolve_memory(&admitted, request.memory_id)?;
         let refused_ids = self.lower.erase(&admitted, request.memory_id, request.confirmation, request.reason.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let outcome = if refused_ids.is_empty() { V2MemoryMutationOutcome::Erased } else { V2MemoryMutationOutcome::ErasedPartially };
         let mut result = self.finish(admitted, V2MemoryMutationOperation::EraseMemory, outcome, Some(request.memory_id), None)?;
@@ -457,6 +485,7 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn confirm(&self, request: V2ConfirmMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::ConfirmMemory, request.estate_id)?;
+        self.authority.resolve_memory(&admitted, request.memory_id)?;
         self.lower.mutate(&admitted, request.memory_id, &V2UpdateMutation::Confirm, None).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let mut result = self.finish(admitted, V2MemoryMutationOperation::ConfirmMemory, V2MemoryMutationOutcome::Confirmed, Some(request.memory_id), None)?;
         // Declared schema: { memory_id, mutation } where mutation is const "confirm".
@@ -465,6 +494,7 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn move_memory(&self, request: V2MoveMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::MoveMemory, request.estate_id)?;
+        self.authority.resolve_memory(&admitted, request.memory_id)?;
         self.lower.move_memory(&admitted, request.memory_id, &request.wing, &request.room).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let mut result = self.finish(admitted, V2MemoryMutationOperation::MoveMemory, V2MemoryMutationOutcome::Moved, Some(request.memory_id), None)?;
         // Declared schema: { memory_id, placement } where placement is { wing, room }.
