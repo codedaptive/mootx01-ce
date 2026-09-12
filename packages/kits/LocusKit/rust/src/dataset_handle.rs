@@ -196,7 +196,7 @@ impl Estate {
                 _ => None,
             })
             .unwrap_or(0);
-        // Content changed: clear the content-derived bits (19, 27) so the
+        // Content changed: clear the content-derived bits (19, 27, 28; factsExtracted) so the
         // span rows are re-encoded, in the same UPDATE that NULLs the
         // content-derived columns below.
         let cleared_op = current_op
