@@ -285,16 +285,31 @@ public struct AriaV2MemoryMutations: Sendable {
 
     public func update(_ request: AriaV2UpdateMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
+        // Rule: dereference fires for every outcome EXCEPT NotFound.
+        // NotFound (absent or above-ceiling) means the caller was never entitled
+        // to name this row — no reward trace.  Any other resolution failure
+        // (estate not open, coordinator unavailability) still fires the dereference:
+        // the caller demonstrated entitlement at recall time, and a backend
+        // failure does not revoke it.  The same rule applies if the lower kit
+        // then fails after the ceiling is cleared — the entitlement stands.
+        let storedID: String
         do {
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
-            // Gate passed.  Fire the reward-trace dereference write after the gate,
-            // not before.  The prior ordering held for rows the caller could read
-            // whose write then failed for an unrelated reason; it does not hold when
-            // the sensitivity gate is itself the failure — a row the caller was never
-            // entitled to name must not receive a reward-trace write.
+            storedID = try await gatedStoredMemoryID(request.memoryID)
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_update_memory")
+        } catch {
+            // Non-NotFound resolution failure.  Dereference fires before returning.
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
+            return unavailable("moot_update_memory")
+        }
+        // Ceiling cleared.  Dereference fires before the lower-kit call so that
+        // a write failure unrelated to sensitivity still records the entitlement.
+        await context.usageLedger.recordDereferenced(
+            [request.memoryID], estateID: context.estateID,
+            callerID: context.serverIdentity, at: context.now())
+        do {
             try await kit.mutate(handle, .init(
                 rowID: storedID,
                 kind: try request.lowerKind(),
@@ -303,24 +318,30 @@ public struct AriaV2MemoryMutations: Sendable {
             return success(tool: "moot_update_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)), "mutation": .string(request.mutation),
             ]), text: "Updated memory \(id(request.memoryID)).")
-        } catch is MemoryNotFoundError {
-            return notFoundRefusal("moot_update_memory")
         } catch { return refusal("moot_update_memory", verb: request.mutation, error: error) }
     }
 
     public func withdraw(_ request: AriaV2WithdrawMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
+        // Same rule as update(_:): MemoryNotFoundError → no dereference;
+        // any other resolution failure or lower-kit failure → dereference fires.
+        let storedID: String
         do {
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
-            // Gate passed.  Fire the reward-trace dereference write after the gate,
-            // not before.  See update(_:) for the full rationale.
+            storedID = try await gatedStoredMemoryID(request.memoryID)
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_withdraw_memory")
+        } catch {
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
+            return unavailable("moot_withdraw_memory")
+        }
+        await context.usageLedger.recordDereferenced(
+            [request.memoryID], estateID: context.estateID,
+            callerID: context.serverIdentity, at: context.now())
+        do {
             try await kit.withdraw(handle, .init(rowID: storedID, reason: request.reason))
             return success(tool: "moot_withdraw_memory", data: .object(["memory_id": .string(id(request.memoryID))]), text: "Withdrew memory \(id(request.memoryID)).")
-        } catch is MemoryNotFoundError {
-            return notFoundRefusal("moot_withdraw_memory")
         } catch { return unavailable("moot_withdraw_memory") }
     }
 
@@ -354,38 +375,54 @@ public struct AriaV2MemoryMutations: Sendable {
 
     public func confirm(_ request: AriaV2ConfirmMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
+        // Same rule as update(_:): MemoryNotFoundError → no dereference;
+        // any other resolution failure or lower-kit failure → dereference fires.
+        let storedID: String
         do {
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
-            // Gate passed.  Fire the reward-trace dereference write after the gate,
-            // not before.  See update(_:) for the full rationale.
+            storedID = try await gatedStoredMemoryID(request.memoryID)
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_confirm_memory")
+        } catch {
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
+            return unavailable("moot_confirm_memory")
+        }
+        await context.usageLedger.recordDereferenced(
+            [request.memoryID], estateID: context.estateID,
+            callerID: context.serverIdentity, at: context.now())
+        do {
             try await kit.mutate(handle, .init(rowID: storedID, kind: .confirm))
             return success(tool: "moot_confirm_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)), "mutation": .string("confirm"),
             ]), text: "Confirmed memory \(id(request.memoryID)).")
-        } catch is MemoryNotFoundError {
-            return notFoundRefusal("moot_confirm_memory")
         } catch { return unavailable("moot_confirm_memory") }
     }
 
     public func move(_ request: AriaV2MoveMemoryRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
+        // Same rule as update(_:): MemoryNotFoundError → no dereference;
+        // any other resolution failure or lower-kit failure → dereference fires.
+        let storedID: String
         do {
-            let storedID = try await gatedStoredMemoryID(request.memoryID)
-            // Gate passed.  Fire the reward-trace dereference write after the gate,
-            // not before.  See update(_:) for the full rationale.
+            storedID = try await gatedStoredMemoryID(request.memoryID)
+        } catch is MemoryNotFoundError {
+            return notFoundRefusal("moot_move_memory")
+        } catch {
             await context.usageLedger.recordDereferenced(
                 [request.memoryID], estateID: context.estateID,
                 callerID: context.serverIdentity, at: context.now())
+            return unavailable("moot_move_memory")
+        }
+        await context.usageLedger.recordDereferenced(
+            [request.memoryID], estateID: context.estateID,
+            callerID: context.serverIdentity, at: context.now())
+        do {
             try await kit.reanchor(handle, .init(rowID: storedID, toRoom: request.room, toWing: request.wing))
             return success(tool: "moot_move_memory", data: .object([
                 "memory_id": .string(id(request.memoryID)),
                 "placement": .object(["wing": .string(request.wing), "room": .string(request.room)]),
             ]), text: "Moved memory \(id(request.memoryID)).")
-        } catch is MemoryNotFoundError {
-            return notFoundRefusal("moot_move_memory")
         } catch { return unavailable("moot_move_memory") }
     }
 
