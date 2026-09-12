@@ -531,7 +531,8 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
                 // wipe facets/secondary QIDs a human or the enrichment daemon
                 // previously attached. `changedBy: serverIdentity` attributes this
                 // automated repair correctly in the audit trail.
-                try await estate.reanchorAnchor(
+                try await kit.reanchorAnchor(
+                    handle,
                     rowID: drawer.id,
                     toLattice: LatticeAnchor(
                         udcCode: newCode,
@@ -551,8 +552,8 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
         var floorAfter = priorFloor
         let floorStampStatus: String
         if apply && fdcMode == .all && limit == nil && skippedNonCandidateChanges == 0 {
-            try await estate.setMeta(
-                key: Self.fdcRecalcedDataVersionMetaKey,
+            try await kit.stampFDCRecalculationFloor(
+                handle,
                 value: currentFDCRecalculationVersion)
             floorAfter = currentFDCRecalculationVersion
             floorStampStatus = "stamped"

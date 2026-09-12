@@ -208,6 +208,73 @@ struct AriaV2DataMobilityDirectTests {
         #expect(error?["retryable"] == .bool(false))
     }
 
+    @Test("quiesced selected dataset filing refuses before a handle is captured")
+    func quiescedSelectedDatasetFilingDoesNotCreateHandle() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-quiesced-dataset-filing")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+
+        let estate = try await kit.estate(for: handle)
+        let drawerIDsBefore = try await estate.allDrawers().map(\.id)
+        try await kit.quiesce(handle)
+        #expect(await kit.mountState(for: handle) == .quiesced)
+        let mobility = AriaV2DataMobility(authority: AriaV2GeniusLocusDataMobilityAuthority(
+            kit: kit, handle: handle, selectedEstateID: handle.estateUUID,
+            now: Date(timeIntervalSince1970: 1_788_912_000), serverIdentity: "test-server"))
+
+        let result = try await mobility.execute(
+            tool: "moot_file_dataset",
+            arguments: .object([
+                "name": .string("must-not-file"),
+                "location": .string("tests/datasets"),
+                "columns": .array([.object(["name": .string("label"), "type": .string("text")])]),
+                "rows": .array([.object(["label": .string("blocked")])]),
+            ]))
+        #expect(result.objectValue?["isError"] == .bool(true),
+                "quiesced filing must fail at the selected typed transaction seam")
+        #expect(try await estate.allDrawers().map(\.id) == drawerIDsBefore,
+                "a refused filing must not leave a dataset handle")
+    }
+
+    @Test("coordinated typed filing drops the backend table after handle capture fails")
+    func typedDatasetFilingRollsBackHandleCaptureFailure() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-dataset-handle-rollback")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+
+        let datasetID = UUID()
+        let store = try await kit.datasetStore(for: handle)
+        await #expect(throws: DatasetFilingError.self) {
+            _ = try await kit.fileDataset(handle, DatasetFilingFrame(
+                datasetID: datasetID,
+                schema: DatasetSchema(
+                    columns: [ColumnDeclaration(name: "label", type: .text)],
+                    primaryKeyColumn: nil),
+                rows: [["label": .text("rollback")]],
+                columns: [DatasetColumnSummary(name: "label", dataType: "TEXT")],
+                sourceDescription: "selected v2 handle rollback",
+                // The selected decoder rejects this public input before DDL;
+                // use the typed frame to exercise its post-DDL capture rollback.
+                room: "",
+                addedBy: "aria-v2",
+                udcCode: "000"))
+        }
+        await #expect(throws: StorageError.self) {
+            _ = try await store.queryRows(
+                id: datasetID, predicate: nil, orderBy: [], limit: nil, offset: nil, columns: nil)
+        }
+    }
+
     @Test("v2 dataset lower validates columns and comparison types against the handle")
     func datasetQueryUsesHandleSchemaBeforeStorage() async throws {
         let kit = GeniusLocusKit()
