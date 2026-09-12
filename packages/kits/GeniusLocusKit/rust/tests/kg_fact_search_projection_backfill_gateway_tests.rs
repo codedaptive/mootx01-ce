@@ -257,6 +257,27 @@ fn gate_c_search_projection_gateway() {
     // 6. Feed the gateway-backfilled fact to FactFirstRecallStage::decide and
     //    confirm it is returned as Solid. This closes the loop: the gateway writes
     //    exactly what fact_first_recall.rs lines 92-93 require for the fact to score.
+    //
+    //    Crucially, search_projection and search_projection_version are read back
+    //    from the database row — not recomputed from constants the test already
+    //    has. If the gateway had written nothing (or wrong bytes), this recall
+    //    assertion would fail, not only the step-5 equality assertions. That is
+    //    what "closing the loop" means: the recall step is testing the bytes the
+    //    gateway actually stored.
+    let stored_projection = match row.get("searchProjection") {
+        Some(TypedValue::Text(v)) => v.clone(),
+        other => panic!(
+            "searchProjection must be present and text in the stored row after gateway run; got {:?}",
+            other
+        ),
+    };
+    let stored_version = match row.get("searchProjectionVersion") {
+        Some(TypedValue::Text(v)) => v.clone(),
+        other => panic!(
+            "searchProjectionVersion must be present and text in the stored row after gateway run; got {:?}",
+            other
+        ),
+    };
     let mut source_drawer = Drawer::new(
         drawer_id, "Jack's birthday is in June.", "n1", "test", 1_800_000_000, "t1",
     );
@@ -265,8 +286,8 @@ fn gate_c_search_projection_gateway() {
     let sources = HashMap::from([(drawer_id.to_string(), source_drawer)]);
 
     let backfilled_fact = KGFact {
-        search_projection: expected_projection,
-        search_projection_version: FactSearchProjection::VERSION.into(),
+        search_projection: stored_projection,
+        search_projection_version: stored_version,
         ..KGFact::new(
             fact_id.into(), subject.into(), predicate.into(), object.into(),
             drawer_id.into(), 1_800_000_000,
