@@ -176,7 +176,7 @@ struct FactFirstRecallTests {
         let sources = [sourceID: source]
 
         // Fact with a correct searchProjectionVersion but an empty searchProjection —
-        // the honest shape for isolating the empty-projection guards. Subject/object
+        // the exact shape for isolating the empty-projection guards. Subject/object
         // match the query so only the empty-projection guards prevent a hit.
         let emptyFact = KGFact(
             id: "f-empty", subject: "Jack", predicate: "birthday", object: "June",
