@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "schema_version": "1.0",
   "purpose": "ARIA v2 target schemas for structuredContent.data for core catalog operations. Text rendering is not a data projection.",
-  "contract": "docs_internal/specs/ARIA_V2_CONTRACT.md",
+  "contract": "ARIA_V2_CONTRACT.md",
   "catalog_indices": {
     "first": 0,
     "last": 35,
@@ -429,7 +429,7 @@
       },
       "source_anchors": [
         "packages/kits/AriaMcpKit/Sources/AriaMCP/ToolDispatch.swift:1685",
-        "docs_internal/specs/ARIA_V2_CONTRACT.md:116"
+        "ARIA_V2_CONTRACT.md:116"
       ],
       "source_gap": "Implement the typed CaptureFrame/Drawer receipt adapter."
     },
@@ -505,7 +505,7 @@
       "source_anchors": [
         "packages/kits/AriaMcpKit/Sources/AriaMCP/ToolDispatch.swift:1853",
         "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:87",
-        "docs_internal/specs/ARIA_V2_CONTRACT.md:70"
+        "ARIA_V2_CONTRACT.md:70"
       ],
       "source_gap": "Implement the v2 compact-memory projection; do not reuse legacy id/content rows."
     },
@@ -539,7 +539,7 @@
       },
       "source_anchors": [
         "packages/kits/AriaMcpKit/Sources/AriaMCP/ToolDispatch.swift:3745",
-        "docs_internal/specs/ARIA_V2_CONTRACT.md:100"
+        "ARIA_V2_CONTRACT.md:100"
       ],
       "source_gap": "Implement the contract-mandated snapshot/cursor projection."
     },
@@ -563,7 +563,7 @@
       "source_anchors": [
         "packages/kits/AriaMcpKit/Sources/AriaMCP/ToolDispatch.swift:2437",
         "packages/kits/AriaMcpKit/Sources/AriaMCP/ResultComposer.swift:287",
-        "docs_internal/specs/ARIA_V2_CONTRACT.md:71"
+        "ARIA_V2_CONTRACT.md:71"
       ],
       "source_gap": "Implement one v2 projection for subject, distilled, and full hydration."
     },
@@ -1042,7 +1042,7 @@
       "source_anchors": [
         "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2MonitoringInspection.swift:42",
         "packages/kits/AriaMcpKit/Sources/AriaMCP/AriaV2MonitoringInspection.swift:54",
-        "docs_internal/specs/ARIA_V2_CONTRACT.md:45"
+        "ARIA_V2_CONTRACT.md:45"
       ]
     },
     "moot_reindex": {
