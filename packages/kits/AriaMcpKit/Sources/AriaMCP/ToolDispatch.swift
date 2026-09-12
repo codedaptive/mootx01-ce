@@ -837,6 +837,8 @@ private extension ToolDispatcher {
                 serverIdentity: serverIdentity,
                 sessionID: "selected-v2-public",
                 buildSerial: buildSerial,
+                versionSkewAdvisory: versionSkewAdvisory,
+                updateAdvisoryProvider: updateAdvisoryProvider,
                 now: { now }))
         let cognitionCatalog = AriaV2CognitionCatalogService(
             estateID: handle.estateUUID,
