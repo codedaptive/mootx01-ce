@@ -68,9 +68,9 @@ pub(crate) fn coaching_hint(request: &SurfaceRequest, result: &Value) -> Option<
 
 /// moot_memory_search: no query, query over 200 characters, or zero results.
 fn hint_for_memory_search(target: &V2SearchTarget, result: &Value) -> Option<String> {
-    // Trigger: query over 200 characters (pre-flight check on decoded request).
+    // Trigger: query over 200 characters (checked on the decoded request).
     // The decoder requires either query or near, so "no query" is a decode error
-    // and cannot reach this path. The long-query trigger is the active pre-flight
+    // and cannot reach this path. The long-query trigger is the active
     // check for moot_memory_search on v2.
     if let V2SearchTarget::Query(q) = target {
         if q.chars().count() > 200 {
@@ -82,7 +82,7 @@ fn hint_for_memory_search(target: &V2SearchTarget, result: &Value) -> Option<Str
             );
         }
     }
-    // Trigger: zero results (post-flight check on the operation result).
+    // Trigger: zero results (checked on the operation result).
     if result_has_empty_results(result) {
         return Some(
             "No memories matched. File content with moot_file_memory first, \
@@ -95,7 +95,7 @@ fn hint_for_memory_search(target: &V2SearchTarget, result: &Value) -> Option<Str
 
 /// moot_file_memory: content over 4,000 characters or duplicate result.
 fn hint_for_file_memory(content: &str, result: &Value) -> Option<String> {
-    // Trigger: content over 4,000 characters (pre-flight on decoded request).
+    // Trigger: content over 4,000 characters (checked on the decoded request).
     if content.chars().count() > 4_000 {
         return Some(
             "Content over 4,000 characters is harder to recall precisely. \
@@ -104,7 +104,7 @@ fn hint_for_file_memory(content: &str, result: &Value) -> Option<String> {
             .to_owned(),
         );
     }
-    // Trigger: duplicate result (post-flight on the operation result).
+    // Trigger: duplicate result (checked on the operation result).
     if result_text_contains(result, "duplicate") || result_text_contains(result, "already filed") {
         return Some(
             "This content may duplicate an existing memory. \
