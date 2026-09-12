@@ -627,7 +627,21 @@ enum AriaV2SelectedCatalog {
             properties: [
                 "estate_id": uuidSchema(),
                 "now": stringSchema(),
-                "associates": enumSchema(["off", "all"]),
+                // Bespoke schema: enum + declared default + per-value description.
+                // Not using enumSchema() because that helper is shared and has no
+                // default or description fields; adding them there would alter every
+                // caller. moot_help renders inputSchema verbatim so this IS the help text.
+                "associates": .object([
+                    "type": .string("string"),
+                    "enum": .array([.string("off"), .string("all"), .string("recent")]),
+                    "default": .string("recent"),
+                    "description": .string(
+                        "Association sweep mode. " +
+                        "\"recent\" probes the 50 most-recently-filed items (default, fast, mirrors the standing-signal cadence). " +
+                        "\"all\" runs a full-estate pass (high coverage, slower). " +
+                        "\"off\" skips the step entirely."
+                    ),
+                ]),
             ],
             includeEmptyRequired: true,
             dataSchema: dreamDataSchema()

@@ -47,7 +47,18 @@ impl V2InvalidArgument {
         });
         let object = value.as_object_mut().expect("fixed object literal");
         if let Some(allowed) = &self.allowed {
-            object.insert("allowed".to_owned(), json!(allowed));
+            // Sort before serialising so the emission order is deterministic and
+            // matches Swift's counterpart (AriaV2InvalidArgument.jsonRPCError, which
+            // calls [String].sorted()). Swift compares Unicode scalars; Rust
+            // Vec<String>::sort() compares UTF-8 bytes. Every shipped `allowed` value
+            // is ASCII (composition names may include '+' and '-', and bm25 carries
+            // digits — the set is ASCII but not limited to letters and underscores),
+            // so the two orderings are identical — a client reading allowed[0] gets
+            // the same
+            // value regardless of which port answered.
+            let mut sorted = allowed.clone();
+            sorted.sort();
+            object.insert("allowed".to_owned(), json!(sorted));
         }
         if let Some(correction) = &self.correction {
             object.insert("correction".to_owned(), json!(correction));
