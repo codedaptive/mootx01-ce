@@ -94,7 +94,7 @@ pub const KIT_ID: &str = "LocusKit";
 pub const SCHEMA_VERSION: i32 = 20;
 
 /// The lowest stored schema version `mootx01 upgrade` brings to
-/// `SCHEMA_VERSION` in one hop: the version CE 1.0.35 and 1.0.37 shipped.
+/// `SCHEMA_VERSION` in two hops, v10 → v19 → v20: the version CE 1.0.35 and 1.0.37 shipped.
 /// Mirrors Swift `LocusKitSchema.supportedUpgradeFloor`.
 pub const SUPPORTED_UPGRADE_FLOOR: i32 = 10;
 
@@ -1435,7 +1435,8 @@ mod tests {
     /// containment tree. `erasure_ledger` is the NT-L4 append-only
     /// erasure record. `snapshot_registry` and `snapshot_attestations`
     /// are the NT-L3 Part 3 snapshot tables. `encoder_models` is the v19
-    /// span-encoder registry. 18 tables total.
+    /// span-encoder registry. `fact_extractor_models` is the v20
+    /// fact-extractor registry. 19 tables total.
     #[test]
     fn table_count_and_order() {
         let names: Vec<String> = schema().tables.iter().map(|t| t.name.clone()).collect();
