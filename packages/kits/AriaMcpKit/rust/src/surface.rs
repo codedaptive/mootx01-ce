@@ -3071,6 +3071,7 @@ mod tests {
                 relationship: "supports".to_owned(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             }),
             &registry,
@@ -3714,7 +3715,7 @@ mod tests {
     /// restricted endpoint):
     ///
     ///   assertion `left == right` failed:
-    ///     left: false
+    ///     left: Bool(false)
     ///    right: true
     ///   link_gate_blocks_restricted_from_id: expected isError=true for
     ///   link to a .Restricted endpoint; got: {"isError":false,...}
@@ -3771,6 +3772,13 @@ mod tests {
         let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
         let ledger = SurfacedRecallLedger::new();
 
+        // Count tunnels before the refused link attempt.
+        let before = {
+            let coord = registry.coord.lock().expect("coord lock before");
+            let estate = coord.estate_for(&handle).expect("estate_for before");
+            estate.all_tunnels().expect("all_tunnels before").len()
+        };
+
         // Ceiling is .Elevated (no grant). The .Restricted from_id must refuse.
         let response = execute_memory_mutation(
             MemoryMutationRequest::Link(V2LinkMemoriesRequest {
@@ -3779,6 +3787,7 @@ mod tests {
                 relationship: "relates".to_string(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             }),
             &registry,
@@ -3794,6 +3803,143 @@ mod tests {
             "link_gate_blocks_restricted_from_id: expected isError=true for \
              link to a .Restricted endpoint; got: {response}"
         );
+        assert_eq!(
+            response["structuredContent"]["error"]["code"], "memory_not_found",
+            "link_gate_blocks_restricted_from_id: error code must be memory_not_found; got: {}",
+            response["structuredContent"]["error"]["code"]
+        );
+        let after = {
+            let coord = registry.coord.lock().expect("coord lock after");
+            let estate = coord.estate_for(&handle).expect("estate_for after");
+            estate.all_tunnels().expect("all_tunnels after").len()
+        };
+        assert_eq!(
+            after, before,
+            "link_gate_blocks_restricted_from_id: tunnel count changed after refused link \
+             (before={before}, after={after})"
+        );
+    }
+
+    /// Gate: `moot_link_memories proposed=true` refuses when the `from_id` endpoint
+    /// sits above the caller's sensitivity ceiling.
+    ///
+    /// This is the `proposed: true` twin of `link_gate_blocks_restricted_from_id`.
+    /// Until proposed links were wired, this code path was unreachable and the gate
+    /// went untested under `proposed=true`.
+    ///
+    /// Why this test is load-bearing: the gate's correctness rests on
+    /// `resolve_memory` being called before `self.lower.link`.  If someone later
+    /// reorders those calls or adds a lifecycle branch that bypasses the gate for
+    /// the proposed path, the `proposed: false` test stays green and only this test
+    /// catches it.  Code ordering is not a gate.
+    ///
+    /// Pre-fix failure (verbatim — occurs when the gate's `resolve_memory` call
+    /// is removed, leaving `proposed=true` links unblocked):
+    ///
+    ///   assertion `left == right` failed:
+    ///     left: Bool(false)
+    ///    right: true
+    ///   link_gate_blocks_restricted_from_id_when_proposed: expected isError=true
+    ///   for proposed link from a .Restricted endpoint; got: {"isError":false,...}
+    ///
+    /// Post-fix: `resolve_memory` is called before the proposed/active branch, so
+    /// the .Restricted `from_id` is never admitted regardless of the proposed flag.
+    #[test]
+    fn link_gate_blocks_restricted_from_id_when_proposed() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2LinkMemoriesRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let (restricted_id, normal_id): (Uuid, Uuid) = {
+            let coord = registry.coord.lock().expect("coord lock");
+
+            // Seed a .Restricted source — above the default .Elevated ceiling.
+            let mut rf = CaptureFrame::new(
+                "restricted endpoint — proposed link from_id must also be blocked",
+                CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("slg-p-r"), "test", "test-embed-v1",
+            );
+            rf.sensitivity = AdjectiveSensitivity::Restricted;
+            let r = coord.capture(&handle, rf, NOW).expect("capture restricted");
+
+            let n = coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "normal endpoint — within ceiling (proposed target)",
+                    CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("slg-p-n"), "test", "test-embed-v1",
+                ),
+                NOW + 1,
+            ).expect("capture normal");
+
+            (
+                Uuid::parse_str(&r.id).expect("parse restricted uuid"),
+                Uuid::parse_str(&n.id).expect("parse normal uuid"),
+            )
+        };
+
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        // Count tunnels before the refused link attempt.
+        let before = {
+            let coord = registry.coord.lock().expect("coord lock before");
+            let estate = coord.estate_for(&handle).expect("estate_for before");
+            estate.all_tunnels().expect("all_tunnels before").len()
+        };
+
+        // Ceiling is .Elevated (no grant). proposed=true must not bypass the gate.
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id: restricted_id,
+                to_id: normal_id,
+                relationship: "relates".to_string(),
+                confidence: None,
+                evidence: None,
+                proposed: true,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 2,
+            EstatePosture::Live,
+            &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("execute must not error at the transport layer");
+
+        assert_eq!(
+            response["isError"], true,
+            "link_gate_blocks_restricted_from_id_when_proposed: expected isError=true \
+             for proposed link from a .Restricted endpoint; got: {response}"
+        );
+        assert_eq!(
+            response["structuredContent"]["error"]["code"], "memory_not_found",
+            "link_gate_blocks_restricted_from_id_when_proposed: error code must be \
+             memory_not_found; got: {}",
+            response["structuredContent"]["error"]["code"]
+        );
+        let after = {
+            let coord = registry.coord.lock().expect("coord lock after");
+            let estate = coord.estate_for(&handle).expect("estate_for after");
+            estate.all_tunnels().expect("all_tunnels after").len()
+        };
+        assert_eq!(
+            after, before,
+            "link_gate_blocks_restricted_from_id_when_proposed: tunnel count changed after \
+             refused link (before={before}, after={after})"
+        );
     }
 
     /// Gate: `moot_review_tunnel` refuses when the tunnel's own sensitivity
@@ -3804,7 +3950,7 @@ mod tests {
     /// to CoordinatorMemoryMutationLower::review, the endorse succeeded):
     ///
     ///   assertion `left == right` failed:
-    ///     left: false
+    ///     left: Bool(false)
     ///    right: true
     ///   review_gate_blocks_above_ceiling_tunnel: expected isError=true for
     ///   endorse of a .Restricted tunnel; got: {"isError":false,...}
@@ -3907,7 +4053,7 @@ mod tests {
     /// Pre-fix failure (verbatim — occurs when the second resolve_memory call is removed):
     ///
     ///   assertion `left == right` failed:
-    ///     left: false
+    ///     left: Bool(false)
     ///    right: true
     ///   link_gate_blocks_restricted_to_id: expected isError=true for
     ///   link to a .Restricted to_id; got: {"isError":false,...}
@@ -3971,6 +4117,7 @@ mod tests {
                 relationship: "relates".to_string(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             }),
             &registry,
@@ -4054,6 +4201,7 @@ mod tests {
                 relationship: "relates".to_string(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             }),
             &registry, &meta, NOW + 2,
@@ -4067,6 +4215,7 @@ mod tests {
                 relationship: "relates".to_string(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             }),
             &registry, &meta, NOW + 2,
@@ -4151,6 +4300,7 @@ mod tests {
                 relationship: "relates".to_string(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             }),
             &registry, &meta, NOW + 2,
@@ -4196,7 +4346,7 @@ mod tests {
     /// `CoordinatorMemoryMutationLower::review` is deleted:
     ///
     ///   assertion `left == right` failed:
-    ///     left: false
+    ///     left: Bool(false)
     ///    right: true
     ///   review_gate_blocks_above_ceiling_far_endpoint: expected isError=true for
     ///   review of a tunnel with a .Restricted far endpoint; got: {"isError":false,...}
@@ -4670,6 +4820,7 @@ mod tests {
                 relationship: "relates".to_string(),
                 confidence: None,
                 evidence: None,
+                proposed: false,
                 estate_id: None,
             }),
             &registry, &meta, NOW + 2,
@@ -4693,6 +4844,153 @@ mod tests {
             after, before + 1,
             "link_succeeds_between_two_readable_rows: expected exactly one new tunnel \
              (before={before}, after={after})"
+        );
+    }
+
+    /// Gate: `moot_review_tunnel` reject with `reviewed_by != "user"` routes to the
+    /// model-objection branch (`object_to_tunnel`) rather than the user-verdict branch
+    /// (`respond_to_tunnel`).
+    ///
+    /// When a standing model endorsement exists, `object_to_tunnel` returns
+    /// `withdrawn=false, contested=true` — keeping the tunnel proposed so a human
+    /// sees the dispute, rather than withdrawing it permanently as the user branch
+    /// would.  This test creates that scenario: model-1 endorses first, then
+    /// model-2 objects; since model-1's endorsement stands, the tunnel is not
+    /// withdrawn.
+    ///
+    /// Entry point: execute_memory_mutation → V2MemoryMutationService → lower.review.
+    ///
+    /// Pre-fix failure (verbatim — occurs when the `reviewed_by != USER_REVIEWER`
+    /// guard is removed, routing all Reject decisions through respond_to_tunnel,
+    /// which withdraws permanently regardless of standing endorsements):
+    ///
+    ///   assertion `left == right` failed:
+    ///     left: Bool(true)
+    ///    right: Bool(false)
+    ///   model_reject_routes_to_object_to_tunnel: withdrawn must be false when a
+    ///   model endorsement stands; got: ...
+    ///
+    /// Post-fix: the guard routes model reviewers to object_to_tunnel, which
+    /// preserves standing endorsements and marks the tunnel contested.
+    #[test]
+    fn model_reject_routes_to_object_to_tunnel() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2LinkMemoriesRequest, V2ReviewTunnelRequest, V2TunnelDecision};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let (from_id, to_id): (Uuid, Uuid) = {
+            let coord = registry.coord.lock().expect("coord lock");
+
+            let f = coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "model-reject source",
+                    CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("mr-f"), "test", "test-embed-v1",
+                ),
+                NOW,
+            ).expect("capture from");
+
+            let t = coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "model-reject target",
+                    CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("mr-t"), "test", "test-embed-v1",
+                ),
+                NOW + 1,
+            ).expect("capture to");
+
+            (
+                Uuid::parse_str(&f.id).expect("parse from uuid"),
+                Uuid::parse_str(&t.id).expect("parse to uuid"),
+            )
+        };
+
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+        let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
+
+        // File proposed link.
+        let link_response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id,
+                to_id,
+                relationship: "relates".to_string(),
+                confidence: None,
+                evidence: None,
+                proposed: true,
+                estate_id: None,
+            }),
+            &registry, &meta, NOW + 2,
+            EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("link must not error at transport layer");
+        assert_eq!(link_response["isError"], false,
+            "proposed link must succeed; got: {link_response}");
+
+        let tunnel_id_str = link_response["structuredContent"]["data"]["tunnel_id"]
+            .as_str()
+            .expect("link response must carry tunnel_id")
+            .to_owned();
+        let tunnel_id = Uuid::parse_str(&tunnel_id_str).expect("parse tunnel_id");
+
+        // model-1 endorses the proposed tunnel. This creates a standing endorsement
+        // that object_to_tunnel will see when model-2 objects.
+        let endorse = execute_memory_mutation(
+            MemoryMutationRequest::Review(V2ReviewTunnelRequest {
+                tunnel_id,
+                decision: V2TunnelDecision::Endorse,
+                note: None,
+                reviewed_by: "model-1".to_string(),
+                estate_id: None,
+            }),
+            &registry, &meta, NOW + 3,
+            EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("endorse must not error at transport layer");
+        assert_eq!(endorse["isError"], false,
+            "model-1 endorse must succeed; got: {endorse}");
+
+        // model-2 objects (reject with reviewed_by != "user") → model-objection branch.
+        // model-1's endorsement stands, so object_to_tunnel marks contested rather
+        // than withdrawing permanently.
+        let reject = execute_memory_mutation(
+            MemoryMutationRequest::Review(V2ReviewTunnelRequest {
+                tunnel_id,
+                decision: V2TunnelDecision::Reject,
+                note: None,
+                reviewed_by: "model-2".to_string(),
+                estate_id: None,
+            }),
+            &registry, &meta, NOW + 4,
+            EstatePosture::Live, &ledger, &grant_ledger,
+        ).expect("model reject must not error at transport layer");
+        assert_eq!(reject["isError"], false,
+            "model reject must succeed (not refuse); got: {reject}");
+
+        // object_to_tunnel with standing model-1 endorsement → withdrawn=false, contested=true.
+        // respond_to_tunnel (the neutered path) would return withdrawn=true, contested=false.
+        assert_eq!(
+            reject["structuredContent"]["data"]["withdrawn"], serde_json::json!(false),
+            "model_reject_routes_to_object_to_tunnel: withdrawn must be false when a \
+             model endorsement stands; got: {:?}",
+            reject["structuredContent"]["data"]["withdrawn"]
+        );
+        assert_eq!(
+            reject["structuredContent"]["data"]["contested"], serde_json::json!(true),
+            "model_reject_routes_to_object_to_tunnel: contested must be true when a \
+             model endorsement stands; got: {:?}",
+            reject["structuredContent"]["data"]["contested"]
         );
     }
 }
