@@ -3,7 +3,7 @@
   "schema_version": "1.0",
   "source_baseline": {
     "blast_radius_commit": "f87dabb60",
-    "contract": "docs_internal/specs/ARIA_V2_CONTRACT.md",
+    "contract": "ARIA_V2_CONTRACT.md",
     "swift_registry": "packages/kits/AriaMcpKit/Sources/AriaMCP/ToolProjection.swift",
     "rust_registry": "packages/kits/AriaMcpKit/rust/src/tool_list.rs"
   },
