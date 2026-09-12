@@ -556,14 +556,9 @@ fn execute_memory_mutation(
         CoordinatorMemoryMutationLower::new(Arc::clone(&registry.default.coord)),
     );
     // The target id is captured here, before the request is consumed by the
-    // match below, so the reward-trace write can fire AFTER the gate succeeds.
-    // A caller who was never entitled to name a restricted row must not receive
-    // a reward-trace write even if they hold its UUID.  The prior ordering —
-    // "BEFORE the mutation" — held for rows the caller could read whose write
-    // then failed for an unrelated reason; it does not hold when the sensitivity
-    // gate is itself the failure.  Erase is excluded — v1 did not reward a row
-    // it was destroying — as are link and review, which name a tunnel rather
-    // than a surfaced memory.
+    // match below.  Erase is excluded — v1 did not reward a row it was
+    // destroying — as are link and review, which name a tunnel rather than a
+    // surfaced memory.
     let dereference_id: Option<Uuid> = match &request {
         MemoryMutationRequest::Update(request) => Some(request.memory_id),
         MemoryMutationRequest::Withdraw(request) => Some(request.memory_id),
