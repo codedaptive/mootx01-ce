@@ -57,7 +57,8 @@ public struct AriaV2UpdateMemoryRequest: Sendable {
             throw AriaV2InvalidArgument(
                 path: "mutation",
                 message: "Unsupported mutation '\(mutation)'.",
-                allowed: ["accept", "confirm", "contest", "correct_exportability", "correct_sensitivity", "reject", "resolve", "revive", "set_subject", "supersede"]
+                allowed: ["accept", "confirm", "contest", "correct_exportability", "correct_sensitivity", "reject", "resolve", "revive", "set_subject", "supersede"],
+                correction: "use one of the documented mutation values"
             ).jsonRPCError
         }
     }
@@ -188,7 +189,8 @@ public struct AriaV2LinkMemoriesRequest: Sendable {
             throw AriaV2InvalidArgument(
                 path: "relationship",
                 message: "Unsupported relationship '\(relationship)'.",
-                allowed: ["blocks", "contradicts", "covers", "derives_from", "elaborates", "exemplifies", "extends", "precedes", "references", "refines", "relates", "responds_to", "supersedes", "supports", "validates"]
+                allowed: ["blocks", "contradicts", "covers", "derives_from", "elaborates", "exemplifies", "extends", "precedes", "references", "refines", "relates", "responds_to", "supersedes", "supports", "validates"],
+                correction: "use one of the documented relationship values"
             ).jsonRPCError
         }
     }
@@ -239,7 +241,9 @@ public struct AriaV2ReviewTunnelRequest: Sendable {
                 path: "reviewed_by",
                 message: "Edge activation is user-only: decision 'accept' requires reviewed_by "
                     + "'user'. Model reviewers use 'endorse' or 'reject'.",
-                allowed: [Self.userReviewer]).jsonRPCError
+                allowed: [Self.userReviewer],
+                correction: "set reviewed_by to 'user' to activate this edge"
+            ).jsonRPCError
         }
     }
 
@@ -664,9 +668,17 @@ fileprivate extension AriaV2UpdateMemoryRequest {
         return result
     }
 
-    static func enumValue<T: RawRepresentable>(_ value: String, path: String, type: T.Type) throws -> T where T.RawValue == String {
+    static func enumValue<T: RawRepresentable & CaseIterable>(_ value: String, path: String, type: T.Type) throws -> T where T.RawValue == String {
         guard let result = T(rawValue: value) else {
-            throw AriaV2InvalidArgument(path: path, message: "Unsupported \(path) '\(value)'.").jsonRPCError
+            // Derive the allowed list from all declared cases so the refusal
+            // carries both fields required by the v2 refusal shape rule.
+            // jsonRPCError sorts allowed at emission; no sort needed here.
+            throw AriaV2InvalidArgument(
+                path: path,
+                message: "Unsupported \(path) '\(value)'.",
+                allowed: T.allCases.map(\.rawValue),
+                correction: "use a documented \(path) value"
+            ).jsonRPCError
         }
         return result
     }

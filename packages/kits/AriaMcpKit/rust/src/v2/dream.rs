@@ -43,19 +43,19 @@ impl V2DreamRequest {
         } else {
             None
         };
-        // Normalise first, then validate. "OFF" and "ALL" are accepted alongside
-        // their lowercase forms; any other value is refused with -32602 before
-        // the lower engine is reached, so no sweep runs on an unknown mode.
+        // Normalise first, then validate. "OFF", "ALL", and "RECENT" are accepted
+        // alongside their lowercase forms; any other value is refused with -32602
+        // before the lower engine is reached, so no sweep runs on an unknown mode.
         let associates = if let Some(raw) = optional_string(object, "associates")? {
             let normalised = raw.to_lowercase();
-            if normalised != "off" && normalised != "all" {
+            if normalised != "off" && normalised != "all" && normalised != "recent" {
                 return Err(super::codec::V2InvalidArgument::new(
                     "associates",
-                    "Argument 'associates' must be \"off\" or \"all\".",
+                    "Argument 'associates' must be \"off\", \"all\", or \"recent\".",
                 )
-                .allowed(["off".to_owned(), "all".to_owned()])
+                .allowed(["off".to_owned(), "all".to_owned(), "recent".to_owned()])
                 .correction(
-                    "Use \"off\" to skip the association sweep or \"all\" for a full-estate pass.",
+                    "Use \"recent\" (default) for the 50-item cadence, \"all\" for a full-estate pass, or \"off\" to skip.",
                 ));
             }
             Some(normalised)
@@ -244,9 +244,20 @@ impl V2DreamLower for V2GeniusLocusDreamLower {
             .map_err(|_| ())?;
 
         // Resolve association sweep probe limit from the `associates` mode:
-        //   "all"  → full-estate pass, bounded by DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE
-        //   "off"  → skip the sweep entirely; associations fields are absent
-        //   None   → default cadence (DEFAULT_PROBE_LIMIT, 50 probes)
+        //   "all"    → full-estate pass, bounded by DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE
+        //   "off"    → skip the sweep entirely; associations fields are absent
+        //   "recent" → same path as None (DEFAULT_PROBE_LIMIT, 50 probes); named default
+        //   None     → same path as "recent"; absent value takes the default cadence
+        // "recent" and None are deliberately identical: the decoder stores "recent" as
+        // Some("recent"), but neither matches Some("off") or Some("all"), so both fall
+        // through to the else-branch. Test
+        // dream_associates_absent_and_recent_are_identical in dispatch_tests.rs proves
+        // this through a single-estate three-pass design: a first pass with associates
+        // absent settles the estate, a second pass with "recent" probes the same default
+        // window and adds zero new associations, a third pass with "all" reaches past
+        // the default window and adds more. A probe-limit divergence between None and
+        // "recent" would cause the second pass to reach drawers the first never probed,
+        // add more than zero, and fail the gate.
         let associates_mode = request.associates.as_deref().map(str::to_lowercase);
         let (associations_written, associations_non_unique_probes) =
             if associates_mode.as_deref() == Some("off") {
