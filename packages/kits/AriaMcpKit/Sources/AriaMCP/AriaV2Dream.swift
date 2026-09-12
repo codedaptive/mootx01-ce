@@ -41,17 +41,17 @@ public enum AriaV2Dream {
             } else {
                 now = nil
             }
-            // Normalise first, then validate. "OFF" and "ALL" are accepted alongside
-            // their lowercase forms; any other value is refused with -32602 before
-            // the lower engine is reached, so no sweep runs on an unknown mode.
+            // Normalise first, then validate. "OFF", "ALL", and "RECENT" are accepted
+            // alongside their lowercase forms; any other value is refused with -32602
+            // before the lower engine is reached, so no sweep runs on an unknown mode.
             if let rawAssociates = try decoder.optionalString("associates") {
                 let normalised = rawAssociates.lowercased()
-                guard normalised == "off" || normalised == "all" else {
+                guard normalised == "off" || normalised == "all" || normalised == "recent" else {
                     throw AriaV2InvalidArgument(
                         path: "associates",
-                        message: "Argument 'associates' must be \"off\" or \"all\".",
-                        allowed: ["off", "all"],
-                        correction: "Use \"off\" to skip the association sweep or \"all\" for a full-estate pass."
+                        message: "Argument 'associates' must be \"off\", \"all\", or \"recent\".",
+                        allowed: ["off", "all", "recent"],
+                        correction: "Use \"recent\" (default) for the 50-item cadence, \"all\" for a full-estate pass, or \"off\" to skip."
                     ).jsonRPCError
                 }
                 associates = normalised
@@ -218,9 +218,22 @@ public enum AriaV2Dream {
                     in: admission.handle, probeLimit: 500, now: admission.now)
 
                 // Resolve association sweep probe limit from the `associates` mode:
-                //   "all"  → full-estate pass, bounded by allModeMaxProbe (10_000)
-                //   "off"  → skip the sweep entirely; associations fields are absent
-                //   nil    → default cadence (defaultProbeLimit, 50 probes)
+                //   "all"    → full-estate pass, bounded by allModeMaxProbe (10_000)
+                //   "off"    → skip the sweep entirely; associations fields are absent
+                //   "recent" → same path as nil (defaultProbeLimit, 50 probes); named default
+                //   nil      → same path as "recent"; absent value takes the default cadence
+                // "recent" and nil are deliberately identical: the decoder admits "recent" and
+                // stores it as "recent", but the runner's else-branch applies in both cases
+                // because neither is "off" and neither is "all". Test
+                // dreamAssociatesAbsentAndRecentAreIdentical in
+                // DreamAssociatesDispatchTests.swift proves this through a
+                // single-estate three-pass design: a first pass with associates absent
+                // settles the estate, a second pass with "recent" probes the same
+                // default window and adds zero new associations, a third pass with
+                // "all" reaches past the default window and adds more. A probe-limit
+                // divergence between the absent path and "recent" would cause the
+                // second pass to reach drawers the first never probed, add more than
+                // zero, and fail the gate.
                 let associatesMode = request.associates?.lowercased()
                 let associationsWritten: Int?
                 let associationsNonUniqueProbes: Int?
