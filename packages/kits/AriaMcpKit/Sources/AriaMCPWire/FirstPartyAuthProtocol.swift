@@ -57,6 +57,11 @@ public enum FirstPartyAuthProtocol {
     /// replay a signed body against a different route.
     public static let requestPath = "/mcp/first-party"
 
+    /// Authenticated control frame that irreversibly narrows the current
+    /// session to exportable recall. It is not an MCP tool and has no
+    /// tools/list projection.
+    public static let restrictRecallToExportableMethod = "mootx01/session/restrict-recall-to-exportable"
+
     /// Handshake step 1: the client presents a nonce and a descriptor digest.
     public static let challengePath = "/mcp/first-party/session/challenge"
 

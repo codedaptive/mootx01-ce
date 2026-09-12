@@ -34,7 +34,7 @@ import Foundation
 import GeniusLocusKit
 import CryptoKit
 @testable import MootCommunityDaemon
-import AriaMCP
+@testable import AriaMCP
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -65,6 +65,34 @@ private struct CaptureScratch {
     }
 
     func remove() { try? FileManager.default.removeItem(at: url) }
+}
+
+/// Coordinator behavior uses the dispatcher's internal verified-request seam.
+/// The real challenge/establish/MAC route is covered by the contract harness,
+/// so this test target never creates a public Community route.
+private func authenticatedCommunityDispatcher(
+    info: ARIA_MCPDispatcher.ServerInfo,
+    handler: any CommunityToolHandler
+) -> ARIA_MCPDispatcher {
+    ARIA_MCPDispatcher(info: info, communityHandler: handler)
+        .withVerifiedFirstPartyRequest(
+            FirstPartyAuthenticatedRequest(
+                sessionIdentifier: Array(repeating: 0xA4, count: FirstPartyAuthProtocol.sessionIdentifierByteCount),
+                sequence: 1,
+                body: Data(),
+                restrictsRecallToExportable: false
+            ),
+            identity: FirstPartyServerIdentity(
+                name: "mootx01-community-test",
+                binaryVersion: "1.1.0",
+                instanceIdentifier: UUID(uuidString: "A4000000-0000-0000-0000-000000000001")!,
+                estateIdentifier: UUID(uuidString: "A4000000-0000-0000-0000-000000000002")!,
+                descriptorGeneration: 1,
+                credentialGeneration: 1,
+                contractRevision: 1,
+                mcpProtocolVersion: "2025-03-26"
+            )
+        )
 }
 
 
@@ -133,7 +161,7 @@ private func makeDispatcher(layoutURL: URL) -> (
         capture: coord
     )
     let info = ARIA_MCPDispatcher.ServerInfo(name: "mootx01", version: "1.1.0")
-    return (ARIA_MCPDispatcher(info: info, communityHandler: handler), coord)
+    return (authenticatedCommunityDispatcher(info: info, handler: handler), coord)
 }
 
 /// Execute a capture tool call through the dispatcher and return structuredContent.

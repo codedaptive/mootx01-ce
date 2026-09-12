@@ -347,6 +347,25 @@ struct FdcReclassifyTests {
         #expect(try await fdcFloor(kit, handle) == nil)
     }
 
+    @Test func quiescedSelectedFDCApplyDoesNotReanchorOrStampFloor() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        let id = try await capture(
+            kit, handle, content: "x += 1", code: "362.4", kind: .code)
+        let floorBefore = try await fdcFloor(kit, handle)
+        try await kit.quiesce(handle)
+        #expect(await kit.mountState(for: handle) == .quiesced)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true), "mode": .string("all")]))
+        #expect(result.objectValue?["isError"] == .bool(true),
+                "a quiesced selected FDC apply must be refused by the typed reanchor verb")
+        #expect(try await storedCode(kit, handle, id: id) == "362.4",
+                "the refused apply must not change the anchor")
+        #expect(try await fdcFloor(kit, handle) == floorBefore,
+                "the refused apply must not stamp the fixed FDC floor")
+    }
+
     @Test func estateStatusDistinguishesMissingAndStaleFDCFloors() async throws {
         let (kit, handle, dispatcher) = try await makeDispatcher()
         let missing = try await dispatcher.dispatch(

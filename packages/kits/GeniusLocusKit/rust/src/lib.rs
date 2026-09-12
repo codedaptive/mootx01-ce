@@ -169,7 +169,7 @@ pub use hydration::{
 };
 // GLK_PROVISION_001: estate provisioning and lifecycle types.
 pub use coordinator::{
-    EstateCoordinator, GeniusLocusKitError, VerbDispatchError,
+    DatasetFilingError, EstateCoordinator, GeniusLocusKitError, VerbDispatchError,
     EstateKind, EstateLifetime, EstateMountState, EstateProvisionParams, SyncMode,
     FederatedRecallResult, FederatedReadRefusalReason,
     SyncEngineEntry, format_sync_state_token,
@@ -203,6 +203,8 @@ pub use locus_kit::container_fingerprint_store::{ContainerFingerprint, RoomLevel
 pub use locus_kit::drawer::Drawer;
 pub use locus_kit::recall_trace_item::RecallTraceItem;
 pub use locus_kit::tunnel::Tunnel;
+pub use locus_kit::frames::TunnelCaptureFrame;
+pub use locus_kit::dataset_handle::DatasetColumnSummary;
 pub use matrix::{
     MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
     MatrixCalibrationRegistry, MatrixCoOccurKey, MatrixFieldCell, MatrixNMF,

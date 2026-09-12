@@ -314,41 +314,22 @@ enum DatasetTools {
         }
 
         let datasetID = UUID()
-        let store = try await kit.datasetStore(for: handle)
-        try await store.createDataset(id: datasetID, schema: schema, indexes: [])
-        do {
-            if !rows.isEmpty { try await store.appendRows(id: datasetID, rows: rows) }
-        } catch {
-            try? await store.dropDataset(id: datasetID)
-            throw error
-        }
-
-        let estate: LocusKit.Estate
-        do {
-            estate = try await kit.estate(for: handle)
-        } catch {
-            try? await store.dropDataset(id: datasetID)
-            throw error
-        }
         let columnSummaries = schema.columns.map {
             DatasetColumnSummary(name: $0.name, dataType: $0.type.rawValue.uppercased())
         }
-        let drawer: Drawer
-        do {
-            drawer = try await estate.captureDatasetHandle(
-                datasetId: datasetID,
-                columns: columnSummaries,
-                rowCount: rows.count,
-                sourceDescription: source,
-                wing: wing,
-                room: location,
-                addedBy: "aria-v2",
-                sensitivity: sensitivity,
-                latticeAnchor: LatticeAnchor.udc("000"))
-        } catch {
-            try? await store.dropDataset(id: datasetID)
-            throw error
-        }
+        let drawer = try await kit.fileDataset(handle, DatasetFilingFrame(
+            datasetID: datasetID,
+            schema: schema,
+            rows: rows,
+            columns: columnSummaries,
+            sourceDescription: source,
+            wing: wing,
+            room: location,
+            addedBy: "aria-v2",
+            sensitivity: sensitivity,
+            udcCode: "000"))
+
+        let store = try await kit.datasetStore(for: handle)
 
         var signatures = "computed"
         do {

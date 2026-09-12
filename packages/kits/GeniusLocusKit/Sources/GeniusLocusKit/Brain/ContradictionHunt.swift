@@ -252,7 +252,7 @@ public extension GeniusLocusKit {
                     originClass: .derived,
                     lifecycle: .proposed
                 )
-                let tunnel = try await estate.capture(frame)
+                let tunnel = try await captureTunnel(handle, frame)
                 settledPairs.insert(Self.pairKey(a.id, b.id))
                 proposed.append(ProposedContradiction(
                     tunnelID: tunnel.id,

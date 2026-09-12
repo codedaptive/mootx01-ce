@@ -110,8 +110,8 @@ struct AriaV2MemoryMutationsTests {
         }
     }
 
-    @Test("direct lower calls produce canonical mutation and link outcomes")
-    func directlyMutatesAndLinks() async throws {
+    @Test("typed mutation service links and reviews through the GLK tunnel boundary")
+    func directlyMutatesLinksAndReviews() async throws {
         let fixture = try await makeFixture()
         let first = try await fixture.estate.capture(frame(content: "first"))
         let second = try await fixture.estate.capture(frame(content: "second"))
@@ -129,6 +129,22 @@ struct AriaV2MemoryMutationsTests {
         #expect(data(link)?["to_id"] == .string(secondID.uuidString.lowercased()))
         #expect(data(link)?["kind"] == .string("contradicts"))
         #expect(data(link)?["tunnel_id"]?.stringValue != nil)
+
+        let proposed = try await fixture.kit.captureTunnel(fixture.handle, TunnelCaptureFrame(
+            sourceWing: "Inbox", sourceRoom: "Inbox",
+            targetWing: "Inbox", targetRoom: "Inbox",
+            label: "reviewable typed service proposal", addedBy: "test",
+            sourceDrawerId: first.id, targetDrawerId: second.id,
+            kind: .contradicts, originClass: .derived, lifecycle: .proposed))
+
+        let review = try await fixture.service.review(arguments: .object([
+            "tunnel_id": .string(proposed.id), "decision": .string("accept"),
+            "note": .string("approved by typed service"),
+        ]))
+        #expect(data(review)?["withdrawn"] == .bool(false), "\(review)")
+        let settled = try #require(try await fixture.estate.getTunnel(id: proposed.id))
+        #expect(settled.lifecycle == .active)
+        #expect(settled.ext == "{\"reviewedBy\":\"user\"}")
     }
 
     @Test("mutation lookup preserves either physical UUID spelling")
@@ -140,7 +156,7 @@ struct AriaV2MemoryMutationsTests {
             memoryID, among: [memoryID.uuidString.lowercased()]) == memoryID.uuidString.lowercased())
     }
 
-    private func makeFixture() async throws -> (estate: Estate, service: AriaV2MemoryMutations) {
+    private func makeFixture() async throws -> (kit: GeniusLocusKit, handle: EstateHandle, estate: Estate, service: AriaV2MemoryMutations) {
         let storage = InMemoryStorage(configuration: .init(estateID: UUID(), backend: .inMemory))
         let kit = GeniusLocusKit()
         let handle = try await kit.open(storage: storage, owner: .init(ownerIdentifier: "mutation-test"))
@@ -148,7 +164,7 @@ struct AriaV2MemoryMutationsTests {
         let context = AriaV2MemoryOperationContext(
             estateID: handle.estateUUID, callerID: "test-reviewer", serverIdentity: "test-server",
             now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        return (estate, .init(kit: kit, handle: handle, context: context))
+        return (kit, handle, estate, .init(kit: kit, handle: handle, context: context))
     }
 
     private func frame(content: String) -> CaptureFrame {

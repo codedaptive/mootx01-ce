@@ -50,12 +50,12 @@
 //   - this target, its trait, its default-trait entry and its test target
 //     (`packages/kits/GeniusLocusKit/Package.swift`),
 //   - the umbrella entry in `GeniusLocusKitMigrations/GLKMigrationCatalog`,
-//   - `apps/Mootx01-App/Sources/MootGateway/LegacyAppEstateStep.swift`, the
-//     whole file, which is the product's only caller of this enum, and
-//   - its one call site, `LegacyAppEstateStep.migrate(into:)` in
-//     `MootBridge.attach(record:)`.
-// `GatewayRuntime` is not a caller. Nothing else in the product knows the old
-// layout existed.
+//   - `GeniusLocusKitMigrations/LegacyAppEstatePreparation.swift`, the shared
+//     pre-open coordination wrapper,
+//   - `apps/Mootx01-App/Sources/MootGateway/LegacyAppEstateStep.swift`, and
+//   - the resident daemon's injected preparation step.
+// `GatewayRuntime` is not a caller. Nothing outside those pre-open owners needs
+// to know the old layout existed.
 
 import Foundation
 import MootProductIdentity

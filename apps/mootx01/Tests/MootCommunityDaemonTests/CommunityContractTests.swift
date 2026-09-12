@@ -20,7 +20,7 @@ import GeniusLocusKit
 import CryptoKit
 @testable import MootCommunityDaemon
 import MootDaemonProvider
-import AriaMCP
+@testable import AriaMCP
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
@@ -61,6 +61,33 @@ private struct Scratch {
 
 /// The A1b test's fixed test UUIDs (not production values).
 private let testInstanceID = UUID(uuidString: "A1B00000-0000-0000-0000-000000000001")!
+
+/// Unit tests exercise the trusted dispatcher branch. The contract harness
+/// exercises the live challenge/establish/MAC transport route.
+private func authenticatedCommunityDispatcher(
+    info: ARIA_MCPDispatcher.ServerInfo,
+    handler: any CommunityToolHandler
+) -> ARIA_MCPDispatcher {
+    ARIA_MCPDispatcher(info: info, communityHandler: handler)
+        .withVerifiedFirstPartyRequest(
+            FirstPartyAuthenticatedRequest(
+                sessionIdentifier: Array(repeating: 0xA1, count: FirstPartyAuthProtocol.sessionIdentifierByteCount),
+                sequence: 1,
+                body: Data(),
+                restrictsRecallToExportable: false
+            ),
+            identity: FirstPartyServerIdentity(
+                name: "mootx01-community-test",
+                binaryVersion: "1.1.0",
+                instanceIdentifier: testInstanceID,
+                estateIdentifier: UUID(uuidString: "A1B00000-0000-0000-0000-000000000002")!,
+                descriptorGeneration: 1,
+                credentialGeneration: 1,
+                contractRevision: 1,
+                mcpProtocolVersion: "2025-03-26"
+            )
+        )
+}
 
 // MARK: - A1b-CT1: Digest honesty
 
@@ -151,7 +178,7 @@ func identityEndpointReturnsLiveEstateID() async throws {
     )
     let handler = CommunityContractDispatch(state: state)
     let info = ARIA_MCPDispatcher.ServerInfo(name: "mootx01", version: "1.1.0")
-    let dispatcher = ARIA_MCPDispatcher(info: info, communityHandler: handler)
+    let dispatcher = authenticatedCommunityDispatcher(info: info, handler: handler)
 
     // Dispatch the identity tool.
     let request = JSONRPCRequest(
@@ -201,7 +228,7 @@ func unknownCommunityMethodFails() async throws {
     )
     let handler = CommunityContractDispatch(state: state)
     let info = ARIA_MCPDispatcher.ServerInfo(name: "mootx01", version: "1.1.0")
-    let dispatcher = ARIA_MCPDispatcher(info: info, communityHandler: handler)
+    let dispatcher = authenticatedCommunityDispatcher(info: info, handler: handler)
 
     let request = JSONRPCRequest(
         id: .integer(2),
@@ -230,7 +257,7 @@ func extraArgsFailClosed() async throws {
     )
     let handler = CommunityContractDispatch(state: state)
     let info = ARIA_MCPDispatcher.ServerInfo(name: "mootx01", version: "1.1.0")
-    let dispatcher = ARIA_MCPDispatcher(info: info, communityHandler: handler)
+    let dispatcher = authenticatedCommunityDispatcher(info: info, handler: handler)
 
     // Inject an unknown field in arguments — fail closed.
     let request = JSONRPCRequest(
