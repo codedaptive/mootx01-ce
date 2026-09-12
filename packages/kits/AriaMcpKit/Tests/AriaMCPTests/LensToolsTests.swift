@@ -1014,16 +1014,23 @@ extension LensToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ks-gate"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Capture a restricted drawer and give it spokes so it becomes a keystone.
-        let restrictedDrawer = try await captureWithSensitivity(
-            kit, handle, content: "secret hub memory", room: "vault",
-            sensitivity: .restricted)
-        let restrictedID = restrictedDrawer.id
+        // Capture the hub with Normal sensitivity and add outgoing tunnels BEFORE
+        // restricting the hub. Tunnels inherit the max endpoint sensitivity at
+        // capture time (LocusKit tunnel sensitivity inheritance): capturing first
+        // keeps the tunnels at Normal so kit.recallTunnels (includingRestricted:
+        // false) includes them in the keystones graph.
+        // If the hub were captured as Restricted first, the tunnels would inherit
+        // Restricted sensitivity and be excluded from the graph, making this gate
+        // vacuous — the assertion body would never execute.
+        let hubID = try await capture(kit, handle, content: "secret hub memory", room: "vault")
         let s1 = try await capture(kit, handle, content: "spoke a", room: "vault")
         let s2 = try await capture(kit, handle, content: "spoke b", room: "vault")
         for spokeID in [s1, s2] {
-            try await addTunnel(kit, handle, wing: "vault", src: restrictedID, tgt: spokeID)
+            try await addTunnel(kit, handle, wing: "vault", src: hubID, tgt: spokeID)
         }
+        // Now restrict the hub. Tunnels retain Normal sensitivity (set at capture time).
+        let estate = try await kit.estate(for: handle)
+        try await estate.mutate(rowID: hubID, kind: .correctSensitivity(.restricted))
 
         let result = try await dispatcher.dispatch(
             name: "moot_lens_keystones",
@@ -1031,19 +1038,25 @@ extension LensToolsTests {
 
         let body = try data(result)
         let keystones = try #require(body["keystones"]?.arrayValue)
-        // The restricted hub may or may not appear in keystones (depends on the graph).
-        // If it appears, it must carry ONLY id and centrality — no dense fields.
-        for keystone in keystones {
-            let obj = try #require(keystone.objectValue)
-            if obj["id"]?.stringValue == restrictedID.lowercased() {
-                #expect(obj["subject"] == nil,
-                    "restricted keystone must not expose subject")
-                #expect(obj["bestSpan"] == nil,
-                    "restricted keystone must not expose bestSpan")
-                #expect(obj["eventTime"] == nil,
-                    "restricted keystone must not expose eventTime")
-            }
+
+        // The restricted hub is the only connected node (two outgoing Normal tunnels);
+        // it MUST appear in keystones. It must carry id and centrality but NO dense
+        // fields (indistinguishability rule).
+        let hubRow = keystones.first {
+            $0.objectValue?["id"]?.stringValue == hubID.lowercased()
         }
+        let obj = try #require(hubRow?.objectValue,
+            "restricted hub must appear in keystones after stale-edge fix")
+        #expect(obj["subject"] == nil,
+            "restricted keystone must not expose subject")
+        #expect(obj["bestSpan"] == nil,
+            "restricted keystone must not expose bestSpan")
+        #expect(obj["eventTime"] == nil,
+            "restricted keystone must not expose eventTime")
+        #expect(obj["id"] != nil,
+            "restricted keystone must carry id")
+        #expect(obj["centrality"] != nil,
+            "restricted keystone must carry centrality")
     }
 
     /// Sensitivity gate: a restricted drawer in rankedIDs yields id only,
