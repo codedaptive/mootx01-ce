@@ -112,6 +112,25 @@ impl V2UpdateMutation {
             Self::CorrectExportability(value) => MutationKind::CorrectExportability(*value),
         }
     }
+
+    /// Returns the wire-format mutation name matching the string that
+    /// decode_update_mutation accepts.  Used to populate the moot_update_memory
+    /// response payload so the emitted JSON matches the declared output schema
+    /// (`memory_id` + `mutation`).
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Confirm => "confirm",
+            Self::Reject => "reject",
+            Self::Contest => "contest",
+            Self::Resolve => "resolve",
+            Self::Supersede => "supersede",
+            Self::Revive => "revive",
+            Self::Accept => "accept",
+            Self::SetSubject(_) => "set_subject",
+            Self::CorrectSensitivity(_) => "correct_sensitivity",
+            Self::CorrectExportability(_) => "correct_exportability",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +355,35 @@ pub enum V2TunnelReviewReceipt {
     Settled { withdrawn: bool, contested: bool },
 }
 
+/// Per-operation response data required to render the schema-declared output
+/// key set for each non-review mutation.  The surface renderer matches on this
+/// to emit exactly the `properties` declared in `remaining_data_schema`
+/// (catalog.rs), and nothing else.  Review operations use `tunnel_review`
+/// instead of this enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V2MutationResponsePayload {
+    /// moot_withdraw_memory: schema declares only `memory_id`.
+    Withdraw,
+    /// moot_erase_memory: schema declares `memory_id`, `outcome`, and
+    /// `refused_sibling_memory_ids`.  `outcome` and `refused_sibling_ids`
+    /// live in `V2MemoryMutationResult` directly; this variant carries no
+    /// extra fields.
+    Erase,
+    /// moot_confirm_memory: schema declares `memory_id` and `mutation` (the
+    /// constant string `"confirm"`).
+    Confirm,
+    /// moot_move_memory: schema declares `memory_id` and `placement` with
+    /// `wing` and `room` sub-keys.
+    Move { wing: String, room: String },
+    /// moot_link_memories: schema declares `tunnel_id`, `from_id`, `to_id`,
+    /// `kind`, and `lifecycle`.  `tunnel_id` lives in
+    /// `V2MemoryMutationResult`; the remaining four live here.
+    Link { from_id: Uuid, to_id: Uuid, kind: String, lifecycle: String },
+    /// moot_update_memory: schema declares `memory_id` and `mutation` (the
+    /// wire-format mutation name string, e.g. `"reject"`, `"set_subject"`).
+    Update { mutation: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2MemoryMutationResult {
     pub operation: V2MemoryMutationOperation,
@@ -349,6 +397,10 @@ pub struct V2MemoryMutationResult {
     /// boundary so callers do not need to normalize. Non-erase operations always
     /// carry an empty vec.
     pub refused_sibling_ids: Vec<String>,
+    /// Per-operation response payload for the schema-declared output key set.
+    /// Set by every non-review service method.  Review operations populate
+    /// `tunnel_review` instead.
+    pub payload: Option<V2MutationResponsePayload>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,12 +428,20 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     pub fn update(&self, request: V2UpdateMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::UpdateMemory, request.estate_id)?;
         self.lower.mutate(&admitted, request.memory_id, &request.mutation, request.note.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
-        self.finish(admitted, V2MemoryMutationOperation::UpdateMemory, V2MemoryMutationOutcome::Updated, Some(request.memory_id), None)
+        // Capture the wire name before finish() so the payload carries the mutation
+        // string that the declared output schema requires (`memory_id` + `mutation`).
+        let mutation_wire = request.mutation.wire_name().to_owned();
+        let mut result = self.finish(admitted, V2MemoryMutationOperation::UpdateMemory, V2MemoryMutationOutcome::Updated, Some(request.memory_id), None)?;
+        result.payload = Some(V2MutationResponsePayload::Update { mutation: mutation_wire });
+        Ok(result)
     }
     pub fn withdraw(&self, request: V2WithdrawMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::WithdrawMemory, request.estate_id)?;
         self.lower.withdraw(&admitted, request.memory_id, request.reason.as_deref()).map_err(|_| V2MemoryMutationError::Unavailable)?;
-        self.finish(admitted, V2MemoryMutationOperation::WithdrawMemory, V2MemoryMutationOutcome::Withdrawn, Some(request.memory_id), None)
+        let mut result = self.finish(admitted, V2MemoryMutationOperation::WithdrawMemory, V2MemoryMutationOutcome::Withdrawn, Some(request.memory_id), None)?;
+        // Declared schema: { memory_id }.
+        result.payload = Some(V2MutationResponsePayload::Withdraw);
+        Ok(result)
     }
     pub fn erase(&self, request: V2EraseMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::EraseMemory, request.estate_id)?;
@@ -389,22 +449,47 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
         let outcome = if refused_ids.is_empty() { V2MemoryMutationOutcome::Erased } else { V2MemoryMutationOutcome::ErasedPartially };
         let mut result = self.finish(admitted, V2MemoryMutationOperation::EraseMemory, outcome, Some(request.memory_id), None)?;
         result.refused_sibling_ids = refused_ids;
+        // Declared schema: { memory_id, outcome, refused_sibling_memory_ids }.
+        // outcome and refused_sibling_ids are already on the result; the payload
+        // variant signals the renderer to emit those three keys only.
+        result.payload = Some(V2MutationResponsePayload::Erase);
         Ok(result)
     }
     pub fn confirm(&self, request: V2ConfirmMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::ConfirmMemory, request.estate_id)?;
         self.lower.mutate(&admitted, request.memory_id, &V2UpdateMutation::Confirm, None).map_err(|_| V2MemoryMutationError::Unavailable)?;
-        self.finish(admitted, V2MemoryMutationOperation::ConfirmMemory, V2MemoryMutationOutcome::Confirmed, Some(request.memory_id), None)
+        let mut result = self.finish(admitted, V2MemoryMutationOperation::ConfirmMemory, V2MemoryMutationOutcome::Confirmed, Some(request.memory_id), None)?;
+        // Declared schema: { memory_id, mutation } where mutation is const "confirm".
+        result.payload = Some(V2MutationResponsePayload::Confirm);
+        Ok(result)
     }
     pub fn move_memory(&self, request: V2MoveMemoryRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::MoveMemory, request.estate_id)?;
         self.lower.move_memory(&admitted, request.memory_id, &request.wing, &request.room).map_err(|_| V2MemoryMutationError::Unavailable)?;
-        self.finish(admitted, V2MemoryMutationOperation::MoveMemory, V2MemoryMutationOutcome::Moved, Some(request.memory_id), None)
+        let mut result = self.finish(admitted, V2MemoryMutationOperation::MoveMemory, V2MemoryMutationOutcome::Moved, Some(request.memory_id), None)?;
+        // Declared schema: { memory_id, placement } where placement is { wing, room }.
+        // request.wing and request.room are borrowed by the lower call above but still
+        // owned by request, so they can be moved into the payload here.
+        result.payload = Some(V2MutationResponsePayload::Move { wing: request.wing, room: request.room });
+        Ok(result)
     }
     pub fn link(&self, request: V2LinkMemoriesRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::LinkMemories, request.estate_id)?;
+        // Capture link payload fields before the lower call borrows request.
+        let from_id = request.from_id;
+        let to_id = request.to_id;
+        let kind = request.relationship.clone();
         let tunnel_id = self.lower.link(&admitted, &request).map_err(|_| V2MemoryMutationError::Unavailable)?;
-        self.finish(admitted, V2MemoryMutationOperation::LinkMemories, V2MemoryMutationOutcome::Linked, None, Some(tunnel_id))
+        let mut result = self.finish(admitted, V2MemoryMutationOperation::LinkMemories, V2MemoryMutationOutcome::Linked, None, Some(tunnel_id))?;
+        // Declared schema: { tunnel_id, from_id, to_id, kind, lifecycle }.
+        // The Rust request has no proposed flag; the lower always creates active tunnels.
+        result.payload = Some(V2MutationResponsePayload::Link {
+            from_id,
+            to_id,
+            kind,
+            lifecycle: "active".to_owned(),
+        });
+        Ok(result)
     }
     pub fn review(&self, request: V2ReviewTunnelRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::ReviewTunnel, request.estate_id)?;
@@ -422,8 +507,9 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     fn finish(&self, admission: V2MemoryMutationAdmission, operation: V2MemoryMutationOperation, outcome: V2MemoryMutationOutcome, memory_id: Option<Uuid>, tunnel_id: Option<Uuid>) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         self.authority.revalidate(&admission).map_err(|_| V2MemoryMutationError::OutcomeUnverified(operation))?;
         // refused_sibling_ids is set by the caller for erase operations; all other
-        // operations carry an empty vec.
-        Ok(V2MemoryMutationResult { operation, outcome, memory_id, tunnel_id, tunnel_review: None, refused_sibling_ids: Vec::new() })
+        // operations carry an empty vec.  payload is set by each service method
+        // after finish() returns so each operation carries its schema-declared keys.
+        Ok(V2MemoryMutationResult { operation, outcome, memory_id, tunnel_id, tunnel_review: None, refused_sibling_ids: Vec::new(), payload: None })
     }
 }
 
