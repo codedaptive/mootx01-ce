@@ -23,8 +23,8 @@ import Testing
 //   before any decoder or handler runs. The stub is dark code. The test below pins
 //   the production behavior: -32601 is always thrown.
 //
-// FINDING — moot_recall_distilled ACK gate removed:
-//   The mission brief documents an ACK gate for moot_recall_distilled requiring the
+// NOTE — moot_recall_distilled ACK gate removed:
+//   An earlier draft documented an ACK gate for moot_recall_distilled requiring the
 //   token "recall_distilled/v2". That gate was deleted in COMPOSER-02B. As of
 //   ARIA_MCP_SPEC 2.0.0 §8.6 the operation executes unconditionally without an ACK
 //   argument. No ACK token is supplied here; the error path tests a missing required
@@ -343,7 +343,7 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
 
     // MARK: - moot_recall_distilled
 
-    // FINDING: The mission brief documents an ACK gate requiring "recall_distilled/v2".
+    // NOTE: An earlier draft documented an ACK gate requiring "recall_distilled/v2".
     // That gate was deleted in COMPOSER-02B (see RecipeToolsTests.swift:354 and
     // ARIA_MCP_SPEC 2.0.0 §8.6). The operation dispatches unconditionally. The error
     // path here tests a missing required "query" argument, not an absent ACK token.
@@ -537,7 +537,7 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
         // Gate 3: compact text must NOT say "Erased memory" unqualified.
         // The text lives in content[0].text per AriaV2Envelope.success (the
         // structuredContent envelope carries data, not the compact text).
-        // A partial erasure is an honest partial verdict; the word "Partially" must appear.
+        // A partial erasure is a partial verdict; the word "Partially" must appear.
         let text = result.objectValue?["content"]?
             .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
         #expect(!text.hasPrefix("Erased memory"),
