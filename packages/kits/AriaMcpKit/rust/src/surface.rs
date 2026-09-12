@@ -3053,4 +3053,96 @@ mod tests {
             declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
         );
     }
+
+    /// Gate: moot_update_memory data carries exactly { memory_id, mutation }.
+    ///
+    /// The Update arm in surface.rs emits { memory_id, mutation }, matching
+    /// updateMemoryDataSchema. This is the only mutation whose response shape
+    /// had no key-set test; a regression in the Update arm would go unnoticed
+    /// until a consumer noticed a missing or extra field at runtime.
+    ///
+    /// Pre-fix failure (verbatim, triggered by adding an extra key to the arm):
+    ///   assertion `left == right` failed: moot_update_memory data key set must
+    ///   equal the declared schema properties — got extras {"extra_key"} and missing {}
+    ///     left: {"memory_id", "extra_key", "mutation"}
+    ///    right: {"memory_id", "mutation"}
+    #[test]
+    fn mutation_response_key_set_update_matches_declared_schema() {
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2UpdateMemoryRequest, V2UpdateMutation};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let drawer_id: String = {
+            let coord = registry.coord.lock().expect("coord lock");
+            let d = coord.capture(
+                &handle,
+                CaptureFrame::new("update key-set gate", CaptureChannel::Typed, "default", LatticeAnchor::udc("000"), "test", "test-embed-v1"),
+                NOW,
+            ).expect("capture");
+            d.id.clone()
+        };
+
+        let drawer_uuid = Uuid::parse_str(&drawer_id).expect("uuid");
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Update(V2UpdateMemoryRequest {
+                memory_id: drawer_uuid,
+                // V2UpdateMutation::Confirm maps to MutationKind::Confirm at the lower layer.
+                // Any simple (no-payload) variant works here; the key-set check is on the
+                // response shape, not on the semantic outcome.
+                mutation: V2UpdateMutation::Confirm,
+                note: None,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 100,
+            EstatePosture::Live,
+            &ledger,
+        ).expect("update must succeed");
+
+        // Expected key set from the declared schema (catalog.rs remaining_data_schema).
+        let surface = SelectedSurface::selected(false, true);
+        let declared_keys: std::collections::BTreeSet<String> = surface
+            .catalog()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "moot_update_memory")
+            .unwrap()["outputSchema"]["properties"]["data"]["properties"]
+            .as_object()
+            .expect("data properties must be an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let actual_keys: std::collections::BTreeSet<String> = response["structuredContent"]["data"]
+            .as_object()
+            .expect("data must be a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            actual_keys,
+            declared_keys,
+            "moot_update_memory data key set must equal the declared schema properties — \
+             got extras {:?} and missing {:?}",
+            actual_keys.difference(&declared_keys).collect::<std::collections::BTreeSet<_>>(),
+            declared_keys.difference(&actual_keys).collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
 }
