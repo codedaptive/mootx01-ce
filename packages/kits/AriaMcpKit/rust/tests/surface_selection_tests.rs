@@ -1403,3 +1403,229 @@ fn v2_dream_associates_all_runs_the_sweep_against_the_full_estate_bound() {
     );
 
 }
+
+/// `associates: "all"` probes all items in the estate; the default cadence
+/// probes only the 50 most recent.  With a two-cluster estate — cluster B
+/// (older, 8 items) and cluster A (newer, 52 items) — default mode cannot
+/// reach cluster B because the 50-probe recency window is exhausted by cluster
+/// A alone.  All-mode probes all 60 and writes additional associations across
+/// the cluster boundary, so `allWritten > defaultWritten`.
+///
+/// Mutation gate: if all-mode is changed to use the default 50-probe limit,
+/// both runs probe only cluster A and write the same count, failing
+/// `allWritten > defaultWritten` ✗.
+#[test]
+fn v2_dream_all_mode_reaches_older_items_that_default_mode_skips() {
+    // --- Estate 1: default mode (50-probe cadence) ---
+    let registry_default = EstateRegistry::new_inmemory();
+    let coord_default = Arc::clone(&registry_default.coord);
+    let handle_default = registry_default.default.handle.clone();
+    let dispatcher_default = Dispatcher::new(
+        registry_default,
+        "ARIA_MCP_Rust", "test", "test-serial", Some(Arc::new(MonitoringProbe::enabled())),
+    );
+
+    // Plant cluster B first (older — planted before cluster A so filed_at is
+    // strictly earlier and falls outside the 50-probe recency window).
+    for i in 1..=8_i32 {
+        let r = call(
+            &dispatcher_default,
+            "moot_file_memory",
+            serde_json::json!({
+                "content": format!("quantum error qubit alignment {i} correction"),
+                "subject": format!("quantum error qubit alignment {i} correction"),
+                "location": "test/cluster-b",
+                "impatient": true
+            }),
+        );
+        assert!(r.get("error").is_none(), "cluster-B plant {i} must not error: {r}");
+    }
+
+    // Plant cluster A (newer — 52 items, fills and exceeds the 50-probe window).
+    for i in 1..=52_i32 {
+        let r = call(
+            &dispatcher_default,
+            "moot_file_memory",
+            serde_json::json!({
+                "content": format!("api timeout endpoint {i} seconds response time"),
+                "subject": format!("api timeout endpoint {i} seconds response time"),
+                "location": "test/cluster-a",
+                "impatient": true
+            }),
+        );
+        assert!(r.get("error").is_none(), "cluster-A plant {i} must not error: {r}");
+    }
+
+    let default_result = call(&dispatcher_default, "moot_dream", serde_json::json!({}));
+    assert_eq!(
+        default_result["result"]["isError"], false,
+        "default dream must complete: {default_result}"
+    );
+    let default_written = coord_default
+        .lock()
+        .unwrap()
+        .recall_associations(&handle_default)
+        .expect("recall default associations")
+        .len();
+
+    // --- Estate 2: all mode (10,000-probe ceiling) ---
+    let registry_all = EstateRegistry::new_inmemory();
+    let coord_all = Arc::clone(&registry_all.coord);
+    let handle_all = registry_all.default.handle.clone();
+    let dispatcher_all = Dispatcher::new(
+        registry_all,
+        "ARIA_MCP_Rust", "test", "test-serial", Some(Arc::new(MonitoringProbe::enabled())),
+    );
+
+    // Same two clusters planted in the same order.
+    for i in 1..=8_i32 {
+        let r = call(
+            &dispatcher_all,
+            "moot_file_memory",
+            serde_json::json!({
+                "content": format!("quantum error qubit alignment {i} correction"),
+                "subject": format!("quantum error qubit alignment {i} correction"),
+                "location": "test/cluster-b",
+                "impatient": true
+            }),
+        );
+        assert!(r.get("error").is_none(), "cluster-B(all) plant {i} must not error: {r}");
+    }
+    for i in 1..=52_i32 {
+        let r = call(
+            &dispatcher_all,
+            "moot_file_memory",
+            serde_json::json!({
+                "content": format!("api timeout endpoint {i} seconds response time"),
+                "subject": format!("api timeout endpoint {i} seconds response time"),
+                "location": "test/cluster-a",
+                "impatient": true
+            }),
+        );
+        assert!(r.get("error").is_none(), "cluster-A(all) plant {i} must not error: {r}");
+    }
+
+    let all_result = call(
+        &dispatcher_all,
+        "moot_dream",
+        serde_json::json!({ "associates": "all" }),
+    );
+    assert_eq!(
+        all_result["result"]["isError"], false,
+        "all-mode dream must complete: {all_result}"
+    );
+    let all_written = coord_all
+        .lock()
+        .unwrap()
+        .recall_associations(&handle_all)
+        .expect("recall all-mode associations")
+        .len();
+
+    assert!(
+        all_written > default_written,
+        "all-mode must write more associations than default ({all_written} > {default_written}): \
+         all-mode probes all 60 items including the older cluster-B items that the \
+         50-probe default window cannot reach"
+    );
+}
+
+/// A past `now` within the admission ceiling must be accepted AND used to stamp
+/// associations written during the dream cycle.  This verifies that
+/// `SelectedDreamAuthority::admit` forwards the proposed instant to the
+/// estate's association sweep rather than substituting the wall clock.
+///
+/// Setup: a wired in-memory estate with three similar items planted via
+/// `moot_file_memory impatient:true` (so the VectorStore is populated
+/// synchronously).  The dream runs with `now = "2021-01-01T00:00:00Z"`
+/// (epoch ms 1_609_459_200_000 — five years before wall clock 2026), so
+/// associations are stamped with that date.
+///
+/// Mutation gate: if `SelectedDreamAuthority::admit` ignores the proposed
+/// `now` and uses `self.now_millis` (wall clock) instead, every
+/// `association.filed_at` will be approximately 2026, not 2021, and the
+/// `(filed_at - 1_609_459_200_000).abs() < 60_000` assertion fails ✗.
+#[test]
+fn v2_dream_past_now_stamps_associations_with_admitted_instant() {
+    // Known past instant: 2021-01-01T00:00:00Z = 1_609_459_200_000 ms epoch.
+    // Five years from wall-clock 2026, so the difference is unambiguous.
+    let known_past_ms: i64 = 1_609_459_200_000;
+    let known_past_str = iso8601_utc(known_past_ms);
+
+    // Pre-clone coord + handle before Dispatcher::new consumes the registry.
+    let registry = EstateRegistry::new_inmemory();
+    let coord = Arc::clone(&registry.coord);
+    let handle = registry.default.handle.clone();
+    let dispatcher = Dispatcher::new(
+        registry,
+        "ARIA_MCP_Rust", "test", "test-serial", Some(Arc::new(MonitoringProbe::enabled())),
+    );
+
+    // Plant three similar rows so the association sweep finds proximity pairs.
+    for phrase in [
+        "the api timeout is thirty seconds on all endpoints",
+        "the api timeout is sixty seconds on all endpoints",
+        "the api timeout is ninety seconds on all endpoints",
+    ] {
+        let r = call(
+            &dispatcher,
+            "moot_file_memory",
+            serde_json::json!({
+                "content": phrase,
+                "subject": phrase,
+                "location": "test/notes",
+                "impatient": true
+            }),
+        );
+        assert!(r.get("error").is_none(), "plant must not error: {r}");
+    }
+
+    // Run the dream with the known past timestamp and all-mode to maximise the
+    // chance of associations being written.
+    let result = call(
+        &dispatcher,
+        "moot_dream",
+        serde_json::json!({
+            "now": known_past_str,
+            "associates": "all"
+        }),
+    );
+    assert!(
+        result.get("error").is_none(),
+        "an in-range past now must not raise a transport error: {result}"
+    );
+    assert_eq!(
+        result["result"]["isError"], false,
+        "dream with admitted past now must complete: {result}"
+    );
+
+    // Verify the admitted instant was forwarded to the sweep.
+    let associations = coord
+        .lock()
+        .unwrap()
+        .recall_associations(&handle)
+        .expect("recall associations after past-now dream");
+
+    // If no associations were written, the proximity threshold wasn't met (very
+    // low probability with three near-identical rows, but guard explicitly so
+    // any failure is visible rather than silent).
+    assert!(
+        !associations.is_empty(),
+        "expected at least one association from three similar planted rows; got zero — \
+         the mutation gate cannot be verified"
+    );
+
+    // Every association must be stamped within 60 seconds (60,000 ms) of the
+    // admitted past instant.  A wall-clock stamp (~2026) would be ~5 years away
+    // and fail this assertion.
+    let margin_ms: i64 = 60_000;
+    for assoc in &associations {
+        let diff = (assoc.filed_at - known_past_ms).abs();
+        assert!(
+            diff < margin_ms,
+            "association.filed_at must be close to admitted past ({known_past_str} = {known_past_ms} ms); \
+             got {} ms — diff {} ms > {margin_ms} ms",
+            assoc.filed_at,
+            diff
+        );
+    }
+}
