@@ -199,7 +199,8 @@ impl V2Sensitivity {
             "restricted" => Ok(Self::Restricted),
             "secret" => Ok(Self::Secret),
             _ => Err(V2InvalidArgument::new(path, "must be a supported sensitivity")
-                .allowed(["normal", "elevated", "restricted", "secret"].into_iter().map(str::to_owned))),
+                .allowed(["normal", "elevated", "restricted", "secret"].into_iter().map(str::to_owned))
+                .correction("use a documented sensitivity value")),
         }
     }
 }
@@ -213,7 +214,8 @@ impl V2Exportability {
             "private" => Ok(Self::Private),
             "public" => Ok(Self::Public),
             _ => Err(V2InvalidArgument::new(path, "must be private or public")
-                .allowed(["private", "public"].into_iter().map(str::to_owned))),
+                .allowed(["private", "public"].into_iter().map(str::to_owned))
+                .correction("use a documented exportability value")),
         }
     }
 }
@@ -229,7 +231,8 @@ impl V2ContentKind {
             "image_caption" => Ok(Self::ImageCaption), "fingerprint_only" => Ok(Self::FingerprintOnly),
             _ => Err(V2InvalidArgument::new(path, "must be a supported content kind").allowed(
                 ["prose", "code", "transcript", "list", "structured_json", "image_caption", "fingerprint_only"]
-                    .into_iter().map(str::to_owned))),
+                    .into_iter().map(str::to_owned))
+                .correction("use a documented content kind value")),
         }
     }
 }
