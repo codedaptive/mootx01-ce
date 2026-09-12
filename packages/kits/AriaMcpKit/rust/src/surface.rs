@@ -3704,4 +3704,200 @@ mod tests {
             probe_count
         );
     }
+
+    // -----------------------------------------------------------------------
+    // SENS_WRITE_GATE Unit 2 — moot_link_memories and moot_review_tunnel
+    // gates proven red-then-green.  Both tests drive `execute_memory_mutation`
+    // with a genuine `SensitivityGrantLedger` (no grant = .Elevated ceiling).
+    // -----------------------------------------------------------------------
+
+    /// Gate: `moot_link_memories` refuses when the `from_id` endpoint exceeds
+    /// the caller's sensitivity ceiling.
+    ///
+    /// Pre-fix failure (verbatim — before the two resolve_memory calls were
+    /// added to V2MemoryMutationService::link, the link succeeded against a
+    /// restricted endpoint):
+    ///
+    ///   assertion `left == right` failed:
+    ///     left: false
+    ///    right: true
+    ///   link_gate_blocks_restricted_from_id: expected isError=true for
+    ///   link to a .Restricted endpoint; got: {"isError":false,...}
+    ///
+    /// Post-fix: `resolve_memory` returns `NotFound` for .Restricted rows when
+    /// the ceiling is .Elevated; `execute_memory_mutation` maps that to
+    /// `isError: true`.
+    #[test]
+    fn link_gate_blocks_restricted_from_id() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::CaptureFrame;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2LinkMemoriesRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let (restricted_id, normal_id): (Uuid, Uuid) = {
+            let coord = registry.coord.lock().expect("coord lock");
+
+            // Seed a .Restricted source — above the default .Elevated ceiling.
+            let mut rf = CaptureFrame::new(
+                "restricted endpoint — link from_id must be blocked",
+                CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("slg-r"), "test", "test-embed-v1",
+            );
+            rf.sensitivity = AdjectiveSensitivity::Restricted;
+            let r = coord.capture(&handle, rf, NOW).expect("capture restricted");
+
+            let n = coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "normal endpoint — within ceiling",
+                    CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("slg-n"), "test", "test-embed-v1",
+                ),
+                NOW + 1,
+            ).expect("capture normal");
+
+            (
+                Uuid::parse_str(&r.id).expect("parse restricted uuid"),
+                Uuid::parse_str(&n.id).expect("parse normal uuid"),
+            )
+        };
+
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        // Ceiling is .Elevated (no grant). The .Restricted from_id must refuse.
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Link(V2LinkMemoriesRequest {
+                from_id: restricted_id,
+                to_id: normal_id,
+                relationship: "relates".to_string(),
+                confidence: None,
+                evidence: None,
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 2,
+            EstatePosture::Live,
+            &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("execute must not error at the transport layer");
+
+        assert_eq!(
+            response["isError"], true,
+            "link_gate_blocks_restricted_from_id: expected isError=true for \
+             link to a .Restricted endpoint; got: {response}"
+        );
+    }
+
+    /// Gate: `moot_review_tunnel` refuses when the tunnel's own sensitivity
+    /// (stamped from its endpoints by DrawerStore::add_tunnel) exceeds the
+    /// caller's ceiling.
+    ///
+    /// Pre-fix failure (verbatim — before the two-part tunnel gate was added
+    /// to CoordinatorMemoryMutationLower::review, the endorse succeeded):
+    ///
+    ///   assertion `left == right` failed:
+    ///     left: false
+    ///    right: true
+    ///   review_gate_blocks_above_ceiling_tunnel: expected isError=true for
+    ///   endorse of a .Restricted tunnel; got: {"isError":false,...}
+    ///
+    /// Post-fix: the own-sensitivity check fires before the lower call and
+    /// returns a `mutation_unavailable` error.
+    #[test]
+    fn review_gate_blocks_above_ceiling_tunnel() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::{CaptureFrame, TunnelCaptureFrame};
+        use locus_kit::tunnel_operational::TunnelLifecycle;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::{V2ReviewTunnelRequest, V2TunnelDecision};
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+
+        let tunnel_id: Uuid = {
+            let coord = registry.coord.lock().expect("coord lock");
+
+            // Seed a .Restricted source so the tunnel's stamped sensitivity
+            // is .Restricted (DrawerStore::add_tunnel uses the max endpoint).
+            let mut rf = CaptureFrame::new(
+                "restricted source for review tunnel gate",
+                CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("slg-rs"), "test", "test-embed-v1",
+            );
+            rf.sensitivity = AdjectiveSensitivity::Restricted;
+            let source = coord.capture(&handle, rf, NOW).expect("capture restricted source");
+
+            let target = coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "normal target for review tunnel gate",
+                    CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("slg-rt"), "test", "test-embed-v1",
+                ),
+                NOW + 1,
+            ).expect("capture normal target");
+
+            // Capture the tunnel in .Proposed lifecycle so the lower endorse
+            // call would succeed if the gate were absent. With the gate active
+            // the own-sensitivity check fires before the lower call.
+            let estate = coord.estate_for(&handle).expect("estate_for");
+            let mut frame = TunnelCaptureFrame::new(
+                "slg-wing", "slg-room", "slg-wing", "slg-room",
+                "relates", "test",
+            );
+            frame.source_drawer_id = Some(source.id.clone());
+            frame.target_drawer_id = Some(target.id.clone());
+            frame.lifecycle = TunnelLifecycle::Proposed;
+            let tunnel = estate.capture_tunnel(frame, NOW + 2).expect("capture_tunnel");
+
+            Uuid::parse_str(&tunnel.id).expect("parse tunnel uuid")
+        };
+
+        let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
+        let ledger = SurfacedRecallLedger::new();
+
+        // Ceiling is .Elevated (no grant). The .Restricted tunnel must refuse.
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Review(V2ReviewTunnelRequest {
+                tunnel_id,
+                decision: V2TunnelDecision::Endorse,
+                note: None,
+                reviewed_by: "test-reviewer".to_string(),
+                estate_id: None,
+            }),
+            &registry,
+            &meta,
+            NOW + 3,
+            EstatePosture::Live,
+            &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("execute must not error at the transport layer");
+
+        assert_eq!(
+            response["isError"], true,
+            "review_gate_blocks_above_ceiling_tunnel: expected isError=true for \
+             endorse of a .Restricted tunnel; got: {response}"
+        );
+    }
 }
