@@ -1564,7 +1564,10 @@ public struct HTTPServer: Sendable {
         // taken from the authenticator that just verified the request — never
         // from the dispatcher the caller supplied — so the advertised capability
         // and the enforced authentication cannot disagree.
-        let identified = dispatcher.withFirstPartyIdentity(await auth.identity)
+        let identified = dispatcher.withVerifiedFirstPartyRequest(
+            authenticated,
+            identity: await auth.identity
+        )
 
         // Only now is the body parsed.
         let parsed: JSONValue
@@ -1583,6 +1586,29 @@ public struct HTTPServer: Sendable {
                     .null, code: JSONRPCErrorCode.invalidRequest,
                     message: "Invalid Request: malformed JSON-RPC envelope"
                 )
+            )
+        }
+        if rpc.method == FirstPartyAuthProtocol.restrictRecallToExportableMethod {
+            guard rpc.params == nil,
+                  let id = rpc.id,
+                  await auth.restrictRecallToExportable(authenticated: authenticated) else {
+                return await sealed(
+                    auth: auth,
+                    authenticated: authenticated,
+                    response: jsonRPCError(
+                        rpc.id ?? .null,
+                        code: JSONRPCErrorCode.invalidParams,
+                        message: "Invalid session restriction request"
+                    )
+                )
+            }
+            return await sealed(
+                auth: auth,
+                authenticated: authenticated,
+                response: encodedResponse(JSONRPCResponse.ok(
+                    id,
+                    .object(["restricted": .bool(true)])
+                ))
             )
         }
         guard let response = await identified.handle(rpc) else {
