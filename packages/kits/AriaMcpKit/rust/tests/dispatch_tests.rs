@@ -115,6 +115,35 @@ fn file_one_memory(registry: &EstateRegistry, content: &str, location: &str) -> 
         .to_owned()
 }
 
+/// Like [`file_one_memory`] but accepts an explicit ISO-8601 `event_time` to pin
+/// each drawer's `event_time` column (temporal scoring; distinct from `filed_at`).
+/// `filed_at` is capture time, set by the bench clock at ingest; probe selection
+/// in `recent_item_ids` orders by `filed_at DESC, item_id ASC`.
+fn file_one_memory_at(
+    registry: &EstateRegistry,
+    content: &str,
+    location: &str,
+    event_time: &str,
+) -> String {
+    let subject: String = content.chars().take(120).collect();
+    let a = args![
+        "content" => content,
+        "subject" => subject.as_str(),
+        "location" => location,
+        "event_time" => event_time,
+        "impatient" => true
+    ];
+    let result = dispatch_tool("moot_file_memory", &a, registry, &SurfacedRecallLedger::new())
+        .expect("file_memory_at must succeed");
+    assert!(is_success(&result), "file_memory_at should succeed; got: {result:?}");
+    let text = content_text(&result);
+    text.lines()
+        .next()
+        .and_then(|l| l.strip_prefix("filed memory "))
+        .unwrap_or("")
+        .to_owned()
+}
+
 fn file_one_memory_with_provenance_sensitivity(
     registry: &EstateRegistry,
     content: &str,
@@ -5862,24 +5891,22 @@ fn lens_partial_cue_unknown_mode_returns_invalid_params() {
     );
     // Parity gate: both ports must expose a machine-readable allowed list so
     // clients can enumerate valid modes without parsing the message string.
-    // Assert on the set of values rather than order — Rust emits declaration
-    // order while Swift sorts alphabetically.
+    // Both ports sort alphabetically, so order is part of the contract.
     let allowed = &response["error"]["data"]["allowed"];
     assert!(
         allowed.is_array(),
         "error data.allowed must be an array; got: {response:?}"
     );
-    let mut allowed_values: Vec<String> = allowed
+    let allowed_values: Vec<String> = allowed
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect();
-    allowed_values.sort();
     assert_eq!(
         allowed_values,
         vec!["aboutThis", "feelsLike", "fromThen"],
-        "error data.allowed must contain exactly the three valid mode values; got: {allowed:?}"
+        "error data.allowed must be sorted alphabetically and contain exactly the three valid mode values; got: {allowed:?}"
     );
     // Parity gate: both ports must expose a machine-readable correction hint.
     // The hint tells clients which values are valid without parsing the message.
@@ -9851,6 +9878,14 @@ fn dream_associates_rejects_unknown_value() {
         "error data.path must be 'associates'; response: {response:?}"
     );
 
+    // Parity gate: allowed list must be sorted alphabetically and match Swift's emission.
+    // Both ports sort, so order is part of the contract.
+    assert_eq!(
+        response["error"]["data"]["allowed"],
+        serde_json::json!(["all", "off", "recent"]),
+        "error data.allowed must be [\"all\", \"off\", \"recent\"] (sorted); response: {response:?}"
+    );
+
     // No execution ran — no diary entry was written.
     assert_eq!(
         diary_before,
@@ -9894,6 +9929,207 @@ fn dream_associates_uppercase_off_is_accepted() {
         response["result"]["isError"],
         serde_json::json!(false),
         "associates='OFF' must succeed (isError:false); response: {response:?}"
+    );
+}
+
+/// Absent `associates` and explicit `associates="recent"` take the same code path
+/// (both use `DEFAULT_PROBE_LIMIT = 50`). Gate A proves this by running three dream
+/// passes on a SINGLE estate: absent first, then recent, then all.
+///
+/// **Single-estate strategy** (why three passes on one estate, not three estates):
+/// The default ensemble (RandomIndexing) trains a per-registry vocabulary; its
+/// document vectors are non-deterministic across independently-constructed
+/// registries because Rust's `HashMap` uses a random per-process hasher seed and
+/// floating-point accumulation is sensitive to iteration order. Two independent
+/// registries seeded with the same 60 items produce association counts that differ
+/// by ±20-40, making an equality assertion across registries unreliable.
+///
+/// A single estate sidesteps this: after Pass 1 (absent, probe_limit=50) settles
+/// all cluster-A association pairs, Pass 2 (recent) on the SAME estate visits the
+/// same 50 probes and finds every pair already in the settled set — writing 0 new
+/// associations. If recent used a different probe limit (e.g. allModeMaxProbe), it
+/// would probe cluster B and charter drawers that absent never probed and write
+/// new B-B / charter-charter pairs, making `recent_adds > 0` and failing Gate A.
+/// Pass 3 (all) confirms the bed is discriminating: the all-mode probe set reaches
+/// cluster B and charter drawers and writes new associations that the 50-probe
+/// cadence never initiated.
+///
+/// Bed: 8 cluster B items ("quantum error qubit alignment N correction") seeded
+/// first, then 52 cluster A items ("api timeout endpoint N seconds response
+/// time") seeded second. `filed_at` is wall-clock capture time recorded at
+/// ingest. The bench clock is NOT pinned in this test, so `filed_at` carries no
+/// fixed spacing; what places the probe window is seeding ORDER, which gives
+/// every cluster A drawer a later capture time than every cluster B drawer.
+/// `recent_item_ids` orders by `filed_at DESC, item_id ASC`, and `item_id` is the
+/// drawer UUID, so two drawers sharing a `filed_at` break arbitrarily. The bed
+/// tolerates that: 52 cluster A items against probe_limit=50 leave cluster B
+/// entirely unprobed however the last two cluster A items fall, and cluster B
+/// is the only material the wider all-mode pass can reach.
+/// Per-item event_times pin each drawer's `event_time` column, which feeds
+/// temporal scoring and has no bearing on filed_at or probe selection.
+///
+/// Mutation gate: wiring `recent` to `DREAM_ASSOCIATE_ALL_MODE_MAX_PROBE` in
+/// `v2/dream.rs` makes Pass 2 probe cluster B + charter drawers and write N > 0
+/// new associations, failing `assert_eq!(recent_adds, 0)` immediately.
+///
+/// Parity: `dreamAssociatesAbsentAndRecentAreIdentical` in Swift.
+#[test]
+fn dream_associates_absent_and_recent_are_identical() {
+    // Seed ONE registry with the 60-item discriminating bed.
+    //
+    // filed_at is wall-clock capture time at ingest and the bench clock is not
+    // pinned here, so seeding ORDER is what separates the clusters: cluster B is
+    // filed first and cluster A second, putting cluster B below the recency cut.
+    // recent_item_ids orders by filed_at DESC, item_id ASC; item_id is the drawer
+    // UUID, so a filed_at collision breaks arbitrarily. That does not matter to
+    // this bed, because 52 cluster A items exceed probe_limit=50 whichever two
+    // fall outside. Per-item event_times pin each drawer's event_time column,
+    // which feeds temporal scoring rather than probe selection.
+    let registry = EstateRegistry::new_inmemory();
+    // Cluster B (older, 8 items): filed first so they fall outside the default
+    // 50-probe window once cluster A's 52 items push them below the recency cut.
+    for i in 1u32..=8 {
+        file_one_memory_at(
+            &registry,
+            &format!("quantum error qubit alignment {i} correction"),
+            "study",
+            &format!("2026-01-01T00:00:{:02}Z", i),
+        );
+    }
+    // Cluster A (newer, 52 items): 52 items > 50-probe limit, so the default
+    // cadence probes only items from this cluster (the 50 most recent).
+    for i in 1u32..=52 {
+        file_one_memory_at(
+            &registry,
+            &format!("api timeout endpoint {i} seconds response time"),
+            "api",
+            &format!("2026-06-01T00:00:{:02}Z", i),
+        );
+    }
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+
+    // ── Pass 1: absent associates (None path) ────────────────────────────────
+    // Probes the 50 most recent items (cluster A :03Z-:52Z), writes cluster-A
+    // association pairs. Non-zero result confirms the probe set is non-trivial.
+    let absent_req = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": "moot_dream", "arguments": { "now": "2026-08-01T00:00:00Z" } }
+    }))
+    .expect("absent tools/call must decode");
+    let absent_resp = serde_json::to_value(dispatcher.handle(&absent_req))
+        .expect("response must serialize");
+    assert!(
+        absent_resp.get("error").is_none(),
+        "absent associates must not error; response: {absent_resp:?}"
+    );
+    let absent_written = absent_resp["result"]["structuredContent"]["data"]["associationsWritten"]
+        .as_u64()
+        .expect("absent-mode must carry associationsWritten in structuredContent.data");
+    assert!(
+        absent_written > 0,
+        "absent-mode must write >0 associations on the seeded bed; got {absent_written}"
+    );
+
+    // ── Pass 2: explicit associates="recent" — Gate A ────────────────────────
+    // Same estate, same settled set from Pass 1. If recent uses probe_limit=50
+    // (same as absent), it visits the same 50 probes and finds every candidate
+    // pair already settled — writes 0 new associations.
+    //
+    // Neuter check: if recent is wired to allModeMaxProbe it probes cluster B +
+    // charter drawers (absent never probed those), writes N > 0 new associations,
+    // and this assert_eq FAILS — that is the mutation gate firing correctly.
+    let recent_req = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": "moot_dream", "arguments": { "now": "2026-08-01T00:00:00Z", "associates": "recent" } }
+    }))
+    .expect("recent tools/call must decode");
+    let recent_resp = serde_json::to_value(dispatcher.handle(&recent_req))
+        .expect("response must serialize");
+    assert!(
+        recent_resp.get("error").is_none(),
+        "associates=recent must not error; response: {recent_resp:?}"
+    );
+    let recent_adds = recent_resp["result"]["structuredContent"]["data"]["associationsWritten"]
+        .as_u64()
+        .expect("recent-mode must carry associationsWritten in structuredContent.data");
+    // Gate A: any structural divergence between the None path and the "recent"
+    // path (e.g. a different probe limit) would mean recent reaches cluster B /
+    // charter items that absent did not probe and writes new associations,
+    // making recent_adds > 0.
+    assert_eq!(
+        recent_adds, 0,
+        "Gate A: recent must add ZERO new associations on an already-settled estate \
+         (absent wrote {absent_written}; a non-zero recent_adds means recent probes \
+         items absent did not, proving the probe limits differ)"
+    );
+
+    // ── Pass 3: associates="all" — discriminator ─────────────────────────────
+    // Same estate again; settled set now contains all absent associations.
+    // The all-mode probe_limit=10_000 reaches cluster B and charter drawers —
+    // items the 50-probe cadence never initiated. B-B and charter-charter
+    // pairs are written here, confirming the bed is wide enough that probe
+    // limits are observable (all_adds > 0 means something was genuinely missed
+    // by the 50-probe window).
+    let all_req = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": "moot_dream", "arguments": { "now": "2026-08-01T00:00:00Z", "associates": "all" } }
+    }))
+    .expect("all tools/call must decode");
+    let all_resp = serde_json::to_value(dispatcher.handle(&all_req))
+        .expect("response must serialize");
+    assert!(
+        all_resp.get("error").is_none(),
+        "associates=all must not error; response: {all_resp:?}"
+    );
+    let all_adds = all_resp["result"]["structuredContent"]["data"]["associationsWritten"]
+        .as_u64()
+        .expect("all-mode must carry associationsWritten in structuredContent.data");
+    assert!(
+        all_adds > 0,
+        "associates=all must write new associations beyond absent's settled set \
+         (cluster B + charter items not reached by the 50-probe window); \
+         all_adds={all_adds} — if 0 the bed is too small to discriminate probe limits"
+    );
+}
+
+/// Uppercase "RECENT" must be accepted for `associates` and behave identically
+/// to lowercase "recent" — the association sweep runs and `associationsWritten`
+/// appears in the result.
+///
+/// Mutation gate: moving `.to_lowercase()` to after the enum check makes "RECENT"
+/// fail validation with -32602.
+///
+/// Parity: `dreamAssociatesUppercaseRecentIsAccepted` in Swift.
+#[test]
+fn dream_associates_uppercase_recent_is_accepted() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+
+    let request = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "moot_dream",
+            "arguments": { "associates": "RECENT" }
+        }
+    }))
+    .expect("tools/call request must decode");
+    let response = serde_json::to_value(dispatcher.handle(&request))
+        .expect("response must serialize");
+
+    // "RECENT" must not produce a protocol-level error.
+    assert!(
+        response.get("error").is_none(),
+        "associates='RECENT' must not produce a protocol error; response: {response:?}"
+    );
+    // "recent" runs the default sweep; isError must be false.
+    assert_eq!(
+        response["result"]["isError"],
+        serde_json::json!(false),
+        "associates='RECENT' must succeed (isError:false); response: {response:?}"
     );
 }
 
@@ -11807,4 +12043,156 @@ fn file_memory_expired_grant_does_not_floor() {
     assert!(!content_text(&result).contains("sensitivity:"));
     let filed = drawer_at(&registry, &filed_id(&result), AdjectiveSensitivity::Normal);
     assert_eq!(filed.adjective_sensitivity(), AdjectiveSensitivity::Normal);
+}
+
+// ── V2 refusal parity tests (Group B) ────────────────────────────────────────
+//
+// Each test fires moot_file_memory through the full Dispatcher::handle path
+// with a bad enum value and asserts that the v2 refusal shape rule is met:
+// both data.allowed (non-empty array) and data.correction (non-empty string)
+// must be present.  Cross-port equality checks pin the allowed list to the
+// same sorted values that Swift emits.
+
+/// Dispatch moot_file_memory with the supplied arguments and return the
+/// serialised response value.  Reused by each parity test below.
+fn file_memory_refusal_response(args: serde_json::Value) -> serde_json::Value {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+    let request = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": "moot_file_memory", "arguments": args }
+    }))
+    .expect("tools/call request must decode");
+    serde_json::to_value(dispatcher.handle(&request))
+        .expect("response must serialize")
+}
+
+/// moot_file_memory with an unknown sensitivity value must return a -32602
+/// error whose data carries both `allowed` (non-empty) and `correction`
+/// (non-empty).
+///
+/// Parity: `enumRefusalCarriesBothFields` (case moot_file_memory/sensitivity)
+/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.  The Swift side
+/// asserts that data.allowed and data.correction are both present and
+/// non-empty; it asserts no value list.
+#[test]
+fn file_memory_bad_sensitivity_carries_both_refusal_fields() {
+    let response = file_memory_refusal_response(serde_json::json!({
+        "content": "test content",
+        "subject": "test subject",
+        "location": "test/location",
+        "sensitivity": "banana"
+    }));
+
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "bad sensitivity must yield -32602 INVALID_PARAMS; response: {response:?}"
+    );
+
+    let data = &response["error"]["data"];
+
+    let allowed = data["allowed"].as_array()
+        .expect("data.allowed must be present and an array");
+    assert!(!allowed.is_empty(), "data.allowed must be non-empty; response: {response:?}");
+
+    let correction = data["correction"].as_str()
+        .expect("data.correction must be present and a string");
+    assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
+
+    // Cross-port equality gate: Rust and Swift both sort at emission.
+    // The value set is closed and must match exactly across ports.
+    assert_eq!(
+        data["allowed"],
+        serde_json::json!(["elevated", "normal", "restricted", "secret"]),
+        "sensitivity allowed must match Swift's sorted emission; response: {response:?}"
+    );
+}
+
+/// moot_file_memory with an unknown exportability value must return a -32602
+/// error whose data carries both `allowed` (non-empty) and `correction`
+/// (non-empty).
+///
+/// Parity: `enumRefusalCarriesBothFields` (case moot_file_memory/exportability)
+/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.  The Swift side
+/// asserts that data.allowed and data.correction are both present and
+/// non-empty; it asserts no value list.
+#[test]
+fn file_memory_bad_exportability_carries_both_refusal_fields() {
+    let response = file_memory_refusal_response(serde_json::json!({
+        "content": "test content",
+        "subject": "test subject",
+        "location": "test/location",
+        "exportability": "banana"
+    }));
+
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "bad exportability must yield -32602 INVALID_PARAMS; response: {response:?}"
+    );
+
+    let data = &response["error"]["data"];
+
+    let allowed = data["allowed"].as_array()
+        .expect("data.allowed must be present and an array");
+    assert!(!allowed.is_empty(), "data.allowed must be non-empty; response: {response:?}");
+
+    let correction = data["correction"].as_str()
+        .expect("data.correction must be present and a string");
+    assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
+
+    // Cross-port equality gate.
+    assert_eq!(
+        data["allowed"],
+        serde_json::json!(["private", "public"]),
+        "exportability allowed must match Swift's sorted emission; response: {response:?}"
+    );
+}
+
+/// moot_file_memory with an unknown content-kind value must return a -32602
+/// error whose data carries both `allowed` (non-empty) and `correction`
+/// (non-empty).  This Rust test pins all seven allowed values including
+/// `fingerprint_only`.
+///
+/// Parity: `enumRefusalCarriesBothFields` (case moot_file_memory/kind)
+/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.  The Swift side
+/// asserts that data.allowed and data.correction are both present and
+/// non-empty; it asserts no value list.  Asymmetry: Swift's AriaV2MemoryKind
+/// declares six cases (no fingerprint_only), both catalogs declare six, and
+/// this Rust test pins seven.  That divergence is open and awaiting a ruling.
+#[test]
+fn file_memory_bad_kind_carries_both_refusal_fields() {
+    let response = file_memory_refusal_response(serde_json::json!({
+        "content": "test content",
+        "subject": "test subject",
+        "location": "test/location",
+        "kind": "banana"
+    }));
+
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "bad kind must yield -32602 INVALID_PARAMS; response: {response:?}"
+    );
+
+    let data = &response["error"]["data"];
+
+    let allowed = data["allowed"].as_array()
+        .expect("data.allowed must be present and an array");
+    assert!(!allowed.is_empty(), "data.allowed must be non-empty; response: {response:?}");
+
+    let correction = data["correction"].as_str()
+        .expect("data.correction must be present and a string");
+    assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
+
+    // Rust carries fingerprint_only (7 values); Swift has 6.  The sorted
+    // Rust allowed list is pinned here so a future addition cannot silently
+    // shrink it.
+    assert_eq!(
+        data["allowed"],
+        serde_json::json!(["code", "fingerprint_only", "image_caption", "list", "prose", "structured_json", "transcript"]),
+        "kind allowed must contain exactly the Rust-port content-kind set (sorted); response: {response:?}"
+    );
 }

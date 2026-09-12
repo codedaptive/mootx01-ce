@@ -257,7 +257,7 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
         "moot_lens_successors", "moot_lens_overlap", "moot_lens_divergence",
         "moot_lens_associations", "moot_lens_concepts", "moot_lens_apriori",
         "moot_lens_moment", "moot_lens_rhythm", "moot_lens_precedence",
-        "moot_lens_complexity", "moot_synthesize",
+        "moot_lens_complexity", "moot_synthesize", "moot_dream",
     ] {
         let expected = mission02_catalog_operation(name);
         let actual = tools.iter().find(|tool| tool["name"] == name)
@@ -265,12 +265,12 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
         assert_eq!(actual["inputSchema"], expected["inputSchema"], "{name} input schema");
         assert_eq!(actual["outputSchema"], expected["outputSchema"], "{name} output schema");
     }
-    // moot_dream is in this loop rather than the outputSchema loop above because
-    // the fixture carries a loose outputSchema for it (additionalProperties:true)
-    // while the live catalog emits a typed one; only the inputSchema is pinned here.
+    // inputSchema-only loop: operations whose outputSchemas are not frozen in the
+    // fixture. moot_file_dataset is also in the strict loop above; the inputSchema
+    // check here is redundant but kept for explicitness.
     for name in [
         "moot_memory_get", "moot_memory_search", "moot_link_memories",
-        "moot_review_tunnel", "moot_file_dataset", "moot_dream",
+        "moot_review_tunnel", "moot_file_dataset",
     ] {
         let expected = mission02_catalog_operation(name);
         let actual = tools.iter().find(|tool| tool["name"] == name)
