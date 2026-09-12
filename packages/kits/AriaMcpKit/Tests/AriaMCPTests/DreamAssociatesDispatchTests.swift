@@ -115,6 +115,33 @@ struct DreamAssociatesDispatchTests {
         return firstLine.split(separator: " ").last.map(String.init) ?? ""
     }
 
+    /// File a memory through the tool surface with an explicit `event_time` to pin
+    /// each drawer's `event_time` column (temporal scoring; distinct from `filed_at`).
+    /// `filed_at` is capture time, set by the bench clock at ingest; probe selection
+    /// in `recentItemIDs` orders by `filed_at DESC, item_id ASC`.
+    @discardableResult
+    private func fileAt(
+        _ content: String, at eventTime: String, via dispatcher: ToolDispatcher
+    ) async throws -> String {
+        let result = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string(content),
+                "subject": .string(String(content.prefix(120))),
+                "location": .string("test/notes"),
+                "impatient": .bool(true),
+                "event_time": .string(eventTime),
+            ]))
+        guard case let .object(obj) = result,
+              case let .array(content)? = obj["content"],
+              case let .object(first)? = content.first,
+              case let .string(body)? = first["text"],
+              body.contains("filed memory")
+        else { return "" }
+        let firstLine = body.split(separator: "\n").first.map(String.init) ?? ""
+        return firstLine.split(separator: " ").last.map(String.init) ?? ""
+    }
+
     // MARK: - Test 1 — associates=all writes associations for similar rows
 
     /// When `associates=all` is passed, `moot_dream` runs step 3.5 over all items
@@ -448,14 +475,28 @@ struct DreamAssociatesDispatchTests {
 
         // "banana" is not a valid associates value — must throw a JSON-RPC
         // invalid-argument error before the lower engine is reached.
-        await #expect(throws: JSONRPCError.self, "associates='banana' must throw JSONRPCError") {
+        var caughtError: JSONRPCError?
+        do {
             try await dispatcher.dispatch(
                 name: "moot_dream",
                 arguments: .object([
                     "now": .string("2026-06-11T00:00:00Z"),
                     "associates": .string("banana"),
                 ]))
+            Issue.record("associates='banana' must throw JSONRPCError but did not throw")
+        } catch let e as JSONRPCError {
+            caughtError = e
+        } catch {
+            Issue.record("associates='banana' must throw JSONRPCError, not \(type(of: error)): \(error)")
         }
+        #expect(caughtError != nil, "associates='banana' must throw JSONRPCError")
+
+        // Parity gate: allowed list must be sorted alphabetically and match Rust's emission.
+        // Both ports sort, so order is part of the contract.
+        let allowedValues = caughtError?.data?.objectValue?["allowed"]?.arrayValue?
+            .compactMap { $0.stringValue }
+        #expect(allowedValues == ["all", "off", "recent"],
+                "error data.allowed must be [\"all\", \"off\", \"recent\"] (sorted); got \(String(describing: allowedValues))")
 
         // Topology signature must be unchanged — no sweep ran.
         let signatureAfter = try await kit.topologyChangeSignature(for: handle)
@@ -493,5 +534,203 @@ struct DreamAssociatesDispatchTests {
         let data = obj["structuredContent"]?.objectValue?["data"]?.objectValue ?? [:]
         #expect(data["associationsWritten"] == nil,
                 "associates='OFF' must skip the sweep (no associationsWritten); data: \(data)")
+    }
+
+    // MARK: - Test 8 — absent and "recent" are identical (Gate A)
+
+    /// Absent `associates` and explicit `associates="recent"` take the same code path
+    /// (both use `defaultProbeLimit = 50`). Gate A proves this on a SINGLE estate with
+    /// three sequential dream passes.
+    ///
+    /// Single-estate strategy: the default embedding ensemble trains a per-estate
+    /// vocabulary; its document vectors are non-deterministic across independently-
+    /// constructed estates because Swift `Dictionary` uses a random per-process seed
+    /// for String keys, and floating-point accumulation is sensitive to iteration
+    /// order. Two independent estates seeded with the same 60 items produce
+    /// association counts that can differ by ±20–50, making an equality assertion
+    /// across estates an unreliable coin flip.
+    ///
+    /// A single estate sidesteps this: after Pass 1 (absent, probeLimit=50) settles
+    /// all cluster-A association pairs, Pass 2 (recent) on the SAME estate visits the
+    /// same 50 probes and finds every pair already in the settled set — writing 0 new
+    /// associations. If "recent" used a different probe limit (e.g. allModeMaxProbe),
+    /// it would probe cluster B + charter items that absent never reached and write new
+    /// associations, making recentAdds > 0 and failing Gate A.
+    /// Pass 3 (all) confirms the bed is discriminating: the 10_000-probe pass reaches
+    /// cluster B and writes new associations that the 50-probe cadence never initiated.
+    ///
+    /// Bed: 8 cluster-B items ("quantum error qubit alignment N correction") seeded
+    /// first, then 52 cluster-A items ("api timeout endpoint N seconds response
+    /// time") seeded second. `filed_at` is wall-clock capture time recorded at
+    /// ingest. The bench clock is NOT pinned in this test, so `filed_at` carries no
+    /// fixed spacing; what places the probe window is seeding ORDER, which gives
+    /// every cluster-A drawer a later capture time than every cluster-B drawer.
+    /// `recentItemIDs` orders by `filed_at DESC, item_id ASC`, and `item_id` is the
+    /// drawer UUID, so two drawers sharing a `filed_at` break arbitrarily. The bed
+    /// tolerates that: 52 cluster-A items against probeLimit=50 leave cluster B
+    /// entirely unprobed however the last two cluster-A items fall, and cluster B
+    /// is the only material the wider all-mode pass can reach.
+    /// Per-item event_times pin each drawer's `event_time` column, which feeds
+    /// temporal scoring and has no bearing on filed_at or probe selection.
+    ///
+    /// Mutation gate: wiring "recent" to `allModeMaxProbe` in `AriaV2Dream.swift`
+    /// makes Pass 2 probe cluster B + charter items and write N > 0 new associations,
+    /// failing `#expect(recentAdds == 0)` immediately.
+    ///
+    /// Parity: `dream_associates_absent_and_recent_are_identical` in Rust.
+    @Test
+    func dreamAssociatesAbsentAndRecentAreIdentical() async throws {
+        // ONE estate seeded with the 60-item discriminating bed.
+        //
+        // filed_at is wall-clock capture time at ingest and the bench clock is not
+        // pinned here, so seeding ORDER is what separates the clusters: cluster B is
+        // filed first and cluster A second, putting cluster B below the recency cut.
+        // recentItemIDs orders by filed_at DESC, item_id ASC; item_id is the drawer
+        // UUID, so a filed_at collision breaks arbitrarily. That does not matter to
+        // this bed, because 52 cluster-A items exceed probeLimit=50 whichever two
+        // fall outside. Per-item event_times pin each drawer's event_time column,
+        // which feeds temporal scoring rather than probe selection.
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Cluster B (older, 8 items): filed first so they fall outside the default
+        // 50-probe window once cluster A's 52 items push them below the recency cut.
+        for i in 1...8 {
+            try await fileAt(
+                "quantum error qubit alignment \(i) correction",
+                at: String(format: "2026-01-01T00:00:%02dZ", i),
+                via: dispatcher)
+        }
+        // Cluster A (newer, 52 items): 52 items > 50-probe limit, so the default
+        // cadence probes only items from this cluster (the 50 most recent: :03Z–:52Z).
+        for i in 1...52 {
+            try await fileAt(
+                "api timeout endpoint \(i) seconds response time",
+                at: String(format: "2026-06-01T00:00:%02dZ", i),
+                via: dispatcher)
+        }
+
+        // ── Pass 1: absent associates (nil path) ─────────────────────────────
+        // Probes the 50 most recent items (cluster A :03Z–:52Z), writes cluster-A
+        // association pairs. Non-zero result confirms the probe set is non-trivial.
+        let absentResult = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object(["now": .string("2026-08-01T00:00:00Z")]))
+
+        guard case let .object(absentObj) = absentResult,
+              case .bool(false)? = absentObj["isError"]
+        else {
+            Issue.record("Pass 1 (absent) dream failed: \(absentResult)")
+            return
+        }
+        let absentData = try #require(
+            absentObj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "Pass 1 (absent): structuredContent.data must be present")
+        let absentWritten = try #require(
+            absentData["associationsWritten"]?.integerValue,
+            "Pass 1 (absent): must carry associationsWritten in data")
+        #expect(absentWritten > 0,
+                "Pass 1 (absent): must write >0 associations on the seeded bed; got \(absentWritten)")
+
+        // ── Pass 2: explicit associates="recent" — Gate A ────────────────────
+        // Same estate, same settled set from Pass 1. If "recent" uses probeLimit=50
+        // (same as absent), it visits the same 50 probes and finds every candidate
+        // pair already settled — writes 0 new associations.
+        //
+        // Neuter check: if "recent" is wired to allModeMaxProbe it probes cluster B
+        // + charter items (absent never probed those), writes N > 0 new associations,
+        // and this #expect FAILS — that is the mutation gate firing correctly.
+        let recentResult = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-08-01T00:00:00Z"),
+                "associates": .string("recent"),
+            ]))
+
+        guard case let .object(recentObj) = recentResult,
+              case .bool(false)? = recentObj["isError"]
+        else {
+            Issue.record("Pass 2 (recent) dream failed: \(recentResult)")
+            return
+        }
+        let recentData = try #require(
+            recentObj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "Pass 2 (recent): structuredContent.data must be present")
+        let recentAdds = try #require(
+            recentData["associationsWritten"]?.integerValue,
+            "Pass 2 (recent): must carry associationsWritten in data")
+
+        // Gate A: any structural divergence between the nil path and the "recent"
+        // path — e.g. a different probe limit — would mean "recent" reaches cluster
+        // B + charter items that absent did not probe and writes new associations,
+        // making recentAdds > 0.
+        #expect(recentAdds == 0,
+                "Gate A: recent must add ZERO new associations on an already-settled estate (absent wrote \(absentWritten); a non-zero recentAdds means recent probes items absent did not, proving the probe limits differ)")
+
+        // ── Pass 3: associates="all" — discriminator ─────────────────────────
+        // Same estate; settled set now contains all absent associations.
+        // The all-mode probeLimit=10_000 reaches cluster B + charter items —
+        // items the 50-probe cadence never initiated. B-B pairs are written here,
+        // confirming the bed is wide enough that probe limits are observable.
+        let allResult = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-08-01T00:00:00Z"),
+                "associates": .string("all"),
+            ]))
+
+        guard case let .object(allObj) = allResult,
+              case .bool(false)? = allObj["isError"]
+        else {
+            Issue.record("Pass 3 (all) dream failed: \(allResult)")
+            return
+        }
+        let allData = try #require(
+            allObj["structuredContent"]?.objectValue?["data"]?.objectValue,
+            "Pass 3 (all): structuredContent.data must be present")
+        let allAdds = try #require(
+            allData["associationsWritten"]?.integerValue,
+            "Pass 3 (all): must carry associationsWritten in data")
+
+        // All-mode must probe cluster B (beyond the 50-probe window) and write new
+        // associations; confirms the bed discriminates probe limits.
+        #expect(allAdds > 0,
+                "Pass 3 (all): must write new associations beyond the absent-settled set (cluster B + charter items not reached by the 50-probe window); allAdds=\(allAdds) — if 0 the bed is too small to discriminate probe limits")
+    }
+
+        // MARK: - Test 9 — uppercase RECENT is accepted
+
+    /// "RECENT" (uppercase) must be accepted and behave as "recent" — the association
+    /// sweep runs at the default probe limit, and `associationsWritten` appears in the
+    /// response.
+    ///
+    /// Mutation gate: moving the `.lowercased()` call to after the enum check, or
+    /// removing it, makes "RECENT" fail validation with a -32602 throw — this test
+    /// goes red immediately.
+    @Test
+    func dreamAssociatesUppercaseRecentIsAccepted() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Seed similar sentences so the sweep writes at least one association.
+        try await file("neural pathway activation sequence one alpha", via: dispatcher)
+        try await file("neural pathway activation sequence two beta", via: dispatcher)
+        try await file("neural pathway activation sequence three gamma", via: dispatcher)
+
+        // "RECENT" must not throw and must behave as "recent" — the sweep runs.
+        let result = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-06-11T00:00:00Z"),
+                "associates": .string("RECENT"),
+            ]))
+        let obj = result.objectValue ?? [:]
+        let isError = obj["isError"] == .bool(true)
+        #expect(!isError, "associates='RECENT' must be accepted (not refused); result: \(result)")
+        // "recent" runs the default sweep; associationsWritten must be present.
+        let data = obj["structuredContent"]?.objectValue?["data"]?.objectValue ?? [:]
+        let written = data["associationsWritten"]?.integerValue
+        #expect(written != nil,
+                "associates='RECENT' must run the default sweep (associationsWritten present); data: \(data)")
     }
 }
