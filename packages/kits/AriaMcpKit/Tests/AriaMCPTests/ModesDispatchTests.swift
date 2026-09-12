@@ -384,6 +384,7 @@ struct ModesDispatchTests {
             "moot_reclassify_fdc",  // FDC mode: suspectOnly|all
             "moot_palace_import",   // import mode: foreground|background (json import)
             "moot_vault_import",    // import mode: foreground|background
+            "moot_lens_partial_cue", // cue mode: feelsLike|aboutThis|fromThen
         ]
 
         // Assertion 1: no operation outside the allowed owner set has mode in its schema.
