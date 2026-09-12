@@ -31,9 +31,19 @@ use substrate_ml::temporal_causality_fold::TemporalFieldCoord;
 use crate::jsonrpc::JsonValue;
 
 use super::recall_lens::{
-    V2RecallLensAdmission, V2RecallLensLower, V2RecallLensOperation, V2RecallLensRequest,
-    V2RecallLensResult, V2RecallLensValue,
+    V2RecallLensAdmission, V2RecallLensError, V2RecallLensLower, V2RecallLensOperation,
+    V2RecallLensRequest, V2RecallLensResult, V2RecallLensValue,
 };
+
+// Helper functions throughout this module return `Result<T, ()>` to signal
+// "data absent or malformed" without carrying a diagnostic (the caller always
+// maps to Unavailable). This From impl lets `?` promote those unit errors to
+// the trait's error type without touching every call site.
+impl From<()> for V2RecallLensError {
+    fn from(_: ()) -> Self {
+        V2RecallLensError::Unavailable
+    }
+}
 
 const RESULT_LIMIT: usize = 500;
 const WALK_LENGTH_LIMIT: usize = 100_000;
@@ -113,7 +123,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let wing = required_string(request, "wing")?;
         let top_k = string_limit(request, "topK", 5, RESULT_LIMIT)?;
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
@@ -162,7 +172,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let wing = required_string(request, "wing")?;
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let constellation = run_constellation(
@@ -192,7 +202,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let wing = required_string(request, "wing")?;
         let seed_memory_id = required_uuid(request, "seed_memory_id")?.to_string();
         let walk_length = string_limit(request, "walkLength", 10_000, WALK_LENGTH_LIMIT)?;
@@ -226,7 +236,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let reference = reference(request)?;
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let report = run_bias(
@@ -288,12 +298,12 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         // The only existing typed lower engine for this operation is the
         // estate content-cohesion engine.  Dataset cohesion has a distinct
         // store-resolving path and is deliberately not misrouted here.
         if request.values.contains_key("dataset_id") {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
 
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
@@ -322,7 +332,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         // The v2 projection consumes the persisted output of the atomic hunt
         // directly.  It intentionally never calls the v1 lens dispatcher or
         // reparses its rendered report.
@@ -460,7 +470,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let weather = run_theme_weather(
             &coordinator,
@@ -488,7 +498,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let themes = run_latent_themes(
             &coordinator,
@@ -507,7 +517,7 @@ impl CoordinatorRecallLensLower {
                     ("dominantTheme", usize_value(loading.dominant_theme)?),
                 ])))
             })
-            .collect::<Result<Vec<_>, ()>>()?;
+            .collect::<Result<Vec<_>, V2RecallLensError>>()?;
         Ok(result(
             request.operation,
             vec![row([
@@ -521,7 +531,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let split_at = parse_iso8601_millis(required_string(request, "splitAt")?).ok_or(())?;
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let output = run_drift(
@@ -558,7 +568,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let mut frame = RecallFrame::new(Vec::new());
         frame.limit = positive_limit(request, "limit", RESULT_LIMIT)?;
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
@@ -659,16 +669,35 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let anchor_id = required_uuid(request, "anchor_memory_id")?.to_string();
         let limit = positive_limit(request, "limit", 5)?.unwrap_or(5);
+        // Decode optional mode argument; absent defaults to FeelsLike.
+        // Enum validation happens at decode time (recall_lens.rs) so only
+        // the three known values can reach this path.
+        let cue_mode = match optional_string(request, "mode")? {
+            None | Some("feelsLike") => CueMode::FeelsLike,
+            Some("aboutThis") => CueMode::AboutThis,
+            Some("fromThen") => CueMode::FromThen,
+            // Callers can construct V2RecallLensRequest directly (all fields are pub),
+            // bypassing decode. Map the unknown mode to the same invalid-argument
+            // diagnostic the decode path raises so the caller receives INVALID_PARAMS
+            // rather than a silent lens_unavailable refusal.
+            Some(unknown) => return Err(V2RecallLensError::InvalidArgument {
+                path: "$.mode".to_owned(),
+                message: format!(
+                    "mode '{}' is not recognised; must be one of: feelsLike, aboutThis, fromThen",
+                    unknown
+                ),
+            }),
+        };
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let matches = run_partial_cue_recall(
             &coordinator,
             &admission.estate_handle,
             RecallFrame::new(Vec::new()),
             &anchor_id,
-            CueMode::FeelsLike,
+            cue_mode,
             limit,
             admission.now_millis,
         )
@@ -692,7 +721,7 @@ impl CoordinatorRecallLensLower {
                     ("score", JsonValue::Double(matched.score)),
                 ]))
             })
-            .collect::<Result<Vec<_>, ()>>()?;
+            .collect::<Result<Vec<_>, V2RecallLensError>>()?;
         Ok(result(request.operation, rows))
     }
 
@@ -700,10 +729,10 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let target_kind = content_kind(required_string(request, "targetKind")?)?;
         if target_kind == ContentKind::Dataset {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let limit = positive_limit(request, "limit", 5)?.unwrap_or(5);
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
@@ -739,7 +768,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let memory_uuid = required_uuid(request, "memory_id")?;
         let canonical = memory_uuid.hyphenated().to_string();
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
@@ -765,7 +794,7 @@ impl CoordinatorRecallLensLower {
                 AdjectiveSensitivity::Restricted | AdjectiveSensitivity::Secret
             )
         {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let events = coordinator
             .audit_events(&admission.estate_handle, None, 50_000)
@@ -814,8 +843,8 @@ impl CoordinatorRecallLensLower {
                             .anchor_trajectory
                             .iter()
                             .copied()
-                            .map(|anchor| usize_value(anchor as usize))
-                            .collect::<Result<Vec<_>, ()>>()?,
+                            .map(|anchor| usize_value(anchor as usize).map_err(|_| V2RecallLensError::Unavailable))
+                            .collect::<Result<Vec<_>, V2RecallLensError>>()?,
                     ),
                 ),
                 ("reanchored", JsonValue::Bool(motion.reanchored())),
@@ -836,7 +865,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let wing = required_string(request, "wing")?;
         let anchor_id = required_uuid(request, "anchor_memory_id")?.to_string();
         let limit = positive_limit(request, "limit", RESULT_LIMIT)?.unwrap_or(5);
@@ -882,7 +911,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let comparison = Self::comparison_handle(&coordinator, request)?;
         let output = run_mind_overlap(
@@ -907,7 +936,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let comparison = Self::comparison_handle(&coordinator, request)?;
         let output = run_estate_divergence(
@@ -945,9 +974,9 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         if request.values.contains_key("dataset_id") {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let mut frame = RecallFrame::new(Vec::new());
         frame.limit = positive_limit(request, "limit", RESULT_LIMIT)?;
@@ -1001,7 +1030,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let mut frame = RecallFrame::new(Vec::new());
         frame.limit = positive_limit(request, "recall_limit", RESULT_LIMIT)?;
         let max_concepts = positive_limit(request, "limit", RESULT_LIMIT)?.unwrap_or(20);
@@ -1027,9 +1056,9 @@ impl CoordinatorRecallLensLower {
                             .get(*row_id as usize)
                             .cloned()
                             .map(JsonValue::String)
-                            .ok_or(())
+                            .ok_or(V2RecallLensError::Unavailable)
                     })
-                    .collect::<Result<Vec<_>, ()>>()?;
+                    .collect::<Result<Vec<_>, V2RecallLensError>>()?;
                 Ok(JsonValue::Object(row([
                     (
                         "intent",
@@ -1053,7 +1082,7 @@ impl CoordinatorRecallLensLower {
                     ),
                 ])))
             })
-            .collect::<Result<Vec<_>, ()>>()?;
+            .collect::<Result<Vec<_>, V2RecallLensError>>()?;
         let covered = ConceptCoverDeltas::covering(
             &receipt
                 .raw_concepts
@@ -1142,7 +1171,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let limit = positive_limit(request, "limit", RESULT_LIMIT)?.unwrap_or(20);
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let mut output = run_apriori_rules(
@@ -1195,23 +1224,23 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         // The frozen v2 grammar currently carries comparison_windows as an
         // opaque string.  It has no typed window-array decoder, so only the
         // source-backed empty-comparison form is admitted here.
         if request.values.contains_key("comparison_windows") {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let start = parse_iso8601_millis(required_string(request, "windowStart")?).ok_or(())?;
         let end = parse_iso8601_millis(required_string(request, "windowEnd")?).ok_or(())?;
         if start > end {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         // A window spanning decades scans the entire corpus and exhausts
         // memory. Three years, matching the v1 ceiling, which survived into v2
         // only inside the unreachable v1 dispatch table.
         if end.saturating_sub(start) > MAXIMUM_WINDOW_MILLIS {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let output = run_moment(
@@ -1232,7 +1261,7 @@ impl CoordinatorRecallLensLower {
                     usize_value(rank.hamming_distance as usize)?,
                 )])))
             })
-            .collect::<Result<Vec<_>, ()>>()?;
+            .collect::<Result<Vec<_>, V2RecallLensError>>()?;
         Ok(result(
             request.operation,
             vec![row([
@@ -1246,7 +1275,7 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let bit = required_string(request, "bit")?
             .parse::<usize>()
             .map_err(|_| ())?;
@@ -1258,7 +1287,7 @@ impl CoordinatorRecallLensLower {
             .map_err(|_| ())?;
         let ending_at = parse_iso8601_millis(required_string(request, "endingAt")?).ok_or(())?;
         if bit > 255 || bucket_seconds < 1 || bucket_count == 0 {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let output = cognition_kit::rhythm_recipe::run_rhythm_from_estate(
@@ -1286,7 +1315,7 @@ impl CoordinatorRecallLensLower {
                     ),
                 ])))
             })
-            .collect::<Result<Vec<_>, ()>>()?;
+            .collect::<Result<Vec<_>, V2RecallLensError>>()?;
         Ok(result(
             request.operation,
             vec![row([
@@ -1300,17 +1329,17 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let start = parse_iso8601_millis(required_string(request, "windowStart")?).ok_or(())?;
         let end = parse_iso8601_millis(required_string(request, "windowEnd")?).ok_or(())?;
         if start > end {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         // A window spanning decades scans the entire corpus and exhausts
         // memory. Three years, matching the v1 ceiling, which survived into v2
         // only inside the unreachable v1 dispatch table.
         if end.saturating_sub(start) > MAXIMUM_WINDOW_MILLIS {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let target = TemporalFieldCoord::new(
             required_string(request, "targetField")?,
@@ -1363,7 +1392,7 @@ impl CoordinatorRecallLensLower {
                     ("count", JsonValue::Integer(antecedent.count)),
                 ])))
             })
-            .collect::<Result<Vec<_>, ()>>()?;
+            .collect::<Result<Vec<_>, V2RecallLensError>>()?;
         Ok(result(
             request.operation,
             vec![row([
@@ -1377,9 +1406,9 @@ impl CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         if request.values.contains_key("dataset_id") {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let field_a = required_string(request, "fieldA")?;
         let field_b = optional_string(request, "fieldB")?;
@@ -1388,7 +1417,7 @@ impl CoordinatorRecallLensLower {
                 !["addedBy", "embeddingModelID", "room", "wing"].contains(&field)
             })
         {
-            return Err(());
+            return Err(V2RecallLensError::Unavailable);
         }
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let output = run_complexity(
@@ -1439,7 +1468,7 @@ impl V2RecallLensLower for CoordinatorRecallLensLower {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()> {
+    ) -> Result<V2RecallLensResult, V2RecallLensError> {
         match request.operation {
             V2RecallLensOperation::LensKeystones => self.keystones(admission, request),
             V2RecallLensOperation::LensConstellation => self.constellation(admission, request),
@@ -1464,7 +1493,7 @@ impl V2RecallLensLower for CoordinatorRecallLensLower {
             V2RecallLensOperation::LensRhythm => self.rhythm(admission, request),
             V2RecallLensOperation::LensPrecedence => self.precedence(admission, request),
             V2RecallLensOperation::LensComplexity => self.complexity(admission, request),
-            _ => Err(()),
+            _ => Err(V2RecallLensError::Unavailable),
         }
     }
 }

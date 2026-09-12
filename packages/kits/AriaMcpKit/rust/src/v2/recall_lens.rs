@@ -206,6 +206,22 @@ impl V2RecallLensRequest {
                 values.insert((*key).to_owned(), V2RecallLensValue::Bool(value));
             }
         }
+        // Validate mode enum value for moot_lens_partial_cue at decode time so
+        // an unknown value produces an INVALID_PARAMS transport fault rather than
+        // a generic operational refusal at execution time.
+        if operation == V2RecallLensOperation::LensPartialCue {
+            if let Some(V2RecallLensValue::String(mode)) = values.get("mode") {
+                match mode.as_str() {
+                    "feelsLike" | "aboutThis" | "fromThen" => {}
+                    _ => return Err(V2InvalidArgument::new(
+                        "$.mode",
+                        "must be one of: feelsLike, aboutThis, fromThen",
+                    )
+                    .allowed(["feelsLike".to_owned(), "aboutThis".to_owned(), "fromThen".to_owned()])
+                    .correction("Use \"feelsLike\", \"aboutThis\", or \"fromThen\".")),
+                }
+            }
+        }
         Ok(Self {
             operation,
             estate_id,
@@ -381,9 +397,9 @@ const LIMIT: Grammar = Grammar {
     bools: &[],
 };
 const ANCHOR: Grammar = Grammar {
-    allowed: &["anchor_memory_id", "limit", "estate_id"],
+    allowed: &["anchor_memory_id", "limit", "estate_id", "mode"],
     required: &["anchor_memory_id"],
-    strings: &[],
+    strings: &["mode"],
     positive_integers: &["limit"],
     uuids: &["anchor_memory_id"],
     arrays: &[],
@@ -529,10 +545,15 @@ pub struct V2RecallLensResult {
     pub operation: V2RecallLensOperation,
     pub rows: Vec<BTreeMap<String, JsonValue>>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum V2RecallLensError {
     Unavailable,
     OutcomeUnverified(V2RecallLensOperation),
+    /// An argument value was rejected after decode. Carries enough diagnostic
+    /// context to produce an INVALID_PARAMS JSON-RPC error with the same
+    /// information the decode path raises. Fields are owned strings so that
+    /// the error can be propagated across the trait boundary without a lifetime.
+    InvalidArgument { path: String, message: String },
 }
 
 pub trait V2RecallLensLower: Send + Sync {
@@ -540,7 +561,7 @@ pub trait V2RecallLensLower: Send + Sync {
         &self,
         admission: &V2RecallLensAdmission,
         request: &V2RecallLensRequest,
-    ) -> Result<V2RecallLensResult, ()>;
+    ) -> Result<V2RecallLensResult, V2RecallLensError>;
 }
 
 /// The operation-specific v2 projection for the first extracted lower recipe.
