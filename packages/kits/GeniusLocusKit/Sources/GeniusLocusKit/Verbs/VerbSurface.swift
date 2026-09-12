@@ -163,6 +163,90 @@ public extension GeniusLocusKit {
         return drawer
     }
 
+    // MARK: - typed tunnel capture and settlement
+
+    /// File one typed tunnel through the mounted estate addressed by `handle`.
+    /// Tunnel timestamping remains owned by LocusKit's existing capture
+    /// boundary; GLK contributes the stale/quiesced handle gate only.
+    @discardableResult
+    func captureTunnel(_ handle: EstateHandle, _ frame: TunnelCaptureFrame) async throws -> Tunnel {
+        try requireMounted(handle, verb: "captureTunnel")
+        let estate = try estate(for: handle)
+        do {
+            return try await estate.capture(frame)
+        } catch {
+            throw remap(verb: "captureTunnel", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Settle a proposed tunnel through the mounted estate addressed by `handle`.
+    /// Accept selects `.active`; reject selects `.withdrawn`. The existing
+    /// LocusKit transaction updates lifecycle and the canonical `reviewedBy`
+    /// ledger entry together. `reason` and `now` are forwarded unchanged;
+    /// current LocusKit deliberately does not persist either value in tunnel ext.
+    func settleTunnel(
+        _ handle: EstateHandle,
+        tunnelID: String,
+        accept: Bool,
+        changedBy: String,
+        reason: String? = nil,
+        now: Date = Date()
+    ) async throws {
+        try requireMounted(handle, verb: "settleTunnel")
+        let estate = try estate(for: handle)
+        do {
+            try await estate.respondToTunnel(
+                id: tunnelID, accept: accept, changedBy: changedBy, reason: reason, now: now)
+        } catch {
+            throw remap(verb: "settleTunnel", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Capture a typed dataset handle through the mounted estate addressed by
+    /// `handle`. The common Swift/Rust contract takes only a UDC code because
+    /// the current Rust lower primitive cannot retain facets or QIDs; LocusKit
+    /// owns dataset payload, bitmap, and capture timestamp construction.
+    @discardableResult
+    func captureDatasetHandle(
+        _ handle: EstateHandle,
+        datasetId: UUID,
+        columns: [DatasetColumnSummary],
+        rowCount: Int,
+        sourceDescription: String,
+        wing: String? = nil,
+        room: String,
+        addedBy: String,
+        sensitivity: AdjectiveSensitivity = .normal,
+        udcCode: String
+    ) async throws -> Drawer {
+        try requireMounted(handle, verb: "captureDatasetHandle")
+        let estate = try estate(for: handle)
+        do {
+            return try await estate.captureDatasetHandle(
+                datasetId: datasetId, columns: columns, rowCount: rowCount,
+                sourceDescription: sourceDescription, wing: wing, room: room,
+                addedBy: addedBy, sensitivity: sensitivity, latticeAnchor: .udc(udcCode))
+        } catch {
+            throw remap(verb: "captureDatasetHandle", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Stamp the one FDC estate-wide recalculation floor. The key is fixed at
+    /// this typed boundary: callers cannot turn GLK into a general metadata
+    /// broker.
+    func stampFDCRecalculationFloor(
+        _ handle: EstateHandle,
+        value: String
+    ) async throws {
+        try requireMounted(handle, verb: "stampFDCRecalculationFloor")
+        let estate = try estate(for: handle)
+        do {
+            try await estate.setMeta(key: "aria.fdc.recalced_data_version", value: value)
+        } catch {
+            throw remap(verb: "stampFDCRecalculationFloor", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
     // MARK: - recall
 
     /// Recall rows from the estate addressed by `handle`.
@@ -1275,6 +1359,27 @@ public extension GeniusLocusKit {
             )
         } catch {
             throw remap(verb: "reanchor", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Update one drawer's lattice anchor with explicit audit provenance.
+    /// This is the Swift twin of Rust `EstateCoordinator.reanchor_anchor`;
+    /// Swift preserves LocusKit's deterministic caller-supplied timestamp.
+    func reanchorAnchor(
+        _ handle: EstateHandle,
+        rowID: RowID,
+        toLattice: LatticeAnchor,
+        changedBy: String,
+        reason: String = "anchor Q-ID resolved via enrichment-proposal acceptance",
+        now: Date
+    ) async throws {
+        try requireMounted(handle, verb: "reanchorAnchor")
+        let estate = try estate(for: handle)
+        do {
+            try await estate.reanchorAnchor(
+                rowID: rowID, toLattice: toLattice, changedBy: changedBy, reason: reason, now: now)
+        } catch {
+            throw remap(verb: "reanchorAnchor", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 

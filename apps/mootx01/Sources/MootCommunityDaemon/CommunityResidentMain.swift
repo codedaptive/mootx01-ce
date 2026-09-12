@@ -56,6 +56,7 @@ import PersistenceKit
 import PersistenceKitSQLite
 import LocusKit
 import GeniusLocusKit
+import GeniusLocusKitMigrations
 #if canImport(Security)
 import Security
 #endif
@@ -84,12 +85,14 @@ public enum CommunityResidentMain {
     /// custody are always exercised here.
     public static func run(
         additionalCapabilities: [String] = [],
-        firstPartyToolHost: (any FirstPartyToolHost)? = nil
+        firstPartyToolHost: (any FirstPartyToolHost)? = nil,
+        firstPartyProvider: (any FirstPartyProvider)? = nil
     ) async -> (code: Int32, output: String) {
         #if canImport(Security)
         return await runProduction(
             additionalCapabilities: additionalCapabilities,
-            firstPartyToolHost: firstPartyToolHost
+            firstPartyToolHost: firstPartyToolHost,
+            firstPartyProvider: firstPartyProvider
         )
         #else
         let refusal: [String: Any] = [
@@ -111,7 +114,8 @@ public enum CommunityResidentMain {
     /// The production resident loop body (Darwin/macOS only).
     private static func runProduction(
         additionalCapabilities: [String],
-        firstPartyToolHost: (any FirstPartyToolHost)?
+        firstPartyToolHost: (any FirstPartyToolHost)?,
+        firstPartyProvider: (any FirstPartyProvider)?
     ) async -> (code: Int32, output: String) {
         // ── Step 1: pre-bind the TCP socket ──────────────────────────────────
         // A minimal HTTPServer (no dispatcher involvement, no firstPartyAuth)
@@ -237,7 +241,8 @@ public enum CommunityResidentMain {
             communityDispatch = try await CommunityResidentMain.makeCommunityDispatch(
                 host: estate,
                 layoutURL: productionLayoutURL,
-                state: providerState
+                state: providerState,
+                firstPartyProvider: firstPartyProvider
             )
         } catch {
             await firstPartyToolHost?.stop()
@@ -252,7 +257,8 @@ public enum CommunityResidentMain {
                 version: activation.descriptor.binaryVersion
             ),
             communityHandler: communityDispatch,
-            firstPartyHandler: firstPartyToolHost
+            firstPartyHandler: firstPartyToolHost,
+            firstPartyProvider: firstPartyProvider
         )
         // DataProtectionKeychainRootProvider: the production FirstPartyRootProviding
         // conformer. Requires the fully expanded Keychain access group (team prefix
@@ -336,7 +342,34 @@ public enum CommunityResidentMain {
         } else {
             ownerIdentifier = "unknown"
         }
-        return CommunityEstateHost(record: record, kit: GeniusLocusKit(), ownerIdentifier: ownerIdentifier)
+        // The legacy app-layout source is a sibling of the catalog's product
+        // directory inside this process family's reachable Application Support.
+        // On the direct Community resident this is ~/Library/Application Support;
+        // on the bundled sandboxed helper it is the shared App Group support
+        // directory. The app's old PRIVATE container is intentionally outside
+        // the helper's sandbox; the app-side owner must run the same public
+        // LegacyAppEstatePreparation there before handing the estate to the
+        // shared group. The daemon still gates its own reachable source here.
+        let familyApplicationSupport = EstateCatalog.configurationDirectory
+            .deletingLastPathComponent()
+        // Only the sandboxed nested helper has an app-private source it cannot
+        // inspect. A direct/standalone resident remains governed by its own
+        // reachable pre-open migration and does not require an app marker.
+        let readiness: LegacyAppEstateReadiness? =
+            ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] == nil
+            ? nil
+            : LegacyAppEstateReadiness(
+                configurationDirectory: EstateCatalog.configurationDirectory
+            )
+        return CommunityEstateHost(
+            record: record,
+            kit: GeniusLocusKit(),
+            ownerIdentifier: ownerIdentifier,
+            legacyAppEstatePreparation: LegacyAppEstatePreparation(
+                applicationSupportDirectory: familyApplicationSupport
+            ),
+            legacyAppEstateReadiness: readiness
+        )
     }
 
     private static func encodedFailure(_ reason: String) -> String {
@@ -386,6 +419,7 @@ public enum CommunityResidentMain {
         host: CommunityEstateHost,
         layoutURL: URL,
         state: CommunityProviderState,
+        firstPartyProvider: (any FirstPartyProvider)? = nil,
         obsidianWatcherPollSeconds: Int = 10,
         obsidianEstatePollSeconds: Int = 60,
         obsidianHealthCheckSeconds: Int = 30
@@ -405,6 +439,15 @@ public enum CommunityResidentMain {
             throw CommunityResidentError.estateOpenFailed(error)
         }
         let kit = host.kit
+        // A stable provider may opt into a context resolver for the daemon's
+        // current GLK session. The provider keeps its executor and ledgers;
+        // this composition root neither creates a ToolDispatcher nor forwards
+        // first-party calls through the public MCP surface.
+        if let contextConsumer = firstPartyProvider as? any FirstPartyProviderExecutorContextConsumer {
+            await contextConsumer.installFirstPartyProviderExecutorContext(
+                CommunityFirstPartyProviderExecutorContext(host: host)
+            )
+        }
         let obsidian = CommunityObsidianCoordinator(
             layoutURL: layoutURL,
             kit: kit,

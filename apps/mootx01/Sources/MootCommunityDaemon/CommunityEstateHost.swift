@@ -16,7 +16,9 @@
 //
 // DaemonProvider.activate() step 6 calls openEstate() on whatever
 // EstateLifecycleAuthority it was composed with. This host does NOT acquire
-// the ProviderLock — the provider's activate() already holds the lock.
+// the ProviderLock — the provider's activate() already holds the lock. The
+// legacy app-layout preparation therefore runs inside openEstate(): one writer
+// owns the move, and it completes or fails before any canonical storage exists.
 //
 // CORE-01: fail closed on every error. A missing key is NOT permission to
 // open plaintext (the posture refuses a ciphertext file whose key is gone).
@@ -71,6 +73,16 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
     /// test or proof host leaves Keychain residue.
     private let identityKeyStore: (any EstateIdentityKeyStore)?
 
+    /// Optional pre-open move from a reachable Apple app Application Support
+    /// directory. Production supplies the support directory beside the active
+    /// catalog; tests inject an isolated directory and key relocator.
+    private let legacyAppEstatePreparation: LegacyAppEstatePreparation?
+
+    /// App-to-helper readiness handshake. Supplied only by the sandboxed
+    /// nested helper. An unsandboxed resident has no inaccessible app-private
+    /// source and therefore needs no marker.
+    private let legacyAppEstateReadiness: LegacyAppEstateReadiness?
+
     // MARK: - Actor-isolated state
 
     /// Cached result of the first successful `openEstate()` call.
@@ -96,16 +108,22 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
     ///   - identityKeyStore: Custody override for the estate identity. nil
     ///     follows the record kind: the Keychain for a registered record, an
     ///     in-memory store for a transient one.
+    ///   - legacyAppEstatePreparation: The shared legacy-layout step. It runs
+    ///     after the provider lock is held and before key posture or storage.
     public init(
         record: EstateRecord,
         kit: GeniusLocusKit,
         ownerIdentifier: String,
-        identityKeyStore: (any EstateIdentityKeyStore)? = nil
+        identityKeyStore: (any EstateIdentityKeyStore)? = nil,
+        legacyAppEstatePreparation: LegacyAppEstatePreparation? = nil,
+        legacyAppEstateReadiness: LegacyAppEstateReadiness? = nil
     ) {
         self.record = record
         self.kit = kit
         self.ownerIdentifier = ownerIdentifier
         self.identityKeyStore = identityKeyStore
+        self.legacyAppEstatePreparation = legacyAppEstatePreparation
+        self.legacyAppEstateReadiness = legacyAppEstateReadiness
     }
 
     // MARK: - Shared access
@@ -145,14 +163,30 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
     /// The open itself. Runs once per open; `openEstate()` serialises callers
     /// onto it through `opening`.
     private func performOpen() async throws -> EstateReadyProof {
-        // 1. The at-rest posture: the one decision every opener makes. A
+        // 1. Legacy layout first. Production reaches this method only from
+        //    DaemonProvider.activate() after it owns ProviderLock. A conflict,
+        //    Keychain failure or rename failure propagates before posture
+        //    resolution and before SQLiteStorage can create an empty estate.
+        if let legacyAppEstatePreparation {
+            _ = try legacyAppEstatePreparation.run(into: record)
+        }
+
+        // A previously-enabled sandboxed helper may run before the upgraded
+        // app. If no canonical database exists, only the app can prove its
+        // private legacy source was migrated or absent. Existing canonical
+        // databases bypass this creation-only handshake.
+        try legacyAppEstateReadiness?.requireBeforeCreatingCanonical(
+            at: record.databaseURL
+        )
+
+        // 2. The at-rest posture: the one decision every opener makes. A
         //    registered record is created encrypted and loads its EXISTING key
         //    on reopen, failing closed when the key is missing; a transient
         //    record is plaintext.
         let resolved = try EstateOpenPosture.resolve(for: record)
         let isFirstRun = !databaseExists
 
-        // 2. The storage. `estateID` is the storage-layer identity of this open
+        // 3. The storage. `estateID` is the storage-layer identity of this open
         //    instance, not the LocusKit manifest UUID, which is read after open.
         let storage = try SQLiteStorage(configuration: EstateConfiguration(
             estateID: UUID(),
@@ -161,7 +195,7 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
         ))
         let owner = OwnerCredentials(ownerIdentifier: ownerIdentifier)
 
-        // 3. Open through the kit. A fresh record is created first, as serve
+        // 4. Open through the kit. A fresh record is created first, as serve
         //    does; an existing file is opened, never re-initialised. The
         //    identity store follows the record kind; the daemon's estate
         //    federates.
@@ -176,7 +210,7 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
         if isFirstRun {
             try await kit.provisionDefaultEncoderIfAbsent(for: handle)
         }
-        // 4. The same post-open sequence as every other opener: prepare, wire
+        // 5. The same post-open sequence as every other opener: prepare, wire
         //    the Corpus, VectorStore and encode queue on this storage, rebuild
         //    the derived matrix tier, and make the manifest say what is on disk.
         let preparation = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
@@ -184,7 +218,7 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
         try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         try await kit.rebuildDerivedAccelerators(for: handle)
 
-        // 5. The proof: the estate's UUID and the highest migration version
+        // 6. The proof: the estate's UUID and the highest migration version
         //    applied across the kits sharing this storage.
         let version = try await storage.currentSchemaVersion()
         guard version >= 0 else { throw CommunityDaemonError.unexpectedSchemaVersion(version) }
