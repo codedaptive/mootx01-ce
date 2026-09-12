@@ -4189,7 +4189,11 @@
               "format": "uuid"
             },
             "associates": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "off",
+                "all"
+              ]
             }
           },
           "required": [],
@@ -5541,6 +5545,14 @@
             "estate_id": {
               "type": "string",
               "format": "uuid"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "feelsLike",
+                "aboutThis",
+                "fromThen"
+              ]
             }
           },
           "required": [
