@@ -21,9 +21,9 @@ use neuron_kit::autonomic_governor::AutonomicGovernor;
 use crate::dream_runner::configure_hnsw_from_registry;
 use crate::governor_topology_adapter::StatsStoreTopologySink;
 use crate::http_server::{
-    run_http_loop, GLOBAL_4XX_COUNTER, GLOBAL_5XX_COUNTER, GLOBAL_INFLIGHT_COUNTER,
-    GLOBAL_INFLIGHT_HWM, GLOBAL_LATENCY_FAST, GLOBAL_LATENCY_MID, GLOBAL_LATENCY_NS_TOTAL,
-    GLOBAL_LATENCY_SLOW, GLOBAL_RPC_COUNTER, GLOBAL_SHED_COUNTER,
+    bind_loopback, run_http_loop, GLOBAL_4XX_COUNTER, GLOBAL_5XX_COUNTER,
+    GLOBAL_INFLIGHT_COUNTER, GLOBAL_INFLIGHT_HWM, GLOBAL_LATENCY_FAST, GLOBAL_LATENCY_MID,
+    GLOBAL_LATENCY_NS_TOTAL, GLOBAL_LATENCY_SLOW, GLOBAL_RPC_COUNTER, GLOBAL_SHED_COUNTER,
 };
 use crate::server::{run_stdio_loop, ServerConfig};
 
@@ -452,7 +452,14 @@ pub fn run(
             }
         });
 
-        if let Err(e) = run_http_loop(port, max_body, config, http_stats_store) {
+        let listener = match bind_loopback(port) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("{banner}: cannot bind HTTP transport on 127.0.0.1:{port}: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = run_http_loop(listener, max_body, config, http_stats_store, None) {
             eprintln!("{banner}: cannot bind HTTP transport on 127.0.0.1:{port}: {e}");
             std::process::exit(1);
         }
