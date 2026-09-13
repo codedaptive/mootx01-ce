@@ -178,7 +178,7 @@ struct AriaSurfaceV2Tests {
         // Patch outputSchema.properties.data from the appropriate side fixture,
         // resolving local $ref values. Mirrors the Rust mission02_catalog_operation
         // three-family dispatch in surface_selection_tests.rs so both ports gate
-        // the same 48 operations at the same assertion depth (inputSchema +
+        // the same 48 operations over the same schema assertions (inputSchema +
         // outputSchema for 44, inputSchema only for 5, with one name shared).
         if name.hasPrefix("moot_lens_") || name.hasPrefix("moot_recall_") {
             // Recall and lens family: typed data schemas live in the recall_lens side
@@ -464,9 +464,11 @@ struct AriaSurfaceV2Tests {
     @Test func selectedDatasetCatalogMatchesFrozenMission02Schemas() throws {
         // Gates 44 operations with inputSchema, outputSchema, description, and
         // effect against the frozen mission02 fixture (after patching each
-        // operation's data schema from the appropriate side fixture). Matches the
-        // depth of Rust's strict loop in
-        // v2_catalog_and_admission_are_the_same_ready_subset. moot_dream is
+        // operation's data schema from the appropriate side fixture). Covers the
+        // same 44 names as Rust's strict loop in
+        // v2_catalog_and_admission_are_the_same_ready_subset, at greater depth:
+        // Rust asserts inputSchema and outputSchema, this loop also asserts
+        // description and effect. moot_dream is
         // included here now that the fixture carries its typed outputSchema; the
         // inputSchema-only loop below gates the 5 operations whose outputSchemas
         // are not yet frozen in the fixture.
@@ -497,13 +499,7 @@ struct AriaSurfaceV2Tests {
             let actual = try #require(tools.first { $0.name == name })
             #expect(actual.inputSchema == expected["inputSchema"], "\(name) input schema")
             #expect(actual.outputSchema == expected["outputSchema"], "\(name) output schema")
-            // moot_synthesize: live description "Produce a grounded synthesis from
-            // authorized memories." diverges from fixture "Synthesize authorized
-            // recalled memories into a grounded context document." — excluded from
-            // the description assertion pending a fixture or live update.
-            if name != "moot_synthesize" {
-                #expect(actual.description == expected["description"]?.stringValue, "\(name) description")
-            }
+            #expect(actual.description == expected["description"]?.stringValue, "\(name) description")
             let descriptor = try #require(registry.operation(named: name), "\(name) missing from registry")
             #expect(descriptor.effect.rawValue == expected["effect"]?.stringValue, "\(name) effect")
         }

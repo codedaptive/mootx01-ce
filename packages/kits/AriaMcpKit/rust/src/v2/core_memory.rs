@@ -220,17 +220,23 @@ impl V2Exportability {
     }
 }
 
+/// The six content-kind values declared by both v2 catalogs
+/// (AriaV2SelectedCatalog.swift, v2/catalog.rs).  A value absent from both
+/// catalogs is not a v2 capability: the parser refuses it, and the refusal's
+/// allowed list is these six, sorted (ruling, 2026-09-12).  LocusKit's own
+/// `ContentKind` is a wider, separate vocabulary reached by the lens surface;
+/// this enum is the v2 wire subset, not an alias for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum V2ContentKind { Prose, Code, Transcript, List, StructuredJson, ImageCaption, FingerprintOnly }
+pub enum V2ContentKind { Prose, Code, Transcript, List, StructuredJson, ImageCaption }
 
 impl V2ContentKind {
     fn parse(value: &str, path: &str) -> V2DecodeResult<Self> {
         match value {
             "prose" => Ok(Self::Prose), "code" => Ok(Self::Code), "transcript" => Ok(Self::Transcript),
             "list" => Ok(Self::List), "structured_json" => Ok(Self::StructuredJson),
-            "image_caption" => Ok(Self::ImageCaption), "fingerprint_only" => Ok(Self::FingerprintOnly),
+            "image_caption" => Ok(Self::ImageCaption),
             _ => Err(V2InvalidArgument::new(path, "must be a supported content kind").allowed(
-                ["prose", "code", "transcript", "list", "structured_json", "image_caption", "fingerprint_only"]
+                ["prose", "code", "transcript", "list", "structured_json", "image_caption"]
                     .into_iter().map(str::to_owned))
                 .correction("use a documented content kind value")),
         }
