@@ -66,17 +66,18 @@ import SubstrateLib
 // dependency graph points the other way). Touch one side and the
 // Guardian warns at your desk, before it ships.
 //
-// Nine pairs total: six set-equality pairs (legalValues ↔ allCases)
+// Ten pairs total: seven set-equality pairs (legalValues ↔ allCases)
 // and three singleton-raw pairs (single comparison literal ↔ single
 // case rawValue). The singleton-raw pairs cover the I-22/S-1 threshold
 // constants at RowStateAutomaton.swift.
 //
-// Test backstop: GuardianPairParityTests (CI-level pin for all nine).
+// Test backstop: GuardianPairParityTests (CI-level pin for all ten).
 // ──────────────────────────────────────────────────────────────────────
 
 // @guardian-pair: state-basis State.allCases <-> AuditGate.basis[state].legalValues (raw set equality)
 // @guardian-pair: drawerstore-mutate-state State.allCases <-> DrawerStore.mutateState.stateSlot.legalValues (raw set equality)
 // @guardian-pair: drawerstore-expunge-state State.allCases <-> DrawerStore.expungeGated.stateSlot.legalValues (raw set equality)
+// @guardian-pair: drawerstore-withdraw-kgfact State.allCases <-> DrawerStore.withdrawKGFact.stateSlot.legalValues (raw set equality)
 /// State axis — where the row sits in the AI's epistemic timeline.
 /// Lives in bits 0–5 of `Drawer.adjectiveBitmap` (6 bits, 64 values;
 /// 10 used at scale-gapped raws, 54 reserved). Per cookbook §2.3 /

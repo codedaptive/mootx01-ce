@@ -146,6 +146,7 @@ public struct AriaV2RetireFactRequest: Sendable, Equatable {
     public init(arguments: JSONValue) throws {
         let decoder = try AriaV2ArgumentDecoder(arguments, allowedKeys: ["fact_id", "reason", "estate_id"])
         factID = try decoder.requireUUID("fact_id")
+        // optionalNonEmpty checks for empty string only; no length cap applies to reason.
         reason = try AriaV2KnowledgeJournalRequest.optionalNonEmpty(decoder.optionalString("reason"), path: "reason")
         estateID = try decoder.optionalUUID("estate_id")
     }
@@ -399,7 +400,6 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
 
     public func retireFact(_ request: AriaV2RetireFactRequest, context: AriaV2MemoryOperationContext) async throws {
         try validateEstate(request.estateID, context: context)
-        _ = request.reason // The lower retirement verb has no reason field.
         let facts = try await kit.recallKGFacts(handle)
         let visible = try await visibleFacts(facts, estate: try await kit.estate(for: handle), context: context)
         guard let storedID = AriaV2ArgumentDecoder.matchingStorageIdentity(request.factID, among: visible.map(\.id)) else {
@@ -408,7 +408,9 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
                 message: "The target fact is not available to this caller."
             ).jsonRPCError
         }
-        try await kit.retireKGFact(handle, rowID: storedID)
+        // changedBy comes from serverIdentity (the binary that hosts this dispatcher).
+        // reason is forwarded from the caller's request; optionalNonEmpty applies, no length cap.
+        try await kit.retireKGFact(handle, rowID: storedID, changedBy: context.serverIdentity, reason: request.reason, now: context.now())
     }
 
     public func factTimeline(_ request: AriaV2FactTimelineRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeFact] {
