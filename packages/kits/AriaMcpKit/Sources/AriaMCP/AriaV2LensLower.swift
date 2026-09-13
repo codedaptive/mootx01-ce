@@ -883,9 +883,19 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         _ matches: [CueMatch], context: AriaV2LensLower.Context
     ) async throws -> AriaV2RecallLensOutcome {
         let estate = try await kit.estate(for: handle)
+        // Full hydration so drawer.content is populated for bestSpan computation;
+        // structured hydration returns content == "" (Swift spec §7.3) which would
+        // make every bestSpan nil. Two independent sensitivity axes still gate
+        // the row. The adjective ceiling reaches it through the filterChain:
+        // BitmapEvaluator injects sensitivityAtMost(.elevated) whenever the
+        // chain carries no sensitivity filter of its own, which is a wider
+        // condition than an empty chain. The provenance axis is a different bit
+        // field and is applied below by AriaV2RecallLensPrivacy.project; neither
+        // axis covers the other. This mirrors the keystones path.
         let drawersByID = try await RecipeTools.structuredDrawersByID(
             ids: matches.map(\.id), estate: estate,
-            filterChain: context.authorizationFrame.filterChain)
+            filterChain: context.authorizationFrame.filterChain,
+            hydrationLevel: .full)
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: drawersByID.values.map(\.parentNodeId))
         let rows = matches.map { match -> CandidateRowData in

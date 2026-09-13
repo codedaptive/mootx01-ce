@@ -617,6 +617,154 @@ fn lens_trust_synthesis_restricted_row_has_no_dense_fields() {
     }
 }
 
+// B6-prov — Provenance sensitivity gate for all three lens surfaces.
+//
+// The existing B3 and B4 tests restrict a drawer via the ADJECTIVE axis
+// (MutationKind::CorrectSensitivity), which causes the adjective ceiling
+// (SensitivityAtMost(Elevated)) to exclude the drawer from f.admissible
+// before structured_drawers_by_id is even called.
+//
+// These tests use the PROVENANCE axis instead (frame.provenance_sensitivity).
+// A drawer with provenance=Restricted and adjective=Normal passes the adjective
+// ceiling and reaches structured_drawers_by_id, where the V2 provenance gate
+// (bits 30-35) must exclude it. Without that gate the real subject and content
+// would reach the wire — this test proves the gate discriminates.
+
+/// Seed a drawer with provenance sensitivity Restricted and default adjective
+/// sensitivity (Normal). The drawer passes the adjective ceiling but must be
+/// excluded by the V2 provenance gate in structured_drawers_by_id.
+fn seed_provenance_restricted(registry: &EstateRegistry, content: &str, wing_name: &str) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+    let coord = registry.coord.lock().unwrap();
+    let mut frame = CaptureFrame::new(
+        content, CaptureChannel::Typed, "r",
+        LatticeAnchor::udc("000"), "test", "test-model",
+    );
+    frame.wing = Some(wing_name.to_owned());
+    frame.provenance_sensitivity = locus_kit::provenance::Sensitivity::Restricted;
+    coord.capture(
+        &registry.default.handle,
+        frame,
+        1_700_000_000_000,
+    ).expect("capture provenance-restricted").id
+}
+
+// B6-prov-keystones — moot_lens_keystones emits no dense fields for a
+// provenance-restricted drawer even when its adjective sensitivity is Normal.
+#[test]
+fn lens_keystones_provenance_restricted_row_has_no_dense_fields() {
+    // TRANSIENT: no charter drawers so the keystones graph is deterministic.
+    use aria_mcp::estate_registry::EstateOpening;
+    let registry = EstateRegistry::new_inmemory_with(EstateOpening::TRANSIENT);
+
+    // Hub: provenance=Restricted, adjective=Normal (default).
+    // Tunnels are captured while hub is still Normal on the adjective axis,
+    // so tunnel sensitivity inherits Normal and recall_tunnels includes them.
+    // This is the combination that exploited the hole: adjective Normal lets the
+    // drawer pass the frame ceiling, provenance Restricted must block the gate.
+    let hub_id = seed_provenance_restricted(&registry, "prov-restricted-hub-b6", "b6p-wing");
+    let s1 = seed_no_subject(&registry, "prov-spoke-b6-a", "b6p-wing");
+    let s2 = seed_no_subject(&registry, "prov-spoke-b6-b", "b6p-wing");
+    {
+        use locus_kit::frames::TunnelCaptureFrame;
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle)
+            .expect("estate must be open");
+        for spoke_id in &[&s1, &s2] {
+            let mut frame = TunnelCaptureFrame::new(
+                "b6p-wing", "r", "b6p-wing", "r", "relates", "test");
+            frame.source_drawer_id = Some(hub_id.clone());
+            frame.target_drawer_id = Some(spoke_id.to_string());
+            estate.capture_tunnel(frame, 1_700_000_000_000)
+                .expect("tunnel capture");
+        }
+    }
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let result = call(&dispatcher, "moot_lens_keystones", json!({ "wing": "b6p-wing" }));
+    assert!(is_success(&result), "keystones must succeed: {result}");
+
+    let keystones = data(&result)["keystones"]
+        .as_array()
+        .expect("keystones array must be present");
+
+    let hub_row = keystones
+        .iter()
+        .find(|k| k["id"].as_str().map_or(false, |s| s.to_lowercase() == hub_id.to_lowercase()))
+        .unwrap_or_else(|| panic!(
+            "provenance-restricted hub must appear in keystones; got: {keystones:?}"
+        ));
+
+    // No dense fields: the provenance gate must prevent real subject and content
+    // from reaching the wire. The drawer's real content is the fixture string
+    // above; seeing it here would mean the gate failed.
+    assert!(
+        hub_row.get("subject").is_none(),
+        "provenance-restricted keystone must not expose 'subject'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("bestSpan").is_none(),
+        "provenance-restricted keystone must not expose 'bestSpan'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("eventTime").is_none(),
+        "provenance-restricted keystone must not expose 'eventTime'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("id").is_some(),
+        "provenance-restricted keystone must still carry 'id'; got: {hub_row}"
+    );
+    assert!(
+        hub_row.get("centrality").is_some(),
+        "provenance-restricted keystone must still carry 'centrality'; got: {hub_row}"
+    );
+}
+
+// B7-prov-trust — moot_lens_trust_synthesis emits no dense fields for a
+// provenance-restricted drawer even when its adjective sensitivity is Normal.
+//
+// A provenance-restricted drawer with adjective sensitivity Normal passes the
+// adjective ceiling and MUST appear in rankedIDs — that is precisely the hole
+// this gate covers. If the row is absent the mission's fix regressed; the
+// panic here is the discriminating signal.
+#[test]
+fn lens_trust_synthesis_provenance_restricted_row_has_no_dense_fields() {
+    let registry = EstateRegistry::new_inmemory();
+    let restricted_id = seed_provenance_restricted(&registry, "prov-restricted-b7", "b7p-wing");
+
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let result = call(&dispatcher, "moot_lens_trust_synthesis", json!({}));
+    assert!(is_success(&result), "trust_synthesis must succeed: {result}");
+
+    let ranked = data(&result)["rankedIDs"]
+        .as_array()
+        .expect("rankedIDs array must be present");
+
+    let row = ranked
+        .iter()
+        .find(|r| r["id"].as_str().map_or(false, |s| s.to_lowercase() == restricted_id.to_lowercase()))
+        .unwrap_or_else(|| panic!("provenance-restricted drawer must appear in rankedIDs; got: {ranked:?}"));
+
+    assert!(
+        row.get("subject").is_none(),
+        "provenance-restricted ranked row must not expose 'subject'; got: {row}"
+    );
+    assert!(
+        row.get("bestSpan").is_none(),
+        "provenance-restricted ranked row must not expose 'bestSpan'; got: {row}"
+    );
+    assert!(
+        row.get("eventTime").is_none(),
+        "provenance-restricted ranked row must not expose 'eventTime'; got: {row}"
+    );
+    assert!(
+        row.get("id").is_some(),
+        "provenance-restricted ranked row must still carry 'id'; got: {row}"
+    );
+}
+
 // B5 — Wire parity: no-subject drawer with multiline content.
 //
 // The exact literals here must match the Swift gate
