@@ -376,7 +376,7 @@ pub fn send_shed_response(stream: &mut TcpStream) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MARK: - HTTP server entry points: run_http_loop (bind) and serve_http (hardened, multi-threaded)
+// MARK: - HTTP server entry points: run_http_loop (delegate) and serve_http (hardened, multi-threaded)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Maximum concurrent SSE connections (CAND-025 hardening).
@@ -388,31 +388,34 @@ pub fn send_shed_response(stream: &mut TcpStream) {
 /// overrideable via `MOOTX01_HTTP_MAX_SSE`.
 const MAX_SSE_CONNECTIONS: usize = 16;
 
-/// Run the resident loopback HTTP MCP transport on `127.0.0.1:port` until the
-/// process is terminated. Returns only if the bind fails.
+/// Run the resident loopback HTTP MCP transport on an already-bound listener
+/// until `connection_limit` is reached or until `serve_http` returns an error.
 ///
-/// Binds the listener then delegates to [`serve_http`], which owns the gate
-/// configuration, the dispatcher construction and the accept loop; see that
-/// function for the concurrency and SSE-isolation behaviour and for the
-/// `stats_store` parameter. This function is the bind half and nothing else.
+/// The caller is responsible for binding the listener before passing it here.
+/// In production, `runtime.rs` calls [`bind_loopback`] and passes the result;
+/// in tests, the test binds its own listener on port 0 and moves it in.
+/// Owning the bind at the call site eliminates the window between acquiring
+/// a free port and the server thread calling accept on it.
 ///
-/// The split exists so a test can drive the real `ServerConfig` to `Dispatcher`
-/// construction: it calls [`serve_http`] with a pre-bound listener and
-/// `connection_limit: Some(n)` instead of mocking or bypassing the seam.
+/// `connection_limit` is forwarded unchanged to [`serve_http`]: `None` serves
+/// forever; `Some(n)` returns after accepting at least `n` connections.
 ///
-/// The advisory gate sits at [`serve_http`] and [`crate::server::dispatcher_from_config`],
-/// not here. This two-line wrapper has no test coverage of its own — patching
-/// the advisory fields between the bind and the delegation leaves the test
-/// suite green because the construction seam is in `serve_http`, not in this
-/// function.
+/// The split between this function and [`serve_http`] exists so a test can
+/// drive the production entry point that `runtime.rs` calls
+/// (`run_http_loop_delegates_to_serve_http_with_both_advisories`) while a
+/// sibling test drives [`serve_http`] directly
+/// (`both_advisories_surface_via_http_construction_path`). Inserting a neuter
+/// (`config.update_advisory = None`) inside this body turns the first test
+/// RED and leaves the second GREEN, confirming the two tests cover different
+/// routing paths.
 pub fn run_http_loop(
-    port: u16,
+    listener: std::net::TcpListener,
     max_body_bytes: usize,
     config: ServerConfig,
     stats_store: Option<Arc<StatsStore>>,
+    connection_limit: Option<usize>,
 ) -> std::io::Result<()> {
-    let listener = bind_loopback(port)?;
-    serve_http(listener, max_body_bytes, config, stats_store, None)
+    serve_http(listener, max_body_bytes, config, stats_store, connection_limit)
 }
 
 /// Accept loop for the loopback HTTP MCP transport.
@@ -688,11 +691,11 @@ pub fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(("127.0.0.1", port))
 }
 
-/// Test-only variant of `run_http_loop`: uses a pre-bound listener and
-/// serves exactly `connection_count` connections then returns. Returns a
-/// `JoinHandle` for the server thread so callers can synchronize shutdown.
+/// Test-only variant of `serve_http`: serves exactly `connection_count`
+/// connections then returns. Returns a `JoinHandle` for the server thread so
+/// callers can synchronize shutdown.
 ///
-/// Uses the same two-phase gate + pre-lock read logic as `run_http_loop`:
+/// Uses the same two-phase gate + pre-lock read logic as `serve_http`:
 /// `try_enqueue()` on the accept thread (non-blocking), `wait_for_slot()` on
 /// the worker thread (blocking Condvar wait), request read before the
 /// dispatcher lock. Enables integration tests that drive real threaded
@@ -737,7 +740,7 @@ pub fn run_http_loop_for_test(
 
                 let start = Instant::now();
 
-                // Bound blocking reads: mirrors run_http_loop and moot-mgr's
+                // Bound blocking reads: mirrors serve_http and moot-mgr's
                 // 30-second SO_RCVTIMEO. Prevents a slow-header attacker from
                 // occupying a gate slot indefinitely during the test variant.
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
@@ -745,7 +748,7 @@ pub fn run_http_loop_for_test(
                 // Read request BEFORE locking the dispatcher (fix #26).
                 let request = read_request(&mut stream, 4 * 1024 * 1024);
 
-                // SSE two-gate protocol (CAND-025): same as run_http_loop.
+                // SSE two-gate protocol (CAND-025): same as serve_http.
                 if let Some(ref req) = request {
                     if req.method == "GET" && req.path == "/api/events" && req.wants_event_stream()
                     {
@@ -753,7 +756,7 @@ pub fn run_http_loop_for_test(
                         gate_c.release();
                         let _ = start.elapsed();
 
-                        // DNS-rebinding guard: same as run_http_loop SSE branch.
+                        // DNS-rebinding guard: same as serve_http SSE branch.
                         if !is_loopback_host(req.host.as_deref()) {
                             let body = br#"{"error":"misdirected_request"}"#;
                             let head = format!(
