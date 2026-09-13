@@ -3,11 +3,10 @@
 //! assertions, and substring checks; they do not compare every Rust
 //! JSON string byte-for-byte against Swift JSONEncoder output.
 
-use std::collections::BTreeMap;
 use convergence_kit::{
-    FingerprintWire, PackedHLC, SyncEventKind, SyncRecord, SyncValueBox, SyncValueMap,
+    PackedHLC, SyncEventKind, SyncRecord, SyncValueBox,
 };
-use convergence_kit::types::{SyncManifest, SyncedTable, SyncDirection, ConflictPolicy};
+use convergence_kit::types::{SyncManifest, SyncedTable, ConflictPolicy};
 use convergence_kit::pairing::{PairingProposal, PairingAcceptance, HyperplaneFamilySpec};
 use persistence_kit::TypedValue;
 use substrate_types::hlc::HLC;
