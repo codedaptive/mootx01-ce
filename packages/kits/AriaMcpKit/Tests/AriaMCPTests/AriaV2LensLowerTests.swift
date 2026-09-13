@@ -372,4 +372,373 @@ struct PartialCueModeTests {
             Issue.record("dispatch must throw JSONRPCError, not \(type(of: error)): \(error)")
         }
     }
+
+    // MARK: bestSpan parity gate
+
+    /// AR_LENS_PARTIAL_CUE_BEST_SPAN_001 (Swift port)
+    /// A partial-cue result row for an admissible drawer whose subject and content
+    /// are different must carry bestSpan equal to the normalised content body.
+    /// Drives the shipped path: AriaV2LensLowerService.execute → AriaV2LensLower
+    /// partialCueOutcome → ResultComposer.structuredS1 → structuredRowObject.
+    ///
+    /// Fixture: anchor UDC "004" Normal; peer UDC "530" Normal, subject ≠ content.
+    /// feelsLike: peer has same structure (Normal) and different concept (UDC "530")
+    /// so score > 0 and the peer appears in results.
+    /// The omit-if-equal branch does not fire because content != subject after
+    /// normalisation. bestSpan must equal the normalised content string.
+    ///
+    /// Port parity: the expectedBestSpan literal must match the Rust twin in
+    /// dispatch_tests.rs lens_partial_cue_row_carries_best_span.
+    @Test("partial-cue result row carries bestSpan equal to normalised content")
+    func partialCueRowCarriesBestSpan() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Anchor: Normal sensitivity, UDC "004". Not returned in its own cue results.
+        let anchor = try await kit.capture(handle, CaptureFrame(
+            content: "partial-cue-span-anchor",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1"))
+
+        // Peer: subject and content are DIFFERENT and both non-empty.
+        // These literal strings are the wire contract. Both ports assert the same value.
+        let expectedBestSpan = "partial cue best span content distinct from subject"
+        let peer = try await kit.capture(handle, CaptureFrame(
+            content: expectedBestSpan,
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("530"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1",
+            subject: "partial cue best span subject"))
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+
+        let results = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "results must be an array")
+
+        // Locate the peer row by id; the anchor is not in results.
+        let peerRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == peer.id })?.objectValue,
+            "peer must appear in partial_cue results")
+
+        let actualBestSpan = try #require(
+            peerRow["bestSpan"]?.stringValue,
+            "peer row must carry bestSpan — Swift partial_cue must hydrate it")
+        #expect(actualBestSpan == expectedBestSpan,
+                "bestSpan must equal the normalised content body")
+    }
+
+    // MARK: Absent-subject and truncation-order parity gates
+
+    /// AR_LENS_PARTIAL_CUE_ABSENT_SUBJECT_001 (Swift port)
+    /// A partial-cue result row for a drawer that has no stored subject must
+    /// carry no "subject" key at all. Swift's structuredRowObject omits the key
+    /// when drawer.subject is nil; Rust's partial-cue arm must do the same.
+    ///
+    /// Drives the shipped path: AriaV2LensLowerService.execute → AriaV2LensLower
+    /// partialCueOutcome → ResultComposer.structuredRowObject.
+    ///
+    /// Neuter gate: restore the pre-fix Rust path that substitutes NO_SUBJECT_MARKER
+    /// and this test remains green in Swift while the Rust twin fails, revealing
+    /// the divergence the gate was designed to catch.
+    @Test("partial-cue result row omits subject key when drawer has no subject")
+    func partialCueRowOmitsSubjectKeyWhenDrawerHasNone() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Anchor: Normal, UDC "004". Not returned in its own cue results.
+        let anchor = try await kit.capture(handle, CaptureFrame(
+            content: "absent-subject-anchor",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1"))
+
+        // Peer: no subject set, non-empty content, UDC "530" (same structure as
+        // anchor so feelsLike score > 0 and the peer appears in results).
+        let peer = try await kit.capture(handle, CaptureFrame(
+            content: "absent subject peer content",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("530"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1"))
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+
+        let results = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "results must be an array")
+
+        let peerRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == peer.id })?.objectValue,
+            "peer must appear in partial_cue results")
+
+        #expect(peerRow["subject"] == nil,
+                "row for drawer without subject must not carry subject key; got row: \(peerRow)")
+    }
+
+    /// AR_LENS_PARTIAL_CUE_TRUNCATION_ORDER_001 (Swift port)
+    /// bestSpan is produced by truncate-then-normalize, not normalize-then-truncate.
+    /// The two orderings give different results when content exceeds 120 chars and
+    /// contains collapsible whitespace before the cut point.
+    ///
+    /// Fixture: 50 'A's, five newlines, 100 'B's (155 chars).
+    ///   truncate(120) first: 50 A's + 5 newlines + 65 B's (120 chars)
+    ///   then normalize:      "AAAA…AAAA BBBB…BBBB" (50 A's, space, 65 B's)
+    ///
+    ///   wrong order (normalize first):
+    ///   normalize:    "AAAA…AAAA BBBB…BBBB" (151 chars; newlines → 1 space)
+    ///   truncate(120): 50 A's + space + 69 B's  (four extra B's)
+    ///
+    /// Drives the shipped path: AriaV2LensLowerService.execute → AriaV2LensLower
+    /// partialCueOutcome → ResultComposer.structuredRowObject.
+    ///
+    /// Port parity: the expectedBestSpan literal must match the Rust twin in
+    /// dispatch_tests.rs partial_cue_row_truncates_before_normalising_best_span.
+    @Test("partial-cue bestSpan applies truncate-then-normalize, not normalize-then-truncate")
+    func partialCueRowTruncatesBeforeNormalisingBestSpan() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // 50 A's + 5 newlines + 100 B's (155 chars; crosses the 120-char cut).
+        let content = String(repeating: "A", count: 50)
+            + "\n\n\n\n\n"
+            + String(repeating: "B", count: 100)
+        // truncate(raw, 120): 50 A's + 5 newlines + 65 B's (120 chars).
+        // normalize: collapse the 5 newlines to one space → 50 A's + " " + 65 B's.
+        // Both ports assert this same literal.
+        let expectedBestSpan = String(repeating: "A", count: 50)
+            + " "
+            + String(repeating: "B", count: 65)
+
+        // Anchor: Normal, UDC "004".
+        let anchor = try await kit.capture(handle, CaptureFrame(
+            content: "truncation-order-anchor",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1"))
+
+        // Peer: subject distinct from content so the omit-if-equal branch does
+        // not fire and bestSpan reaches the wire.
+        let peer = try await kit.capture(handle, CaptureFrame(
+            content: content,
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("530"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1",
+            subject: "truncation order subject"))
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+
+        let results = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "results must be an array")
+
+        let peerRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == peer.id })?.objectValue,
+            "peer must appear in partial_cue results")
+
+        let actualBestSpan = try #require(
+            peerRow["bestSpan"]?.stringValue,
+            "peer row must carry bestSpan")
+        #expect(actualBestSpan == expectedBestSpan,
+                "bestSpan must be truncate-then-normalize (50 A's + space + 65 B's); got: \(actualBestSpan)")
+    }
+
+    /// Parity lock: a drawer with provenance sensitivity Restricted and default
+    /// adjective sensitivity (Normal) must carry the restricted marker as its
+    /// subject and no bestSpan in a partial-cue result row.
+    ///
+    /// Swift applies AriaV2RecallLensPrivacy.project, which checks bits 30-35 of
+    /// drawer.provenance and substitutes ResultComposer.restrictedMarker for the
+    /// subject while setting bestSpan to nil (raw=32 arm). Both ports agree on
+    /// this exact wire shape; the Rust twin
+    /// (dispatch_tests.rs lens_partial_cue_provenance_restricted_row_has_restricted_marker)
+    /// asserts the same literal marker string.
+    @Test("partial-cue row carries restricted marker as subject and omits bestSpan for provenance-restricted drawer")
+    func partialCueProvenanceRestrictedRowHasRestrictedMarker() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Anchor: Normal provenance and adjective, UDC "004".
+        let anchor = try await kit.capture(handle, CaptureFrame(
+            content: "prov-restricted-cue-anchor",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-prov-tests",
+            embeddingModelID: "test-model-v1"))
+
+        // Peer: provenance=Restricted, adjective=Normal (default).
+        // Same UDC as anchor so feelsLike score > 0 and the peer ranks.
+        let peer = try await kit.capture(handle, CaptureFrame(
+            content: "prov-restricted peer body — must not reach wire",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-prov-tests",
+            embeddingModelID: "test-model-v1",
+            provenanceSensitivity: .restricted))
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+
+        let results = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "results must be an array")
+
+        let peerRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == peer.id })?.objectValue,
+            "provenance-restricted peer must appear in partial_cue results")
+
+        // subject must be the restricted marker — literal string so a constant
+        // change breaks this test in both ports simultaneously.
+        let actualSubject = peerRow["subject"]?.stringValue
+        #expect(actualSubject == "[sensitivity: restricted \u{2014} content redacted]",
+                "provenance-restricted row subject must be the restricted marker; got: \(String(describing: actualSubject))")
+        // Real body content must never appear as bestSpan.
+        #expect(peerRow["bestSpan"] == nil,
+                "provenance-restricted row must not expose 'bestSpan'; got: \(String(describing: peerRow["bestSpan"]))")
+        // id must still be present.
+        #expect(peerRow["id"] != nil,
+                "provenance-restricted row must carry 'id'")
+    }
+
+    /// Parity lock: a drawer with provenance sensitivity Secret and default
+    /// adjective sensitivity (Normal) must carry the secret marker as its
+    /// subject and no bestSpan in a partial-cue result row.
+    ///
+    /// Swift applies AriaV2RecallLensPrivacy.project raw=48 arm:
+    /// subject = ResultComposer.secretMarker, bestSpan = nil. Both ports
+    /// agree on this exact wire shape; the Rust twin
+    /// (dispatch_tests.rs lens_partial_cue_provenance_secret_row_has_secret_marker)
+    /// asserts the same literal marker string.
+    @Test("partial-cue row carries secret marker as subject and omits bestSpan for provenance-secret drawer")
+    func partialCueProvenanceSecretRowHasSecretMarker() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Anchor: Normal provenance and adjective, UDC "004".
+        let anchor = try await kit.capture(handle, CaptureFrame(
+            content: "prov-secret-cue-anchor",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-prov-tests",
+            embeddingModelID: "test-model-v1"))
+
+        // Peer: provenance=Secret, adjective=Normal (default).
+        // Same UDC as anchor so feelsLike score > 0 and the peer ranks.
+        let peer = try await kit.capture(handle, CaptureFrame(
+            content: "prov-secret peer body — must not reach wire",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-prov-tests",
+            embeddingModelID: "test-model-v1",
+            provenanceSensitivity: .secret))
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+
+        let results = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "results must be an array")
+
+        let peerRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == peer.id })?.objectValue,
+            "provenance-secret peer must appear in partial_cue results")
+
+        // subject must be the secret marker — literal string so a constant change
+        // breaks this test in both ports simultaneously.
+        let actualSubject = peerRow["subject"]?.stringValue
+        #expect(actualSubject == "[sensitivity: secret \u{2014} content access requires explicit grant]",
+                "provenance-secret row subject must be the secret marker; got: \(String(describing: actualSubject))")
+        // Real body content must never appear as bestSpan.
+        #expect(peerRow["bestSpan"] == nil,
+                "provenance-secret row must not expose 'bestSpan'; got: \(String(describing: peerRow["bestSpan"]))")
+        // id must still be present.
+        #expect(peerRow["id"] != nil,
+                "provenance-secret row must carry 'id'")
+    }
+
+    /// Parity lock: a body that starts with leading whitespace followed by more
+    /// than 120 characters must produce a bestSpan truncated at raw character 120,
+    /// not at character 120 of the trimmed body.
+    ///
+    /// Fixture: 10 spaces + 115 A's (125 chars total).
+    ///   truncate(raw, 120): 10 spaces + 110 A's.
+    ///   normalize: leading spaces stripped → 110 A's.
+    ///
+    /// Wrong order (trim-then-truncate): 115 A's (no cut because 115 < 120).
+    ///
+    /// Port parity: the Rust twin is
+    /// dispatch_tests.rs partial_cue_leading_whitespace_truncates_at_raw_character_boundary.
+    /// Both ports assert "A" × 110 so a regression in either fails here.
+    @Test("partial-cue bestSpan truncates leading-whitespace body at raw character 120")
+    func partialCueLeadingWhitespaceTruncation() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // 10 leading spaces + 115 A's = 125 chars total.
+        let content = String(repeating: " ", count: 10) + String(repeating: "A", count: 115)
+        // truncate(raw, 120) cuts at the 121st character: 10 spaces + 110 A's.
+        // normalize strips leading spaces → 110 A's.
+        let expectedBestSpan = String(repeating: "A", count: 110)
+
+        let anchor = try await kit.capture(handle, CaptureFrame(
+            content: "trim-asymmetry-anchor",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-trim-tests",
+            embeddingModelID: "test-model-v1"))
+
+        // Subject is distinct from content so the omit-if-equal branch does not
+        // fire and bestSpan reaches the wire.
+        let peer = try await kit.capture(handle, CaptureFrame(
+            content: content,
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("530"), addedBy: "partial-cue-trim-tests",
+            embeddingModelID: "test-model-v1",
+            subject: "trim asymmetry subject"))
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+
+        let results = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "results must be an array")
+
+        let peerRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == peer.id })?.objectValue,
+            "peer must appear in partial_cue results")
+
+        let actualBestSpan = try #require(
+            peerRow["bestSpan"]?.stringValue,
+            "peer row must carry bestSpan")
+        #expect(actualBestSpan == expectedBestSpan,
+                "bestSpan must be 110 A's (truncate-at-raw-120 then normalize); got: \(actualBestSpan)")
+    }
 }
