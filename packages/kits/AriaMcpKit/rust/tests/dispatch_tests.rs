@@ -5917,6 +5917,425 @@ fn lens_partial_cue_unknown_mode_returns_invalid_params() {
     );
 }
 
+/// Seed a partial-cue memory with an explicit subject AND content (both non-empty,
+/// deliberately different so the omit-if-equal bestSpan branch does not fire).
+fn seed_cue_memory_with_subject(
+    registry: &EstateRegistry,
+    subject: &str,
+    content: &str,
+    udc_code: &str,
+    sensitivity: locus_kit::provenance::Sensitivity,
+) -> String {
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "cue-mode-test",
+        LatticeAnchor::udc(udc_code),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.subject = Some(subject.to_owned());
+    frame.provenance_sensitivity = sensitivity;
+    let now = aria_mcp::dispatch::wall_now();
+    let coord = registry.coord.lock().unwrap();
+    coord
+        .capture(&registry.default.handle, frame, now)
+        .expect("seed_cue_memory_with_subject capture must succeed")
+        .id
+}
+
+#[test]
+fn lens_partial_cue_row_carries_best_span() {
+    // AR_LENS_PARTIAL_CUE_BEST_SPAN_001
+    // A partial-cue result row for an admissible drawer whose subject and content
+    // are different must carry bestSpan equal to the normalised content body.
+    // Drives the shipped path: Dispatcher::handle → surface.rs execute_recall →
+    // lens_lower.rs partial_cue → project_data LensPartialCue arm.
+    //
+    // Fixture:
+    //   anchor: Normal, UDC "004" — probe anchor, not returned in results.
+    //   peer:   Normal, UDC "530" — feelsLike score > 0 (same structure block,
+    //           different concept block), so the peer appears in results.
+    //   peer subject: "partial cue best span subject" (distinct from content).
+    //   peer content: "partial cue best span content distinct from subject".
+    //   Expected bestSpan: the normalised content string (both conditions for
+    //   omission are false — content is non-empty and != subject after normalise).
+    //
+    // Port parity: the same expected_best_span literal must match both this
+    // assertion and the Swift twin in AriaV2LensLowerTests.swift.
+    use locus_kit::provenance::Sensitivity;
+
+    // These literal strings are the wire contract. Both ports assert them.
+    let expected_best_span = "partial cue best span content distinct from subject";
+
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(
+        &registry, "partial-cue-span-anchor", "004", Sensitivity::Normal);
+    let peer_id = seed_cue_memory_with_subject(
+        &registry,
+        "partial cue best span subject",
+        expected_best_span,
+        "530",
+        Sensitivity::Normal,
+    );
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "partial_cue must succeed; got: {result:?}");
+    let results = result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("results must be an array");
+
+    // The anchor is not in its own cue results; the peer is the only candidate.
+    let peer_row = results
+        .iter()
+        .find(|row| row["id"].as_str() == Some(peer_id.as_str()))
+        .expect("peer must appear in partial_cue results");
+
+    let actual_best_span = peer_row["bestSpan"]
+        .as_str()
+        .expect("peer row must carry bestSpan — partial_cue must hydrate it");
+    assert_eq!(
+        actual_best_span, expected_best_span,
+        "bestSpan must equal the normalised content body; got: {actual_best_span:?}"
+    );
+}
+
+#[test]
+fn partial_cue_row_omits_subject_key_when_drawer_has_none() {
+    // AR_LENS_PARTIAL_CUE_ABSENT_SUBJECT_001 (Rust port)
+    // A partial-cue result row for an admissible drawer that has no stored
+    // subject must carry no "subject" key at all — not "(no subject)", not
+    // an empty string, not null. Swift's partialCueOutcome passes
+    // drawer.subject through privacy projection to structuredRowObject, which
+    // omits the key when nil. Both ports must agree.
+    //
+    // Drives the shipped path: Dispatcher::handle → surface.rs execute_recall
+    // → lens_lower.rs partial_cue → structured_drawers_by_id.
+    //
+    // Neuter gate: if structured_drawers_by_id substitutes NO_SUBJECT_MARKER
+    // ("(no subject)") the assertion fires because the key is present.
+    use locus_kit::provenance::Sensitivity;
+
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(
+        &registry, "absent-subject-anchor", "004", Sensitivity::Normal);
+    // Peer has no subject — seed_cue_memory does not set CaptureFrame.subject.
+    let peer_id = seed_cue_memory(
+        &registry, "absent subject peer content", "530", Sensitivity::Normal);
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "partial_cue must succeed; got: {result:?}");
+    let results = result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("results must be an array");
+
+    let peer_row = results
+        .iter()
+        .find(|row| row["id"].as_str() == Some(peer_id.as_str()))
+        .expect("peer must appear in partial_cue results");
+
+    assert!(
+        peer_row.get("subject").is_none(),
+        "row for drawer without subject must not carry subject key; got row: {peer_row:?}"
+    );
+}
+
+#[test]
+fn partial_cue_row_truncates_before_normalising_best_span() {
+    // AR_LENS_PARTIAL_CUE_TRUNCATION_ORDER_001 (Rust port)
+    // BestSpan is produced by truncate-then-normalize, not normalize-then-truncate.
+    // The two orderings give different results for content longer than 120 chars
+    // that contains collapsible whitespace before the cut point.
+    //
+    // Fixture: 50 'A's, five newlines, 100 'B's (155 chars total).
+    //   truncate(120) first: 50 A's + 5 newlines + 65 B's (120 chars)
+    //   then normalize:      "AAAA...AAAA BBBB...BBBB" (50 A's, space, 65 B's)
+    //
+    //   wrong order (normalize first):
+    //   normalize:    "AAAA...AAAA BBBB...BBBB" (151 chars; 5 newlines → 1 space)
+    //   truncate(120): 50 A's + space + 69 B's   (120 chars — four extra B's)
+    //
+    // The expected literal encodes 50 A's, one space, and 65 B's. Both ports
+    // assert the same literal so a difference in ordering shows up in either.
+    //
+    // Drives the shipped path: Dispatcher::handle → surface.rs execute_recall
+    // → lens_lower.rs partial_cue → structured_drawers_by_id.
+    //
+    // Port parity: the expected_best_span literal must match the Swift twin in
+    // AriaV2LensLowerTests.swift partialCueRowTruncatesBeforeNormalisingBestSpan.
+    use locus_kit::provenance::Sensitivity;
+
+    // 50 A's + 5 newlines + 100 B's (155 chars; crosses the 120-char cut).
+    let content = format!("{}\n\n\n\n\n{}", "A".repeat(50), "B".repeat(100));
+    // truncate(raw, 120) cuts at char 120: 50 A's + 5 newlines + 65 B's.
+    // normalize collapses the 5 newlines to one space: 50 A's + " " + 65 B's.
+    let expected_best_span = format!("{} {}", "A".repeat(50), "B".repeat(65));
+
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(
+        &registry, "truncation-order-anchor", "004", Sensitivity::Normal);
+    // Peer: subject is distinct from content so the omit-if-equal branch does
+    // not fire and bestSpan reaches the wire.
+    let peer_id = seed_cue_memory_with_subject(
+        &registry,
+        "truncation order subject",
+        &content,
+        "530",
+        Sensitivity::Normal,
+    );
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "partial_cue must succeed; got: {result:?}");
+    let results = result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("results must be an array");
+
+    let peer_row = results
+        .iter()
+        .find(|row| row["id"].as_str() == Some(peer_id.as_str()))
+        .expect("peer must appear in partial_cue results");
+
+    let actual_best_span = peer_row["bestSpan"]
+        .as_str()
+        .expect("peer row must carry bestSpan");
+    assert_eq!(
+        actual_best_span, expected_best_span,
+        "bestSpan must be truncate-then-normalize (50 A's + space + 65 B's); got: {actual_best_span:?}"
+    );
+}
+
+// AR_LENS_PARTIAL_CUE_PROV_RESTRICTED_001
+// A partial-cue result row for a provenance-restricted drawer (adjective=Normal)
+// must carry the RESTRICTED_MARKER string as its subject and no bestSpan.
+// The drawer passes the adjective ceiling (SensitivityAtMost(Elevated)) and
+// reaches structured_drawers_by_id, which returns DrawerFill::Restricted.
+// The partial_cue arm applies the four-way sensitivity-marker projection
+// (matching Swift's AriaV2RecallLensPrivacy.project raw=32 arm) and emits
+// the marker rather than the real subject.
+//
+// seed_cue_memory writes to the PROVENANCE axis (frame.provenance_sensitivity),
+// not the adjective axis. Every existing call passes Sensitivity::Normal; this
+// test is the first to pass Sensitivity::Restricted, which is the combination
+// that opened the hole.
+//
+// Drives the shipped path: Dispatcher::handle → surface.rs execute_recall →
+// lens_lower.rs partial_cue → structured_drawers_by_id.
+#[test]
+fn lens_partial_cue_provenance_restricted_row_has_restricted_marker() {
+    use locus_kit::provenance::Sensitivity;
+
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(&registry, "prov-restricted-cue-anchor", "004", Sensitivity::Normal);
+    // Peer: provenance=Restricted, adjective=Normal (default).
+    // Same UDC as anchor so feelsLike score > 0 and the peer ranks in results.
+    let peer_id = seed_cue_memory(&registry, "prov-restricted peer body", "004", Sensitivity::Restricted);
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "partial_cue must succeed; got: {result:?}");
+    let results = result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("results must be an array");
+
+    let peer_row = results
+        .iter()
+        .find(|row| row["id"].as_str().map_or(false, |s| s.to_lowercase() == peer_id.to_lowercase()))
+        .unwrap_or_else(|| panic!(
+            "provenance-restricted peer must appear in results; got: {results:?}"
+        ));
+
+    // subject must be the restricted marker — literal string so a constant
+    // change breaks this test in both ports simultaneously.
+    assert_eq!(
+        peer_row["subject"].as_str(),
+        Some("[sensitivity: restricted \u{2014} content redacted]"),
+        "provenance-restricted row subject must be the restricted marker; got: {peer_row:?}"
+    );
+    // Real body content must not appear as bestSpan.
+    assert!(
+        peer_row.get("bestSpan").is_none(),
+        "provenance-restricted row must not expose 'bestSpan'; got: {peer_row:?}"
+    );
+    // id and score must still be present.
+    assert!(
+        peer_row.get("id").is_some(),
+        "provenance-restricted row must carry 'id'; got: {peer_row:?}"
+    );
+}
+
+// AR_LENS_PARTIAL_CUE_PROV_SECRET_001
+// A partial-cue result row for a provenance-secret drawer (adjective=Normal)
+// must carry the SECRET_MARKER string as its subject and no bestSpan.
+// The drawer passes the adjective ceiling and reaches structured_drawers_by_id,
+// which returns DrawerFill::Secret. The partial_cue arm applies the
+// four-way sensitivity-marker projection (matching Swift's
+// AriaV2RecallLensPrivacy.project raw=48 arm).
+//
+// Drives the shipped path: Dispatcher::handle → surface.rs execute_recall →
+// lens_lower.rs partial_cue → structured_drawers_by_id.
+#[test]
+fn lens_partial_cue_provenance_secret_row_has_secret_marker() {
+    use locus_kit::provenance::Sensitivity;
+
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(&registry, "prov-secret-cue-anchor", "004", Sensitivity::Normal);
+    // Peer: provenance=Secret, adjective=Normal (default).
+    // Same UDC as anchor so feelsLike score > 0 and the peer ranks in results.
+    let peer_id = seed_cue_memory(&registry, "prov-secret peer body", "004", Sensitivity::Secret);
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "partial_cue must succeed; got: {result:?}");
+    let results = result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("results must be an array");
+
+    let peer_row = results
+        .iter()
+        .find(|row| row["id"].as_str().map_or(false, |s| s.to_lowercase() == peer_id.to_lowercase()))
+        .unwrap_or_else(|| panic!(
+            "provenance-secret peer must appear in results; got: {results:?}"
+        ));
+
+    // subject must be the secret marker — literal string so a constant change
+    // breaks this test in both ports simultaneously.
+    assert_eq!(
+        peer_row["subject"].as_str(),
+        Some("[sensitivity: secret \u{2014} content access requires explicit grant]"),
+        "provenance-secret row subject must be the secret marker; got: {peer_row:?}"
+    );
+    // Real body content must not appear as bestSpan.
+    assert!(
+        peer_row.get("bestSpan").is_none(),
+        "provenance-secret row must not expose 'bestSpan'; got: {peer_row:?}"
+    );
+    // id and score must still be present.
+    assert!(
+        peer_row.get("id").is_some(),
+        "provenance-secret row must carry 'id'; got: {peer_row:?}"
+    );
+}
+
+// AR_LENS_PARTIAL_CUE_TRIM_ASYMMETRY_001
+// bestSpan for a body that starts with leading whitespace followed by more
+// than 120 chars must be computed by truncating the RAW (untrimmed) body,
+// then normalising — matching Swift's AriaV2LensLower.swift:901-903 which
+// passes drawer.content whole to structuredRowObject where truncation
+// precedes normalisation.
+//
+// Fixture: 10 spaces + 115 A's (125 chars total).
+//   truncate(raw, 120): "          " + 110 A's (char 120 is the 111th A).
+//   normalize: leading spaces stripped → 110 A's.
+//
+// Wrong order (trim-then-truncate):
+//   trim: 115 A's (115 < 120 — no cut at all).
+//   normalize: 115 A's.
+//
+// Both ports assert the 110-A literal so a trim-before-truncate regression
+// fails in either.
+//
+// Port parity: the expected literal must match the Swift twin in
+// AriaV2LensLowerTests.swift partialCueLeadingWhitespaceTruncation.
+//
+// Drives: Dispatcher::handle → surface.rs execute_recall →
+// lens_lower.rs partial_cue → structured_drawers_by_id.
+#[test]
+fn partial_cue_leading_whitespace_truncates_at_raw_character_boundary() {
+    use locus_kit::provenance::Sensitivity;
+
+    // 10 leading spaces + 115 A's = 125 chars total.
+    let content = format!("{}{}", " ".repeat(10), "A".repeat(115));
+    // truncate(raw, 120) cuts 10 spaces + 110 A's; normalize → 110 A's.
+    let expected_best_span = "A".repeat(110);
+
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(&registry, "trim-asymmetry-anchor", "004", Sensitivity::Normal);
+    // Subject is distinct from content so the omit-if-equal branch does not
+    // fire and bestSpan reaches the wire.
+    let peer_id = seed_cue_memory_with_subject(
+        &registry,
+        "trim asymmetry subject",
+        &content,
+        "530",
+        Sensitivity::Normal,
+    );
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "partial_cue must succeed; got: {result:?}");
+    let results = result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("results must be an array");
+
+    let peer_row = results
+        .iter()
+        .find(|row| row["id"].as_str() == Some(peer_id.as_str()))
+        .expect("peer must appear in partial_cue results");
+
+    let actual_best_span = peer_row["bestSpan"]
+        .as_str()
+        .expect("peer row must carry bestSpan");
+    assert_eq!(
+        actual_best_span, expected_best_span,
+        "bestSpan must be truncate-then-normalize (110 A's); got: {actual_best_span:?}"
+    );
+}
+
 #[test]
 fn lens_with_unknown_estate_returns_invalid_params() {
     let registry = EstateRegistry::new_inmemory();
