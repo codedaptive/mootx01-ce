@@ -466,12 +466,17 @@ struct AriaSurfaceV2Tests {
         // effect against the frozen mission02 fixture (after patching each
         // operation's data schema from the appropriate side fixture). Covers the
         // same 44 names as Rust's strict loop in
-        // v2_catalog_and_admission_are_the_same_ready_subset, at greater depth:
-        // Rust asserts inputSchema and outputSchema, this loop also asserts
-        // description and effect. moot_dream is
-        // included here now that the fixture carries its typed outputSchema; the
-        // inputSchema-only loop below gates the 5 operations whose outputSchemas
-        // are not yet frozen in the fixture.
+        // v2_catalog_and_admission_are_the_same_ready_subset, at the same depth:
+        // both ports assert all four fields over these 44 names. moot_dream is
+        // included here now that the fixture carries its typed outputSchema.
+        //
+        // The inputSchema-only loop below gates 5 further operations. Every
+        // fixture row carries an outputSchema, so that loop's existence is not
+        // about frozen-ness: moot_memory_search, moot_link_memories and
+        // moot_review_tunnel carry a placeholder fixture data schema,
+        // {"type":"object","additionalProperties":true}, which no side fixture
+        // patches and which does not match the live typed schema, so their
+        // outputSchemas are compared nowhere.
         //
         // description is read from ProjectedTool.description (the value the
         // server ships in tools/list, derived from the operation's help.description).
@@ -506,11 +511,11 @@ struct AriaSurfaceV2Tests {
     }
 
     @Test func selectedFiniteAndExclusiveInputsMatchFrozenMission02Schemas() throws {
-        // Gates 5 operations on inputSchema only. moot_file_dataset is shared with
-        // the strict loop above (which already checks its outputSchema). Matches
-        // the depth of Rust's inputSchema-only loop after moot_dream's promotion
-        // to the strict loop in both ports.
+        // Gates 5 operations on inputSchema, description, and effect at the same
+        // depth as Rust's inputSchema-only loop. moot_file_dataset is shared with
+        // the strict loop above, which already checks its outputSchema.
         let tools = ToolProjection.tools(environment: [:])
+        let registry = AriaV2SelectedCatalog.registry(environment: [:])
         for name in [
             "moot_memory_get", "moot_memory_search", "moot_link_memories",
             "moot_review_tunnel", "moot_file_dataset",
@@ -518,6 +523,9 @@ struct AriaSurfaceV2Tests {
             let expected = try mission02CatalogOperation(name)
             let actual = try #require(tools.first { $0.name == name })
             #expect(actual.inputSchema == expected["inputSchema"], "\(name) input schema")
+            #expect(actual.description == expected["description"]?.stringValue, "\(name) description")
+            let descriptor = try #require(registry.operation(named: name), "\(name) missing from registry")
+            #expect(descriptor.effect.rawValue == expected["effect"]?.stringValue, "\(name) effect")
         }
     }
 
