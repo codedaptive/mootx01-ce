@@ -477,7 +477,7 @@ mod tests {
     fn retired_facts_are_still_migrated() {
         let store = InMemoryDrawerStore::new(NOW, None).unwrap();
         store.add_kg_fact(&fact("f-retired-host", "mootx01")).unwrap();
-        store.withdraw_kg_fact("f-retired-host", NOW).unwrap();
+        store.withdraw_kg_fact("f-retired-host", "test-actor", None, NOW).unwrap();
 
         let storage: &Arc<dyn Storage> = store.storage();
         let report = run(storage.as_ref(), &null_resolver).unwrap();

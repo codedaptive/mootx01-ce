@@ -2919,7 +2919,7 @@ public actor DrawerStore {
         )
     }
 
-    /// Transition a KGFact's state to withdrawn.
+    /// Transition a KGFact's state to withdrawn and write a sealed audit row.
     ///
     /// Sets bits 0–5 of `adjectiveBitmap` to `State.withdrawn.rawValue` (18).
     /// That raw lands in RowState Cluster B (at/above the active upper bound
@@ -2927,17 +2927,121 @@ public actor DrawerStore {
     /// from `allKGFacts` active recall. The row is not deleted — retirement
     /// is a state transition that preserves the audit trail.
     ///
-    /// - Throws: `LocusKitError.invalidContent` if no fact with `id` exists.
-    public func withdrawKGFact(id: String) async throws {
-        guard let fact = try await getKGFact(id: id) else {
-            throw LocusKitError.invalidContent("kgFact not found: \(id)")
+    /// The state change is routed through `AuditGate.admit` (verb `.retract`,
+    /// transition `active → withdrawn`) so the substrate emits a sealed
+    /// `_storagekit_audit` row. The gate uses the source drawer's lattice
+    /// anchor when available; a null anchor is used when `sourceDrawerID` is
+    /// empty or the drawer is not found.
+    ///
+    /// - Parameters:
+    ///   - id: The KGFact row identifier.
+    ///   - changedBy: Actor performing the withdrawal (required, non-empty).
+    ///   - reason: Optional human-readable explanation for the withdrawal.
+    ///   - now: The wall-clock instant for the HLC tick (must be passed deterministically).
+    /// - Throws: `LocusKitError.invalidContent` if no fact with `id` exists or
+    ///   the gate rejects the transition.
+    public func withdrawKGFact(id: String, changedBy: String, reason: String? = nil, now: Date) async throws {
+        try Self.validateNonEmpty(id, label: "id")
+        try Self.validateNonEmpty(changedBy, label: "changedBy")
+
+        // Derive the canonical row key for the audit log (UUID passthrough for
+        // UUID-shaped IDs; SHA-256 truncated name-based UUID for arbitrary strings).
+        let rowKey = RowKeyDerivation.deterministicRowKey(from: id)
+
+        // Stamp the ingest clock once before the transaction closure —
+        // `hlc` is actor-isolated mutable state and cannot be mutated inside
+        // a non-isolated closure.
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let vocab = vocabulary
+
+        // State slot: bits 0-5 of adjective bitmap (6-bit state field).
+        // legalValues duplicate the State.allCases raws from LocusKit/Adjectives.swift; the actual
+        // gate check uses the basis slot's legalValues so this set is only
+        // needed so FieldSlot.admits() does not reject the query.
+        // @guardian-pair: drawerstore-withdraw-kgfact DrawerStore.withdrawKGFact.stateSlot.legalValues <-> State.allCases (raw set equality)
+        let stateSlot = FieldSlot(column: .adjective, shift: 0, width: 6,
+                                  label: "state",
+                                  legalValues: [0, 1, 2, 3, 16, 17, 18, 19, 32, 33])
+
+        try await storage.transaction(isolation: .serializable) { txn in
+            // Fetch the current kg_facts row to read prior bitmaps.
+            let rows = try await txn.rowStore.query(
+                table: "kg_facts",
+                where: .eq(Column(table: "kg_facts", name: "id"), .text(id))
+            )
+            guard let row = rows.first else {
+                throw LocusKitError.invalidContent("kgFact not found: \(id)")
+            }
+            let priorAdj  = Self.int64(row["adjectiveBitmap"])
+            let priorOp   = Self.int64(row["operationalBitmap"])
+            let priorProv = Self.int64(row["provenanceBitmap"])
+            let prior = BitmapFields(
+                adjective:   UInt64(bitPattern: priorAdj),
+                operational: UInt64(bitPattern: priorOp),
+                provenance:  UInt64(bitPattern: priorProv)
+            )
+
+            // Derive the lattice anchor from the source drawer when available.
+            // KGFact rows do not carry their own UDC/QID; the source drawer is
+            // the canonical anchor source. A null anchor (udcCode 0, qidPointer 0)
+            // is used when sourceDrawerID is empty or the drawer cannot be found;
+            // AuditGate.admit accepts null anchors without rejection.
+            let sourceDrawerID = Self.string(row["sourceDrawerID"])
+            let anchor: SubstrateTypes.LatticeAnchor
+            if sourceDrawerID.isEmpty {
+                anchor = SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0)
+            } else {
+                let drawerRows = try await txn.rowStore.query(
+                    table: "drawers",
+                    where: .eq(Column(table: "drawers", name: "id"), .text(sourceDrawerID))
+                )
+                if let drawerRow = drawerRows.first {
+                    anchor = SubstrateTypes.LatticeAnchor.udcQid(
+                        Self.string(drawerRow["udcCode"]),
+                        qid: Self.string(drawerRow["wikidataQID"])
+                    )
+                } else {
+                    anchor = SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0)
+                }
+            }
+
+            // Route through the substrate write gate: validates the active→withdrawn
+            // transition via RowStateAutomaton (verb .retract), enforces I-22 bitmap
+            // invariants, and emits the sealed snapshot event.
+            let result = AuditGate.admit(
+                estateUuid: estate,
+                rowId: rowKey,
+                nounType: .kgFact,
+                verb: .retract,
+                prior: prior,
+                priorLatticeAnchor: anchor,
+                writes: [FieldWrite(slot: stateSlot, value: Int64(State.withdrawn.rawValue))],
+                afterLatticeAnchor: anchor,
+                vocabulary: vocab,
+                hlc: stamp,
+                actor: changedBy
+            )
+            let gateEvent: AuditEvent
+            switch result {
+            case .success(let e): gateEvent = e
+            case .failure(let v):
+                throw LocusKitError.invalidContent("kgFact withdrawal rejected by gate: \(v)")
+            }
+            // Thread the caller-supplied reason into the event before persisting.
+            let event = gateEvent.withReason(reason)
+
+            // Materialized projection: write the merged snapshot to the live kg_facts
+            // row (the O(1) read target). Append the sealed event to the audit log
+            // (the source of truth for this state transition).
+            _ = try await txn.rowStore.update(
+                table: "kg_facts",
+                values: ["adjectiveBitmap": .bitmap(event.afterBitmaps.adjective)],
+                where: .eq(Column(table: "kg_facts", name: "id"), .text(id))
+            )
+            try await txn.auditLog.append(event)
         }
-        // Preserve all bits above the 6-bit state field (g_state_cluster mask = 0x3F).
-        let newBitmap = (fact.adjectiveBitmap & ~Int64(0x3F)) | Int64(State.withdrawn.rawValue)
-        _ = try await storage.rowStore.update(
-            table: "kg_facts",
-            values: ["adjectiveBitmap": .bitmap(newBitmap)],
-            where: .eq(Column(table: "kg_facts", name: "id"), .text(id)))
     }
 
     public func getKGFact(id: String) async throws -> KGFact? {
