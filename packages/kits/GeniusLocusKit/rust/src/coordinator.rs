@@ -7375,25 +7375,49 @@ impl EstateCoordinator {
 
         let estate = self.estate_for_verb(handle)?;
 
-        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4).
+        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4) and sensitivity
+        // ceiling (GLK-CEILING).
         //
         // The storage expunge (step 1) zeroes the content blob, so any
-        // DatasetHandleContent JSON must be decoded BEFORE tombstoning. A
-        // pre-read failure or non-dataset kind silently yields None; step 1
-        // will surface DrawerNotFound if the row genuinely doesn't exist.
-        let dataset_id_to_erase: Option<uuid::Uuid> = estate
+        // DatasetHandleContent JSON must be decoded BEFORE tombstoning. An
+        // absent row or a non-dataset kind yields None; step 1 will surface
+        // DrawerNotFound if the row genuinely doesn't exist. A pre-read that
+        // ERRORS does not reach here; it is remapped and returned below.
+        //
+        // Sensitivity ceiling: a caller who can only read rows at or below
+        // Elevated must not be able to erase a row above that tier. The check
+        // uses raw_value comparison (not is_bulk_exportable) so a future change
+        // to the bulk-export tier cannot silently shift this security boundary.
+        // The refusal is produced through the same remap path as an absent-row
+        // error — the caller cannot distinguish above-ceiling rows from absent
+        // rows, providing no existence oracle. A genuine read ERROR must propagate
+        // (fail-closed); only an absent row (None) is tolerated and flows to step 1.
+        let pre_read_drawer: Option<Drawer> = estate
             .drawer_by_id(row_id)
-            .ok()
-            .flatten()
-            .and_then(|d| {
-                // ContentKind is imported at the top of this file.
-                if d.content_kind() != ContentKind::Dataset {
-                    return None;
-                }
-                locus_kit::dataset_handle::DatasetHandleContent::decode(&d.content)
-                    .ok()
-                    .map(|h| h.dataset_id)
-            });
+            .map_err(|e| VerbDispatchError::from(remap("expunge", &uuid_to_str(&handle.estate_uuid), e)))?;
+
+        if let Some(ref d) = pre_read_drawer {
+            if d.adjective_sensitivity().raw_value()
+                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            {
+                return Err(remap(
+                    "expunge",
+                    &uuid_to_str(&handle.estate_uuid),
+                    LocusKitError::DrawerNotFound { id: row_id.to_string() },
+                )
+                .into());
+            }
+        }
+
+        let dataset_id_to_erase: Option<uuid::Uuid> = pre_read_drawer.and_then(|d| {
+            // ContentKind is imported at the top of this file.
+            if d.content_kind() != ContentKind::Dataset {
+                return None;
+            }
+            locus_kit::dataset_handle::DatasetHandleContent::decode(&d.content)
+                .ok()
+                .map(|h| h.dataset_id)
+        });
 
         // Step 1 — LocusKit storage expunge with deferred audit seal.
         // The full ExpungeOutcome comes back: the gate-produced AuditEvent
@@ -8283,6 +8307,31 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
+
+        // Sensitivity ceiling (GLK-CEILING): refuse Restricted/Secret targets
+        // by routing through remap with LocusKitError::InvalidContent, matching
+        // exactly the path the absent-fact case takes. O(n) linear scan via
+        // all_kg_facts_including_retired is acceptable for an infrequent write
+        // verb; get_kg_fact is not exposed on Estate from the genius_locus_kit
+        // crate. raw_value comparison (not is_bulk_exportable) is used so a
+        // future change to the bulk-export tier cannot silently shift this
+        // security boundary. A genuine read ERROR must propagate (fail-closed);
+        // swallowing it with ok() would skip the ceiling check entirely.
+        let facts = estate
+            .all_kg_facts_including_retired()
+            .map_err(|e| VerbDispatchError::from(remap("withdraw_kg_fact", "", e)))?;
+        if let Some(fact) = facts.iter().find(|f| f.id == id) {
+            if fact.adjective_sensitivity().raw_value()
+                > locus_kit::adjectives::AdjectiveSensitivity::Elevated.raw_value()
+            {
+                return Err(VerbDispatchError::from(remap(
+                    "withdraw_kg_fact",
+                    "",
+                    LocusKitError::InvalidContent(format!("kgFact not found: {id}")),
+                )));
+            }
+        }
+
         estate
             .withdraw_kg_fact(id, changed_by, reason, now)
             .map_err(|e| VerbDispatchError::from(remap("withdraw_kg_fact", "", e)))
@@ -17048,6 +17097,133 @@ mod tests {
         assert!(dataset_store
             .query_rows(dataset_id, None, &[], None, None, None)
             .is_err(), "append failure must not leave a backend table");
+    }
+
+    // GLKC-1: expunge refuses a .Restricted target — no existence oracle.
+    // Both the ceiling path and the absent-row path route through remap, so
+    // the expected error is observed by calling the verb on a genuinely absent
+    // id and normalizing the id. The row must survive — non-tombstoned — after
+    // the refusal.
+    #[test]
+    fn expunge_refuses_restricted_target_with_absent_row_error() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        let (coord, h) = open_one();
+
+        let mut frame = cap_frame("restricted drawer that must not be erasable by an elevated caller");
+        frame.sensitivity = AdjectiveSensitivity::Restricted;
+        let stored = coord.capture(&h, frame, NOW).expect("capture");
+        let row_id = stored.id.clone();
+
+        // Observe the absent-row error from a row that genuinely does not exist.
+        // This is the ground truth: the ceiling error must match after id substitution.
+        let absent_id = uuid::Uuid::new_v4().to_string();
+        let absent_err = coord
+            .expunge(&h, &absent_id, "absent-row-probe", true, NOW)
+            .expect_err("a genuinely absent row must fail");
+
+        // Ceiling must produce the same error, routed through the same remap path.
+        let ceiling_err = coord
+            .expunge(&h, &row_id, "ceiling-probe", true, NOW)
+            .expect_err(".restricted target must be refused by expunge");
+
+        // Normalize: replace absent_id with row_id in the observed absent error.
+        // This assertion goes red if the ceiling and absent-row paths ever diverge,
+        // whatever either string contains.
+        let expected = match &absent_err {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure { verb, reason }) => {
+                VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                    verb: verb.clone(),
+                    reason: reason.replace(&absent_id, &row_id),
+                })
+            }
+            other => panic!("unexpected absent-row error shape: {other:?}"),
+        };
+        assert_eq!(ceiling_err, expected, "ceiling error must match absent-row error");
+
+        // The row must survive the refusal — non-tombstoned, content intact.
+        let estate = coord.registry.get(&h).expect("estate in registry");
+        let drawers = estate.all_drawers().expect("all_drawers");
+        let row_after = drawers.iter().find(|d| d.id == row_id);
+        assert!(row_after.is_some(), "the .restricted drawer must still exist after the refused expunge");
+        assert_ne!(
+            row_after.unwrap().state(),
+            locus_kit::adjectives::State::Tombstoned,
+            "state must remain Active, not Tombstoned"
+        );
+        assert_eq!(
+            row_after.unwrap().content, stored.content,
+            "content must be byte-identical to what was captured"
+        );
+    }
+
+    // GLKC-2: withdraw_kg_fact refuses a fact whose own adjective_sensitivity
+    // is Restricted (inherited from its Restricted source drawer via
+    // add_kg_fact's adjective-bitmap copy). Both the ceiling path and the
+    // absent-fact path route through remap, so the expected error is observed
+    // by calling the verb on a genuinely absent id and normalizing.
+    // The fact must remain active in storage after the refusal.
+    #[test]
+    fn withdraw_kg_fact_refuses_restricted_source_fact_with_absent_row_error() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        let (coord, h) = open_one();
+
+        // Seed a .Restricted source drawer so the fact inherits its sensitivity
+        // via add_kg_fact's adjective-bitmap inheritance path.
+        let mut source_frame = cap_frame("restricted source drawer for kg fact ceiling test");
+        source_frame.sensitivity = AdjectiveSensitivity::Restricted;
+        let source = coord.capture(&h, source_frame, NOW).expect("capture source");
+
+        let fact = coord
+            .add_kg_fact(&h, "RestrictedEntity", "hasProperty", "SensitiveValue", &source.id, NOW)
+            .expect("add_kg_fact");
+        let fact_id = fact.id.clone();
+
+        // Pin the inheritance: add_kg_fact copies the source drawer's adjective_bitmap.
+        // The production ceiling check reads the fact's OWN adjective_sensitivity().
+        // If this assertion fails, the inheritance path has changed and the test is
+        // no longer exercising the ceiling for the intended reason.
+        assert!(
+            fact.adjective_sensitivity().raw_value()
+                > AdjectiveSensitivity::Elevated.raw_value(),
+            "the fact must inherit Restricted from its source drawer; got: {:?}",
+            fact.adjective_sensitivity()
+        );
+
+        // Observe the absent-fact error from a fact that genuinely does not exist.
+        let absent_id = uuid::Uuid::new_v4().to_string();
+        let absent_err = coord
+            .withdraw_kg_fact(&h, &absent_id, "absent-probe", None, NOW)
+            .expect_err("a genuinely absent fact must fail");
+
+        // Ceiling must produce the same error, routed through the same remap path.
+        let ceiling_err = coord
+            .withdraw_kg_fact(&h, &fact_id, "sensitivity-ceiling-tests", None, NOW)
+            .expect_err(".restricted fact must be refused by withdraw_kg_fact");
+
+        // Normalize: replace absent_id with fact_id in the observed absent error.
+        let expected = match &absent_err {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure { verb, reason }) => {
+                VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                    verb: verb.clone(),
+                    reason: reason.replace(&absent_id, &fact_id),
+                })
+            }
+            other => panic!("unexpected absent-fact error shape: {other:?}"),
+        };
+        assert_eq!(ceiling_err, expected, "ceiling error must match absent-fact error");
+
+        // The fact must survive the refusal — still active, not withdrawn.
+        let estate = coord.registry.get(&h).expect("estate in registry");
+        let all_facts = estate
+            .all_kg_facts_including_retired()
+            .expect("all_kg_facts_including_retired");
+        let fact_after = all_facts.iter().find(|f| f.id == fact_id);
+        assert!(fact_after.is_some(), "the .restricted fact must still exist after the refused retire");
+        assert_eq!(
+            fact_after.unwrap().state(),
+            locus_kit::adjectives::State::Active,
+            "state must remain Active, not Withdrawn"
+        );
     }
 }
 
