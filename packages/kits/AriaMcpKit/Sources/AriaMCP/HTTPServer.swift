@@ -92,10 +92,10 @@ func updateInflightHighWater(_ current: Int) {
 
 /// Lets cancellation unblock the first-party lane's blocking raw request read.
 ///
-/// The GCD worker is the only code that unregisters the descriptor; `serve`
-/// remains the only closer. A cancellation handler only calls `shutdown`, so it
-/// cannot close an fd that the kernel has already reused. Cancellation is
-/// latched to cover the interval before the worker registers.
+/// The dedicated read thread is the only code that unregisters the descriptor;
+/// `serve` remains the only closer. A cancellation handler only calls `shutdown`,
+/// so it cannot close an fd that the kernel has already reused. Cancellation is
+/// latched to cover the interval before that thread registers.
 final class HTTPReadSocketOwner: @unchecked Sendable {
     private let lock = NSLock()
     private var descriptor: Int32 = -1
@@ -110,7 +110,7 @@ final class HTTPReadSocketOwner: @unchecked Sendable {
 
     /// Atomically publish a completed read only if cancellation did not win.
     ///
-    /// Cancellation can arrive after the final byte but before the worker
+    /// Cancellation can arrive after the final byte but before the read thread
     /// resumes its continuation. Clearing the descriptor and judging the latch
     /// under one lock prevents that cancelled request from reaching dispatch.
     func complete(_ fd: Int32) -> Bool {
@@ -835,13 +835,23 @@ public struct HTTPServer: Sendable {
         // this, a slow-header attacker can occupy a gate slot indefinitely, starving real
         // MCP clients. The gate slot is already held (waitForSlot above); the timeout ensures
         // it is released within a bounded window even if the read never returns.
-        // Run the BLOCKING read on a GCD worker so it does not occupy a
-        // cooperative-pool thread for the 30s window: under parallel load that
-        // starves the pool and other connections' Tasks can't run promptly.
-        // The `await` suspends this Task (freeing the cooperative thread) while
-        // the read blocks — matching moot-mgr's readRequestOffPool and the Rust
-        // dedicated-thread-per-connection model. The 30s SO_RCVTIMEO below still
-        // bounds a slow-header attacker exactly as before.
+        // Run the BLOCKING read off the cooperative executor so it does not
+        // occupy a cooperative-pool thread for the 30s window: under parallel
+        // load that starves the pool and other connections' Tasks can't run
+        // promptly. The `await` suspends this Task (freeing the cooperative
+        // thread) while the read blocks — matching moot-mgr's
+        // readRequestOffPool and the Rust dedicated-thread-per-connection
+        // model. The 30s SO_RCVTIMEO below still bounds a slow-header attacker
+        // exactly as before.
+        //
+        // The two arms of the branch below use different off-executor
+        // mechanisms, deliberately. The FIRST-PARTY arm calls
+        // `readRawRequestOffPool`, which runs on a dedicated thread so its
+        // scheduling cannot be starved by other work on the shared GCD global
+        // pool; that starvation was a real defect, not a theoretical one. The
+        // legacy arm still hands `HTTPRequest.read` to a GCD worker, which is
+        // sound there because it is the pre-existing path and carries no
+        // cancellation contract to honour promptly.
         //
         // TWO VIEWS OF ONE BYTE STRING.
         //
@@ -1275,10 +1285,25 @@ public struct HTTPServer: Sendable {
         return Data(buffer[buffer.startIndex..<headerEnd.upperBound]) + body
     }
 
-    /// Run the blocking first-party raw read off the cooperative executor while
+    /// Run the blocking first-party raw read on a dedicated thread while
     /// preserving Swift task cancellation. The cancellation handler shuts down
-    /// the registered socket; the worker unregisters before returning, and the
-    /// caller remains the sole closer.
+    /// the registered socket; the read thread unregisters before returning, and
+    /// the caller remains the sole closer.
+    ///
+    /// A dedicated thread — not the shared GCD global pool — is used so that
+    /// scheduling cannot be starved by other pool work. Each first-party
+    /// connection occupies exactly one thread for the duration of its recv;
+    /// the maximum live count is bounded by the ConcurrencyGate that guards
+    /// `serve`, because `serve` holds a gate slot before calling this function
+    /// and the SSE early release happens after the read, never before it.
+    /// That ceiling is 64 by default and up to 1024 when
+    /// `MOOTX01_HTTP_MAX_CONCURRENT` is raised, so the environment variable is
+    /// also a thread-count multiplier: each live thread holds a full stack for
+    /// the duration of its recv window.
+    ///
+    /// The thread carries the stable name "com.mootx01.aria-mcp.raw-read",
+    /// which the test gate asserts. Returning to a shared pool would break that
+    /// assertion deterministically, even without pool saturation.
     static func readRawRequestOffPool(
         fd: Int32,
         maxBodyBytes: Int,
@@ -1288,7 +1313,7 @@ public struct HTTPServer: Sendable {
         let owner = HTTPReadSocketOwner()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
-                DispatchQueue.global(qos: .userInitiated).async {
+                let thread = Thread {
                     guard owner.register(fd) else {
                         continuation.resume(returning: nil)
                         return
@@ -1301,6 +1326,10 @@ public struct HTTPServer: Sendable {
                     )
                     continuation.resume(returning: owner.complete(fd) ? raw : nil)
                 }
+                // Stable name so the test gate can assert the read is NOT running
+                // on the shared pool. A pool worker does not carry this name.
+                thread.name = "com.mootx01.aria-mcp.raw-read"
+                thread.start()
             }
         } onCancel: {
             owner.shutdownNow()
