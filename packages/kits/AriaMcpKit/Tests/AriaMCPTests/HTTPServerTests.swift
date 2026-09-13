@@ -1824,28 +1824,30 @@ struct FirstPartyHTTPLaneTests {
                 afterRegistration: { registration.mark() }
             )
         }
-        // Six seconds, not two: this budget is the first gate in the test and must
-        // not be tighter than the three-second elapsed assertion below, which was
-        // widened because a saturated cooperative executor and GCD pool delay the
-        // whole chain.  The same saturation delays registration.
-        let waitDeadline = DispatchTime.now().uptimeNanoseconds + 6_000_000_000
+        // Two seconds: the dedicated thread is scheduled promptly regardless of
+        // GCD pool saturation. Measured post-fix under a saturated global pool,
+        // registration arrives well under 40 ms.
+        let waitDeadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
         while !registration.value, DispatchTime.now().uptimeNanoseconds < waitDeadline {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         try #require(registration.value, "raw reader never registered its descriptor")
+
+        // The read must run on the dedicated thread, not the shared GCD pool.
+        // A regression to DispatchQueue.global gives a pool-worker name, not this
+        // one, so the assertion fails deterministically without needing saturation.
+        #expect(registration.threadName == "com.mootx01.aria-mcp.raw-read",
+                "raw read must run on the dedicated thread, not the shared GCD pool")
 
         let started = DispatchTime.now().uptimeNanoseconds
         task.cancel()
         let result = await task.value
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         #expect(result == nil)
-        // Three seconds is well below the five-second reader timeout, so the
-        // assertion still excludes the defect it names (an uninterrupted recv
-        // waiting out the full deadline).  The original one-second margin was
-        // flaky under a saturated cooperative executor and GCD pool — legitimate
-        // shutdown can exceed one second when both are loaded, while the mechanism
-        // itself is working correctly.
-        #expect(elapsed < 3_000_000_000,
+        // One second is well below the five-second reader timeout. The dedicated
+        // thread is scheduled promptly; measured post-fix under a saturated global
+        // pool the elapsed shutdown time was well under 40 ms.
+        #expect(elapsed < 1_000_000_000,
                 "cancellation must unblock recv, not wait for the five-second deadline")
 
         // The peer observes shutdown even though the test remains the sole
@@ -1915,17 +1917,32 @@ struct FirstPartyHTTPLaneTests {
 }
 
 /// Lock-protected registration observation for the cancellation regression.
+///
+/// `mark()` is called from the `afterRegistration` closure, which runs on
+/// the dedicated read thread; it captures the thread name at that moment so
+/// the test can assert the read is not running on the shared GCD pool.
 private final class RawReadRegistration: @unchecked Sendable {
     private let lock = NSLock()
     private var registered = false
+    private var capturedThreadName: String? = nil
 
     var value: Bool {
         lock.lock(); defer { lock.unlock() }
         return registered
     }
 
+    /// Name of the thread on which the read was registered, or nil before
+    /// registration.
+    var threadName: String? {
+        lock.lock(); defer { lock.unlock() }
+        return capturedThreadName
+    }
+
     func mark() {
-        lock.lock(); registered = true; lock.unlock()
+        lock.lock()
+        registered = true
+        capturedThreadName = Thread.current.name
+        lock.unlock()
     }
 }
 
