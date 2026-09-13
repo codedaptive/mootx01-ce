@@ -129,6 +129,46 @@ struct AriaV2RecallLensTests {
         return (kit, handle, bodyByID, secretID)
     }
 
+    // MARK: - Projected recall bestSpan gate
+
+    /// Operation: `moot_recall_precise`. Entry point: `AriaV2GeniusLocusRecallLensAuthority.execute`
+    /// → `precise` → `projectedResult` (the shipped server path — no row construction by hand).
+    ///
+    /// The fixture has subject and content deliberately different so `structuredRowObject` cannot
+    /// fire the omit-when-identical branch. This test goes red when `projectedResult` fetches
+    /// drawers at `.structured` hydration, because `drawer.content` is then `""` and `bestSpan`
+    /// evaluates to `nil`. It goes green only when `.full` hydration is used, which is the fix.
+    @Test("projected precise recall row carries bestSpan equal to drawer content")
+    func projectedRecallRowCarriesBestSpan() async throws {
+        // Subject and content are DIFFERENT so the omit-when-identical branch in
+        // structuredRowObject cannot fire and suppress the field.
+        let subject = "projected-bestspan-gate: a short subject"
+        let content = "projected-bestspan-gate: the body is longer than the subject and must appear as bestSpan"
+
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-v2-projected-bestspan-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        _ = try await kit.capture(handle, CaptureFrame(
+            content: content, channel: .typed, room: "notes", latticeAnchor: .udc("0"),
+            addedBy: "aria-v2-projected-bestspan-tests", embeddingModelID: "test-v1",
+            subject: subject))
+
+        let authority = AriaV2GeniusLocusRecallLensAuthority(kit: kit, handle: handle)
+        let outcome = try await authority.execute(try AriaV2RecallLensRequest(
+            tool: "moot_recall_precise",
+            arguments: .object(["query": .string("projected-bestspan-gate")])))
+        let data = try #require(outcome.data.objectValue)
+        let results = try #require(data["results"]?.arrayValue)
+        let row = try #require(
+            results.first(where: { $0.objectValue?["subject"] == .string(subject) })?.objectValue,
+            "the captured row must appear in precise recall results")
+        #expect(
+            row["bestSpan"] == .string(content),
+            "projected recall row must carry bestSpan equal to the drawer content; got \(row)")
+    }
+
     @Test("distilled recall savings cover only the emitted rows that carry a distilled body")
     func distilledSavingsCoverEmittedRowsOnly() async throws {
         let (kit, handle, bodyByID, secretID) = try await distilledEstate()

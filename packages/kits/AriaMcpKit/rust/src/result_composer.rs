@@ -545,7 +545,10 @@ pub fn normalize_value(raw: &str) -> String {
 // ─── first-sentence truncation (§11.1 rule 3) ────────────────────────────────
 
 /// Hard cut the first sentence at 120 characters with no ellipsis.
-/// Operates on char boundaries (Swift String.prefix is also char-based).
+/// Counts Unicode scalars through `char_indices`. Swift's `String.prefix`
+/// and `count` are grapheme-cluster based; on strings with combining marks
+/// or emoji ZWJ sequences the two ports may cut at different byte positions.
+/// On plain ASCII and common BMP code points the counts agree.
 pub fn truncate_first_sentence(raw: &str) -> &str {
     // Find the char boundary for the 120th Unicode scalar, matching Swift.
     let mut char_count = 0;
