@@ -1452,11 +1452,19 @@ impl Estate {
         self.store.add_kg_fact(fact)
     }
 
-    /// Retire a kg-fact by transitioning its state to `Withdrawn`. Estate-level
-    /// pass-through over `DrawerStore::withdraw_kg_fact`. Required by GLK for
-    /// the same B-1 compliance reason as `add_kg_fact`.
-    pub fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
-        self.store.withdraw_kg_fact(id, now)
+    /// Retire a kg-fact by transitioning its state to `Withdrawn` and writing a
+    /// sealed audit row. Estate-level pass-through over
+    /// `DrawerStore::withdraw_kg_fact`. `changed_by` names the actor;
+    /// `reason` is optional human-readable context. Required by GLK for B-1
+    /// compliance.
+    pub fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.withdraw_kg_fact(id, changed_by, reason, now)
     }
 
     /// All non-tombstoned diary entries in the estate, ordered by `filed_at`
