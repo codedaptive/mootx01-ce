@@ -756,7 +756,7 @@ fn pairing_persistence_across_reopen() {
 /// Mirrors Swift `tamperedProposalRejected`.
 #[test]
 fn tampered_proposal_rejected() {
-    use convergence_kit::{PairingProposal, proposal_signing_bytes, verify_signature};
+    use convergence_kit::{PairingProposal, proposal_signing_bytes};
 
     let honest = LocalIdentity::generate();
     let attacker = LocalIdentity::generate();

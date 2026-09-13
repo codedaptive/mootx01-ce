@@ -16,16 +16,16 @@
 //!
 //! The HTTP test (`both_advisories_surface_via_http_construction_path`) drives
 //! the REAL `serve_http` construction path with a real `ServerConfig`, not a
-//! pre-built dispatcher. The prior `run_http_loop_for_test` helper took an
-//! already-constructed `Arc<Mutex<Dispatcher>>` and bypassed construction
-//! entirely, which was the hole this test closes.
+//! pre-built dispatcher. A per-test helper, since collapsed into `serve_http`,
+//! took an already-constructed `Arc<Mutex<Dispatcher>>` and bypassed
+//! construction entirely, which was the hole this test closes.
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
 
 use aria_mcp::{
     dispatcher::UpdateAdvisoryProvider,
-    http_server::{bind_loopback, run_http_loop, serve_http},
+    http_server::{bind_loopback, http_gates_from_env, run_http_loop, serve_http},
     server::{run_stdio_loop, ServerConfig},
 };
 
@@ -271,10 +271,10 @@ fn both_advisories_surface_via_http_construction_path() {
     // Spawn serve_http with connection_limit=Some(1): it accepts one connection
     // and returns, so the JoinHandle is guaranteed to complete after the client
     // round-trip. This is how a test drives the real construction path without
-    // leaking a thread (the prior run_http_loop_for_test took an
-    // already-constructed Arc<Mutex<Dispatcher>> and bypassed construction).
+    // leaking a thread (the prior helper took an already-constructed
+    // Arc<Mutex<Dispatcher>> and bypassed construction entirely).
     let server = std::thread::spawn(move || {
-        serve_http(listener, 4 * 1024 * 1024, cfg, None, Some(1))
+        serve_http(listener, 4 * 1024 * 1024, cfg, None, Some(1), http_gates_from_env())
             .expect("serve_http must not fail during test");
     });
 
