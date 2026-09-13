@@ -643,7 +643,8 @@ public extension GeniusLocusKit {
     /// `Estate.withdraw` is Drawer-specific and does not handle KGFact rowIDs.
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen`, or
-    ///   `VerbError.underlyingEstateFailure` if the row is not found.
+    ///   `VerbError.underlyingEstateFailure` if the row is not found or if the
+    ///   store cannot be read.
     func retireKGFact(
         _ handle: EstateHandle,
         rowID: String,
@@ -652,6 +653,34 @@ public extension GeniusLocusKit {
         now: Date
     ) async throws {
         let store = try await ensureKGStore(for: handle)
+
+        // Sensitivity ceiling (GLK-CEILING): refuse .restricted/.secret targets
+        // by producing the same error the absent-fact path produces through
+        // remap. Explicit switch (not isBulkExportable) so a future change to
+        // the bulk-export tier cannot silently shift this security boundary.
+        // The ceiling check precedes the do-catch block so the VerbError is
+        // thrown directly without double-wrapping. A genuine read ERROR from the
+        // store must propagate (fail-closed) rather than being swallowed; only
+        // a nil return (absent row) is tolerated.
+        let existingFactForCeiling: KGFact?
+        do {
+            existingFactForCeiling = try await store.getKGFact(id: rowID)
+        } catch {
+            throw remap(verb: "retireKGFact", estateID: handle.estateUUID.uuidString, error: error)
+        }
+        if let existingFact = existingFactForCeiling {
+            switch existingFact.adjectiveSensitivity {
+            case .restricted, .secret:
+                throw remap(
+                    verb: "retireKGFact",
+                    estateID: handle.estateUUID.uuidString,
+                    error: LocusKitError.invalidContent("kgFact not found: \(rowID)")
+                )
+            case .normal, .elevated:
+                break
+            }
+        }
+
         do {
             try await store.withdrawKGFact(id: rowID, changedBy: changedBy, reason: reason, now: now)
         } catch {
@@ -868,17 +897,49 @@ public extension GeniusLocusKit {
         }
         let estate = try estate(for: handle)
 
-        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4).
+        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4) and sensitivity
+        // ceiling (GLK-CEILING).
         //
         // The storage expunge (step 1) zeroes the content blob, so any
         // DatasetHandleContent JSON must be decoded BEFORE tombstoning.
-        // If the pre-read fails or the drawer is not a dataset handle we
-        // proceed without a cascade — step 1 will surface a drawerNotFound
-        // error if the row genuinely doesn't exist.
+        // If the pre-read returns no row, or the drawer is not a dataset
+        // handle, we proceed without a cascade — step 1 will surface a
+        // drawerNotFound error if the row genuinely doesn't exist. A pre-read
+        // that ERRORS does not reach here; it is remapped and thrown below.
+        //
+        // Sensitivity ceiling: a caller who can only read rows at or below
+        // .elevated must not be able to erase a row above that tier. The
+        // check uses an explicit switch against .restricted and .secret (not
+        // isBulkExportable) so a future change to the bulk-export tier cannot
+        // silently shift this security boundary. The refusal is produced
+        // through the same remap path as an absent-row error — the caller
+        // cannot distinguish above-ceiling rows from absent rows, providing
+        // no existence oracle. A genuine read ERROR must propagate (fail-closed);
+        // only an absent row (nil return) is tolerated and flows to step 1.
+        let preReadDrawer: Drawer?
+        do {
+            preReadDrawer = try await estate.drawerById(rowID: frame.rowID)
+        } catch {
+            throw remap(verb: "expunge", estateID: handle.estateUUID.uuidString, error: error)
+        }
+
+        if let ceilingDrawer = preReadDrawer {
+            switch ceilingDrawer.adjectiveSensitivity {
+            case .restricted, .secret:
+                throw remap(
+                    verb: "expunge",
+                    estateID: handle.estateUUID.uuidString,
+                    error: LocusKitError.drawerNotFound(id: frame.rowID)
+                )
+            case .normal, .elevated:
+                break
+            }
+        }
+
         let datasetIdToErase: UUID?
-        if let preReadDrawer = try? await estate.drawerById(rowID: frame.rowID),
-           preReadDrawer.contentKind == .dataset,
-           let handleContent = try? DatasetHandleContent.decode(from: preReadDrawer.content) {
+        if let datasetDrawer = preReadDrawer,
+           datasetDrawer.contentKind == .dataset,
+           let handleContent = try? DatasetHandleContent.decode(from: datasetDrawer.content) {
             datasetIdToErase = handleContent.datasetId
         } else {
             datasetIdToErase = nil
