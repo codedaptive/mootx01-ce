@@ -300,11 +300,16 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         }
     }
 
-    /// Project direct lower-kit matches through the same structured hydration
-    /// gate used by the existing recall surfaces.  It intentionally consumes
-    /// typed match/drawer values and never invokes or reparses a v1 tool.
+    /// Project direct lower-kit matches through the full-hydration gate the v2
+    /// lens surfaces use.  This function is itself the v2 recall surface for all
+    /// seven recall operations.  It intentionally consumes typed match/drawer
+    /// values and never invokes or reparses a v1 tool.
     /// `reportsDistillation` is true only for distilled recall, whose response
     /// always carries `capabilities.distillation`, even with zero rows.
+    ///
+    /// Full hydration is required so `drawer.content` is populated for
+    /// `bestSpan` computation; structured hydration returns `content == ""`
+    /// (Swift spec §7.3), which would make `bestSpan` nil for every row.
     private func projectedResult(
         _ matches: [ProjectedMatch],
         filterChain: [LocusKit.Filter] = [],
@@ -315,7 +320,8 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         let shown = Array(matches.prefix(50))
         let estate = try await kit.estate(for: handle)
         let drawersByID = try await RecipeTools.structuredDrawersByID(
-            ids: shown.map(\.id), estate: estate, filterChain: filterChain)
+            ids: shown.map(\.id), estate: estate, filterChain: filterChain,
+            hydrationLevel: .full)
         let nodeNames = try await estate.resolveNodeNames(
             parentNodeIds: drawersByID.values.map(\.parentNodeId))
         let rows = shown.map { match -> CandidateRowData in
