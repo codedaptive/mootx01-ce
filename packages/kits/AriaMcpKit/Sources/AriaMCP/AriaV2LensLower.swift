@@ -102,8 +102,10 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 now: context.now)
             // Dense-row hydration through the sensitivity gate (empty filterChain →
             // BitmapEvaluator.insertDefaults injects sensitivityAtMost(.elevated)).
-            // Restricted/secret rows are absent from drawersByID and receive no structured
-            // fields; they still appear with id and centrality (indistinguishability rule).
+            // Adjective-gated rows are absent from drawersByID when maximumSensitivity
+            // is set; provenance-gated rows (bits 30-35) may be present regardless and
+            // are caught by AriaV2RecallLensPrivacy.classify in the row builder. Both
+            // axes produce the same sparse key set {id, centrality} (indistinguishability rule).
             let estate = try await kit.estate(for: handle)
             // Full hydration so drawer.content is populated — structured hydration
             // returns content == "" (Swift spec §7.3) which would collapse every
@@ -130,7 +132,15 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             return .init(data: .object(["keystones": .array(projectedRanked.map { keystone in
                 let id = keystone.id.lowercased()
                 guard let drawer = drawersByID[keystone.id] ?? drawersByID[keystone.id.lowercased()] else {
-                    // Gated (restricted/secret) row: id and centrality only.
+                    // Adjective-gated row: id and centrality only.
+                    return .object(["id": .string(id), "centrality": .double(keystone.centrality)])
+                }
+                // Both the adjective axis (bits 6-11) and the provenance axis (bits 30-35)
+                // decide whether dense fields are emitted. Map-absent rows handle the
+                // adjective gate above; AriaV2RecallLensPrivacy.classify catches
+                // provenance-gated rows here. Both emit the same sparse key set
+                // {id, centrality} (indistinguishability rule).
+                guard AriaV2RecallLensPrivacy.classify(drawer) == .admissible else {
                     return .object(["id": .string(id), "centrality": .double(keystone.centrality)])
                 }
                 // Normalize bestSpan through the shared ResultComposer helper so
@@ -828,20 +838,30 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
     /// Build the trust synthesis wire payload.
     ///
     /// `drawersByID` is the result of `RecipeTools.structuredDrawersByID` with an
-    /// empty filterChain (the sensitivity gate). Rows absent from the map are
-    /// restricted/secret and carry only the id field; admissible rows carry all
-    /// dense fields (subject, bestSpan, eventTime).
+    /// empty filterChain (the sensitivity gate). Rows absent from the map and
+    /// provenance-gated rows (AriaV2RecallLensPrivacy.classify != .admissible)
+    /// carry only the id field; admissible rows carry all dense fields
+    /// (subject, bestSpan, eventTime).
     private func trustData(
         _ output: TrustGroundedOutput,
         drawersByID: [String: Drawer]
     ) -> JSONValue {
         // Dense-row hydration: rankedIDs becomes an array of objects.
-        // Gated rows carry only {id}; admissible rows carry {id, subject, bestSpan, eventTime}.
+        // Map-absent and provenance-gated rows carry only {id};
+        // admissible rows carry {id, subject, bestSpan, eventTime}.
         let rankedRows: JSONValue = .array(output.rankedIDs.map { id in
             let lowID = id.lowercased()
             // Case-normalised lookup: dict keys come from $0.id (estate-fetched IDs)
             // which may differ in case from the IDs that flow through ranked output.
             guard let drawer = drawersByID[id] ?? drawersByID[lowID] else {
+                return .object(["id": .string(lowID)])
+            }
+            // Both the adjective axis (bits 6-11) and the provenance axis (bits 30-35)
+            // decide whether dense fields are emitted. Map-absent rows handle the
+            // adjective gate above; AriaV2RecallLensPrivacy.classify catches
+            // provenance-gated rows here. Both emit the same sparse key set {id}
+            // (indistinguishability rule).
+            guard AriaV2RecallLensPrivacy.classify(drawer) == .admissible else {
                 return .object(["id": .string(lowID)])
             }
             // Normalize through shared helpers — mirrors Rust result_composer.rs
