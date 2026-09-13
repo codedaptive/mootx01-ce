@@ -337,8 +337,9 @@ fn cognition_catalog_service_v2_recipes_terse_omits_capabilities() {
 /// when it does not. Neither port may emit a null `output_schema`: absent in
 /// one port and null in the other is a conformance failure. Rust omits through
 /// `.get("outputSchema").filter(!is_null).cloned()` plus
-/// `skip_serializing_if = "Option::is_none"`; Swift omits through the `if let`
-/// in its verbose row builder.
+/// `skip_serializing_if = "Option::is_none"`; Swift omits through `if let
+/// outputSchema = catalog.outputSchema` in the verbose row builder
+/// (buildCatalogLookup path).
 #[test]
 fn cognition_catalog_v2_verbose_row_key_set_matches_swift() {
     use aria_mcp::lens_tools::is_lens_tool;
@@ -403,4 +404,107 @@ fn cognition_catalog_v2_verbose_row_key_set_matches_swift() {
         let expected: BTreeSet<&str> = ["name", "description"].into_iter().collect();
         assert_eq!(keys, expected, "{} terse key set", tool.name);
     }
+}
+
+/// Asserts that the `moot_list_lenses` row for `moot_synthesize` carries the
+/// same description as the v2 catalog entry (selected_tools). Guards against
+/// the pre-fix divergence in Swift where the lens lane took description from
+/// RecipeTools instead of the catalog. Rust already behaves correctly; this
+/// assertion arms the guard so both ports are gated at equal depth.
+///
+/// Swift twin: `lensLaneDescriptionMatchesCatalogForSynthesize`
+/// (Tests/AriaMCPTests/UtilityTierTests.swift).
+#[test]
+fn lens_lane_description_matches_catalog_for_synthesize() {
+    use aria_mcp::lens_tools::is_lens_tool;
+    use aria_mcp::recipe_tools::is_recipe_tool;
+    use aria_mcp::v2::catalog::selected_tools;
+    use aria_mcp::v2::cognition_catalog::{CognitionCatalogRequest, CognitionCatalogService};
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    let catalog = selected_tools();
+    let catalog_arr = catalog.as_array().expect("selected_tools must return an array");
+
+    // Get the expected description from the catalog entry for moot_synthesize.
+    // Compare against the live catalog value rather than a hardcoded string so
+    // the assertion tracks the catalog as it evolves.
+    let expected_description = catalog_arr
+        .iter()
+        .find(|t| t["name"].as_str() == Some("moot_synthesize"))
+        .expect("moot_synthesize must be in the catalog")["description"]
+        .as_str()
+        .expect("moot_synthesize catalog entry must have a description")
+        .to_owned();
+
+    // Build callable_tool_names from the catalog so the filter passes.
+    let callable: BTreeSet<String> = catalog_arr
+        .iter()
+        .filter_map(|t| {
+            let name = t["name"].as_str()?;
+            if is_recipe_tool(name) || is_lens_tool(name) {
+                Some(name.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        callable.contains("moot_synthesize"),
+        "moot_synthesize must be in the callable set"
+    );
+
+    let service = CognitionCatalogService::new(Uuid::new_v4(), callable);
+
+    // Verbose row description must match the catalog.
+    let verbose = service
+        .lenses(CognitionCatalogRequest { verbose: true, estate_id: None })
+        .expect("verbose lenses must succeed");
+    let synthesize_verbose = verbose
+        .tools
+        .iter()
+        .find(|t| t.name == "moot_synthesize")
+        .expect("moot_synthesize must appear in the verbose lens row set");
+    assert_eq!(
+        synthesize_verbose.description, expected_description,
+        "verbose lens row description for moot_synthesize must match the catalog"
+    );
+
+    // input_schema must carry "estate_id", the v2 catalog key, and not "estateID".
+    // This port has always read input_schema from crate::v2::catalog::selected_tools()
+    // and touches crate::recipe_tools only as the is_recipe_tool name predicate, so
+    // "estateID" never shipped here; the assertion guards against drift rather than
+    // recording a migration. Swift reached the same contract by a different route:
+    // its lens lane did read the key from RecipeTools until the catalog became the
+    // single source of truth there. Mirrors the Swift assertion in
+    // `lensLaneDescriptionMatchesCatalogForSynthesize`.
+    let input_schema = synthesize_verbose
+        .input_schema
+        .as_ref()
+        .expect("verbose moot_synthesize row must carry an input_schema");
+    let properties = input_schema["properties"]
+        .as_object()
+        .expect("moot_synthesize input_schema must have a properties object");
+    assert!(
+        properties.contains_key("estate_id"),
+        "verbose input_schema must carry the property key estate_id"
+    );
+    assert!(
+        !properties.contains_key("estateID"),
+        "verbose input_schema must NOT carry estateID; the canonical key is estate_id"
+    );
+
+    // Terse row description must also match the catalog.
+    let terse = service
+        .lenses(CognitionCatalogRequest { verbose: false, estate_id: None })
+        .expect("terse lenses must succeed");
+    let synthesize_terse = terse
+        .tools
+        .iter()
+        .find(|t| t.name == "moot_synthesize")
+        .expect("moot_synthesize must appear in the terse lens row set");
+    assert_eq!(
+        synthesize_terse.description, expected_description,
+        "terse lens row description for moot_synthesize must match the catalog"
+    );
 }
