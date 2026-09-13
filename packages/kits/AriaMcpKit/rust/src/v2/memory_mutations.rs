@@ -228,7 +228,9 @@ fn decode_update_mutation(
             Some("public") => Ok(V2UpdateMutation::CorrectExportability(AdjectiveExportability::Public)),
             _ => Err(V2InvalidArgument::new("$.exportability", "must be private or public for correct_exportability")),
         },
-        _ => Err(V2InvalidArgument::new("$.mutation", "is not a supported typed memory mutation")),
+        _ => Err(V2InvalidArgument::new("$.mutation", "is not a supported typed memory mutation")
+            .allowed(["accept", "confirm", "contest", "correct_exportability", "correct_sensitivity", "reject", "resolve", "revive", "set_subject", "supersede"].map(str::to_owned))
+            .correction("use one of the documented mutation values")),
     }
 }
 
@@ -307,7 +309,9 @@ impl V2LinkMemoriesRequest {
             | "exemplifies" | "extends" | "precedes" | "references" | "refines"
             | "relates" | "responds_to" | "supersedes" | "supports" | "validates"
         ) {
-            return Err(V2InvalidArgument::new("$.relationship", "unsupported relationship"));
+            return Err(V2InvalidArgument::new("$.relationship", "unsupported relationship")
+                .allowed(["blocks", "contradicts", "covers", "derives_from", "elaborates", "exemplifies", "extends", "precedes", "references", "refines", "relates", "responds_to", "supersedes", "supports", "validates"].map(str::to_owned))
+                .correction("use one of the documented relationship values"));
         }
         Ok(Self {
             from_id, to_id, relationship,
@@ -358,7 +362,9 @@ impl V2ReviewTunnelRequest {
             return Err(V2InvalidArgument::new(
                 "$.reviewed_by",
                 "edge activation is user-only: decision 'accept' requires reviewed_by 'user'; model reviewers use 'endorse' or 'reject'",
-            ));
+            )
+            .allowed([USER_REVIEWER.to_owned()])
+            .correction("set reviewed_by to 'user' to activate this edge"));
         }
         Ok(Self { tunnel_id: required_uuid(object, "tunnel_id")?, decision, note: optional_string(object, "note")?.map(str::to_owned), reviewed_by, estate_id: optional_uuid(object, "estate_id")? })
     }
