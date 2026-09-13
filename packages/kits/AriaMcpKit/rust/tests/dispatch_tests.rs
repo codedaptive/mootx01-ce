@@ -12047,25 +12047,18 @@ fn file_memory_expired_grant_does_not_floor() {
 
 // ── V2 refusal parity tests (Group B) ────────────────────────────────────────
 //
-// Each test fires moot_file_memory through the full Dispatcher::handle path
-// with a bad enum value and asserts that the v2 refusal shape rule is met:
-// both data.allowed (non-empty array) and data.correction (non-empty string)
-// must be present.  Cross-port equality checks pin the allowed list to the
-// same sorted values that Swift emits.
+// Each test fires one v2 tool — moot_file_memory, moot_update_memory,
+// moot_link_memories or moot_review_tunnel — through the full
+// Dispatcher::handle path with a bad enum value, and asserts that the v2
+// refusal shape rule is met: both data.allowed (non-empty array) and
+// data.correction (non-empty string) must be present.  Cross-port equality
+// checks pin the allowed list to the same sorted values that Swift emits.
 
 /// Dispatch moot_file_memory with the supplied arguments and return the
-/// serialised response value.  Reused by each parity test below.
+/// serialised response value.  Names the tool for the moot_file_memory parity
+/// tests below; call_tool_response carries the dispatcher construction.
 fn file_memory_refusal_response(args: serde_json::Value) -> serde_json::Value {
-    let registry = EstateRegistry::new_inmemory();
-    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
-    let request = JSONRPCRequest::decode(&serde_json::json!({
-        "jsonrpc": "2.0", "id": 1,
-        "method": "tools/call",
-        "params": { "name": "moot_file_memory", "arguments": args }
-    }))
-    .expect("tools/call request must decode");
-    serde_json::to_value(dispatcher.handle(&request))
-        .expect("response must serialize")
+    call_tool_response("moot_file_memory", args)
 }
 
 /// moot_file_memory with an unknown sensitivity value must return a -32602
@@ -12151,17 +12144,146 @@ fn file_memory_bad_exportability_carries_both_refusal_fields() {
     );
 }
 
+/// Dispatch the named tool through the full Dispatcher::handle path with the
+/// supplied arguments and return the serialised response value.  The single
+/// dispatcher construction for every parity test in this block.
+fn call_tool_response(tool: &str, args: serde_json::Value) -> serde_json::Value {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+    let request = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": args }
+    }))
+    .expect("tools/call request must decode");
+    serde_json::to_value(dispatcher.handle(&request))
+        .expect("response must serialize")
+}
+
+/// moot_update_memory with an unknown mutation value must return a -32602
+/// error whose data carries `allowed` equal to the sorted ten-value set and
+/// a non-empty `correction`.
+///
+/// Parity: `enumRefusalCarriesBothFields` (case moot_update_memory/mutation)
+/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.
+#[test]
+fn update_memory_bad_mutation_carries_allowed_and_correction() {
+    let response = call_tool_response(
+        "moot_update_memory",
+        serde_json::json!({
+            "memory_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "mutation": "bogus_mutation"
+        }),
+    );
+
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "bad mutation must yield -32602 INVALID_PARAMS; response: {response:?}"
+    );
+
+    let data = &response["error"]["data"];
+
+    let correction = data["correction"].as_str()
+        .expect("data.correction must be present and a string");
+    assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
+
+    // Cross-port value equality: Rust and Swift sort at emission. The ten-value
+    // set is closed and must be byte-identical across ports.
+    assert_eq!(
+        data["allowed"],
+        serde_json::json!(["accept","confirm","contest","correct_exportability","correct_sensitivity","reject","resolve","revive","set_subject","supersede"]),
+        "mutation allowed must match Swift's sorted emission; response: {response:?}"
+    );
+}
+
+/// moot_link_memories with an unknown relationship value must return a -32602
+/// error whose data carries `allowed` equal to the sorted fifteen-value set
+/// and a non-empty `correction`.
+///
+/// Parity: `enumRefusalCarriesBothFields` (case moot_link_memories/relationship)
+/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.
+#[test]
+fn link_memories_bad_relationship_carries_allowed_and_correction() {
+    let response = call_tool_response(
+        "moot_link_memories",
+        serde_json::json!({
+            "from_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "to_id":   "b2c3d4e5-f6a7-8901-bcde-f01234567891",
+            "relationship": "bogus_relationship"
+        }),
+    );
+
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "bad relationship must yield -32602 INVALID_PARAMS; response: {response:?}"
+    );
+
+    let data = &response["error"]["data"];
+
+    let correction = data["correction"].as_str()
+        .expect("data.correction must be present and a string");
+    assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
+
+    // Cross-port value equality: fifteen-value set, sorted, must be byte-identical
+    // across ports.
+    assert_eq!(
+        data["allowed"],
+        serde_json::json!(["blocks","contradicts","covers","derives_from","elaborates","exemplifies","extends","precedes","references","refines","relates","responds_to","supersedes","supports","validates"]),
+        "relationship allowed must match Swift's sorted emission; response: {response:?}"
+    );
+}
+
+/// moot_review_tunnel with decision 'accept' and reviewed_by 'model' must
+/// return a -32602 error whose data carries `allowed` equal to ["user"] and
+/// a non-empty `correction`.
+///
+/// Parity: `enumRefusalCarriesBothFields` (case moot_review_tunnel/reviewed_by)
+/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.
+#[test]
+fn review_tunnel_model_accept_carries_allowed_and_correction() {
+    let response = call_tool_response(
+        "moot_review_tunnel",
+        serde_json::json!({
+            "tunnel_id":   "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "decision":    "accept",
+            "reviewed_by": "model"
+        }),
+    );
+
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "model accept must yield -32602 INVALID_PARAMS; response: {response:?}"
+    );
+
+    let data = &response["error"]["data"];
+
+    let correction = data["correction"].as_str()
+        .expect("data.correction must be present and a string");
+    assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
+
+    // Cross-port value equality: the only acceptable reviewer for activation is
+    // "user".  Sorted list is ["user"].
+    assert_eq!(
+        data["allowed"],
+        serde_json::json!(["user"]),
+        "reviewed_by allowed must match Swift's sorted emission; response: {response:?}"
+    );
+}
+
 /// moot_file_memory with an unknown content-kind value must return a -32602
 /// error whose data carries both `allowed` (non-empty) and `correction`
-/// (non-empty).  This Rust test pins all seven allowed values including
-/// `fingerprint_only`.
+/// (non-empty), and whose `allowed` is exactly the six catalog-declared
+/// content-kind values in sorted order.
 ///
 /// Parity: `enumRefusalCarriesBothFields` (case moot_file_memory/kind)
-/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.  The Swift side
-/// asserts that data.allowed and data.correction are both present and
-/// non-empty; it asserts no value list.  Asymmetry: Swift's AriaV2MemoryKind
-/// declares six cases (no fingerprint_only), both catalogs declare six, and
-/// this Rust test pins seven.  That divergence is open and awaiting a ruling.
+/// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift, whose
+/// expectedAllowed literal is the twin of the list asserted here.  Both
+/// catalogs — AriaV2SelectedCatalog.swift and v2/catalog.rs — declare these
+/// six values and no others; a value absent from both catalogs is not a v2
+/// content kind (ruling, 2026-09-12).
 #[test]
 fn file_memory_bad_kind_carries_both_refusal_fields() {
     let response = file_memory_refusal_response(serde_json::json!({
@@ -12187,12 +12309,12 @@ fn file_memory_bad_kind_carries_both_refusal_fields() {
         .expect("data.correction must be present and a string");
     assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
 
-    // Rust carries fingerprint_only (7 values); Swift has 6.  The sorted
-    // Rust allowed list is pinned here so a future addition cannot silently
-    // shrink it.
+    // The six catalog-declared values, sorted at emission.  This literal is the
+    // twin of the Swift expectedAllowed list, so any addition or removal must
+    // update both gates in the same change.
     assert_eq!(
         data["allowed"],
-        serde_json::json!(["code", "fingerprint_only", "image_caption", "list", "prose", "structured_json", "transcript"]),
-        "kind allowed must contain exactly the Rust-port content-kind set (sorted); response: {response:?}"
+        serde_json::json!(["code", "image_caption", "list", "prose", "structured_json", "transcript"]),
+        "kind allowed must contain exactly the six catalog-declared content-kind values (sorted); response: {response:?}"
     );
 }
