@@ -164,7 +164,7 @@ struct KGFactVerbTests {
         let before = try await kit.recallKGFacts(handle)
         #expect(before.contains { $0.id == fact.id })
 
-        try await kit.retireKGFact(handle, rowID: fact.id)
+        try await kit.retireKGFact(handle, rowID: fact.id, changedBy: "test-actor", now: testNow)
 
         // Must not appear in active recall after retirement.
         let after = try await kit.recallKGFacts(handle)
@@ -223,7 +223,7 @@ struct KGFactVerbTests {
         #expect(timelineBefore.contains { $0.id == fact.id })
 
         // Retire the fact.
-        try await kit.retireKGFact(handle, rowID: fact.id)
+        try await kit.retireKGFact(handle, rowID: fact.id, changedBy: "test-actor", now: testNow)
 
         // After retirement: active recall must NOT show it.
         let activeAfter = try await kit.recallKGFacts(handle)
@@ -288,7 +288,7 @@ struct KGFactVerbTests {
             now: testNow
         )
 
-        try await kit.retireKGFact(handle, rowID: fact.id)
+        try await kit.retireKGFact(handle, rowID: fact.id, changedBy: "test-actor", now: testNow)
 
         // Active-recall must not include the retired fact.
         let active = try await kit.recallKGFacts(handle)

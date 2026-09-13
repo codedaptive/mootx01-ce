@@ -488,19 +488,18 @@ struct MerkleRollupTests {
     // deliberate DUPLICATE of this exact algorithm — not a shared-package
     // promotion, because PersistenceKit cannot depend on LocusKit (the
     // dependency runs the other way: LocusKit depends on PersistenceKit).
-    // `RowKeyDerivation` is `package`-scoped to PersistenceKit, so it is not
-    // directly callable from here (a different SwiftPM package) even via
-    // `@testable import` — package access does not cross package
-    // boundaries. Instead, this cross-checks INDIRECTLY: both
-    // implementations are asserted against the SAME hardcoded vector
-    // values, independently, in their own package's test suite:
+    // `RowKeyDerivation` is public API, so `RowKeyDerivationAgreementTests`
+    // in this same target calls it directly. This suite stays a VECTOR
+    // cross-check rather than a direct comparison: both implementations are
+    // asserted against the SAME hardcoded vector values, independently, in
+    // their own package's test suite, so a divergence names the port that
+    // moved instead of failing one shared assertion:
     //   - here (`Estate.deterministicUUID`, LocusKit)
     //   - `RowKeyDerivationConformanceTests.swift::sharedVectorWidgetAlpha`/
     //     `sharedVectorSupersedesSlug` (PersistenceKit)
     //   - `row_key_derivation.rs::tests::shared_vector_*` (Rust)
     // If any of the three diverges from these hardcoded values, ITS OWN
-    // test fails — a three-way conformance gate without loosening
-    // PersistenceKit's access control.
+    // test fails — a three-way conformance gate that localises the defect.
     @Test("gap 5 shared vector: 'widget-alpha' matches PersistenceKit's RowKeyDerivation and Rust's deterministic_row_key")
     func gap5SharedVectorWidgetAlpha() {
         #expect(Estate.deterministicUUID(from: "widget-alpha").uuidString == "5653F1D5-D5DE-5B4F-A820-E6BA150A14E2")

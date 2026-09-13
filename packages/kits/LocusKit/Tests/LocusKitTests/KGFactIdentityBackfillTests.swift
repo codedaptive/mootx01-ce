@@ -328,7 +328,7 @@ struct KGFactIdentityBackfillTests {
         try await store.addKGFact(KGFact(
             id: "f-retired-host", subject: "s", predicate: "p", object: "o",
             sourceDrawerID: "mootx01", filedAt: t(1_700_000_000)))
-        try await store.withdrawKGFact(id: "f-retired-host")
+        try await store.withdrawKGFact(id: "f-retired-host", changedBy: "test-actor", reason: nil, now: Date(timeIntervalSince1970: 1_700_000_000))
 
         let report = try await KGFactIdentityBackfill.run(
             storage: storage, resolveForeignKey: Self.nullResolver)

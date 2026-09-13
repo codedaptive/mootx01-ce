@@ -20,6 +20,7 @@
 //   Pairs 4b (DrawerStore inline duplicates — also set equality):
 //     drawerstore-mutate-state   DrawerStore.mutateState stateSlot.legalValues == State allCases raws
 //     drawerstore-expunge-state  DrawerStore.expungeGated stateSlot.legalValues == State allCases raws
+//     drawerstore-withdraw-kgfact  DrawerStore.withdrawKGFact stateSlot.legalValues == State allCases raws
 //   Pairs 5-6 (single-value threshold — checked as raw value equality):
 //     i22-sensitivity-raw  AdjectiveSensitivity.secret.rawValue == 48
 //     i22-exportability-raw AdjectiveExportability.public_.rawValue == 32
@@ -229,6 +230,32 @@ struct GuardianPairParityTests {
             "drawerstore-expunge-state drift: State raws \(canonicalRaws.sorted()) != DrawerStore inline \(expectedDrawerStoreInline.sorted())")
     }
 
+
+    @Test("Pair 4b-c drawerstore-withdraw-kgfact: canonical State raws match DrawerStore inline literal set")
+    func drawerStoreWithdrawKGFactSlotLegalValuesMatchesState() {
+        let canonicalRaws: Set<Int64> = [
+            Int64(State.active.rawValue),
+            Int64(State.pending.rawValue),
+            Int64(State.contested.rawValue),
+            Int64(State.accepted.rawValue),
+            Int64(State.superseded.rawValue),
+            Int64(State.decayed.rawValue),
+            Int64(State.withdrawn.rawValue),
+            Int64(State.expired.rawValue),
+            Int64(State.rejected.rawValue),
+            Int64(State.tombstoned.rawValue),
+        ]
+        // A second copy of the DrawerStore.withdrawKGFact stateSlot literal.
+        // This test reads State, not DrawerStore, so it catches a State case
+        // being added, removed or renumbered and signals that the DrawerStore
+        // literal must follow. The literal itself is checked by the Guardian's
+        // @guardian-pair sentinel scan (Adjectives.swift:80 and
+        // DrawerStore.swift:2960), not here. Same shape as the two sibling
+        // Pair 4b tests above.
+        let expectedDrawerStoreInline: Set<Int64> = [0, 1, 2, 3, 16, 17, 18, 19, 32, 33]
+        #expect(canonicalRaws == expectedDrawerStoreInline,
+            "drawerstore-withdraw-kgfact drift: State raws \(canonicalRaws.sorted()) != DrawerStore inline \(expectedDrawerStoreInline.sorted())")
+    }
     // MARK: - Pair 5: I-22 raw values (single-value threshold checks)
     //
     // RowStateAutomaton.ForbiddenCombinations.check uses inline integer
