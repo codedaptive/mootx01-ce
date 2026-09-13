@@ -3439,10 +3439,22 @@ extension ToolDispatcher {
     }
 
     /// `moot_retire_fact` — invalidate a KG fact by row ID.
+    ///
+    /// The running server does not reach this. It is the v1 interface-tools
+    /// path, called only from `InterfaceTools.dispatch`, which has no call
+    /// site in `Sources/`; the shipped route is `dispatch(name:arguments:)` →
+    /// `dispatchV2` → `AriaV2GeniusLocusKnowledgeJournalBackend.retireFact`.
+    /// The actor below is a literal rather than the server identity the v2
+    /// path uses, so the two surfaces would write different actors for the
+    /// same call if this one were ever reached.
     func runRetireFact(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
-        try await kit.retireKGFact(handle, rowID: rowID)
+        let now = benchClock.now()
+        // Actor is the calling surface name, and this surface supplies no
+        // reason, so the audit row's reason column is null. Both differ from
+        // the v2 path; see the note on this method.
+        try await kit.retireKGFact(handle, rowID: rowID, changedBy: "moot-retire-fact", reason: nil, now: now)
         return Self.textResult("retired fact \(rowID)")
     }
 

@@ -217,7 +217,7 @@ impl EstateCoordinator {
 
                 for old in &active {
                     if !old.extraction_schema_version.is_empty() && !desired_ids.contains(&old.id) {
-                        self.withdraw_kg_fact(handle, &old.id, now)
+                        self.withdraw_kg_fact(handle, &old.id, "fact-extraction-duty", None, now)
                             .map_err(|error| format!("{error:?}"))?;
                     }
                 }
@@ -226,7 +226,7 @@ impl EstateCoordinator {
                     .map_err(|error| error.to_string())?;
                 if settled != 1 {
                     for id in newly_filed {
-                        let _ = self.withdraw_kg_fact(handle, &id, now);
+                        let _ = self.withdraw_kg_fact(handle, &id, "fact-extraction-duty", None, now);
                     }
                     return Ok((0, grounding.rejected.len()));
                 }
