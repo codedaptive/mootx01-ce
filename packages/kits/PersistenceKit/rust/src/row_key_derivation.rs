@@ -16,9 +16,12 @@
 // (parse rule, hash function, version/variant bit placement) must be
 // applied identically to ALL FOUR copies (this file, `RowKeyDerivation.swift`,
 // `merkle_rollup.rs`, `MerkleRollup.swift`) or cross-spoke rowKey agreement
-// breaks silently. `row_key_derivation_conformance_tests.rs` cross-checks
-// this file's output against a shared vector set that also gates the Swift
-// side (`RowKeyDerivationCrossCheckTests.swift`, LocusKit test target).
+// breaks silently. The cross-port conformance gate is the shared-vector
+// tests in `row_key_derivation.rs::tests::shared_vector_*` (this file) and
+// `RowKeyDerivationConformanceTests.swift::sharedVectorWidgetAlpha` /
+// `sharedVectorSupersedesSlug` (PersistenceKitTests, Swift). Both assert
+// the same hardcoded vectors independently; `row_key_public_api_agreement_tests.rs`
+// gates that this function returns the same value the SQLite backend assigns.
 //
 // SCOPE: single-column TEXT primary keys only. Composite (multi-column) PKs
 // and `.uuid`-typed PKs are untouched by this file — callers invoke
@@ -28,24 +31,31 @@
 use uuid::Uuid;
 
 /// Derive a deterministic `RowKey` (`Uuid`) from a single-column TEXT
-/// primary-key VALUE.
+/// primary-key value.
 ///
-/// Parses `string_id` as a UUID when possible (today's reality for every
-/// LocusKit drawer/kg_fact id); otherwise derives a stable UUID from
-/// SHA-256 of the string (UUIDv5-style version/variant bits set on the
-/// first 16 hash bytes), so a non-UUID deterministic id (LocusKit's
-/// documented, not-yet-exercised capability) ALSO resolves identically on
-/// every spoke.
+/// # Contract (four invariants callers may rely on)
 ///
-/// # Fail-loud on the degenerate case
-/// `string_id` must not be empty. An empty single-column TEXT PK value is a
-/// data-quality violation — every caller writing a row MUST supply the PK
-/// value being written, there is no legitimate "absent PK" case for a
-/// declared single-column PK. `debug_assert!` panics in debug/test builds
-/// so this is caught immediately; `eprintln!` ensures release builds are
-/// never silent. The random-UUID fallback executes ONLY for this
-/// already-degenerate input — it is not the ordinary path and does not
-/// reintroduce gap 5's defect for any well-formed PK value.
+/// 1. The returned value IS the `RowKey` the storage layer assigns to a
+///    single-column TEXT-primary-key row carrying `string_id`, in every
+///    backend (SQLite, InMemory, PostgreSQL). A caller that must reference
+///    such a row from an audit event uses this function to obtain that
+///    row's `rowId` without going through the storage layer.
+///
+/// 2. When `string_id` is a well-formed UUID string, the function parses it
+///    and returns that UUID unchanged — the caller does not need to pre-parse.
+///
+/// 3. When `string_id` is not a UUID string, the function derives a stable
+///    UUID from SHA-256 of the string bytes (first 16 bytes, version nibble
+///    set to 0x50, variant bits set to 0x80). The same input always produces
+///    the same output across languages, machines, and time.
+///
+/// 4. `string_id` must not be empty (fail-loud precondition). An empty
+///    single-column TEXT PK value is a data-quality violation — every caller
+///    writing a row MUST supply the PK value. `debug_assert!` panics in
+///    debug/test builds so this is caught immediately; `eprintln!` ensures
+///    release builds are never silent. The random-UUID fallback executes ONLY
+///    for this already-degenerate input — it is not the ordinary path and
+///    does not reintroduce gap 5's defect for any well-formed PK value.
 pub fn deterministic_row_key(string_id: &str) -> Uuid {
     if string_id.is_empty() {
         debug_assert!(

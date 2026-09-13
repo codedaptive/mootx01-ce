@@ -194,7 +194,7 @@ public extension GeniusLocusKit {
                 // anchored to the same source remain independent assertions.
                 for old in active where
                     !old.extractionSchemaVersion.isEmpty && !desiredIDs.contains(old.id) {
-                    try await retireKGFact(handle, rowID: old.id)
+                    try await retireKGFact(handle, rowID: old.id, changedBy: "fact-extraction-duty", reason: nil, now: now)
                 }
 
                 let settled = try await estate.setFactsExtracted(
@@ -202,7 +202,7 @@ public extension GeniusLocusKit {
                 guard settled == 1 else {
                     // The source changed in the last race window. Do not leave
                     // assertions from the stale snapshot active.
-                    for id in newlyFiled { try? await retireKGFact(handle, rowID: id) }
+                    for id in newlyFiled { try? await retireKGFact(handle, rowID: id, changedBy: "fact-extraction-duty", reason: nil, now: now) }
                     skipped += 1
                     continue
                 }

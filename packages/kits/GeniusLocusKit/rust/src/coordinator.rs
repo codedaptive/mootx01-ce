@@ -8267,20 +8267,25 @@ impl EstateCoordinator {
 
     // MARK: - withdraw_kg_fact
 
-    /// Retire a KGFact by transitioning its state to `Withdrawn`.
-    ///
-    /// The row is preserved for audit purposes; `g_state_cluster` rises to 18
-    /// which excludes the fact from the active-recall filter. Delegates to
-    /// `Estate::withdraw_kg_fact`. Mirrors the Swift
-    /// `GeniusLocusKit.retireKGFact(_:rowID:)`.
+    /// Retire a KGFact by transitioning its state to `Withdrawn` and writing a
+    /// sealed audit row. Routes through `AuditGate::admit` (verb `retract`,
+    /// transition `active → withdrawn`). `changed_by` names the actor;
+    /// `reason` is optional human-readable context. The row is preserved for
+    /// audit purposes; `g_state_cluster` rises to 18 which excludes the fact
+    /// from the active-recall filter. Delegates to `Estate::withdraw_kg_fact`.
+    /// Mirrors the Swift `GeniusLocusKit.retireKGFact(_:rowID:changedBy:reason:now:)`.
     pub fn withdraw_kg_fact(
         &self,
         handle: &EstateHandle,
         id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
         now: i64,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.withdraw_kg_fact(id, now).map_err(|e| VerbDispatchError::from(remap("withdraw_kg_fact", "", e)))
+        estate
+            .withdraw_kg_fact(id, changed_by, reason, now)
+            .map_err(|e| VerbDispatchError::from(remap("withdraw_kg_fact", "", e)))
     }
 
     // MARK: - add_diary_entry
@@ -16038,7 +16043,7 @@ mod tests {
         // State::Withdrawn raw value (18), which makes g_state_cluster = 18,
         // at/above the active upper bound (RowState Cluster B).
         coord
-            .withdraw_kg_fact(&h, &fact.id, NOW + 1)
+            .withdraw_kg_fact(&h, &fact.id, "test-actor", None, NOW + 1)
             .expect("withdraw_kg_fact should succeed");
 
         // After retirement: active-only recall must NOT include the fact.
@@ -16184,7 +16189,7 @@ mod tests {
         assert_eq!(baseline.len(), 2, "baseline must have 2 active facts");
 
         coord
-            .withdraw_kg_fact(&h, &to_retire.id, NOW + 2)
+            .withdraw_kg_fact(&h, &to_retire.id, "test-actor", None, NOW + 2)
             .expect("withdraw");
 
         // After retirement: active recall must have exactly 1 fact.

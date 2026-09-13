@@ -646,11 +646,14 @@ public extension GeniusLocusKit {
     ///   `VerbError.underlyingEstateFailure` if the row is not found.
     func retireKGFact(
         _ handle: EstateHandle,
-        rowID: String
+        rowID: String,
+        changedBy: String,
+        reason: String? = nil,
+        now: Date
     ) async throws {
         let store = try await ensureKGStore(for: handle)
         do {
-            try await store.withdrawKGFact(id: rowID)
+            try await store.withdrawKGFact(id: rowID, changedBy: changedBy, reason: reason, now: now)
         } catch {
             throw remap(verb: "retireKGFact", estateID: handle.estateUUID.uuidString, error: error)
         }
