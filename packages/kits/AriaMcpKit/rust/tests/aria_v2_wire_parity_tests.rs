@@ -727,7 +727,7 @@ fn lens_keystones_provenance_restricted_row_has_no_dense_fields() {
 //
 // A provenance-restricted drawer with adjective sensitivity Normal passes the
 // adjective ceiling and MUST appear in rankedIDs — that is precisely the hole
-// this gate covers. If the row is absent the mission's fix regressed; the
+// this gate covers. If the row is absent the redaction fix regressed; the
 // panic here is the discriminating signal.
 #[test]
 fn lens_trust_synthesis_provenance_restricted_row_has_no_dense_fields() {
