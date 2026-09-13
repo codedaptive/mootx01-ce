@@ -741,4 +741,161 @@ struct PartialCueModeTests {
         #expect(actualBestSpan == expectedBestSpan,
                 "bestSpan must be 110 A's (truncate-at-raw-120 then normalize); got: \(actualBestSpan)")
     }
+
+    // MARK: - Provenance gate: keystones and trust-synthesis (B6/B7)
+
+    /// Parity lock: a drawer with provenance sensitivity Restricted and default
+    /// adjective sensitivity (Normal) must produce a sparse row in keystones —
+    /// id and centrality only, no dense fields.
+    ///
+    /// The provenance axis (bits 30-35 of drawer.provenance) gates dense fields
+    /// independently of the adjective axis (bits 6-11). A provenance-Restricted
+    /// drawer with adjective Normal passes the frame ceiling and is present in
+    /// drawersByID; AriaV2RecallLensPrivacy.classify must block its body from
+    /// the wire. Rust twin: aria_v2_wire_parity_tests.rs
+    /// lens_keystones_provenance_restricted_row_has_no_dense_fields.
+    @Test("keystones row has no dense fields for provenance-restricted drawer")
+    func keystonesProvenanceRestrictedRowHasNoDenseFields() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Hub: provenance=Restricted, adjective=Normal (default).
+        // Tunnels are captured while hub is already Restricted on the provenance
+        // axis but Normal on the adjective axis, so tunnel sensitivity inherits
+        // Normal and the graph includes them — this is the combination that
+        // exploited the hole: adjective Normal passes the frame ceiling, provenance
+        // Restricted must still block the dense fields.
+        let hubContent = "prov-restricted-hub-b6-swift — must not reach wire"
+        let hub = try await kit.capture(handle, CaptureFrame(
+            content: hubContent,
+            channel: .typed, room: "b6p-room",
+            latticeAnchor: .udc("004"), addedBy: "prov-keystones-tests",
+            embeddingModelID: "test-model-v1",
+            provenanceSensitivity: .restricted,
+            wing: "b6p-wing"))
+
+        // Spokes: Normal provenance and adjective. Their IDs anchor the tunnels
+        // so hub accumulates out-degree and ranks as the top keystone.
+        let s1 = try await kit.capture(handle, CaptureFrame(
+            content: "prov-spoke-b6-a",
+            channel: .typed, room: "b6p-room",
+            latticeAnchor: .udc("004"), addedBy: "prov-keystones-tests",
+            embeddingModelID: "test-model-v1",
+            wing: "b6p-wing"))
+        let s2 = try await kit.capture(handle, CaptureFrame(
+            content: "prov-spoke-b6-b",
+            channel: .typed, room: "b6p-room",
+            latticeAnchor: .udc("004"), addedBy: "prov-keystones-tests",
+            embeddingModelID: "test-model-v1",
+            wing: "b6p-wing"))
+
+        // Two outbound tunnels from hub make it the highest-centrality node.
+        let estate = try await kit.estate(for: handle)
+        for spokeID in [s1.id, s2.id] {
+            _ = try await estate.capture(TunnelCaptureFrame(
+                sourceWing: "b6p-wing", sourceRoom: "b6p-room",
+                targetWing: "b6p-wing", targetRoom: "b6p-room",
+                label: "relates", addedBy: "prov-keystones-tests",
+                sourceDrawerId: hub.id, targetDrawerId: spokeID, kind: .references))
+        }
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_keystones",
+            arguments: .object(["wing": .string("b6p-wing")]))
+        let response = try await service.execute(request)
+
+        let keystones = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["keystones"]?.arrayValue,
+            "keystones array must be present")
+
+        let hubRow = try #require(
+            keystones.first(where: {
+                $0.objectValue?["id"]?.stringValue == hub.id.lowercased()
+            })?.objectValue,
+            "provenance-restricted hub must appear in keystones; got: \(keystones)")
+
+        // No dense fields: the provenance gate must block the real body from the wire.
+        #expect(hubRow["subject"] == nil,
+                "provenance-restricted keystone must not expose 'subject'; got: \(String(describing: hubRow["subject"]))")
+        #expect(hubRow["bestSpan"] == nil,
+                "provenance-restricted keystone must not expose 'bestSpan'; got: \(String(describing: hubRow["bestSpan"]))")
+        #expect(hubRow["eventTime"] == nil,
+                "provenance-restricted keystone must not expose 'eventTime'; got: \(String(describing: hubRow["eventTime"]))")
+        #expect(hubRow["id"] != nil,
+                "provenance-restricted keystone must still carry 'id'")
+        #expect(hubRow["centrality"] != nil,
+                "provenance-restricted keystone must still carry 'centrality'")
+
+        // Fixture content must never appear anywhere in the serialized response.
+        let serialized = String(describing: response)
+        #expect(!serialized.contains(hubContent),
+                "fixture content must not appear in the wire response; serialized prefix: \(serialized.prefix(500))")
+    }
+
+    /// Parity lock: a drawer with provenance sensitivity Restricted and default
+    /// adjective sensitivity (Normal) must produce a sparse row in trust_synthesis
+    /// rankedIDs — id only, no dense fields.
+    ///
+    /// A provenance-Restricted drawer with adjective Normal passes the frame
+    /// ceiling, is present in drawersByID, and must appear in rankedIDs — its
+    /// absence would signal a different regression. The gate is
+    /// AriaV2RecallLensPrivacy.classify, which blocks dense fields for any
+    /// non-admissible verdict. Rust twin: aria_v2_wire_parity_tests.rs
+    /// lens_trust_synthesis_provenance_restricted_row_has_no_dense_fields.
+    @Test("trust_synthesis rankedIDs row has no dense fields for provenance-restricted drawer")
+    func trustSynthesisProvenanceRestrictedRowHasNoDenseFields() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // Restricted drawer: passes adjective ceiling, must not expose body.
+        let restrictedContent = "prov-restricted-b7-swift — must not reach wire"
+        let restricted = try await kit.capture(handle, CaptureFrame(
+            content: restrictedContent,
+            channel: .typed, room: "b7p-room",
+            latticeAnchor: .udc("004"), addedBy: "prov-trust-tests",
+            embeddingModelID: "test-model-v1",
+            provenanceSensitivity: .restricted))
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_trust_synthesis",
+            arguments: .object([:]))
+        let response = try await service.execute(request)
+
+        let ranked = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["rankedIDs"]?.arrayValue,
+            "rankedIDs array must be present")
+
+        // The restricted drawer must appear — absence means a different regression.
+        let row = try #require(
+            ranked.first(where: {
+                $0.objectValue?["id"]?.stringValue == restricted.id.lowercased()
+            })?.objectValue,
+            "provenance-restricted drawer must appear in rankedIDs; got: \(ranked)")
+
+        // No dense fields.
+        #expect(row["subject"] == nil,
+                "provenance-restricted ranked row must not expose 'subject'; got: \(String(describing: row["subject"]))")
+        #expect(row["bestSpan"] == nil,
+                "provenance-restricted ranked row must not expose 'bestSpan'; got: \(String(describing: row["bestSpan"]))")
+        #expect(row["eventTime"] == nil,
+                "provenance-restricted ranked row must not expose 'eventTime'; got: \(String(describing: row["eventTime"]))")
+        #expect(row["id"] != nil,
+                "provenance-restricted ranked row must still carry 'id'")
+
+        // Fixture content must not appear in the rankedIDs array (the field this
+        // fix gates). The assertion guards against an implementation that passes
+        // the row field-checks by omitting the row entirely rather than
+        // redacting it. The context synthesizer separately processes drawer
+        // content and is outside this fix's scope; only rankedIDs is checked.
+        let rankedIDsSerialized = String(describing:
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["rankedIDs"] ?? .null)
+        #expect(!rankedIDsSerialized.contains(restrictedContent),
+                "fixture content must not appear in the rankedIDs field; rankedIDs: \(rankedIDsSerialized.prefix(500))")
+    }
 }
