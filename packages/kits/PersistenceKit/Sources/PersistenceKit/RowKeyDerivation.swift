@@ -45,10 +45,13 @@
 // algorithm (parse rule, hash function, version/variant bit placement) must
 // be applied identically to ALL FOUR copies (this file, its Rust twin in
 // `persistence_kit`, MerkleRollup.swift, merkle_rollup.rs) or cross-spoke
-// rowKey agreement breaks silently. `RowKeyDerivationCrossCheckTests.swift`
-// (LocusKit test target, which can import both PersistenceKit and LocusKit)
-// asserts this file's output is byte-identical to `Estate.deterministicUUID
-// (from:)`'s output across a shared vector set.
+// rowKey agreement breaks silently. The cross-port conformance gate is
+// `RowKeyDerivationConformanceTests.swift::sharedVectorWidgetAlpha` /
+// `sharedVectorSupersedesSlug` (PersistenceKitTests) and
+// `row_key_derivation.rs::tests::shared_vector_*` (Rust) — both assert
+// the same hardcoded vectors independently. `RowKeyDerivationAgreementTests`
+// (LocusKit test target) gates that this function returns the same value
+// the SQLite backend assigns as the RowKey of a matching row.
 //
 // SCOPE: single-column TEXT primary keys only. Composite (multi-column) PKs
 // and `.uuid`-typed PKs are untouched — callers already resolve those via
@@ -64,28 +67,37 @@ private let rowKeyDerivationLogger = Logger(subsystem: MootProductIdentity.Loggi
 
 /// Deterministic, content-derived `RowKey` minting for single-column TEXT
 /// primary keys. See file header for the full gap-5 rationale.
-package enum RowKeyDerivation {
+public enum RowKeyDerivation {
 
     /// Derive a deterministic `RowKey` (`UUID`) from a single-column TEXT
-    /// primary-key VALUE.
+    /// primary-key value.
     ///
-    /// Parses `stringId` as a UUID when possible (today's reality for every
-    /// LocusKit drawer/kg_fact id); otherwise derives a stable UUID from
-    /// SHA-256 of the string (UUIDv5-style version/variant bits set on the
-    /// first 16 hash bytes), so a non-UUID deterministic id (LocusKit's
-    /// documented, not-yet-exercised capability) ALSO resolves identically
-    /// on every spoke.
+    /// **Contract** (four invariants that callers may rely on):
     ///
-    /// - Precondition (fail-loud, not silent): `stringId` must not be empty.
-    ///   An empty single-column TEXT PK value is a data-quality violation —
-    ///   every caller writing a row MUST supply the PK value being written,
-    ///   there is no legitimate "absent PK" case for a declared single-column
-    ///   PK. `assertionFailure` crashes DEBUG/test builds immediately; the
-    ///   `OSLog` fault ensures RELEASE builds are never silent. The
-    ///   random-`UUID()` fallback below executes ONLY for this already-
-    ///   degenerate input — it is not the ordinary path and does not
-    ///   reintroduce gap 5's defect for any well-formed PK value.
-    package static func deterministicRowKey(from stringId: String) -> RowKey {
+    /// 1. The returned value IS the `RowKey` the storage layer assigns to a
+    ///    single-column TEXT-primary-key row carrying `stringId`, in every
+    ///    backend (SQLite, InMemory, PostgreSQL). A caller that must reference
+    ///    such a row from an audit event uses this function to obtain that
+    ///    row's `rowId` without going through the storage layer.
+    ///
+    /// 2. When `stringId` is a well-formed UUID string, the function parses it
+    ///    and returns that UUID unchanged — the caller does not need to
+    ///    pre-parse.
+    ///
+    /// 3. When `stringId` is not a UUID string, the function derives a stable
+    ///    UUID from SHA-256 of the string bytes (first 16 bytes, version nibble
+    ///    set to 0x50, variant bits set to 0x80). The same input always
+    ///    produces the same output across languages, machines, and time.
+    ///
+    /// 4. `stringId` must not be empty (fail-loud precondition). An empty
+    ///    single-column TEXT PK value is a data-quality violation — every
+    ///    caller writing a row MUST supply the PK value being written.
+    ///    `assertionFailure` crashes DEBUG/test builds immediately; the
+    ///    `OSLog` fault ensures RELEASE builds are never silent. The
+    ///    random-`UUID()` fallback below executes ONLY for this already-
+    ///    degenerate input — it is not the ordinary path and does not
+    ///    reintroduce gap 5's defect for any well-formed PK value.
+    public static func deterministicRowKey(from stringId: String) -> RowKey {
         guard !stringId.isEmpty else {
             assertionFailure("RowKeyDerivation.deterministicRowKey: PK value must not be empty")
             rowKeyDerivationLogger.fault("deterministicRowKey called with an empty single-column TEXT PK value — this indicates a caller bug, not a legitimate absent-PK case")
