@@ -21,8 +21,8 @@ use std::net::TcpStream;
 
 use aria_mcp::dispatcher::Dispatcher;
 use aria_mcp::http_server::{
-    bind_loopback, drive_sse_stream, run_http_loop_for_test, send_shed_response, serve_once,
-    ConcurrencyGate, GLOBAL_RPC_COUNTER, GLOBAL_SHED_COUNTER,
+    bind_loopback, drive_sse_stream, send_shed_response, serve_http, serve_once, ConcurrencyGate,
+    HttpGates, GLOBAL_RPC_COUNTER, GLOBAL_SHED_COUNTER,
 };
 use aria_mcp::server::ServerConfig;
 
@@ -799,10 +799,9 @@ fn gate_concurrency_cap_holds_under_contention() {
 /// After the fix, the worker reads the request bytes BEFORE taking the
 /// dispatcher lock. The lock scope is limited to `route()` alone.
 ///
-/// This test uses `run_http_loop_for_test` — an exported variant of
-/// `run_http_loop` that accepts a pre-bound listener and serves exactly N
-/// connections, then returns. This lets the test drive real threaded behavior
-/// without the process-lifetime loop.
+/// This test uses `serve_http` with `connection_limit=Some(2)`, which accepts
+/// exactly 2 connections then returns. This lets the test drive the real
+/// construction and threading path without the process-lifetime loop.
 ///
 /// Shape:
 ///   - Server: max_concurrent=2, max_queued=0.
@@ -818,26 +817,29 @@ fn gate_concurrency_cap_holds_under_contention() {
 #[test]
 fn slow_client_does_not_block_fast_concurrent_request() {
     use std::net::TcpStream;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    // Build a fresh in-memory dispatcher for this test.
+    // Build a fresh in-memory config; serve_http constructs the dispatcher from it.
     let config = ServerConfig::default_inmemory();
-    let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial, None)
-    ));
 
     // Bind the listener.
     let listener = bind_loopback(0).expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
 
     // Two-thread pool: both connections can be in-flight simultaneously.
-    let gate = ConcurrencyGate::new(2, 0);
+    // Exact capacities are needed here; http_gates_from_env() would race with
+    // other tests running on the same process-global env vars.
+    let gates = HttpGates {
+        normal: ConcurrencyGate::new(2, 0),
+        sse: ConcurrencyGate::new(16, 0),
+    };
 
     // Spawn the server loop: serves exactly 2 connections then returns.
-    let server_listener = listener.try_clone().expect("clone listener");
-    let sse_gate = Arc::new(ConcurrencyGate::new(16, 0));
-    let server_thread = run_http_loop_for_test(server_listener, Arc::clone(&dispatcher), Arc::clone(&gate), Arc::clone(&sse_gate), 2);
+    let server_thread = std::thread::spawn(move || {
+        serve_http(listener, 4 * 1024 * 1024, config, None, Some(2), gates)
+            .expect("serve_http must not fail during test");
+    });
 
     // Brief pause to ensure the server loop is in accept() before clients connect.
     std::thread::sleep(Duration::from_millis(5));
@@ -945,28 +947,29 @@ fn slow_client_does_not_block_fast_concurrent_request() {
 #[test]
 fn saturation_overflow_reads_503_on_wire_while_slot_holder_in_flight() {
     use std::net::TcpStream;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     // ── Server setup ─────────────────────────────────────────────────────────
+    // gate: 1 concurrency slot + 1 soft-queue slot = total capacity 2.
+    // connection_count=3: A (served as worker), B (served as worker), C (shed).
+    // Exact capacities are needed; http_gates_from_env() would race on env vars.
+    let gates = HttpGates {
+        normal: ConcurrencyGate::new(1, 1),
+        sse: ConcurrencyGate::new(16, 0),
+    };
+    // Clone the normal gate handle before it moves into HttpGates for the server,
+    // so the assertions on current_depth() remain wired to the server's gate.
+    let gate = Arc::clone(&gates.normal);
+
     let config = ServerConfig::default_inmemory();
-    let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial, None)
-    ));
     let listener = bind_loopback(0).expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
 
-    // gate: 1 concurrency slot + 1 soft-queue slot = total capacity 2.
-    // connection_count=3: A (served as worker), B (served as worker), C (shed).
-    let gate = ConcurrencyGate::new(1, 1);
-    let sse_gate_2 = Arc::new(ConcurrencyGate::new(16, 0));
-    let server_thread = run_http_loop_for_test(
-        listener,
-        Arc::clone(&dispatcher),
-        Arc::clone(&gate),
-        Arc::clone(&sse_gate_2),
-        3,
-    );
+    let server_thread = std::thread::spawn(move || {
+        serve_http(listener, 4 * 1024 * 1024, config, None, Some(3), gates)
+            .expect("serve_http must not fail during test");
+    });
 
     // Brief pause so the server's accept() is ready before clients connect.
     std::thread::sleep(Duration::from_millis(5));
@@ -1248,29 +1251,25 @@ fn sse_get_without_accept_header_returns_404() {
 fn sse_streams_do_not_starve_normal_gate_slots() {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    use std::sync::{Arc, Mutex};
 
     let config = ServerConfig::default_inmemory();
-    let dispatcher = Arc::new(Mutex::new(
-        Dispatcher::new(config.registry, &config.server_name, &config.server_version, &config.build_serial, None)
-    ));
     let listener = bind_loopback(0).expect("bind loopback");
     let port = listener.local_addr().unwrap().port();
 
     // Tight normal gate: 1 concurrent slot.
     // If SSE consumed this slot, the POST below would block until an SSE client disconnects.
-    let normal_gate = Arc::new(ConcurrencyGate::new(1, 4));
     // Generous SSE gate: 4 concurrent SSE streams — room for our 3 test clients.
-    let test_sse_gate = Arc::new(ConcurrencyGate::new(4, 0));
+    // Exact capacities are needed; http_gates_from_env() would race on env vars.
+    let gates = HttpGates {
+        normal: ConcurrencyGate::new(1, 4),
+        sse: ConcurrencyGate::new(4, 0),
+    };
 
     // Serve 4 connections: 3 SSE + 1 POST.
-    let server_thread = run_http_loop_for_test(
-        listener,
-        Arc::clone(&dispatcher),
-        Arc::clone(&normal_gate),
-        Arc::clone(&test_sse_gate),
-        4,
-    );
+    let server_thread = std::thread::spawn(move || {
+        serve_http(listener, 4 * 1024 * 1024, config, None, Some(4), gates)
+            .expect("serve_http must not fail during test");
+    });
 
     std::thread::sleep(std::time::Duration::from_millis(10));
 
@@ -1368,15 +1367,19 @@ fn read_journal_zero_last_n_returns_invalid_params() {
 // ── Finding #8 — Host guard on ARIA MCP GET routes → 421 ──
 
 /// A GET with a non-loopback Host header must be rejected 421.
-/// Uses `run_http_loop_for_test` so the full gate+read path is exercised.
+/// Uses `serve_http` with `connection_limit=Some(1)` so the full
+/// gate+read path is exercised on each iteration.
 #[test]
 fn http_get_with_non_loopback_host_returns_421() {
-    use std::sync::{Arc, Mutex};
-    let dispatcher = Arc::new(Mutex::new(make_dispatcher()));
-    let normal_gate = Arc::new(aria_mcp::http_server::ConcurrencyGate::new(4, 4));
-    let sse_gate = Arc::new(aria_mcp::http_server::ConcurrencyGate::new(2, 0));
-
     for path in ["/api/graph", "/api/admin/estates", "/api/lattice"] {
+        // Build fresh config and gates per iteration — each iteration serves
+        // exactly one connection, so shared state between iterations is unnecessary.
+        let config = ServerConfig::default_inmemory();
+        let gates = HttpGates {
+            normal: ConcurrencyGate::new(4, 4),
+            sse: ConcurrencyGate::new(2, 0),
+        };
+
         let listener = bind_loopback(0).expect("bind");
         let port = listener.local_addr().unwrap().port();
 
@@ -1387,13 +1390,10 @@ fn http_get_with_non_loopback_host_returns_421() {
         client.write_all(req.as_bytes()).unwrap();
         client.flush().unwrap();
 
-        let handle = aria_mcp::http_server::run_http_loop_for_test(
-            listener,
-            Arc::clone(&dispatcher),
-            Arc::clone(&normal_gate),
-            Arc::clone(&sse_gate),
-            1,
-        );
+        let handle = std::thread::spawn(move || {
+            serve_http(listener, 4 * 1024 * 1024, config, None, Some(1), gates)
+                .expect("serve_http must not fail during test");
+        });
         let _ = handle.join();
 
         let mut resp = Vec::new();

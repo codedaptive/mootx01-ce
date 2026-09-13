@@ -455,12 +455,12 @@ pub fn run(
         let listener = match bind_loopback(port) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("{banner}: cannot bind HTTP transport on 127.0.0.1:{port}: {e}");
+                eprintln!("{}", http_bind_failure_line(banner, port, &e));
                 std::process::exit(1);
             }
         };
         if let Err(e) = run_http_loop(listener, max_body, config, http_stats_store, None) {
-            eprintln!("{banner}: cannot bind HTTP transport on 127.0.0.1:{port}: {e}");
+            eprintln!("{}", http_serve_failure_line(banner, port, &e));
             std::process::exit(1);
         }
         eprintln!("{banner}: HTTP transport stopped, exiting");
@@ -542,5 +542,101 @@ fn parse_max_body_bytes(banner: &str) -> usize {
             eprintln!("{banner}: MOOTX01_HTTP_MAX_BODY_BYTES={raw:?} invalid; using 4 MiB default");
             4 * 1024 * 1024
         }
+    }
+}
+
+/// Build the user-visible error line for a TCP bind failure.
+///
+/// This message is emitted when `bind_loopback(port)` itself returns `Err`.
+/// The listener does not exist yet, so the failure is specifically that the
+/// address could not be claimed — distinct from a serve failure that happens
+/// after the socket is already bound.
+fn http_bind_failure_line(banner: &str, port: u16, error: &std::io::Error) -> String {
+    format!("{banner}: cannot bind HTTP transport on 127.0.0.1:{port}: {error}")
+}
+
+/// Build the user-visible error line for a serve loop failure.
+///
+/// This message is emitted when `run_http_loop` returns `Err`. At that point
+/// the listener is already bound; the error comes from `local_addr()` failing
+/// on the handed-in socket (the only fallible expression in `serve_http` that
+/// propagates through `run_http_loop`). Naming a bind failure here would be
+/// false: the bind already succeeded.
+fn http_serve_failure_line(banner: &str, port: u16, error: &std::io::Error) -> String {
+    format!("{banner}: HTTP transport on 127.0.0.1:{port} failed while serving: {error}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The serve-failure message must NOT claim a bind failure.  A bind
+    /// failure and a serve failure are distinct: the bind arm fires before any
+    /// socket exists; the serve arm fires on a socket that is already bound.
+    /// Mixing them up makes the operator look in the wrong place.
+    #[test]
+    fn serve_failure_line_does_not_claim_a_bind_failure() {
+        let err = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let line = http_serve_failure_line("mootx01", 8765, &err);
+        assert!(
+            !line.contains("cannot bind"),
+            "serve-failure line must not say 'cannot bind', got: {line:?}"
+        );
+        assert!(
+            line.contains("127.0.0.1:8765"),
+            "serve-failure line must include address, got: {line:?}"
+        );
+        assert!(
+            line.contains("failed while serving"),
+            "serve-failure line must name serving failure, got: {line:?}"
+        );
+    }
+
+    /// The bind-failure line must keep the exact wording that shipped, byte
+    /// for byte.  Any change to the message string would silently break
+    /// operators' log parsers that grep for it.
+    #[test]
+    fn bind_failure_line_keeps_the_shipped_wording() {
+        let err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address already in use");
+        let line = http_bind_failure_line("mootx01", 8765, &err);
+        assert_eq!(
+            line,
+            format!("mootx01: cannot bind HTTP transport on 127.0.0.1:8765: {err}"),
+        );
+    }
+
+    /// Prove that handing `run_http_loop` a non-socket file descriptor makes it
+    /// return `Err`, and that the resulting error, rendered through
+    /// `http_serve_failure_line`, names a serve failure rather than a bind
+    /// failure. What this covers is `run_http_loop`'s `Err` return and the line
+    /// built from it, which confirms the error path is real rather than
+    /// hypothetical. The serve arm inside `run()` is not reachable from a test,
+    /// because `std::process::exit(1)` follows the `eprintln`; that the arm
+    /// passes the serve builder rather than the bind builder is held by review.
+    #[cfg(unix)]
+    #[test]
+    fn run_http_loop_error_is_a_serve_failure_not_a_bind_failure() {
+        use std::os::fd::OwnedFd;
+
+        // A regular file descriptor returns ENOTSOCK from local_addr(), so
+        // serve_http returns Err before reaching accept().  This is the safe
+        // route: we own the OwnedFd and TcpListener takes ownership.
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let listener = std::net::TcpListener::from(OwnedFd::from(file));
+
+        let config = crate::server::ServerConfig::default_inmemory();
+        let result = run_http_loop(listener, 4 * 1024 * 1024, config, None, None);
+        assert!(result.is_err(), "expected Err from run_http_loop with a non-socket fd");
+
+        let err = result.unwrap_err();
+        let line = http_serve_failure_line("mootx01", 8765, &err);
+        assert!(
+            !line.contains("cannot bind"),
+            "serve-failure line must not say 'cannot bind', got: {line:?}"
+        );
+        assert!(
+            line.contains("failed while serving"),
+            "serve-failure line must name serving failure, got: {line:?}"
+        );
     }
 }
