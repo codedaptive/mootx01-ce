@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use aria_mcp::{
     dispatcher::UpdateAdvisoryProvider,
-    http_server::{bind_loopback, serve_http},
+    http_server::{bind_loopback, run_http_loop, serve_http},
     server::{run_stdio_loop, ServerConfig},
 };
 
@@ -331,4 +331,92 @@ fn both_advisories_surface_via_http_construction_path() {
 
     // Join the server thread — must not panic.
     server.join().expect("serve_http thread must not panic");
+}
+
+/// Gate: `run_http_loop` delegates to `serve_http` and surfaces both advisories
+/// in `moot_estate_ping` when `ServerConfig` carries them.
+///
+/// This test drives the production entry point that `runtime.rs` calls.
+/// The sibling test `both_advisories_surface_via_http_construction_path` drives
+/// `serve_http` directly. The split exists so a neuter applied inside
+/// `run_http_loop` (`config.update_advisory = None`) turns THIS test RED while
+/// the sibling stays GREEN, confirming the two tests cover different routing
+/// paths. `run_http_loop`'s body is an unconditional delegation; what the neuter
+/// proves is that this test enters `run_http_loop` and the sibling does not.
+///
+/// Port selection: the test binds its own listener on port 0 and moves it into
+/// the spawned server thread. The socket is listening before the thread is
+/// scheduled, so the connect lands in the accept backlog with no race window.
+#[test]
+fn run_http_loop_delegates_to_serve_http_with_both_advisories() {
+    // Build a ServerConfig that carries both advisories.
+    let mut cfg = ServerConfig::default_inmemory();
+    cfg.version_skew = SKEW_ADVISORY.to_owned();
+    cfg.update_advisory = Some(fixed_provider(UPDATE_ADVISORY));
+
+    // Bind the listener here; move it into the server thread. The socket is
+    // already listening when the connect fires, so there is no race window.
+    let listener = bind_loopback(0).expect("bind loopback for run_http_loop gate");
+    let port = listener.local_addr().unwrap().port();
+
+    // Spawn run_http_loop with connection_limit=Some(1): it accepts one
+    // connection and returns.
+    let server = std::thread::spawn(move || {
+        run_http_loop(listener, 4 * 1024 * 1024, cfg, None, Some(1))
+            .expect("run_http_loop must not fail during test");
+    });
+
+    // Build one tools/call frame for moot_estate_ping.
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "moot_estate_ping", "arguments": {} }
+    });
+    let body = serde_json::to_vec(&frame).unwrap();
+
+    // The listener was already bound before the thread spawned, so a single
+    // connect suffices. A read timeout guards against hangs in the response path.
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port))
+        .expect("connect to run_http_loop");
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        String::from_utf8_lossy(&body)
+    );
+    client.write_all(request.as_bytes()).unwrap();
+    client.flush().unwrap();
+
+    // Read until the server closes the connection (Connection: close).
+    let mut resp = Vec::new();
+    client.read_to_end(&mut resp).unwrap();
+
+    // Split HTTP headers from body at \r\n\r\n.
+    let sep = find_in(&resp, b"\r\n\r\n")
+        .expect("HTTP response must contain header/body separator \\r\\n\\r\\n");
+    let json_body = &resp[sep + 4..];
+
+    let response: serde_json::Value =
+        serde_json::from_slice(json_body).expect("HTTP body must be valid JSON");
+    let d = data(&response);
+
+    assert_eq!(
+        d["version_skew"].as_str(),
+        Some(SKEW_ADVISORY),
+        "moot_estate_ping over run_http_loop must carry version_skew; \
+         a neuter of version_skew inside run_http_loop will turn this RED"
+    );
+    assert_eq!(
+        d["update_available"].as_str(),
+        Some(UPDATE_ADVISORY),
+        "moot_estate_ping over run_http_loop must carry update_available; \
+         inserting `config.update_advisory = None` inside run_http_loop \
+         will turn this RED while both_advisories_surface_via_http_construction_path stays GREEN"
+    );
+
+    // Join the server thread — must not panic.
+    server.join().expect("run_http_loop thread must not panic");
 }
