@@ -459,8 +459,9 @@ struct UtilityTierTests {
     /// `output_schema` is present when the tool declares one and the key is
     /// OMITTED when it does not. Neither port may emit a null `output_schema`:
     /// absent in one port and null in the other is a conformance failure.
-    /// Swift omits via `if let` in `buildOutputSchemaLookup`'s consumer; Rust
-    /// omits via `.get("outputSchema").filter(!is_null).cloned()` plus
+    /// Swift omits via `if let outputSchema = catalog.outputSchema` in the
+    /// verbose row builder (buildCatalogLookup path); Rust omits via
+    /// `.get("outputSchema").filter(!is_null).cloned()` plus
     /// `skip_serializing_if`.
     @Test
     func verboseLensRowKeySetIsExact() async throws {
@@ -522,5 +523,84 @@ struct UtilityTierTests {
             #expect(Set(obj.keys) == ["name", "description"],
                     "\(name) terse key set: \(Set(obj.keys).sorted())")
         }
+    }
+
+    // MARK: - lens lane description parity with catalog
+
+    /// Asserts that the `moot_list_lenses` row for `moot_synthesize` carries the
+    /// same description as the v2 catalog entry (ToolProjection), and that the
+    /// verbose row's `input_schema` uses the canonical property key `estate_id`
+    /// and not `estateID`. Guards against the pre-fix divergence where the lens
+    /// lane took description and inputSchema from RecipeTools instead of the catalog.
+    ///
+    /// Compares against the live catalog value rather than a hardcoded string so
+    /// the assertion tracks the catalog as it evolves.
+    ///
+    /// Rust twin: `lens_lane_description_matches_catalog_for_synthesize`
+    /// (rust/tests/utility_tier_tests.rs).
+    @Test
+    func lensLaneDescriptionMatchesCatalogForSynthesize() async throws {
+        // Retrieve the catalog description from the live projection — compare
+        // against the actual value rather than a hardcoded string so the assertion
+        // tracks the catalog rather than freezing today's prose.
+        let catalogTools = ToolProjection.tools()
+        let catalogEntry = try #require(
+            catalogTools.first(where: { $0.name == "moot_synthesize" }),
+            "moot_synthesize must be present in ToolProjection.tools()")
+        let expectedDescription = catalogEntry.description
+
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(
+            storage: storage, owner: OwnerCredentials(ownerIdentifier: "catalogue"))
+        let handle = try await kit.open(
+            storage: storage,
+            owner: OwnerCredentials(ownerIdentifier: "catalogue"),
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Verbose row: description must match catalog and input_schema must use estate_id.
+        let verboseResult = try await dispatcher.dispatch(
+            name: "moot_list_lenses", arguments: .object(["verbose": .bool(true)]))
+        let verboseRows = try #require(
+            data(of: verboseResult)?["tools"]?.arrayValue,
+            "verbose list_lenses must carry a tools array")
+        let verboseRow = try #require(
+            verboseRows.first(where: { $0.objectValue?["name"] == .string("moot_synthesize") }),
+            "moot_synthesize must appear in the verbose lens row set")
+        let verboseObj = try #require(verboseRow.objectValue)
+
+        let actualVerboseDesc = verboseObj["description"]?.stringValue ?? "(nil)"
+        #expect(
+            verboseObj["description"] == .string(expectedDescription),
+            "verbose row description must match the catalog: expected \"\(expectedDescription)\" got \"\(actualVerboseDesc)\"")
+
+        // input_schema must carry estate_id (v2 catalog key), not estateID
+        // (the pre-fix RecipeTools key that diverged from the catalog).
+        let inputSchemaProps = verboseObj["input_schema"]?.objectValue?["properties"]?.objectValue
+        #expect(
+            inputSchemaProps?["estate_id"] != nil,
+            "verbose input_schema must carry the property key estate_id")
+        #expect(
+            inputSchemaProps?["estateID"] == nil,
+            "verbose input_schema must NOT carry estateID; the canonical key is estate_id")
+
+        // Terse row: description must also match catalog.
+        let terseResult = try await dispatcher.dispatch(
+            name: "moot_list_lenses", arguments: .object([:]))
+        let terseRows = try #require(
+            data(of: terseResult)?["tools"]?.arrayValue,
+            "terse list_lenses must carry a tools array")
+        let terseRow = try #require(
+            terseRows.first(where: { $0.objectValue?["name"] == .string("moot_synthesize") }),
+            "moot_synthesize must appear in the terse lens row set")
+        let terseObj = try #require(terseRow.objectValue)
+
+        let actualTerseDesc = terseObj["description"]?.stringValue ?? "(nil)"
+        #expect(
+            terseObj["description"] == .string(expectedDescription),
+            "terse row description must match the catalog: expected \"\(expectedDescription)\" got \"\(actualTerseDesc)\"")
     }
 }
