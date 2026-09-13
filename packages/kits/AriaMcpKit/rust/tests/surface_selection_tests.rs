@@ -12,7 +12,7 @@ use std::{fs, path::Path};
 
 use aria_mcp::{
     dispatcher::Dispatcher, estate_registry::EstateRegistry, jsonrpc::JSONRPCRequest,
-    v2::catalog::selected_capability_digest,
+    v2::catalog::{selected_capability_digest, selected_registry_with_vault},
 };
 
 use aria_mcp::{estate_posture::EstatePosture, monitoring_control::MonitoringControl};
@@ -244,6 +244,10 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
         "moot_monitoring_status", "moot_move_memory", "moot_palace_import", "moot_propose_contradictions",
         "moot_read_journal", "moot_rebuild_status", "moot_recall_connected", "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped", "moot_recall_temporal", "moot_recall_vague", "moot_recall_walk", "moot_reclassify_fdc", "moot_reindex", "moot_retire_fact", "moot_review_tunnel", "moot_synthesize", "moot_timing_report", "moot_update_memory", "moot_vault_export", "moot_vault_import", "moot_vault_job", "moot_vault_reconcile", "moot_vault_status", "moot_withdraw_memory", "moot_write_journal",
     ]);
+    // Build the registry once to read effect; tools/list does not emit effect.
+    // Vault defaults on (absent MOOTX01_VAULT env var = on), so pass true to
+    // match the dispatcher's catalog and include vault-gated operations.
+    let registry = selected_registry_with_vault(true);
     for name in [
         "moot_reindex", "moot_reclassify_fdc", "moot_palace_import", "moot_json_import",
         "moot_file_dataset", "moot_dataset_query", "moot_dataset_stats", "moot_vault_export", "moot_vault_import",
@@ -264,10 +268,24 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
             .unwrap_or_else(|| panic!("selected catalog missing {name}"));
         assert_eq!(actual["inputSchema"], expected["inputSchema"], "{name} input schema");
         assert_eq!(actual["outputSchema"], expected["outputSchema"], "{name} output schema");
+        assert_eq!(actual["description"], expected["description"], "{name} description");
+        let descriptor = registry.operation(name)
+            .unwrap_or_else(|| panic!("registry missing {name}"));
+        assert_eq!(
+            serde_json::to_value(descriptor.effect).unwrap(),
+            expected["effect"],
+            "{name} effect"
+        );
     }
-    // inputSchema-only loop: operations whose outputSchemas are not frozen in the
-    // fixture. moot_file_dataset is also in the strict loop above; the inputSchema
-    // check here is redundant but kept for explicitness.
+    // inputSchema-only loop. Every one of the fixture's rows carries an
+    // outputSchema, so the separation is not about frozen-ness:
+    // moot_memory_search, moot_link_memories and moot_review_tunnel carry a
+    // placeholder data schema in the fixture, {"type":"object",
+    // "additionalProperties":true}, which no side fixture patches and which does
+    // not match the live typed schema. moot_memory_get's and moot_file_dataset's
+    // fixture outputSchemas do match live; moot_file_dataset is gated strictly
+    // above, so its inputSchema check here is redundant but kept for
+    // explicitness.
     for name in [
         "moot_memory_get", "moot_memory_search", "moot_link_memories",
         "moot_review_tunnel", "moot_file_dataset",
@@ -276,6 +294,14 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
         let actual = tools.iter().find(|tool| tool["name"] == name)
             .unwrap_or_else(|| panic!("selected catalog missing {name}"));
         assert_eq!(actual["inputSchema"], expected["inputSchema"], "{name} input schema");
+        assert_eq!(actual["description"], expected["description"], "{name} description");
+        let descriptor = registry.operation(name)
+            .unwrap_or_else(|| panic!("registry missing {name}"));
+        assert_eq!(
+            serde_json::to_value(descriptor.effect).unwrap(),
+            expected["effect"],
+            "{name} effect"
+        );
     }
 
     let response = call(&dispatcher, "moot_monitoring_status", serde_json::json!({}));

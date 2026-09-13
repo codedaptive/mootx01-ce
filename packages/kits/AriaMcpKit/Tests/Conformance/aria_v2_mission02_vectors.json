@@ -155,9 +155,9 @@
       {
         "id": "memory_search",
         "name": "moot_memory_search",
-        "description": "Search memories by a query or an anchor, returning compact retrieval rows.",
+        "description": "Search memories by a query or an anchor, returning compact authorized rows.",
         "help": {
-          "intent": "Search memories by a query or an anchor, returning compact retrieval rows.",
+          "intent": "Search memories by a query or an anchor, returning compact authorized rows.",
           "example": {
             "name": "moot_memory_search",
             "arguments": {

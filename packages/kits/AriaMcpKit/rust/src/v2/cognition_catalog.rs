@@ -149,9 +149,9 @@ impl CognitionCatalogService {
                         // `.get().cloned()` and NOT `tool["outputSchema"]`:
                         // indexing a serde_json::Value with a missing key
                         // yields Value::Null, which would serialize as
-                        // `"output_schema": null`. Swift omits the key when
-                        // ProjectedTool.outputSchema is nil
-                        // (AriaV2CognitionCatalog.swift buildOutputSchemaLookup),
+                        // `"output_schema": null`. Swift omits the key via
+                        // `if let outputSchema = catalog.outputSchema` in
+                        // AriaV2CognitionCatalog.swift (buildCatalogLookup path),
                         // so emitting null here would diverge from Swift.
                         // Neither port ever emits a null output_schema.
                         output_schema: tool
