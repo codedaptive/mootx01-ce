@@ -415,7 +415,7 @@ pub fn run_http_loop(
     stats_store: Option<Arc<StatsStore>>,
     connection_limit: Option<usize>,
 ) -> std::io::Result<()> {
-    serve_http(listener, max_body_bytes, config, stats_store, connection_limit)
+    serve_http(listener, max_body_bytes, config, stats_store, connection_limit, http_gates_from_env())
 }
 
 /// Accept loop for the loopback HTTP MCP transport.
@@ -439,6 +439,11 @@ pub fn run_http_loop(
 /// Shipping behaviour (`connection_limit: None`) is unchanged.
 ///
 /// `stats_store`: optional stats store for topology snapshot reads.
+///
+/// `gates`: the two concurrency gates. Production code passes
+/// [`http_gates_from_env()`]; tests construct [`HttpGates`] directly to pin
+/// exact per-test capacities without racing on process-global environment
+/// variables (cargo runs integration tests on a shared thread pool).
 #[doc(hidden)]
 pub fn serve_http(
     listener: std::net::TcpListener,
@@ -446,29 +451,10 @@ pub fn serve_http(
     config: ServerConfig,
     stats_store: Option<Arc<StatsStore>>,
     connection_limit: Option<usize>,
+    gates: HttpGates,
 ) -> std::io::Result<()> {
-    // Read gate configuration from env (same keys as Swift, same defaults).
-    let max_concurrent = std::env::var("MOOTX01_HTTP_MAX_CONCURRENT")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(64)
-        .clamp(1, 1024);
-    let max_queued = std::env::var("MOOTX01_HTTP_MAX_QUEUED")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(256)
-        .clamp(0, 4096);
-    // SSE gate: separate pool so SSE clients never starve normal requests.
-    // maxQueued=0: shed immediately when the cap is hit (SSE clients reconnect
-    // via EventSource retry, so queuing adds no value).
-    let max_sse = std::env::var("MOOTX01_HTTP_MAX_SSE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(MAX_SSE_CONNECTIONS)
-        .clamp(1, 256);
-
-    let gate = ConcurrencyGate::new(max_concurrent, max_queued);
-    let sse_gate = Arc::new(ConcurrencyGate::new(max_sse, 0));
+    let gate = gates.normal;
+    let sse_gate = gates.sse;
 
     // Build the monitoring control from the stats store when available.
     // The concrete type lives here (AriaResident is the Swift mirror) so
@@ -499,7 +485,10 @@ pub fn serve_http(
     ));
 
     let bound = listener.local_addr()?.port();
-    eprintln!("aria-mcp: HTTP listening on 127.0.0.1:{bound} (max body {max_body_bytes} bytes, max_concurrent={max_concurrent}, max_queued={max_queued}, max_sse={max_sse})");
+    // Read gate parameters back from the gate objects so the banner is truthful
+    // when gates is a test-constructed HttpGates rather than one built from env.
+    eprintln!("aria-mcp: HTTP listening on 127.0.0.1:{bound} (max body {max_body_bytes} bytes, max_concurrent={}, max_queued={}, max_sse={})",
+        gate.max_concurrent, gate.max_queued, sse_gate.max_concurrent);
 
     let mut accepted = 0usize;
     loop {
@@ -691,139 +680,51 @@ pub fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(("127.0.0.1", port))
 }
 
-/// Test-only variant of `serve_http`: serves exactly `connection_count`
-/// connections then returns. Returns a `JoinHandle` for the server thread so
-/// callers can synchronize shutdown.
+/// The two concurrency gates the loopback HTTP transport runs on.
 ///
-/// Uses the same two-phase gate + pre-lock read logic as `serve_http`:
-/// `try_enqueue()` on the accept thread (non-blocking), `wait_for_slot()` on
-/// the worker thread (blocking Condvar wait), request read before the
-/// dispatcher lock. Enables integration tests that drive real threaded
-/// behavior without the process-lifetime loop.
+/// `normal` bounds POST and JSON-RPC traffic. `sse` bounds long-lived
+/// `GET /api/events` streams so idle SSE clients cannot starve normal
+/// requests (CAND-025). Production builds both from the environment through
+/// [`http_gates_from_env`]; a test constructs them directly to pin exact
+/// capacities, because the environment is process-global and cargo runs the
+/// test binary on many threads at once.
+pub struct HttpGates {
+    pub normal: Arc<ConcurrencyGate>,
+    pub sse: Arc<ConcurrencyGate>,
+}
+
+/// Read the shipped gate configuration from the environment.
 ///
-/// Sibling: [`serve_http`] takes a `ServerConfig` and constructs the dispatcher
-/// itself; this function takes an already-constructed `Arc<Mutex<Dispatcher>>`
-/// so tests that pre-build their dispatcher can use it without going through
-/// config construction.
+/// Environment variables (same keys as the Swift transport, same defaults):
+///   `MOOTX01_HTTP_MAX_CONCURRENT` — default 64, clamped 1..=1024
+///   `MOOTX01_HTTP_MAX_QUEUED`     — default 256, clamped 0..=4096
+///   `MOOTX01_HTTP_MAX_SSE`        — default `MAX_SSE_CONNECTIONS`, clamped 1..=256
 ///
-/// Gate is provided by the caller so tests can configure capacity precisely.
-/// `sse_gate` is provided separately (CAND-025) so SSE isolation tests can
-/// verify that SSE clients do not consume slots from the normal gate.
-#[doc(hidden)]
-pub fn run_http_loop_for_test(
-    listener: TcpListener,
-    dispatcher: Arc<Mutex<Dispatcher>>,
-    gate: Arc<ConcurrencyGate>,
-    sse_gate: Arc<ConcurrencyGate>,
-    connection_count: usize,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut served = 0;
-        while served < connection_count {
-            let (mut stream, _) = match listener.accept() {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            // Phase 1: non-blocking depth check on the accept thread.
-            if !gate.try_enqueue() {
-                GLOBAL_SHED_COUNTER.fetch_add(1, Ordering::Relaxed);
-                send_shed_response(&mut stream);
-                served += 1;
-                continue;
-            }
-            let gate_c = Arc::clone(&gate);
-            let sse_gate_c = Arc::clone(&sse_gate);
-            let disp_c = Arc::clone(&dispatcher);
-            std::thread::spawn(move || {
-                // Phase 2: blocking Condvar wait on the worker thread.
-                gate_c.wait_for_slot();
-
-                let start = Instant::now();
-
-                // Bound blocking reads: mirrors serve_http and moot-mgr's
-                // 30-second SO_RCVTIMEO. Prevents a slow-header attacker from
-                // occupying a gate slot indefinitely during the test variant.
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
-
-                // Read request BEFORE locking the dispatcher (fix #26).
-                let request = read_request(&mut stream, 4 * 1024 * 1024);
-
-                // SSE two-gate protocol (CAND-025): same as serve_http.
-                if let Some(ref req) = request {
-                    if req.method == "GET" && req.path == "/api/events" && req.wants_event_stream()
-                    {
-                        // Release normal gate early before entering long-lived stream.
-                        gate_c.release();
-                        let _ = start.elapsed();
-
-                        // DNS-rebinding guard: same as serve_http SSE branch.
-                        if !is_loopback_host(req.host.as_deref()) {
-                            let body = br#"{"error":"misdirected_request"}"#;
-                            let head = format!(
-                                "HTTP/1.1 421 Misdirected Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                                body.len()
-                            );
-                            let _ = stream.write_all(head.as_bytes());
-                            let _ = stream.write_all(body);
-                            return;
-                        }
-
-                        if !is_origin_allowed(req.origin.as_deref()) {
-                            let body = br#"{"error":"forbidden_origin"}"#;
-                            let head = format!(
-                                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                                body.len()
-                            );
-                            let _ = stream.write_all(head.as_bytes());
-                            let _ = stream.write_all(body);
-                            return;
-                        }
-                        if !sse_gate_c.try_enqueue() {
-                            let body = br#"{"error":"sse_capacity_exceeded"}"#;
-                            let head = format!(
-                                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                                body.len()
-                            );
-                            let _ = stream.write_all(head.as_bytes());
-                            let _ = stream.write_all(body);
-                            return;
-                        }
-                        sse_gate_c.wait_for_slot();
-                        let _sse_guard = defer_on_drop(move || {
-                            sse_gate_c.release();
-                        });
-                        drive_sse_stream(&mut stream, SSE_HEARTBEAT_INTERVAL_MS);
-                        return;
-                    }
-                }
-
-                let _guard = defer_on_drop(|| {
-                    gate_c.release();
-                    let _ = start.elapsed(); // latency recording omitted in test helper
-                });
-
-                let lock = disp_c.lock().unwrap();
-                if let Some(req) = request {
-                    let (status, body) = route(&req, &lock, None);
-                    drop(lock);
-                    match status {
-                        400..=499 => {
-                            GLOBAL_4XX_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        }
-                        500..=599 => {
-                            GLOBAL_5XX_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        }
-                        _ => {}
-                    }
-                    if status != 202 {
-                        GLOBAL_RPC_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    }
-                    write_http_response(&mut stream, status, &body);
-                }
-            });
-            served += 1;
-        }
-    })
+/// SSE gate maxQueued=0: shed immediately when the SSE cap is hit (SSE clients
+/// reconnect via EventSource retry, so queuing adds no value).
+pub fn http_gates_from_env() -> HttpGates {
+    let max_concurrent = std::env::var("MOOTX01_HTTP_MAX_CONCURRENT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64)
+        .clamp(1, 1024);
+    let max_queued = std::env::var("MOOTX01_HTTP_MAX_QUEUED")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(256)
+        .clamp(0, 4096);
+    // SSE gate: separate pool so SSE clients never starve normal requests.
+    // maxQueued=0: shed immediately when the cap is hit (SSE clients reconnect
+    // via EventSource retry, so queuing adds no value).
+    let max_sse = std::env::var("MOOTX01_HTTP_MAX_SSE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(MAX_SSE_CONNECTIONS)
+        .clamp(1, 256);
+    HttpGates {
+        normal: ConcurrencyGate::new(max_concurrent, max_queued),
+        sse: ConcurrencyGate::new(max_sse, 0),
+    }
 }
 
 /// Accept one connection and serve it synchronously (no thread spawn, no gate).
