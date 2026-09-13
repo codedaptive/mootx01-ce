@@ -3448,9 +3448,9 @@
       {
         "id": "synthesize",
         "name": "moot_synthesize",
-        "description": "Synthesize authorized recalled memories into a grounded context document.",
+        "description": "Produce a grounded synthesis from authorized memories.",
         "help": {
-          "intent": "Synthesize authorized recalled memories into a grounded context document.",
+          "intent": "Produce a grounded synthesis from authorized memories.",
           "example": {
             "name": "moot_synthesize",
             "arguments": {}

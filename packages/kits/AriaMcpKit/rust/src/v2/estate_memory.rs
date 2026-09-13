@@ -782,7 +782,7 @@ fn canonical_uuid_str(id: &str) -> String {
     use uuid::Uuid;
     Uuid::parse_str(id).map(|u| u.hyphenated().to_string()).unwrap_or_else(|_| id.to_lowercase())
 }
-fn content_kind(value: V2ContentKind) -> ContentKind { match value { V2ContentKind::Prose => ContentKind::Prose, V2ContentKind::Code => ContentKind::Code, V2ContentKind::Transcript => ContentKind::Transcript, V2ContentKind::List => ContentKind::List, V2ContentKind::StructuredJson => ContentKind::StructuredJson, V2ContentKind::ImageCaption => ContentKind::ImageCaption, V2ContentKind::FingerprintOnly => ContentKind::FingerprintOnly } }
+fn content_kind(value: V2ContentKind) -> ContentKind { match value { V2ContentKind::Prose => ContentKind::Prose, V2ContentKind::Code => ContentKind::Code, V2ContentKind::Transcript => ContentKind::Transcript, V2ContentKind::List => ContentKind::List, V2ContentKind::StructuredJson => ContentKind::StructuredJson, V2ContentKind::ImageCaption => ContentKind::ImageCaption } }
 fn placeholder_fetch(memory_id: Uuid) -> V2FetchReference { V2FetchReference { tool: MEMORY_GET_TOOL, arguments: V2FetchArguments { memory_id: memory_id.to_string() } } }
 fn failure(code: &str, message: &str) -> V2MemoryFailure { V2MemoryFailure { code: code.to_owned(), message: message.to_owned(), retryable: false, recovery: None } }
 
