@@ -1409,12 +1409,21 @@ pub trait DrawerStore: Send + Sync {
     }
 
     /// Retire a kg-fact by transitioning its adjective_bitmap state to
-    /// `State::Withdrawn` (raw 18). The row is preserved for audit
-    /// purposes; `g_state_cluster` rises to 18 (RowState Cluster B) which
-    /// excludes the fact from the active-recall filter
-    /// (`g_state_cluster < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`, the
-    /// cluster-B floor of 16). Mirrors Swift `DrawerStore.withdrawKGFact(id:)`.
-    fn withdraw_kg_fact(&self, _id: &str, _now: i64) -> Result<(), LocusKitError> {
+    /// `State::Withdrawn` (raw 18) and writing a sealed audit row.
+    /// Routes through `AuditGate::admit` (verb `retract`, transition
+    /// `active → withdrawn`). `changed_by` names the actor; `reason`
+    /// is optional human-readable context. The row is preserved for
+    /// audit purposes; `g_state_cluster` rises to 18 (RowState Cluster B)
+    /// which excludes the fact from the active-recall filter
+    /// (`g_state_cluster < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`).
+    /// Mirrors Swift `DrawerStore.withdrawKGFact(id:changedBy:reason:now:)`.
+    fn withdraw_kg_fact(
+        &self,
+        _id: &str,
+        _changed_by: &str,
+        _reason: Option<&str>,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "withdraw_kg_fact not implemented for this DrawerStore impl".to_string(),
         ))
@@ -2588,8 +2597,14 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     fn add_kg_fact(&self, fact: &KGFact) -> Result<(), LocusKitError> {
         self.as_ref().add_kg_fact(fact)
     }
-    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
-        self.as_ref().withdraw_kg_fact(id, now)
+    fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().withdraw_kg_fact(id, changed_by, reason, now)
     }
     fn get_kg_fact(&self, id: &str) -> Result<Option<KGFact>, LocusKitError> {
         self.as_ref().get_kg_fact(id)
