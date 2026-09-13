@@ -1509,7 +1509,7 @@ fn finding3_sqlite_all_kg_facts_including_retired_sees_retired_facts() {
         NOW,
     );
     store.add_kg_fact(&f).unwrap();
-    store.withdraw_kg_fact(&tid("f2"), NOW + 1).unwrap();
+    store.withdraw_kg_fact(&tid("f2"), "test-actor", None, NOW + 1).unwrap();
 
     // Active-only scan must not include the retired fact.
     let active = store.all_kg_facts().unwrap();
@@ -1547,7 +1547,7 @@ fn finding3_sqlite_all_kg_facts_including_retired_survives_reopen() {
         );
         store.add_kg_fact(&f_active).unwrap();
         store.add_kg_fact(&f_retired).unwrap();
-        store.withdraw_kg_fact(&tid("fr"), NOW + 2).unwrap();
+        store.withdraw_kg_fact(&tid("fr"), "test-actor", None, NOW + 2).unwrap();
         // Drop store — flushes WAL-mode SQLite.
     }
     // Reopen from same path.
