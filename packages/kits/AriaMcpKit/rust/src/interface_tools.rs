@@ -2648,11 +2648,19 @@ fn run_retire_fact(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve_direct(args)?;
     let id = require_string(args, "id")?;
+    // The running server does not reach this. `dispatch_tool` is a bare
+    // convenience and test-helper entry point (dispatch.rs:65, :77-84), and
+    // `dispatcher.rs:551-553` states `dispatch::route_tool` is never reached
+    // from the `tools/call` handler; the shipped route decodes through the v2
+    // surface into `v2::knowledge_journal::retire_fact`.
+    // changedBy comes from the registry's server_identity (the binary hosting this dispatcher).
+    // reason is forwarded from the caller's request; optional_string returns None when absent.
+    let reason = optional_string(args, "reason")?;
 
     // Bench-clock: pins to MOOT_BENCH_EPOCH_NOW in replay; wall clock otherwise.
     let now = bench_clock_now();
     let coord = estate.coord.lock().unwrap();
-    match coord.withdraw_kg_fact(&estate.handle, id, now) {
+    match coord.withdraw_kg_fact(&estate.handle, id, &registry.server_identity, reason.as_deref(), now) {
         Ok(()) => Ok(text_result(&format!("retired fact {id}"))),
         Err(e) => Ok(error_result(&describe_verb_dispatch_error(&e))),
     }

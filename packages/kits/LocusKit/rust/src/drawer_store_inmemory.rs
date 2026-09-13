@@ -3988,30 +3988,170 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
-    fn withdraw_kg_fact(&self, id: &str, _now: i64) -> Result<(), LocusKitError> {
+    fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
         validate_non_empty(id, "id")?;
-        let fact = self
-            .get_kg_fact(id)?
-            .ok_or_else(|| LocusKitError::InvalidContent(format!("kgFact not found: {id}")))?;
-        // Preserve adjective bits above the State field (bits 6+) and set
-        // bits 0-5 to Withdrawn (raw 18). Mirrors Swift DrawerStore.withdrawKGFact.
-        let new_bitmap = (fact.adjective_bitmap & !0x3Fi64) | State::Withdrawn.raw_value();
-        let mut update_vals = BTreeMap::new();
-        update_vals.insert(
-            "adjectiveBitmap".to_string(),
-            TypedValue::Bitmap(new_bitmap),
+        validate_non_empty(changed_by, "changed_by")?;
+
+        // Derive the canonical row key for the audit log: UUID passthrough for
+        // UUID-shaped IDs; SHA-256 truncated name-based UUID for arbitrary strings.
+        // deterministic_row_key handles both, mirroring Swift RowKeyDerivation.
+        let row_uuid = persistence_kit::row_key_derivation::deterministic_row_key(id);
+
+        // State slot: bits 0-5 of adjective bitmap. Legal values mirror the
+        // Swift DrawerStore.withdrawKGFact stateSlot literal, which is
+        // cross-checked by GuardianPairParityTests drawerStoreWithdrawKGFactSlotLegalValuesMatchesState.
+        let state_slot = audit_gate::FieldSlot::with_values(
+            audit_gate::Column::Adjective,
+            0,
+            6,
+            "state",
+            &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33],
         );
-        self.storage
-            .row_store()
-            .update(
-                T_KG_FACTS,
-                update_vals,
-                &StoragePredicate::Eq(
+
+        // One tick per logical mutation; HLC stamp before the transaction.
+        // Kept outside the closure to match Swift: Swift computes the stamp
+        // before opening the transaction. The stamp is deterministic (clock
+        // parameter is caller-supplied), so moving it outside does not
+        // introduce non-determinism.
+        let stamp = self.hlc.lock().unwrap().send(now);
+
+        // Read the current kg_facts row and the source drawer for lattice
+        // anchor derivation INSIDE the serializable transaction so that
+        // `prior` and `anchor` are derived from the same consistent snapshot
+        // as the update and the audit append. A concurrent writer between an
+        // outside-transaction read and the transaction open cannot produce a
+        // lost-update on `after_bitmaps` (mirrors Swift, which reads inside
+        // its `.serializable` transaction; the transaction opens at
+        // DrawerStore.swift:2968 and the row read is at :2970-2973).
+        //
+        // LocusKitErrors (e.g. "kgFact not found", gate rejection) cannot
+        // propagate directly through a `StorageResult<()>` closure; they are
+        // threaded out via `validation_error` using the same pattern as
+        // `atomic_file_conflict_proposal`.
+        let mut validation_error: Option<LocusKitError> = None;
+        let tx_result = self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let run = || -> Result<(), LocusKitError> {
+                let row_store = txn.row_store();
+
+                // READ 1 (inside transaction): kg_facts row → prior bitmaps.
+                let fact_rows = row_store
+                    .query(
+                        T_KG_FACTS,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_KG_FACTS, "id"),
+                            TypedValue::Text(id.to_string()),
+                        )),
+                        &[],
+                        Some(1),
+                        None,
+                    )
+                    .map_err(map_storage_err)?;
+                let fact_row = fact_rows
+                    .first()
+                    .ok_or_else(|| LocusKitError::InvalidContent(format!("kgFact not found: {id}")))?;
+                let prior = BitmapFields {
+                    adjective:   i64_value_of(fact_row.get("adjectiveBitmap")) as u64,
+                    operational: i64_value_of(fact_row.get("operationalBitmap")) as u64,
+                    provenance:  i64_value_of(fact_row.get("provenanceBitmap")) as u64,
+                };
+                let source_drawer_id = string_value_of(fact_row.get("sourceDrawerID"));
+
+                // READ 2 (inside transaction): source drawer → lattice anchor.
+                // KGFact rows carry no UDC/QID of their own; the source drawer
+                // is the canonical anchor source. A null anchor is used when
+                // source_drawer_id is empty or the drawer cannot be found;
+                // audit_gate::admit accepts null anchors without rejection.
+                let anchor: substrate_lib::verbs::LatticeAnchor = if source_drawer_id.is_empty() {
+                    substrate_lib::verbs::LatticeAnchor::new(0, 0)
+                } else {
+                    let drawer_rows = row_store
+                        .query(
+                            T_DRAWERS,
+                            Some(&StoragePredicate::Eq(
+                                Column::new(T_DRAWERS, "id"),
+                                TypedValue::Text(source_drawer_id),
+                            )),
+                            &[],
+                            Some(1),
+                            None,
+                        )
+                        .map_err(map_storage_err)?;
+                    if let Some(drawer_row) = drawer_rows.first() {
+                        let udc = string_value_of(drawer_row.get("udcCode"));
+                        let qid = string_value_of(drawer_row.get("wikidataQID"));
+                        substrate_lib::verbs::LatticeAnchor::udc_qid(&udc, &qid)
+                    } else {
+                        substrate_lib::verbs::LatticeAnchor::new(0, 0)
+                    }
+                };
+
+                // Route through the substrate write gate: validates the
+                // active→withdrawn transition (verb Retract), enforces I-22
+                // bitmap invariants, and emits the sealed snapshot event.
+                // Mirrors Swift AuditGate.admit.
+                let event = audit_gate::admit(
+                    self.estate_uuid.as_u128(),
+                    substrate_lib::verbs::RowId(row_uuid.as_u128()),
+                    substrate_lib::verbs::NounType::KGFact,
+                    RowVerb::Retract,
+                    Some(prior),
+                    Some(anchor),
+                    &[audit_gate::FieldWrite {
+                        slot: state_slot.clone(),
+                        value: State::Withdrawn.raw_value(),
+                    }],
+                    anchor,
+                    &self.vocabulary,
+                    stamp,
+                    changed_by,
+                )
+                .map_err(|v| {
+                    LocusKitError::InvalidContent(format!("kgFact withdrawal rejected by gate: {}", v))
+                })?;
+
+                // Thread the caller-supplied reason into the event.
+                let event = substrate_lib::verbs::AuditEvent {
+                    reason: reason.map(|s| s.to_string()),
+                    ..event
+                };
+
+                // Materialized projection: write the merged adjective snapshot
+                // to the live kg_facts row. Append the sealed event to the
+                // audit log. Both writes are atomic in this same transaction.
+                let mut update_vals = BTreeMap::new();
+                update_vals.insert(
+                    "adjectiveBitmap".to_string(),
+                    TypedValue::Bitmap(event.after_bitmaps.0),
+                );
+                let update_pred = StoragePredicate::Eq(
                     Column::new(T_KG_FACTS, "id"),
                     TypedValue::Text(id.to_string()),
-                ),
-            )
-            .map_err(map_storage_err)?;
+                );
+                let audit_row = pk_audit_event_from(&event);
+                row_store.update(T_KG_FACTS, update_vals, &update_pred).map_err(map_storage_err)?;
+                txn.audit_log().append(audit_row).map_err(map_storage_err)?;
+                Ok(())
+            };
+            match run() {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    validation_error = Some(e);
+                    Err(persistence_kit::error::StorageError::TransactionConflict {
+                        detail: "withdraw_kg_fact failed".to_string(),
+                    })
+                }
+            }
+        });
+        if let Some(e) = validation_error {
+            return Err(e);
+        }
+        tx_result.map_err(map_storage_err)?;
         Ok(())
     }
 
@@ -6250,8 +6390,14 @@ impl DrawerStore for InMemoryDrawerStore {
     fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
         self.inner.add_kg_fact(fact)
     }
-    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
-        self.inner.withdraw_kg_fact(id, now)
+    fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.withdraw_kg_fact(id, changed_by, reason, now)
     }
     fn get_kg_fact(&self, id: &str) -> Result<Option<crate::kg_fact::KGFact>, LocusKitError> {
         self.inner.get_kg_fact(id)
@@ -9930,7 +10076,7 @@ mod tests {
         );
         store.add_kg_fact(&f).unwrap();
         // Retire the fact: transitions state to Withdrawn (≥ 7).
-        store.withdraw_kg_fact(&tid("f2"), NOW + 1).unwrap();
+        store.withdraw_kg_fact(&tid("f2"), "test-actor", None, NOW + 1).unwrap();
 
         // all_kg_facts (active-only) must NOT see it.
         let active = store.all_kg_facts().unwrap();
@@ -9965,7 +10111,7 @@ mod tests {
         );
         store.add_kg_fact(&f_active).unwrap();
         store.add_kg_fact(&f_retired).unwrap();
-        store.withdraw_kg_fact(&tid("fr"), NOW + 2).unwrap();
+        store.withdraw_kg_fact(&tid("fr"), "test-actor", None, NOW + 2).unwrap();
 
         let timeline = store.all_kg_facts_including_retired().unwrap();
         assert_eq!(timeline.len(), 2, "timeline must include both active and retired");
