@@ -865,7 +865,7 @@ pub fn v2_candidate_from_drawer(drawer: &locus_kit::drawer::Drawer) -> crate::re
     }
 }
 
-fn v2_raw_provenance_sensitivity(drawer: &locus_kit::drawer::Drawer) -> i64 {
+pub(crate) fn v2_raw_provenance_sensitivity(drawer: &locus_kit::drawer::Drawer) -> i64 {
     (drawer.provenance >> 30) & 0x3f
 }
 

@@ -74,19 +74,57 @@ pub struct CoordinatorRecallLensLower {
 /// Three years in milliseconds, matching the v1 window ceiling.
 const MAXIMUM_WINDOW_MILLIS: i64 = (3.0 * 365.25 * 24.0 * 60.0 * 60.0 * 1000.0) as i64;
 
-/// Dense-row hydration helper for the v2 lens lower — returns structured
-/// fields (subject, best_span, event_time) for admissible drawers.
+/// Provenance verdict returned by `structured_drawers_by_id` for each
+/// hydrated drawer.  The partial-cue arm applies a four-way
+/// sensitivity-marker projection that matches Swift's
+/// `AriaV2RecallLensPrivacy.project`; keystones and trust-synthesis treat
+/// only `Admissible` as carrying dense fields (indistinguishability rule).
+enum DrawerFill {
+    /// Provenance raw 0 (Normal) or 16 (Elevated) — content admissible.
+    /// Carries raw fields; each call site applies its own display convention.
+    Admissible {
+        raw_subject: Option<String>,
+        raw_content: String,
+        event_time: String,
+    },
+    /// Provenance raw 32 (Restricted). Partial-cue emits `RESTRICTED_MARKER`
+    /// as the subject slot; `best_span` is absent.
+    Restricted,
+    /// Provenance raw 48 (Secret). Partial-cue emits `SECRET_MARKER`
+    /// as the subject slot; `best_span` is absent.
+    Secret,
+    /// Any off-scale raw value (not 0, 16, 32, or 48). Partial-cue emits
+    /// neither subject nor best_span — fail-closed.
+    OffScale,
+}
+
+/// Dense-row hydration helper for the v2 lens lower.  Returns a
+/// `DrawerFill` verdict for every drawer in `ids` that passes the adjective
+/// ceiling; drawers absent from the admissible set are not in the map at all.
 ///
-/// Mirrors `recipe_tools::s2_rows_by_id` but returns structured fields
-/// instead of a rendered string. THE EMPTY FILTER CHAIN IS LOAD-BEARING:
-/// `BitmapEvaluator::insert_defaults` inserts `SensitivityAtMost(Elevated)`,
-/// so restricted/secret drawers are absent from the returned map and callers
-/// emit no dense fields for them (indistinguishability rule).
+/// Two independent sensitivity axes are checked:
+///
+/// 1. Adjective ceiling: `BitmapEvaluator::insert_defaults` injects
+///    `SensitivityAtMost(Elevated)` whenever the chain carries no sensitivity
+///    filter of its own, which is a wider condition than an empty chain.  That
+///    ceiling checks ADJECTIVE bits 6-11, so adjective-restricted and
+///    adjective-secret drawers never enter `f.admissible`.
+///
+/// 2. Provenance classification (V2 rule, bits 30-35): `DrawerFill::Admissible`
+///    for raw 0/16; `DrawerFill::Restricted` for raw 32; `DrawerFill::Secret`
+///    for raw 48; `DrawerFill::OffScale` for any other value.  All three
+///    call sites (keystones, trust-synthesis, partial-cue) share this single
+///    enforcement point; each call site applies its own display convention.
+///
+/// No display convention is applied here: `raw_subject` is `None` when absent,
+/// `raw_content` is raw (not trimmed, not normalised).  Partial-cue truncates
+/// at raw character 120 before normalising; keystones and trust-synthesis
+/// normalise only.
 fn structured_drawers_by_id(
     coord: &genius_locus_kit::coordinator::EstateCoordinator,
     handle: &genius_locus_kit::handle::EstateHandle,
     ids: &[String],
-) -> BTreeMap<String, (String, Option<String>, String)> {
+) -> BTreeMap<String, DrawerFill> {
     if ids.is_empty() {
         return BTreeMap::new();
     }
@@ -100,11 +138,34 @@ fn structured_drawers_by_id(
                     f.admissible
                         .into_iter()
                         .map(|d| {
-                            let row = crate::result_composer::candidate_from_drawer(&d);
-                            let subject = row.subject.unwrap_or_else(|| "-".to_owned());
-                            let best_span = row.best_span;
-                            let event_time = row.event_time;
-                            (d.id, (subject, best_span, event_time))
+                            // V2 provenance classification. The adjective ceiling already
+                            // excludes adjective-restricted drawers from f.admissible, but
+                            // the provenance axis (bits 30-35) is independent. Classify
+                            // here — once, for all three call sites — so real subject and
+                            // body never reach the wire via the admissible arm, while
+                            // partial-cue can emit the appropriate sensitivity marker.
+                            let fill = match super::recall_lens::v2_raw_provenance_sensitivity(&d) {
+                                0 | 16 => DrawerFill::Admissible {
+                                    raw_subject: d.subject.clone(),
+                                    // Raw content, not trimmed: truncation precedes
+                                    // normalisation on the partial-cue path, matching
+                                    // Swift's AriaV2LensLower.swift:905-907 which passes
+                                    // drawer.content whole to structuredRowObject.
+                                    // Keystones and trust-synthesis call normalize_value
+                                    // directly, which trims internally, so removing the
+                                    // pre-trim here does not change their output.
+                                    raw_content: d.content.to_owned(),
+                                    event_time: crate::result_composer::iso8601_flex(d.event_time),
+                                },
+                                32 => DrawerFill::Restricted,
+                                48 => DrawerFill::Secret,
+                                // Off-scale raw values fail closed: no content reaches
+                                // the wire, matching Swift's default arm in
+                                // AriaV2RecallLensPrivacy.project (subject nil,
+                                // bestSpan nil).
+                                _ => DrawerFill::OffScale,
+                            };
+                            (d.id, fill)
                         })
                         .collect()
                 })
@@ -136,10 +197,13 @@ impl CoordinatorRecallLensLower {
         )
         .map_err(|_| ())?;
 
-        // Dense-row hydration through the sensitivity gate (empty filterChain →
-        // BitmapEvaluator::insert_defaults injects SensitivityAtMost(Elevated)).
-        // Restricted/secret drawers are absent from the map and receive no structured
-        // fields; they still appear with id and centrality (indistinguishability rule).
+        // Dense-row hydration through both sensitivity gates. The adjective
+        // ceiling keeps adjective-restricted drawers out of the map entirely;
+        // the provenance axis is a separate bit field, so a provenance-restricted
+        // drawer IS in the map, carrying a DrawerFill::Restricted verdict rather
+        // than its fields. Keystones emits structured fields only for
+        // DrawerFill::Admissible, so every other verdict yields a row of id and
+        // centrality alone (indistinguishability rule).
         let ids: Vec<String> = keystones.iter().map(|k| k.id.clone()).collect();
         let structured = structured_drawers_by_id(&coordinator, &admission.estate_handle, &ids);
 
@@ -152,12 +216,22 @@ impl CoordinatorRecallLensLower {
                     r.insert("memory_id".to_owned(), JsonValue::String(keystone.id.clone()));
                     r.insert("centrality".to_owned(), JsonValue::Double(keystone.centrality));
                     // Dense fields: present only for admissible (non-gated) rows.
-                    if let Some((subject, best_span, event_time)) = structured.get(&keystone.id) {
-                        r.insert("subject".to_owned(), JsonValue::String(subject.clone()));
+                    // Restricted/secret rows remain sparse (id + centrality only).
+                    if let Some(DrawerFill::Admissible { raw_subject, raw_content, event_time }) = structured.get(&keystone.id) {
+                        // Preserve existing keystones behaviour: emit subject with
+                        // NO_SUBJECT_MARKER filler, and bestSpan as normalize_value(raw)
+                        // without prior truncation — matching the normalisation
+                        // candidate_from_drawer previously applied at the data layer.
+                        r.insert("subject".to_owned(), JsonValue::String(
+                            raw_subject.as_deref()
+                                .unwrap_or(crate::result_composer::NO_SUBJECT_MARKER)
+                                .to_owned(),
+                        ));
+                        let bs_norm = crate::result_composer::normalize_value(raw_content);
                         r.insert(
                             "best_span".to_owned(),
                             JsonValue::String(
-                                best_span.clone().unwrap_or_else(|| "-".to_owned()),
+                                if bs_norm.is_empty() { "-".to_owned() } else { bs_norm },
                             ),
                         );
                         r.insert("event_time".to_owned(), JsonValue::String(event_time.clone()));
@@ -625,8 +699,11 @@ impl CoordinatorRecallLensLower {
                 ),
             ),
         ]));
-        // Dense-row hydration for ranked IDs through the sensitivity gate.
-        // Restricted/secret rows are absent from the map and carry only id.
+        // Dense-row hydration for ranked IDs through both sensitivity gates.
+        // An adjective-restricted drawer is absent from the map; a
+        // provenance-restricted one is present carrying a non-Admissible
+        // verdict. Only DrawerFill::Admissible yields dense fields here, so
+        // every other verdict produces a row of id alone.
         let structured = structured_drawers_by_id(
             &coordinator,
             &admission.estate_handle,
@@ -636,13 +713,24 @@ impl CoordinatorRecallLensLower {
             .ranked_ids
             .iter()
             .map(|id| {
-                if let Some((subject, best_span, event_time)) = structured.get(id) {
+                if let Some(DrawerFill::Admissible { raw_subject, raw_content, event_time }) = structured.get(id) {
                     let mut obj: BTreeMap<String, JsonValue> = BTreeMap::new();
                     obj.insert("id".to_owned(), JsonValue::String(id.clone()));
-                    obj.insert("subject".to_owned(), JsonValue::String(subject.clone()));
+                    // Preserve existing trust-synthesis behaviour: emit subject with
+                    // NO_SUBJECT_MARKER filler, and bestSpan as normalize_value(raw)
+                    // without prior truncation — matching the normalisation
+                    // candidate_from_drawer previously applied at the data layer.
+                    obj.insert("subject".to_owned(), JsonValue::String(
+                        raw_subject.as_deref()
+                            .unwrap_or(crate::result_composer::NO_SUBJECT_MARKER)
+                            .to_owned(),
+                    ));
+                    let bs_norm = crate::result_composer::normalize_value(raw_content);
                     obj.insert(
                         "best_span".to_owned(),
-                        JsonValue::String(best_span.clone().unwrap_or_else(|| "-".to_owned())),
+                        JsonValue::String(
+                            if bs_norm.is_empty() { "-".to_owned() } else { bs_norm },
+                        ),
                     );
                     obj.insert("event_time".to_owned(), JsonValue::String(event_time.clone()));
                     JsonValue::Object(obj)
@@ -702,6 +790,17 @@ impl CoordinatorRecallLensLower {
             admission.now_millis,
         )
         .map_err(|_| ())?;
+
+        // Dense-row hydration through both sensitivity gates. An
+        // adjective-restricted drawer is absent from the map. A
+        // provenance-restricted or provenance-secret one is present, carrying a
+        // DrawerFill verdict instead of its fields, and this surface turns that
+        // verdict into the sensitivity marker in the subject slot with no
+        // bestSpan — which is what Swift's AriaV2RecallLensPrivacy.project
+        // emits for the same drawer. An off-scale raw yields neither.
+        let ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
+        let structured = structured_drawers_by_id(&coordinator, &admission.estate_handle, &ids);
+
         let estate = coordinator
             .estate_for(&admission.estate_handle)
             .map_err(|_| ())?;
@@ -712,14 +811,68 @@ impl CoordinatorRecallLensLower {
                     .drawer_by_id(&matched.id)
                     .map_err(|_| ())?
                     .ok_or(())?;
-                Ok(row([
-                    ("memory_id", JsonValue::String(matched.id)),
-                    (
-                        "event_time",
-                        JsonValue::String(crate::result_composer::iso8601_flex(drawer.event_time)),
-                    ),
-                    ("score", JsonValue::Double(matched.score)),
-                ]))
+                let mut r: BTreeMap<String, JsonValue> = BTreeMap::new();
+                r.insert("memory_id".to_owned(), JsonValue::String(matched.id.clone()));
+                r.insert(
+                    "event_time".to_owned(),
+                    JsonValue::String(crate::result_composer::iso8601_flex(drawer.event_time)),
+                );
+                r.insert("score".to_owned(), JsonValue::Double(matched.score));
+                // Dense fields: apply Swift's four-arm privacy projection
+                // (AriaV2RecallLensPrivacy.project) so both ports agree on what
+                // a provenance-gated partial-cue row looks like.
+                match structured.get(&matched.id) {
+                    Some(DrawerFill::Admissible { raw_subject, raw_content, .. }) => {
+                        // Admissible: emit subject when present (omit key when None —
+                        // Swift's partialCueOutcome passes drawer.subject through
+                        // structuredRowObject, which omits the key when nil.
+                        // NO_SUBJECT_MARKER must NOT reach the wire here).
+                        if let Some(subj) = raw_subject.as_deref() {
+                            r.insert("subject".to_owned(), JsonValue::String(subj.to_owned()));
+                        }
+                        // Apply truncate-then-normalize (Swift order). Swift contract at
+                        // ResultComposer.swift:614: "Applied before normalization so the
+                        // byte count is over raw UTF-8 chars." A pre-normalized span
+                        // moves the 120-char cut because whitespace runs collapse before
+                        // counting.
+                        let truncated = crate::result_composer::truncate_first_sentence(raw_content);
+                        let bs_norm = crate::result_composer::normalize_value(truncated);
+                        let subj_norm = raw_subject.as_deref()
+                            .map(|s| crate::result_composer::normalize_value(s))
+                            .unwrap_or_default();
+                        if !bs_norm.is_empty() && bs_norm != subj_norm {
+                            r.insert("best_span".to_owned(), JsonValue::String(bs_norm));
+                        }
+                    }
+                    Some(DrawerFill::Restricted) => {
+                        // Provenance raw 32. Emit restricted marker as subject; best_span
+                        // absent. Matches Swift's AriaV2RecallLensPrivacy.project raw=32
+                        // arm: subject = ResultComposer.restrictedMarker, bestSpan = nil.
+                        r.insert(
+                            "subject".to_owned(),
+                            JsonValue::String(
+                                crate::result_composer::RESTRICTED_MARKER.to_owned(),
+                            ),
+                        );
+                    }
+                    Some(DrawerFill::Secret) => {
+                        // Provenance raw 48. Emit secret marker as subject; best_span
+                        // absent. Matches Swift's AriaV2RecallLensPrivacy.project raw=48
+                        // arm: subject = ResultComposer.secretMarker, bestSpan = nil.
+                        r.insert(
+                            "subject".to_owned(),
+                            JsonValue::String(
+                                crate::result_composer::SECRET_MARKER.to_owned(),
+                            ),
+                        );
+                    }
+                    Some(DrawerFill::OffScale) | None => {
+                        // Off-scale raw value or drawer not in admissible set: no subject,
+                        // no best_span. Matches Swift's AriaV2RecallLensPrivacy.project
+                        // default arm (subject nil, bestSpan nil).
+                    }
+                }
+                Ok(r)
             })
             .collect::<Result<Vec<_>, V2RecallLensError>>()?;
         Ok(result(request.operation, rows))
@@ -1667,13 +1820,25 @@ pub fn project_data(result: &V2RecallLensResult) -> Result<serde_json::Value, ()
                 "highTrustCount": json_value(required_field(row, "high_trust_count")?)?,
             }))
         }
-        V2RecallLensOperation::LensPartialCue => Ok(json!({
-            "results": result.rows.iter().map(|row| Ok(json!({
-                "id": json_value(required_field(row, "memory_id")?)?,
-                "eventTime": json_value(required_field(row, "event_time")?)?,
-                "score": json_value(required_field(row, "score")?)?,
-            }))).collect::<Result<Vec<_>, ()>>()?,
-        })),
+        V2RecallLensOperation::LensPartialCue => {
+            // Map internal snake_case row fields to camelCase wire keys.
+            // Dense fields (subject, bestSpan) are conditionally present: admissible rows
+            // carry them; restricted/secret rows carry only id, eventTime, and score.
+            let items: Result<Vec<serde_json::Value>, ()> = result.rows.iter().map(|row| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("id".to_owned(), json_value(required_field(row, "memory_id")?)?);
+                if let Some(v) = row.get("subject") {
+                    obj.insert("subject".to_owned(), json_value(v)?);
+                }
+                if let Some(v) = row.get("best_span") {
+                    obj.insert("bestSpan".to_owned(), json_value(v)?);
+                }
+                obj.insert("eventTime".to_owned(), json_value(required_field(row, "event_time")?)?);
+                obj.insert("score".to_owned(), json_value(required_field(row, "score")?)?);
+                Ok(serde_json::Value::Object(obj))
+            }).collect();
+            Ok(json!({ "results": items? }))
+        }
         V2RecallLensOperation::LensAnticipate => Ok(json!({
             "actions": result.rows.iter().map(|row| Ok(json!({
                 "action": json_value(required_field(row, "action")?)?,

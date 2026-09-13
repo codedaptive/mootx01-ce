@@ -1972,9 +1972,24 @@ fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry
     };
     match result {
         Ok(data) => {
-            // moot_recall_distilled appends its savings display line after the
-            // count; no other recall operation carries a distillation object.
-            let mut text = format!("Returned {} typed recall result(s).", data.results.len());
+            // Each recall operation names itself in the count line; the label
+            // matches the Swift port exactly so both ports emit the same text.
+            // moot_recall_distilled then appends its savings display line after
+            // the count; no other recall operation carries a distillation object.
+            let label = match request.operation {
+                V2RecallLensOperation::RecallConnected => "connected recall",
+                V2RecallLensOperation::RecallShaped => "shaped recall",
+                V2RecallLensOperation::RecallDistilled => "distilled recall",
+                V2RecallLensOperation::RecallTemporal => "temporal recall",
+                V2RecallLensOperation::RecallWalk => "walk recall",
+                V2RecallLensOperation::RecallVague => "vague recall",
+                V2RecallLensOperation::RecallPrecise => "precise recall",
+                // Unreachable: the match above returns an internal error for
+                // every operation outside these seven. The arm exists only to
+                // make the match exhaustive over the lens variants.
+                _ => "typed recall",
+            };
+            let mut text = format!("Returned {} {} result(s).", data.results.len(), label);
             if let Some(display) = data.metadata.as_ref().and_then(|capabilities| capabilities["distillation"]["display"].as_str()) {
                 text.push('\n');
                 text.push_str(display);
