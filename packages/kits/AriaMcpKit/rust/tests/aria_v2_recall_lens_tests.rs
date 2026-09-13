@@ -470,7 +470,7 @@ fn execute_distilled_recall_with_no_rows_still_reports_the_zero_distillation_obj
     // after the distillation display line, so the compact text is checked as
     // a prefix and the remainder must be that hint line or nothing.
     let text = response["result"]["content"][0]["text"].as_str().expect("compact text");
-    let expected = format!("Returned 0 typed recall result(s).\n{zero}");
+    let expected = format!("Returned 0 distilled recall result(s).\n{zero}");
     let rest = text.strip_prefix(&expected).unwrap_or_else(|| panic!("compact text: {text}"));
     assert!(rest.is_empty() || rest.starts_with("\nhint: "), "unexpected tail: {rest}");
 }
@@ -495,4 +495,68 @@ fn execute_precise_recall_carries_no_distillation() {
     assert_eq!(response["result"]["isError"], false, "{response}");
     let text = response["result"]["content"][0]["text"].as_str().expect("compact text");
     assert!(!text.contains('\u{1F331}'), "{text}");
+    // The compact text must name the operation: "precise recall", matching the Swift port.
+    // Entry point: the v2 recall surface dispatch in surface.rs (the shipped path).
+    assert!(text.contains("precise recall result(s)."), "precise recall label missing: {text}");
+}
+
+// Operation: RecallPrecise. Entry point: execute_precise_recall (the shipped
+// path — no row construction by hand). The fixture has subject and content
+// deliberately different so structuredRowObject cannot fire the
+// omit-when-equal branch. This test gates the invariant that every projected
+// recall row carries bestSpan equal to the drawer's content. It goes red when
+// the body fetch silently omits the content field (e.g. a structured-hydration
+// call that returns content == "").
+#[test]
+fn projected_precise_recall_row_carries_best_span() {
+    const NOW: i64 = 1_700_000_000;
+    let mut coordinator = genius_locus_kit::coordinator::EstateCoordinator::new();
+    let store: Arc<dyn DrawerStore> =
+        Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+    let handle = coordinator
+        .open(store, OwnerCredentials::new("v2-projected-bestspan-test"), 0, i64::MAX)
+        .expect("open estate");
+    coordinator.seed_default_wings(&handle, NOW).expect("seed wings");
+
+    // Subject and content are DIFFERENT so the omit-when-identical branch in
+    // structuredRowObject cannot fire.
+    const SUBJECT: &str = "projected-bestspan-gate: a short subject";
+    const CONTENT: &str =
+        "projected-bestspan-gate: the body is longer than the subject and must appear as bestSpan";
+    let mut frame = CaptureFrame::new(
+        CONTENT,
+        CaptureChannel::Typed,
+        "notes",
+        LatticeAnchor::udc("0"),
+        "v2-projected-bestspan-test",
+        "test-v1",
+    );
+    frame.subject = Some(SUBJECT.to_owned());
+    coordinator.capture(&handle, frame, NOW).expect("capture");
+
+    let request = V2RecallLensRequest::decode(
+        V2RecallLensOperation::RecallPrecise,
+        &arguments([(
+            "query",
+            JsonValue::String("projected-bestspan-gate".to_owned()),
+        )]),
+    )
+    .expect("request");
+
+    let data =
+        execute_precise_recall(&coordinator, &handle, &request, NOW + 1)
+            .expect("precise recall");
+
+    // There must be exactly one result and it must carry bestSpan equal to
+    // the first sentence of the literal content string.
+    let row = data
+        .results
+        .iter()
+        .find(|r| r["subject"].as_str() == Some(SUBJECT))
+        .expect("the captured row must appear in precise recall results");
+    assert_eq!(
+        row["bestSpan"].as_str(),
+        Some("projected-bestspan-gate: the body is longer than the subject and must appear as bestSpan"),
+        "projected recall row must carry bestSpan equal to the drawer content; got {row}"
+    );
 }
