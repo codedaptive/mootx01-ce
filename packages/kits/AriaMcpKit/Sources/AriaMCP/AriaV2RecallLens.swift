@@ -424,6 +424,34 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
 /// unknown packed values to normal for legacy access compatibility; a public
 /// v2 projection must instead fail closed before the composer sees body data.
 enum AriaV2RecallLensPrivacy {
+    /// Four-way verdict on whether and how a drawer's body may be presented.
+    /// Mirrors Rust's `DrawerFill` in lens_lower.rs. Bit arithmetic lives
+    /// once, in `classify`, so every call site switches on the verdict rather
+    /// than repeating the extraction — matches the Rust single-enforcement
+    /// mandate at lens_lower.rs:113-118.
+    enum Verdict: Equatable {
+        case admissible
+        case restricted
+        case secret
+        case offScale
+    }
+
+    /// Classify a drawer by the provenance axis (bits 30-35 of drawer.provenance).
+    ///
+    /// raw 0 or 16 → admissible; raw 32 → restricted; raw 48 → secret;
+    /// any other value → offScale (fail closed). This is the single place
+    /// that holds the `(provenance >> 30) & 0x3f` extraction — callers
+    /// switch on Verdict, never on the raw integer.
+    static func classify(_ drawer: Drawer) -> Verdict {
+        let raw = Int((drawer.provenance >> 30) & 0x3f)
+        switch raw {
+        case 0, 16: return .admissible
+        case 32:    return .restricted
+        case 48:    return .secret
+        default:    return .offScale
+        }
+    }
+
     struct Projection: Equatable {
         let subject: String?
         let bestSpan: String?
@@ -436,18 +464,17 @@ enum AriaV2RecallLensPrivacy {
         drawer: Drawer, subject: String?, bestSpan: String?, sscFacts: String?,
         distilled: String?, representation: String?
     ) -> Projection {
-        let raw = Int((drawer.provenance >> 30) & 0x3f)
-        switch raw {
-        case 0, 16:
+        switch classify(drawer) {
+        case .admissible:
             return .init(subject: subject, bestSpan: bestSpan, sscFacts: sscFacts,
                          distilled: distilled, representation: representation)
-        case 32:
+        case .restricted:
             return .init(subject: ResultComposer.restrictedMarker, bestSpan: nil,
                          sscFacts: nil, distilled: nil, representation: nil)
-        case 48:
+        case .secret:
             return .init(subject: ResultComposer.secretMarker, bestSpan: nil,
                          sscFacts: nil, distilled: nil, representation: nil)
-        default:
+        case .offScale:
             return .init(subject: nil, bestSpan: nil, sscFacts: nil,
                          distilled: nil, representation: nil)
         }
