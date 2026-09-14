@@ -44,7 +44,11 @@ public struct AriaV2CognitionCatalogService: Sendable {
         try validate(request)
         let filteredTools = AriaV2SelectedCatalog.descriptors
             .filter { $0.isLensLaneMember && callableToolNames.contains($0.publicName) }
-            .sorted { $0.lensLaneOrder! < $1.lensLaneOrder! }
+            // moot_list_lenses presents alphabetically by operation name.
+            // Presence in the registry's lens-lane list decides membership;
+            // the ordinal it carries decides nothing here. Sort by publicName
+            // so the contract holds regardless of registry container order.
+            .sorted { $0.publicName < $1.publicName }
         let catalogByName = Self.buildCatalogLookup()
         if request.verbose {
             // Verbose: include input_schema and output_schema for each tool.
