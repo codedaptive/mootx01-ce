@@ -145,6 +145,11 @@ public struct AriaV2OperationDescriptor: Sendable, Equatable {
     public let projection: AriaV2OperationProjection
     public let help: AriaV2OperationHelp
     public let provenance: ToolProvenance
+    /// Registry-only legacy sequence for the cognition lens lane. A non-nil
+    /// value marks membership; it is not projected to tools/list or included
+    /// in the capability digest.
+    public let lensLaneOrder: Int?
+    public var isLensLaneMember: Bool { lensLaneOrder != nil }
 
     public init(
         identity: AriaV2OperationIdentity,
@@ -154,7 +159,8 @@ public struct AriaV2OperationDescriptor: Sendable, Equatable {
         inputSchema: JSONValue,
         projection: AriaV2OperationProjection,
         help: AriaV2OperationHelp,
-        provenance: ToolProvenance = .interface
+        provenance: ToolProvenance = .interface,
+        lensLaneOrder: Int? = nil
     ) {
         precondition(!publicName.isEmpty, "A v2 operation public name must not be empty.")
         self.identity = identity
@@ -165,6 +171,7 @@ public struct AriaV2OperationDescriptor: Sendable, Equatable {
         self.projection = projection
         self.help = help
         self.provenance = provenance
+        self.lensLaneOrder = lensLaneOrder
     }
 
     public func projectedTool() -> ProjectedTool {

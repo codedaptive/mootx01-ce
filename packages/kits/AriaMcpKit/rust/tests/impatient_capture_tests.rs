@@ -24,10 +24,10 @@
 //! is advertised and threaded — the item-#9 surface.
 
 use std::collections::BTreeMap;
+mod test_support;
+use test_support::SelectedV2Session;
 
 use aria_mcp::{
-    dispatch::dispatch_tool,
-    surfaced_recall_ledger::SurfacedRecallLedger,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
     tool_list::build_tool_list,
@@ -81,14 +81,14 @@ fn file_memory_schema_advertises_impatient() {
 /// `capture_with_mode`). The drawer row is durably stored regardless of mode.
 #[test]
 fn impatient_file_memory_succeeds() {
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
     let a = args![
         "content" => "kingfisher heron osprey wading bird",
         "subject" => "kingfisher heron osprey wading bird",
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let result = dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
+    let result = session.call("moot_file_memory", &a)
         .expect("impatient file_memory must dispatch");
     assert!(
         is_success(&result),
@@ -100,13 +100,13 @@ fn impatient_file_memory_succeeds() {
 /// the default path is unchanged for existing callers.
 #[test]
 fn regular_file_memory_succeeds_without_impatient_arg() {
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
     let a = args![
         "content" => "apple mango banana fruit",
         "subject" => "apple mango banana fruit",
         "location" => "memories/fruit",
     ];
-    let result = dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
+    let result = session.call("moot_file_memory", &a)
         .expect("regular file_memory must dispatch");
     assert!(
         is_success(&result),
@@ -117,14 +117,14 @@ fn regular_file_memory_succeeds_without_impatient_arg() {
 /// An explicit `impatient: false` is equivalent to omitting it (regular mode).
 #[test]
 fn explicit_impatient_false_succeeds() {
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
     let a = args![
         "content" => "tungsten molybdenum refractory",
         "subject" => "tungsten molybdenum refractory",
         "location" => "memories/metals",
         "impatient" => false,
     ];
-    let result = dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
+    let result = session.call("moot_file_memory", &a)
         .expect("file_memory must dispatch");
     assert!(is_success(&result), "got: {result:?}");
 }

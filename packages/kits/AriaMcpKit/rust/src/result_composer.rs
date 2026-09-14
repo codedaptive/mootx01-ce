@@ -143,10 +143,9 @@ pub fn render_s2_row_unhydrated(id: &str) -> String {
 /// Build a `CandidateRowData` from a hydrated `Drawer`, ready for S2 rendering.
 ///
 /// Redaction wins over subject: restricted/secret sensitivity replaces the
-/// subject field with the appropriate marker. The empty `RecallFrame` filter
-/// chain in `s2_rows_by_id` prevents restricted/secret rows from reaching the
-/// renderer at all, but callers that hydrate outside that path (lens arms, etc.)
-/// still get a safe row.
+/// subject field with the appropriate marker, so a caller that hydrates a
+/// row outside the gated `structured_drawers_by_id` path still gets a safe
+/// row.
 ///
 /// `best_span` is the normalized first sentence of `drawer.content`, capped at
 /// 120 grapheme clusters. Admissible rows copy `drawer.ssc_facts`; restricted or

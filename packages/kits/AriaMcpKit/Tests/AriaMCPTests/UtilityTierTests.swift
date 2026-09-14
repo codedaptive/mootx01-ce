@@ -34,10 +34,7 @@ struct UtilityTierTests {
 
     // MARK: - estate_status subject-debt counter — BLOCKED (v2 dropped the field)
     //
-    // v1's `moot_estate_status` rendered free text ("subjects: X/Y (Z
-    // missing)", "memories: N active (M total)", "wings: ...") via the
-    // legacy `runEstateStatus` (ToolDispatch.swift:3503). The live v2
-    // production path (`ToolDispatcher.dispatch` → `estateDiagnostics.status`,
+    // The live v2 production path (`ToolDispatcher.dispatch` → `estateDiagnostics.status`,
     // ToolDispatch.swift:850-851) is `AriaV2GeniusLocusEstateDiagnosticsProvider.status`
     // (AriaV2EstateDiagnostics.swift:191-221), which returns a typed
     // `AriaV2EstateStatusData` (AriaV2EstateDiagnostics.swift:93-103):
@@ -78,16 +75,25 @@ struct UtilityTierTests {
                 "subject": .string("carries a subject"),
                 "location": .string("study"),
             ]))
+        let subjectless = CaptureFrame(
+            content: "an imported memory without a subject",
+            channel: .actuator,
+            room: "study",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "utility-tier-tests",
+            embeddingModelID: "default",
+            wing: LocusKit.defaultWingName)
+        _ = try await kit.capture(handle, subjectless, mode: .regular)
 
         let result = try await dispatcher.dispatch(
             name: "moot_estate_status", arguments: .object([:]))
         let data = try #require(
             result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue)
 
-        #expect(data["subjects_eligible"]?.integerValue == 1,
-                "one non-empty memory is eligible for a subject")
+        #expect(data["subjects_eligible"]?.integerValue == 2,
+                "both non-empty memories are eligible for a subject")
         #expect(data["subjects_bearing"]?.integerValue == 1,
-                "and it carries one, so the debt is zero")
+                "only the boundary-filed memory carries one, so debt is one")
         // Always present: "local-only" when no sync engine is wired, never absent.
         #expect(data["sync_state"]?.stringValue != nil)
         // Omitted rather than zeroed when unreadable, so a present value is
@@ -289,6 +295,39 @@ struct UtilityTierTests {
                 "memory_count must exclude the restricted row; got \(String(describing: memoryCount))")
     }
 
+    @Test func estateStatusMemoryCountExcludesTombstonedRows() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: "status-tombstone-count")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        defer { Task { try? await kit.close(handle) } }
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let filed = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string("tombstone status control"),
+                "subject": .string("tombstone status control"),
+                "location": .string("status-tests"),
+            ]))
+        let filedID = try #require(
+            filed.objectValue?["structuredContent"]?.objectValue?["data"]?
+                .objectValue?["memory_id"]?.stringValue)
+        let erased = try await dispatcher.dispatch(
+            name: "moot_erase_memory",
+            arguments: .object([
+                "memory_id": .string(filedID),
+                "confirmation": .bool(true),
+            ]))
+        #expect(erased.objectValue?["isError"] == .bool(false))
+        let status = try await dispatcher.dispatch(name: "moot_estate_status", arguments: .object([:]))
+        #expect(data(of: status)?["memory_count"] == .integer(0),
+                "tombstoned rows must be excluded from the active memory_count")
+    }
+
     // MARK: - outputSchema-conformance gate
 
     /// Validates a LIVE `moot_list_lenses` response against the `outputSchema`
@@ -483,9 +522,12 @@ struct UtilityTierTests {
         // AriaV2OperationDescriptor.projectedTool() (outputSchema:
         // projection.outputSchema, non-optional), so this is expected to be 0
         // today. The branch still has to agree across ports.
-        let callableNames = Set(
-            (RecipeTools.tools() + LensTools.tools()).map(\.name))
-        let projected = ToolProjection.tools().filter { callableNames.contains($0.name) }
+        let callableNames = Set(ToolProjection.tools().map(\.name))
+        let expectedLensNames = Set(AriaV2SelectedCatalog.descriptors
+            .filter(\.isLensLaneMember)
+            .map(\.publicName))
+            .intersection(callableNames)
+        let projected = ToolProjection.tools().filter { expectedLensNames.contains($0.name) }
         let missingOutputSchema = projected.filter { $0.outputSchema == nil }
         #expect(missingOutputSchema.isEmpty,
                 "callable cognition tools with no output schema: \(missingOutputSchema.map(\.name))")
@@ -517,6 +559,9 @@ struct UtilityTierTests {
         let terseResult = try await dispatcher.dispatch(
             name: "moot_list_lenses", arguments: .object([:]))
         let terseRows = try #require(data(of: terseResult)?["tools"]?.arrayValue)
+        #expect(
+            Set(try terseRows.map { try #require($0.objectValue?["name"]?.stringValue) }) == expectedLensNames,
+            "lens row names must equal marked v2 registry entries intersected with callable names")
         for row in terseRows {
             let obj = try #require(row.objectValue)
             let name = try #require(obj["name"]?.stringValue)

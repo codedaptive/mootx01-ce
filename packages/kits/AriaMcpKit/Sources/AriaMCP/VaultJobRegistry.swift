@@ -3,9 +3,8 @@ import AriaMCPWire
 // VaultJobRegistry.swift
 //
 // Actor-based registry of in-process vault import and export jobs.
-// Held by ToolDispatcher and injected into VaultTools.dispatch() so
-// moot_vault_import / moot_vault_export can return a job_id immediately
-// and moot_vault_job can poll the result.
+// Held by the selected v2 data-mobility provider so vault operations can
+// return a job_id immediately and later inspect the same lifecycle record.
 //
 // Jobs are retained for the process lifetime with no TTL eviction (v1).
 
@@ -69,7 +68,7 @@ struct VaultJob: Sendable {
     /// Wall-clock time the job was registered. Used to compute elapsed_s
     /// in moot_vault_job responses. Date() is correct here — start time
     /// is a real-time measurement (not a deterministic computation), the
-    /// same precedent as LensTools/VaultTools sampling Date() for manifests.
+    /// same precedent as VaultTools sampling Date() for manifests.
     let startedAt: Date
     var status: JobStatus
     var result: JobResult?
@@ -114,9 +113,8 @@ struct VaultJobLaunch: Sendable {
 /// Actor-isolated in-process registry for vault import and export jobs.
 ///
 /// A single instance is held by `ToolDispatcher` for the process lifetime.
-/// It is injected into `VaultTools.dispatch()` so the async launch tools
-/// (`moot_vault_import`, `moot_vault_export`) and the polling tool
-/// (`moot_vault_job`) share one authoritative store. Actor isolation makes
+/// The selected v2 data-mobility provider uses one registry for async vault
+/// launches and job inspection. Actor isolation makes
 /// all mutations and reads thread-safe without additional locking.
 actor VaultJobRegistry {
 
