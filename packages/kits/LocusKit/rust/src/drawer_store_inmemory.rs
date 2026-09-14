@@ -2133,14 +2133,17 @@ impl DrawerStore for DrawerStoreCore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
 
-        // Resolve the full lineage chain. Every member is walked;
-        // members whose tombstone transition the gate admits are
-        // scrubbed, and accepted members (refused per S-3) are left
-        // untouched and reported in the outcome.
+        // Resolve the full lineage chain. Every sibling is walked. The
+        // ceiling check (Elevated) runs first; a sibling above the
+        // ceiling never reaches the gate. A sibling the ceiling admits
+        // is evaluated by the gate: admitted siblings are scrubbed,
+        // gate-refused siblings (S-3) are left untouched. Both causes
+        // of refusal are reported in the outcome.
         let lineage_ids = self.lineage_chain(drawer_id)?;
 
         // Read all three bitmaps so we can construct BitmapFields and
@@ -2299,8 +2302,11 @@ impl DrawerStore for DrawerStoreCore {
         }
 
         // ── Walk every lineage sibling ──
-        // Siblings the gate admits are scrubbed; siblings the gate
-        // refuses are left untouched and collected for the outcome.
+        // The ceiling check (Elevated) runs first; a sibling above the
+        // ceiling is left untouched without reaching the gate. Siblings
+        // the ceiling admits are evaluated by the gate: admitted
+        // siblings are scrubbed, gate-refused siblings are left
+        // untouched and collected for the outcome.
         let mut refused_sibling_ids: Vec<String> = Vec::new();
         for sibling_id in &lineage_ids {
             if sibling_id == drawer_id {
@@ -2311,6 +2317,20 @@ impl DrawerStore for DrawerStoreCore {
                 Err(_) => continue,
             };
             let sib_state = bit_field::extract_field(sib_bitmap, 0, 6);
+
+            // Sensitivity ceiling: a sibling whose tier exceeds the caller's ceiling
+            // is left byte-identical and recorded as refused. Matches the existing
+            // gate-refused accepted-row shape (S-3): no content write, no state
+            // write, no audit append, no erasure-ledger entry. Invariant
+            // (GLK-CEILING): a caller bounded at Elevated cannot erase rows above
+            // that tier through the lineage cascade, even when the cascade target
+            // is itself at or below the ceiling.
+            let sib_tier =
+                crate::adjectives::AdjectiveSensitivity::from_raw(bit_field::extract_field(sib_bitmap, 6, 6));
+            if sib_tier.raw_value() > sensitivity_ceiling.raw_value() {
+                refused_sibling_ids.push(sibling_id.to_string());
+                continue;
+            }
 
             if sib_state == State::Tombstoned.raw_value() {
                 // Already tombstoned — just ensure content is empty (and
@@ -6002,6 +6022,25 @@ impl InMemoryDrawerStore {
         Ok(InMemoryDrawerStore { inner })
     }
 
+    /// Open a new in-memory estate backed by an externally-supplied
+    /// `Arc<dyn Storage>`.
+    ///
+    /// Available under `feature = "test-seams"` only. Needed by
+    /// GeniusLocusKit tests that inject `FaultingStorage` (from
+    /// persistence-kit's `test-support` module) to drive the fail-closed
+    /// pre-read paths in `expunge` and `withdraw_kg_fact`. `with_storage`
+    /// cannot be used for that purpose because it is typed to
+    /// `Arc<InMemoryStorage>`, not `Arc<dyn Storage>`.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn with_dyn_storage(
+        storage: Arc<dyn Storage>,
+        now: i64,
+        hlc: Option<HLCGenerator>,
+    ) -> Result<Self, LocusKitError> {
+        let inner = DrawerStoreCore::new(storage, now, hlc)?;
+        Ok(InMemoryDrawerStore { inner })
+    }
+
     /// Kit-internal accessor — the underlying persistence-kit `Storage`
     /// handle.  `#[cfg(test)]` only: used by inline tests that need to
     /// verify audit-log contents directly through the storage handle.
@@ -6175,8 +6214,9 @@ impl DrawerStore for InMemoryDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
-        self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+        self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit, sensitivity_ceiling)
     }
     fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
         self.inner.set_ssc_facts(drawer_id, facts)
@@ -9805,6 +9845,7 @@ mod tests {
                 Some("GDPR delete request 2026-05-29"),
                 NOW + 500,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap();
 
@@ -9883,7 +9924,7 @@ mod tests {
         store.set_span_indexed(&d.id).unwrap();
         store.set_facts_extracted(&d.id).unwrap();
         store
-            .expunge_gated(&d.id, "alice", Some("erasure covers derived columns"), NOW + 500, true)
+            .expunge_gated(&d.id, "alice", Some("erasure covers derived columns"), NOW + 500, true, crate::adjectives::AdjectiveSensitivity::Secret)
             .unwrap();
         let after = store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.content, "");
@@ -9941,6 +9982,7 @@ mod tests {
                 None,
                 NOW + 500,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap();
         let after = store
@@ -9980,6 +10022,7 @@ mod tests {
                 None,
                 NOW + 200,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap_err();
         match err {
@@ -10016,6 +10059,7 @@ mod tests {
                 None,
                 NOW + 100,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap_err();
         match err {

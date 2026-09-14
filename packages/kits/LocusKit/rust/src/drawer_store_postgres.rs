@@ -319,8 +319,9 @@ impl DrawerStore for PostgresDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
-        self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+        self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit, sensitivity_ceiling)
     }
     fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
         self.0.set_ssc_facts(drawer_id, facts)
