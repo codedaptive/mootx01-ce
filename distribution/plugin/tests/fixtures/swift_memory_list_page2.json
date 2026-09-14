@@ -1,0 +1,104 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Enumerated 7 authorized memories from a complete current inventory.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "has_more": false,
+        "memories": [
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fbfb8dac-e273-4ac2-8c73-c0016d064d98"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fbfb8dac-e273-4ac2-8c73-c0016d064d98",
+            "provenance": "imported",
+            "subject": "m006"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fd3346cc-893d-4ca4-938e-588fb723ed48"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fd3346cc-893d-4ca4-938e-588fb723ed48",
+            "provenance": "imported",
+            "subject": "m029"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fd7fc085-18a0-4ffc-bb86-2adcedaaf5ce"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fd7fc085-18a0-4ffc-bb86-2adcedaaf5ce",
+            "provenance": "imported",
+            "subject": "m118"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fd959c46-208d-47e7-b5d3-ea7acfffe778"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fd959c46-208d-47e7-b5d3-ea7acfffe778",
+            "provenance": "imported",
+            "subject": "m085"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fdba4a26-8e91-42b5-bfe9-9a5879f05d0b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fdba4a26-8e91-42b5-bfe9-9a5879f05d0b",
+            "provenance": "imported",
+            "subject": "m193"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fdcd8cac-8cb8-4fd3-a46e-116831dd57ba"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fdcd8cac-8cb8-4fd3-a46e-116831dd57ba",
+            "provenance": "imported",
+            "subject": "m113"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ff99386e-6974-43d6-90e9-f4562e0d8c18"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ff99386e-6974-43d6-90e9-f4562e0d8c18",
+            "provenance": "imported",
+            "subject": "m058"
+          }
+        ],
+        "revision": "a7e2f8d6e948fb18bba2b571dce54684dfd6a750e04eff2e8e33b3c393a2c58e"
+      },
+      "meta": {
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_list"
+    }
+  }
+}

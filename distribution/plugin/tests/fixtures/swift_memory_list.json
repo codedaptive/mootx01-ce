@@ -1,0 +1,49 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Enumerated 2 authorized memories from a complete current inventory.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "has_more": false,
+        "memories": [
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "84de1bc0-ee45-4054-9eb8-f308d938172b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "84de1bc0-ee45-4054-9eb8-f308d938172b",
+            "provenance": "imported",
+            "subject": "notes for testslug"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "cd6b8979-708e-4d93-b1b2-00174b35b8fe"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "cd6b8979-708e-4d93-b1b2-00174b35b8fe",
+            "provenance": "imported",
+            "subject": "MEMORY.md index for testslug"
+          }
+        ],
+        "revision": "8782176c79700f04ad6bf8f1010fdf9fb75104c2fea1b6088692d0dac22e2729"
+      },
+      "meta": {
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_list"
+    }
+  }
+}

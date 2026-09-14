@@ -20,10 +20,11 @@
 //! Metric emit points (consumed by MXE-HM-2 observability wiring):
 //!   - `harness_memory.enable` — on successful enable
 //!   - `harness_memory.disable` — on successful disable
-//!   - `harness_memory.ingest.filed` / `.removed` / `.skipped`
-//!   - `harness_memory.restore.written` / `.superseded` / `.revived`
+//!   - `harness_memory.ingest.filed` / `.matched` / `.removed` / `.skipped`
+//!   - `harness_memory.restore.written`
 //!   - `harness_memory.capture.ok` / `.fallback` / `.bypass`  (hook-capture)
 
+use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -497,10 +498,15 @@ pub fn backup_settings(path: &Path) -> Result<PathBuf, String> {
 
 // ─── MCP call helpers ─────────────────────────────────────────────────────────
 
-/// An estate memory record returned by `estate_list`.
+/// A full estate memory record, as read from `moot_memory_get`.
 ///
-/// Mirrors `HarnessMemoryRecord` in Swift's `LiveDaemonClient`, which derives
-/// fields from the `moot_memory_list` JSON response.
+/// Mirrors `HarnessMemoryRecord` in Swift's `LiveDaemonClient`. A v2
+/// `moot_memory_list` row carries only `memory_id/fetch/subject/provenance`,
+/// so `estate_list` collects ids across every page and completes them with
+/// `estate_get_batch` (`moot_memory_get` with `memory_ids`, 50 per call).
+/// `estate_get` completes a single id the same way. Both read
+/// `placement.room` (location), `content`, and `state` from the full record.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct EstateRecord {
     id: String,
     location: String,
@@ -508,27 +514,75 @@ struct EstateRecord {
     is_superseded: bool,
 }
 
+/// Why an estate call failed.
+///
+/// Callers that only need a message use `to_string()`; callers that branch
+/// on the refusal (`estate_list` restarts on a stale cursor, `estate_get`
+/// treats `memory_not_found` as "no row") match on `Refused { code, .. }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonCallError {
+    /// The frame did not reach the daemon or came back unreadable: a network
+    /// error, a non-200 status, or a body that is not the expected JSON.
+    Transport(String),
+    /// The daemon answered HTTP 200 and refused the call. An ARIA v2 refusal
+    /// carries `result.isError: true` and `result.structuredContent.error`
+    /// `{code, message}` with no `data`; `code` is empty when the refusal
+    /// names none. A top-level JSON-RPC `error` object maps to code
+    /// `rpc_error` with its message.
+    Refused { code: String, message: String },
+}
+
+impl fmt::Display for DaemonCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DaemonCallError::Transport(msg) => write!(f, "{msg}"),
+            DaemonCallError::Refused { code, message } if code.is_empty() => write!(f, "refused: {message}"),
+            DaemonCallError::Refused { code, message } => write!(f, "refused ({code}): {message}"),
+        }
+    }
+}
+
 /// POST one JSON-RPC 2.0 `tools/call` frame to the estate daemon.
 ///
-/// `tool_name` is the ARIA tool name (`moot_file_memory`, `moot_update_memory`,
+/// `tool_name` is the ARIA tool name (`moot_file_memory`, `moot_memory_get`,
 /// `moot_memory_list`, …). `args` is the tool's `arguments` object.
-/// Returns the parsed response body on HTTP 200, or an error string.
-fn call_tool(daemon: &dyn DaemonHttp, port: u16, tool_name: &str, args: Value) -> Result<Value, String> {
+/// Returns the parsed body when the daemon accepted the call. A refusal is an
+/// `Err(Refused)` even though it arrives as HTTP 200: a refused `moot_memory_list`
+/// is never an empty wing, and a refused `moot_file_memory` is never a filed row.
+fn call_tool(daemon: &dyn DaemonHttp, port: u16, tool_name: &str, args: Value) -> Result<Value, DaemonCallError> {
     let frame = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
         "params": {"name": tool_name, "arguments": args}
     });
-    let bytes = serde_json::to_vec(&frame).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(&frame).map_err(|e| DaemonCallError::Transport(e.to_string()))?;
     let (status, body) = daemon
         .post_frame(port, &bytes)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| DaemonCallError::Transport(e.to_string()))?;
     if status != 200 {
         let msg = String::from_utf8_lossy(&body).into_owned();
-        return Err(format!("daemon returned HTTP {status}: {msg}"));
+        return Err(DaemonCallError::Transport(format!("daemon returned HTTP {status}: {msg}")));
     }
-    serde_json::from_slice::<Value>(&body).map_err(|e| e.to_string())
+    let resp = serde_json::from_slice::<Value>(&body).map_err(|e| DaemonCallError::Transport(e.to_string()))?;
+    if let Some(err) = resp.get("error") {
+        return Err(DaemonCallError::Refused {
+            code: "rpc_error".to_string(),
+            message: err["message"].as_str().unwrap_or("").to_string(),
+        });
+    }
+    let result = &resp["result"];
+    let refusal = result.pointer("/structuredContent/error");
+    if refusal.is_some() || result["isError"].as_bool() == Some(true) {
+        let code = refusal.and_then(|e| e["code"].as_str()).unwrap_or("").to_string();
+        let message = refusal
+            .and_then(|e| e["message"].as_str())
+            .or_else(|| result.pointer("/content/0/text").and_then(|t| t.as_str()))
+            .unwrap_or("")
+            .to_string();
+        return Err(DaemonCallError::Refused { code, message });
+    }
+    Ok(resp)
 }
 
 /// File one memory entry to the estate via `moot_file_memory`.
@@ -558,7 +612,8 @@ fn estate_file(
         "subject": subject,
         "event_time": event_time,
         "kind": kind,
-    }))?;
+    }))
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -583,57 +638,342 @@ pub fn extract_subject(content: &str, filename: &str) -> String {
     stem.chars().take(120).collect()
 }
 
-/// Apply a mutation to an existing estate record via `moot_update_memory`.
+/// Parse one element of `data.memories` from a `moot_memory_get` body.
 ///
-/// - `id`: the estate drawer ID (UUID) obtained from a prior `estate_list` call
-/// - `mutation`: `"supersede"` or `"revive"`
-/// - `note`: human-readable rationale appended to the estate audit trail
-///
-/// Mirrors Swift `LiveDaemonClient.updateMemory(id:mutation:note:)`.
-fn estate_update(
-    daemon: &dyn DaemonHttp,
-    port: u16,
-    id: &str,
-    mutation: &str,
-    note: &str,
-) -> Result<(), String> {
-    // MXE-HM-2: harness_memory.restore.superseded / .revived metric emit points.
-    call_tool(daemon, port, "moot_update_memory", json!({
-        "id": id,
-        "mutation": mutation,
-        "note": note,
-    }))?;
-    Ok(())
+/// Shared by `estate_get` and `estate_get_batch` so both read the same keys:
+/// `memory_id`, `placement.room` (the original location string, e.g.
+/// `harness-import/slug/file.md`), `content`, and `state`
+/// (`"active"` or `"superseded"`).
+fn parse_estate_record(item: &Value) -> Option<EstateRecord> {
+    let id = item["memory_id"].as_str()?.to_string();
+    let location = item.pointer("/placement/room")?.as_str()?.to_string();
+    let content = item["content"].as_str().unwrap_or("").to_string();
+    let is_superseded = item["state"].as_str() == Some("superseded");
+    Some(EstateRecord { id, location, content, is_superseded })
 }
 
-/// List estate records whose location begins with `location_prefix` via
-/// `moot_memory_list`. Returns all matching records (active and superseded).
+/// Fetch the full memory record for a single id via `moot_memory_get`.
 ///
-/// Returns an empty vec on any network or parse error — callers treat absence
-/// as "no prior record" and proceed with a fresh file. The response shape
-/// mirrors what Swift `LiveDaemonClient.listMemories(locationPrefix:)` parses:
-/// `{ "result": { "memories": [{ "id", "location", "content", "superseded" }] } }`.
-fn estate_list(daemon: &dyn DaemonHttp, port: u16, location_prefix: &str) -> Vec<EstateRecord> {
-    let Ok(resp) = call_tool(daemon, port, "moot_memory_list", json!({
-        "location_prefix": location_prefix,
-    })) else {
-        return Vec::new();
+/// The v2 `moot_memory_list` row carries only `memory_id/fetch/subject/provenance`
+/// (additionalProperties:false). Location and content require this follow-up call,
+/// which reads `placement.room` (original location string), `content`, and
+/// `state` from the full structured record.
+///
+/// `Ok(None)` only when the daemon refuses with code `memory_not_found`, which
+/// it answers for an unknown id and for a superseded one. Every other failure
+/// (transport, malformed body, any other refusal) is returned as `Err`.
+fn estate_get(daemon: &dyn DaemonHttp, port: u16, memory_id: &str) -> Result<Option<EstateRecord>, DaemonCallError> {
+    match call_tool(daemon, port, "moot_memory_get", json!({ "memory_id": memory_id })) {
+        Ok(resp) => {
+            // v2 envelope: result.structuredContent.data.memories[0]
+            let item = resp
+                .pointer("/result/structuredContent/data/memories/0")
+                .ok_or_else(|| DaemonCallError::Transport("malformed moot_memory_get body: no memories[0]".to_string()))?;
+            parse_estate_record(item)
+                .map(Some)
+                .ok_or_else(|| DaemonCallError::Transport(format!("malformed moot_memory_get record for {memory_id}")))
+        }
+        Err(DaemonCallError::Refused { code, .. }) if code == "memory_not_found" => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Maximum `memory_ids` per `moot_memory_get` call (server limit).
+const ESTATE_GET_BATCH_SIZE: usize = 50;
+
+/// Fetch full records for many ids via `moot_memory_get` with `memory_ids`.
+///
+/// Sends `ceil(n / 50)` calls of at most `ESTATE_GET_BATCH_SIZE` ids. Every
+/// element of `data.memories` is parsed with `parse_estate_record`. A refusal
+/// is returned. A chunk that answers fewer records than it was asked for is
+/// returned as `Refused { code: "memory_not_found" }` naming the missing ids:
+/// no record is ever dropped silently. Order follows the server's order within
+/// each chunk.
+fn estate_get_batch(daemon: &dyn DaemonHttp, port: u16, ids: &[String]) -> Result<Vec<EstateRecord>, DaemonCallError> {
+    let mut records = Vec::new();
+    for chunk in ids.chunks(ESTATE_GET_BATCH_SIZE) {
+        let resp = call_tool(daemon, port, "moot_memory_get", json!({ "memory_ids": chunk }))?;
+        let arr = resp
+            .pointer("/result/structuredContent/data/memories")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| DaemonCallError::Transport("malformed moot_memory_get batch: no memories array".to_string()))?;
+        let parsed: Vec<EstateRecord> = arr.iter().filter_map(parse_estate_record).collect();
+        if parsed.len() < chunk.len() {
+            let got: std::collections::HashSet<&str> = parsed.iter().map(|r| r.id.as_str()).collect();
+            let missing: Vec<&str> = chunk.iter().map(String::as_str).filter(|id| !got.contains(id)).collect();
+            return Err(DaemonCallError::Refused {
+                code: "memory_not_found".to_string(),
+                message: format!(
+                    "batch answered {} of {} records; missing: {}",
+                    parsed.len(),
+                    chunk.len(),
+                    missing.join(", ")
+                ),
+            });
+        }
+        records.extend(parsed);
+    }
+    Ok(records)
+}
+
+/// Page size requested from `moot_memory_list` (server maximum).
+const ESTATE_LIST_PAGE_SIZE: u64 = 200;
+
+/// How many times a stale or expired cursor restarts the enumeration before
+/// the refusal is returned to the caller.
+const ESTATE_LIST_MAX_RESTARTS: usize = 3;
+
+/// List estate records whose location begins with `location_prefix` via
+/// `moot_memory_list`, then complete them with `estate_get_batch`.
+///
+/// Only active rows exist on the wire: the server omits superseded rows from
+/// `moot_memory_list`. The listing is complete across pages: each call asks for
+/// `limit` 200 and the loop re-sends with `cursor = next_cursor` while
+/// `has_more` is true. A refusal with code `cursor_stale` or `cursor_expired`
+/// discards the ids collected so far and restarts without a cursor, at most
+/// `ESTATE_LIST_MAX_RESTARTS` times; any other refusal is returned. A page
+/// whose `data` lacks `memories` or `has_more` is `Transport("malformed page")`,
+/// never an empty page. A `next_cursor` already seen at any earlier page — not
+/// only the immediately previous one — is the same `Transport("malformed
+/// page")` error: a server alternating between cursors (c1, c2, c1, …) cannot
+/// spin this client forever. Errors from `estate_get_batch` are returned as-is.
+///
+/// ARIA v2: file memories are stored in the "Agentic Memory" wing regardless
+/// of their location prefix; `room` equals the full location string. Strip
+/// leading slashes before matching so both "/" and "" return empty rather than
+/// sending wing="" (server rejects minLength:1). For an exact file location
+/// (3+ components, no trailing slash) supply the full prefix as `room`; for a
+/// directory prefix (trailing slash) omit `room` and filter client-side.
+fn estate_list(daemon: &dyn DaemonHttp, port: u16, location_prefix: &str) -> Result<Vec<EstateRecord>, DaemonCallError> {
+    // Normalize: strip leading slashes so both ports agree on every input shape.
+    let prefix = location_prefix.trim_start_matches('/');
+    if prefix.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ends_with_slash = location_prefix.ends_with('/');
+    let component_count = prefix.split('/').count();
+    // Supply `room` only for exact file lookups (3+ segments, no trailing slash).
+    let base_args = if !ends_with_slash && component_count >= 3 {
+        json!({ "wing": "Agentic Memory", "room": prefix, "limit": ESTATE_LIST_PAGE_SIZE })
+    } else {
+        json!({ "wing": "Agentic Memory", "limit": ESTATE_LIST_PAGE_SIZE })
     };
-    // The ARIA response wraps the payload in a JSON-RPC `result` object.
-    // `memories` lives at result.memories.
-    let Some(arr) = resp.pointer("/result/memories").and_then(|v| v.as_array()) else {
-        return Vec::new();
+    let malformed = || DaemonCallError::Transport("malformed page".to_string());
+
+    // Walk every page, collecting ids. Each row carries only memory_id/fetch/
+    // subject/provenance; estate_get_batch supplies location, content, state.
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor: Option<String> = None;
+    // Every cursor this call has walked, not just the immediately previous
+    // one. A server alternating between cursors (c1, c2, c1, c2, …) would
+    // pass a single-value comparison against `cursor` forever; tracking the
+    // whole set catches the repeat on its second appearance, matching the
+    // Swift twin's `seenCursors` (HarnessMemory.swift).
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut restarts = 0usize;
+    loop {
+        let mut args = base_args.clone();
+        if let Some(c) = &cursor {
+            args["cursor"] = json!(c);
+        }
+        let resp = match call_tool(daemon, port, "moot_memory_list", args) {
+            Ok(resp) => resp,
+            Err(DaemonCallError::Refused { code, message })
+                if code == "cursor_stale" || code == "cursor_expired" =>
+            {
+                // The inventory moved under the cursor: start over from the
+                // first page so the listing stays complete.
+                if restarts >= ESTATE_LIST_MAX_RESTARTS {
+                    return Err(DaemonCallError::Refused { code, message });
+                }
+                restarts += 1;
+                ids.clear();
+                seen.clear();
+                cursor = None;
+                seen_cursors.clear();
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        // v2 envelope: result.structuredContent.data.{memories, has_more, next_cursor}
+        let data = resp.pointer("/result/structuredContent/data").ok_or_else(malformed)?;
+        let arr = data["memories"].as_array().ok_or_else(malformed)?;
+        let has_more = data["has_more"].as_bool().ok_or_else(malformed)?;
+        for item in arr {
+            if let Some(memory_id) = item["memory_id"].as_str() {
+                // The server never repeats an id across pages; the set guards the
+                // batch call, which rejects duplicate memory_ids.
+                if seen.insert(memory_id.to_string()) {
+                    ids.push(memory_id.to_string());
+                }
+            }
+        }
+        if !has_more {
+            break;
+        }
+        // has_more without a fresh cursor cannot be walked; report it rather
+        // than return the pages read so far as the whole wing. A cursor already
+        // seen — at any earlier page, not just the immediately previous one —
+        // fails the same way: a server alternating cursors cannot spin this
+        // client forever.
+        let next = data["next_cursor"].as_str().map(str::to_string);
+        match next {
+            Some(next) if seen_cursors.insert(next.clone()) => {
+                cursor = Some(next);
+            }
+            _ => return Err(malformed()),
+        }
+    }
+
+    // Client-side prefix filter for directory queries where room was omitted.
+    Ok(estate_get_batch(daemon, port, &ids)?
+        .into_iter()
+        .filter(|record| record.location.starts_with(prefix))
+        .collect())
+}
+
+// ─── Restore front matter ─────────────────────────────────────────────────────
+
+/// Front-matter key that carries the estate memory id on a restored file.
+///
+/// Nested under `metadata:` with a two-space indent, matching the shape of
+/// the `metadata:` mapping that Claude Code memory files already carry.
+const FRONT_MATTER_ID_KEY: &str = "moot_memory_id";
+
+/// Front-matter key that marks a `MEMORY.md` written by `regenerate_memory_index`
+/// rather than captured from the estate or authored by hand. `ingest_project`
+/// discards a marked index instead of filing it, so a disable → enable cycle
+/// never adds an estate row for a slug that has no captured index. Shared
+/// with Swift `HarnessMemoryFrontMatter.generatedIndexKey`.
+pub const FRONT_MATTER_GENERATED_INDEX_KEY: &str = "moot_generated_index";
+
+/// Byte offset of line `index` within `text` when `text` is split on `\n`.
+fn line_offset(text: &str, index: usize) -> usize {
+    text.split('\n').take(index).map(|l| l.len() + 1).sum()
+}
+
+/// Inject the estate `memory_id` into a restored file's YAML front matter.
+///
+/// Thin wrapper over `front_matter_inject_field` for the key
+/// `moot_memory_id`. `front_matter_strip` is the exact byte inverse. Mirrors
+/// Swift `HarnessMemoryFrontMatter.inject`.
+pub fn front_matter_inject(content: &str, memory_id: &str) -> String {
+    front_matter_inject_field(content, FRONT_MATTER_ID_KEY, memory_id)
+}
+
+/// Inject the line `  <key>: <value>` into a file's YAML front matter
+/// `metadata:` mapping.
+///
+/// Line-based, `\n` only. Three cases:
+///   1. A block is present (first line `---`, a later line exactly `---`) and
+///      a line exactly `metadata:` exists inside it: insert
+///      `  <key>: <value>` immediately after that `metadata:` line.
+///   2. A block is present without `metadata:`: insert the two lines
+///      `metadata:` and `  <key>: <value>` immediately before the
+///      closing `---`.
+///   3. No block (MEMORY.md, or any file without front matter): prepend the
+///      three-line header `---\nmetadata:\n  <key>: <value>\n---\n`.
+///
+/// `front_matter_strip_field` with the same key is the exact byte inverse.
+/// Mirrors Swift `HarnessMemoryFrontMatter.inject(field:)`.
+pub fn front_matter_inject_field(content: &str, key: &str, value: &str) -> String {
+    let id_line = format!("  {key}: {value}");
+    if let Some(rest) = content.strip_prefix("---\n") {
+        let lines: Vec<&str> = rest.split('\n').collect();
+        if let Some(close) = lines.iter().position(|l| *l == "---") {
+            let mut out = String::from("---\n");
+            match lines[..close].iter().position(|l| *l == "metadata:") {
+                Some(meta) => {
+                    for (i, line) in lines[..close].iter().enumerate() {
+                        out.push_str(line);
+                        out.push('\n');
+                        if i == meta {
+                            out.push_str(&id_line);
+                            out.push('\n');
+                        }
+                    }
+                }
+                None => {
+                    for line in &lines[..close] {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                    out.push_str("metadata:\n");
+                    out.push_str(&id_line);
+                    out.push('\n');
+                }
+            }
+            // Closing fence and body, byte-exact.
+            out.push_str(&rest[line_offset(rest, close)..]);
+            return out;
+        }
+    }
+    format!("---\nmetadata:\n{id_line}\n---\n{content}")
+}
+
+/// Strip the estate `memory_id` that `front_matter_inject` placed in a file.
+///
+/// Thin wrapper over `front_matter_strip_field` for the key `moot_memory_id`.
+/// Returns `(Some(id), body)` with `body` byte-identical to the content that
+/// was injected, or `(None, content unchanged)` when no id line is present.
+/// Mirrors Swift `HarnessMemoryFrontMatter.strip`.
+pub fn front_matter_strip(content: &str) -> (Option<String>, String) {
+    front_matter_strip_field(content, FRONT_MATTER_ID_KEY)
+}
+
+/// Strip the line `  <key>: <value>` that `front_matter_inject_field` placed
+/// in a file's front matter.
+///
+/// Returns `(Some(value), body)` with `body` byte-identical to the content
+/// that was injected, or `(None, content unchanged)` when no such line is
+/// present. Other `metadata:` entries (for example a `moot_memory_id` line
+/// next to a `moot_generated_index` line) are left in place. Line-based,
+/// `\n` only:
+///   - find the first line inside the block that starts with `  <key>: `;
+///     the trimmed remainder is the value; remove the line;
+///   - if the line immediately before it is `metadata:` and the line now in
+///     its place is not indented by two spaces (or the block ends there),
+///     remove that `metadata:` line too;
+///   - if the block is then empty, remove both fences.
+///
+/// Mirrors Swift `HarnessMemoryFrontMatter.strip(field:)`.
+pub fn front_matter_strip_field(content: &str, key: &str) -> (Option<String>, String) {
+    let unchanged = || (None, content.to_string());
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return unchanged();
     };
-    arr.iter()
-        .filter_map(|item| {
-            Some(EstateRecord {
-                id: item["id"].as_str()?.to_string(),
-                location: item["location"].as_str()?.to_string(),
-                content: item["content"].as_str().unwrap_or("").to_string(),
-                is_superseded: item["superseded"].as_bool().unwrap_or(false),
-            })
-        })
-        .collect()
+    let lines: Vec<&str> = rest.split('\n').collect();
+    let Some(close) = lines.iter().position(|l| *l == "---") else {
+        return unchanged();
+    };
+    let id_prefix = format!("  {key}: ");
+    let mut block: Vec<&str> = lines[..close].to_vec();
+    let Some(idx) = block.iter().position(|l| l.starts_with(&id_prefix)) else {
+        return unchanged();
+    };
+    let id = block[idx][id_prefix.len()..].trim().to_string();
+    block.remove(idx);
+    if idx > 0 && block[idx - 1] == "metadata:" {
+        let next_indented = block.get(idx).map(|l| l.starts_with("  ")).unwrap_or(false);
+        if !next_indented {
+            block.remove(idx - 1);
+        }
+    }
+    // Everything from the closing fence on, byte-exact ("---\n<body>", or a
+    // bare "---" when the fence ends the file).
+    let fence_and_body = &rest[line_offset(rest, close)..];
+    if block.is_empty() {
+        let body = fence_and_body.strip_prefix("---\n").unwrap_or("");
+        return (Some(id), body.to_string());
+    }
+    let mut out = String::from("---\n");
+    for line in &block {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(fence_and_body);
+    (Some(id), out)
 }
 
 // ─── Path analysis (for hook-capture) ────────────────────────────────────────
@@ -730,7 +1070,16 @@ fn request_consent(yes: bool, hook_script_path: &Path, settings_path: &Path) -> 
 
 /// Per-project ingest result.
 pub struct IngestResult {
+    /// Files written to the estate. Every one is a new row: a file with no
+    /// id, an unknown id, or a changed body all file fresh. Nothing is replaced.
     pub filed: usize,
+    /// Files whose front-matter id matched an unchanged estate row; the file
+    /// was removed and the row left alone.
+    pub matched: usize,
+    /// `MEMORY.md` indexes that `regenerate_memory_index` wrote at disable
+    /// (marked `moot_generated_index: true`, no estate id); the file was
+    /// removed and nothing was filed, because the estate never held it.
+    pub discarded_indexes: usize,
     pub removed: usize,
     pub skipped: usize,
     pub skip_reasons: Vec<String>,
@@ -739,20 +1088,48 @@ pub struct IngestResult {
 /// Ingest all memory files from one project's `memory/` directory into the
 /// estate.  Returns an `IngestResult`.
 ///
-/// Contract (Bob's ruling 2026-08-07):
+/// Contract (Bob's rulings 2026-08-07 and 2026-09-09):
 ///   - MOVE semantics: file to estate → confirm success → delete source.
 ///   - Never delete before confirmation.
 ///   - A failed/aborted run leaves all unconfirmed source files intact.
 ///   - After the last file is removed, delete the empty `memory/` directory.
-///   - Before filing, check for a superseded `harness-import` drawer with the
-///     same location; if content is unchanged → revive; if changed → file fresh.
+///   - A file restored by `disable` carries its estate `memory_id` in front
+///     matter. `front_matter_strip` recovers the id and the original body;
+///     the body is what gets compared, filed, and used for the subject.
+///   - The id matches by identity, not by location class: the row's location
+///     (`harness-import/<slug>/<file>` or `harness/<slug>/<file>`) must parse
+///     to the same (slug, filename) as the file on disk.
+///   - Id matches and the row's content is identical → `Matched`: remove the
+///     file, touch nothing in the estate.
+///   - Id matches and the content changed → `Replace`: leave the old row
+///     untouched (no mutation call) and file the new body as its own row
+///     at the ROW's own location (a `harness/` row stays a `harness/`
+///     row); if filing fails, the old row is unaffected and the file
+///     stays on disk.
+///   - No id, unknown id, or a row at another slug or filename → file fresh
+///     at `harness-import/<slug>/<file>`.
+///   - A `MEMORY.md` with no id that carries `moot_generated_index: true` is
+///     the index `regenerate_memory_index` wrote at disable, not estate
+///     content: remove it, count it in `discarded_indexes`, call nothing. An
+///     authored `MEMORY.md` (no markers) files fresh with kind `list`.
+///   - The row lookup fails for any other reason → skip, leave the file.
+///   - An unchanged row is left alone and never re-filed. A changed file
+///     files a new row beside the old one, which is retained — the estate
+///     gains a second row for that (slug, filename) pair.
 fn ingest_project(
     daemon: &dyn DaemonHttp,
     port: u16,
     project_slug: &str,
     memory_dir: &Path,
 ) -> IngestResult {
-    let mut result = IngestResult { filed: 0, removed: 0, skipped: 0, skip_reasons: Vec::new() };
+    let mut result = IngestResult {
+        filed: 0,
+        matched: 0,
+        discarded_indexes: 0,
+        removed: 0,
+        skipped: 0,
+        skip_reasons: Vec::new(),
+    };
 
     let entries = match fs::read_dir(memory_dir) {
         Ok(e) => e,
@@ -782,12 +1159,15 @@ fn ingest_project(
         }
         files_to_process.push(path);
     }
+    // read_dir order is unspecified; sort so estate calls happen in a
+    // deterministic order on every platform.
+    files_to_process.sort();
 
     for file_path in &files_to_process {
         let fname = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Read content (byte-exact — restore depends on it).
-        let content = match fs::read_to_string(file_path) {
+        let raw = match fs::read_to_string(file_path) {
             Ok(c) => c,
             Err(e) => {
                 result.skip_reasons.push(format!("  {}: read error: {e}", file_path.display()));
@@ -795,6 +1175,34 @@ fn ingest_project(
                 continue;
             }
         };
+        // A restored file carries its estate id in front matter; the body is
+        // the original content and is what the estate compares and stores.
+        let (memory_id, content) = front_matter_strip(&raw);
+
+        // A regenerated index never left the estate: `restore_memories` wrote it
+        // for a slug with no captured MEMORY.md row and marked it. Filing it
+        // would add one estate row per disable → enable cycle, so it is removed
+        // without an estate call. Only a MEMORY.md without an id qualifies; a
+        // restored or authored index is never discarded.
+        if memory_id.is_none()
+            && memory_kind(fname) == "list"
+            && front_matter_strip_field(&content, FRONT_MATTER_GENERATED_INDEX_KEY).0.as_deref() == Some("true")
+        {
+            match fs::remove_file(file_path) {
+                Ok(()) => {
+                    result.discarded_indexes += 1;
+                    result.removed += 1;
+                }
+                Err(e) => {
+                    result.discarded_indexes += 1;
+                    result.skip_reasons.push(format!(
+                        "  {}: regenerated index discarded but source delete failed: {e} (remove manually)",
+                        file_path.display()
+                    ));
+                }
+            }
+            continue;
+        }
 
         // event_time = file mtime as ISO 8601 UTC.
         let event_time = match fs::metadata(file_path)
@@ -809,13 +1217,38 @@ fn ingest_project(
 
         // Location hint = reconstruction key for restore (filename preserved exactly).
         // The bare location (no `/memories/` prefix) is what `moot_file_memory` expects.
+        // A Replace files at the row's own location instead (see below).
         let location = format!("harness-import/{project_slug}/{fname}");
         let kind = memory_kind(fname);
 
-        // Check for a superseded drawer with the same location (re-enable path).
-        // If the content is unchanged, revive. If changed, file fresh (new drawer).
-        // If absent, file fresh normally.
-        let file_action = determine_ingest_action(daemon, port, &location, &content);
+        let file_action = match determine_ingest_action(daemon, port, memory_id.as_deref(), project_slug, fname, &content) {
+            Ok(action) => action,
+            Err(e) => {
+                // The row could not be read: leave the file, never file blind.
+                result.skip_reasons.push(format!("  {fname}: estate lookup failed: {e}"));
+                result.skipped += 1;
+                continue;
+            }
+        };
+
+        if let IngestAction::Matched(ref id) = file_action {
+            // MXE-HM-2: harness_memory.ingest.matched metric emit point.
+            // The estate row already holds this content; the file is the copy.
+            match fs::remove_file(file_path) {
+                Ok(()) => {
+                    result.matched += 1;
+                    result.removed += 1;
+                }
+                Err(e) => {
+                    result.matched += 1;
+                    result.skip_reasons.push(format!(
+                        "  {}: matched estate row {id} but source delete failed: {e} (remove manually)",
+                        file_path.display()
+                    ));
+                }
+            }
+            continue;
+        }
 
         let subject = extract_subject(&content, fname);
         let file_result = match file_action {
@@ -823,10 +1256,14 @@ fn ingest_project(
                 // MXE-HM-2: harness_memory.ingest.filed metric emit point.
                 estate_file(daemon, port, &location, &content, &subject, &event_time, kind)
             }
-            IngestAction::Revive(ref id) => {
-                // MXE-HM-2: harness_memory.restore.revived metric emit point.
-                estate_update(daemon, port, id, "revive", "re-enabled harness-memory; content unchanged")
+            IngestAction::Replace(ref row_location) => {
+                // Harness memory never supersedes and never revives: the old row
+                // is left untouched, and the new body is filed as its own row at
+                // the row's own location, so a capture-born `harness/` row keeps
+                // its class. A single moot_file_memory call, no mutation.
+                estate_file(daemon, port, row_location, &content, &subject, &event_time, kind)
             }
+            IngestAction::Matched(_) => unreachable!("matched files are handled above"),
         };
 
         match file_result {
@@ -865,50 +1302,77 @@ fn ingest_project(
 }
 
 enum IngestAction {
+    /// No usable id: file the body as a new row.
     CreateFresh,
-    /// Revive a superseded drawer; the String is its estate drawer ID.
-    Revive(String),
+    /// The row with this id is active for the same (slug, filename) with
+    /// identical content: remove the file, leave the row.
+    Matched(String),
+    /// The row with this id is active for the same (slug, filename) but the
+    /// content changed: the row is left untouched and the body is filed as
+    /// its own new row at the row's own location. Field: row location.
+    Replace(String),
 }
 
-/// Check estate for a superseded drawer at `location`.
+/// Decide how one file re-enters the estate.
 ///
-/// Queries `moot_memory_list` with the exact location as prefix to find prior
-/// records. If a superseded record exists with matching content, return
-/// `Revive(id)` — the ID drives `moot_update_memory` so no duplicate drawer
-/// is created across toggle cycles (enable → disable → re-enable). Otherwise
-/// return `CreateFresh`.
+/// `memory_id` is the id recovered from the file's front matter (None when the
+/// file was never restored from the estate). With an id, `estate_get` fetches
+/// the row. The match is by identity, not location class: the row's location
+/// must parse (`parse_restore_location`) to the same `(project_slug, fname)`
+/// as the file, whichever of `harness-import/` or `harness/` it carries. Such
+/// a row yields `Matched(id)` when its content equals `local_content` byte
+/// for byte, otherwise `Replace(row_location)`. No id, an id the daemon
+/// answers `memory_not_found` for, a superseded row, or a row at another slug
+/// or filename yields `CreateFresh`. Any other daemon failure is returned so
+/// the caller skips the file rather than filing a duplicate of a row it could
+/// not read.
 ///
-/// IDs are derived from list results, never constructed from paths.
+/// Ids come from the file's front matter, never constructed from paths.
 fn determine_ingest_action(
     daemon: &dyn DaemonHttp,
     port: u16,
-    location: &str,
+    memory_id: Option<&str>,
+    project_slug: &str,
+    fname: &str,
     local_content: &str,
-) -> IngestAction {
-    let records = estate_list(daemon, port, location);
-    // Find a superseded record at the exact location whose content matches.
-    for record in &records {
-        if record.is_superseded && record.location == location
-            && record.content.trim() == local_content.trim()
-        {
-            return IngestAction::Revive(record.id.clone());
-        }
+) -> Result<IngestAction, DaemonCallError> {
+    let Some(id) = memory_id else {
+        return Ok(IngestAction::CreateFresh);
+    };
+    let Some(record) = estate_get(daemon, port, id)? else {
+        return Ok(IngestAction::CreateFresh);
+    };
+    if record.is_superseded {
+        return Ok(IngestAction::CreateFresh);
     }
-    IngestAction::CreateFresh
+    let same_file = parse_restore_location(&record.location)
+        .map(|(slug, file)| slug == project_slug && file == fname)
+        .unwrap_or(false);
+    if !same_file {
+        return Ok(IngestAction::CreateFresh);
+    }
+    if record.content == local_content {
+        Ok(IngestAction::Matched(record.id))
+    } else {
+        Ok(IngestAction::Replace(record.location))
+    }
 }
 
 // ─── Restore (Part 3b) ───────────────────────────────────────────────────────
 
 /// Restore estate memories to disk on `disable harness-memory`.
 ///
-/// Queries the estate for drawers in both restore classes:
+/// Queries the estate for rows in both restore classes:
 ///   - `harness-import/*` (originally on disk, ingested by Part 3)
 ///   - `harness/*` (born in the estate during capture-hook interception)
 ///
 /// Per project, offers restore (per project prompt, `--restore-all`, or
-/// `--no-restore`).  After each confirmed disk write, marks the estate
-/// record with `mutation=supersede` and a timestamped note.  Estate records
-/// are NEVER deleted.
+/// `--no-restore`). Each written file is the row's content with the row's
+/// `memory_id` injected into its front matter (`front_matter_inject`), so a
+/// later re-enable can match the file back to its row. Estate rows are left
+/// exactly as they were: no mutation, no deletion (Bob's ruling 2026-09-09).
+/// A refused or failed enumeration writes nothing and reports
+/// `Restore FAILED`; it is never treated as an empty wing.
 ///
 /// Returns a summary string for display.
 fn restore_memories(
@@ -922,16 +1386,23 @@ fn restore_memories(
         return "  Restore skipped (--no-restore).".to_string();
     }
 
-    // Discover all harness records from the estate using moot_memory_list.
-    // IDs come from list results — never constructed from paths.
-    let records = discover_restore_records(daemon, port);
+    // Discover all harness rows from the estate using moot_memory_list.
+    // IDs come from list results, never constructed from paths. A refusal
+    // is a failure of the disable, never an empty wing: nothing is written.
+    let records = match discover_restore_records(daemon, port) {
+        Ok(records) => records,
+        Err(e) => {
+            return format!(
+                "  Restore FAILED: estate enumeration refused: {e}; nothing written, estate rows unchanged."
+            );
+        }
+    };
 
     if records.is_empty() {
         return "  No harness memories found in the estate to restore.".to_string();
     }
 
     let mut written = 0usize;
-    let mut superseded = 0usize;
     let mut collisions = Vec::new();
     // Track restored locations for MEMORY.md regeneration.
     let mut restored_locations: Vec<String> = Vec::new();
@@ -956,8 +1427,9 @@ fn restore_memories(
             }
         }
 
-        // Content is already in the list record — no extra round-trip needed.
-        let content = &record.content;
+        // The row's content with its id in front matter; ingest strips the id
+        // back out, so the estate never sees the header.
+        let content = front_matter_inject(&record.content, &record.id);
 
         // Write to ~/.claude/projects/<slug>/memory/<filename>
         let dest_dir = claude_dir
@@ -984,24 +1456,17 @@ fn restore_memories(
             collisions.push(format!("  {}: write failed: {e}", dest.display()));
             continue;
         }
+        // MXE-HM-2: harness_memory.restore.written metric emit point.
         written += 1;
         restored_locations.push(record.location.clone());
-
-        // Mark estate record as superseded via moot_update_memory (use record ID,
-        // not a constructed path). Estate keeps full history while the harness
-        // copy is live.
-        // MXE-HM-2: harness_memory.restore.written metric emit point.
-        let note = format!("restored to harness {}", now_iso8601());
-        if estate_update(daemon, port, &record.id, "supersede", &note).is_ok() {
-            superseded += 1;
-        }
     }
 
-    // Regenerate MEMORY.md index for each project that received restored files.
-    // (If a captured MEMORY.md drawer exists it was already restored verbatim above.)
+    // Write a marked MEMORY.md index for each project that received restored
+    // files and has no captured MEMORY.md row (a captured row was already
+    // restored verbatim above). Re-enable discards the marked index.
     regenerate_memory_index(claude_dir, &restored_locations);
 
-    let mut summary = format!("  Restore: {written} written, {superseded} superseded in estate.");
+    let mut summary = format!("  Restore: {written} written; estate rows left unchanged.");
     for c in &collisions {
         summary.push('\n');
         summary.push_str(c);
@@ -1009,30 +1474,32 @@ fn restore_memories(
     summary
 }
 
-/// Query the estate for all harness records across both location classes:
+/// Query the estate once for every harness row across both location classes:
 ///   - `harness-import/*` (originally on disk, ingested by ingest sweep)
 ///   - `harness/*` (born in the estate via capture-hook interception)
 ///
-/// Uses `moot_memory_list` which returns records with IDs and content.
-/// IDs drive subsequent `moot_update_memory` calls — never constructed paths.
-///
-/// Deduplicates by `record.location`: querying with prefix "harness" returns
-/// `harness-import/*` records too (prefix overlap), so a record received from
-/// the first query is skipped if it appears again in the second.
-fn discover_restore_records(daemon: &dyn DaemonHttp, port: u16) -> Vec<EstateRecord> {
+/// One `estate_list` call with prefix `harness` covers both (prefix overlap),
+/// so the result is filtered to locations that start with `harness-import/`
+/// or `harness/` and that `parse_restore_location` accepts. Superseded rows
+/// are skipped and ids are deduplicated. IDs come from list results, never
+/// from constructed paths. A refused or failed enumeration is returned as the
+/// error; it is never an empty result.
+fn discover_restore_records(daemon: &dyn DaemonHttp, port: u16) -> Result<Vec<EstateRecord>, DaemonCallError> {
     let mut records = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    // "harness-import" queried first; "harness" would also match those locations.
-    for prefix in &["harness-import", "harness"] {
-        let batch = estate_list(daemon, port, prefix);
-        for rec in batch {
-            // Skip if we already have this location from a previous prefix query.
-            if seen.insert(rec.location.clone()) {
-                records.push(rec);
-            }
+    for rec in estate_list(daemon, port, "harness")? {
+        if rec.is_superseded {
+            continue;
+        }
+        let in_class = rec.location.starts_with("harness-import/") || rec.location.starts_with("harness/");
+        if !in_class || parse_restore_location(&rec.location).is_none() {
+            continue;
+        }
+        if seen.insert(rec.id.clone()) {
+            records.push(rec);
         }
     }
-    records
+    Ok(records)
 }
 
 /// Extract `(slug, filename)` from a bare estate location string of the form
@@ -1069,6 +1536,14 @@ fn parse_restore_location(location: &str) -> Option<(String, String)> {
 /// files, UNLESS a MEMORY.md was already restored verbatim from the estate
 /// (in which case it was handled by the main restore loop).
 ///
+/// The index is `# Memory Index\n\n` followed by one `- [<f>](<f>)\n` line
+/// per restored non-MEMORY.md file in byte order, wrapped in a front-matter
+/// block carrying `moot_generated_index: true`. That marker is how
+/// `ingest_project` tells a regenerated index (discard, never file) from a
+/// captured or authored one. Exact bytes for `a.md` and `b.md`:
+/// `---\nmetadata:\n  moot_generated_index: true\n---\n# Memory Index\n\n- [a.md](a.md)\n- [b.md](b.md)\n`.
+/// Swift writes the identical bytes.
+///
 /// `restored_locations` is a vec of bare estate location strings (the form
 /// returned by `estate_list`, e.g. `harness-import/<slug>/<file>`).
 fn regenerate_memory_index(claude_dir: &Path, restored_locations: &[String]) {
@@ -1088,12 +1563,15 @@ fn regenerate_memory_index(claude_dir: &Path, restored_locations: &[String]) {
         let index = memory_dir.join("MEMORY.md");
         // Only write the index if no MEMORY.md was restored verbatim already.
         if !index.exists() {
-            let mut content = "# Memory Index\n\n".to_string();
+            let mut body = "# Memory Index\n\n".to_string();
             let mut sorted = files.clone();
             sorted.sort();
             for f in &sorted {
-                content.push_str(&format!("- [{f}]({f})\n"));
+                body.push_str(&format!("- [{f}]({f})\n"));
             }
+            // The body has no front matter, so the marker becomes a three-line
+            // header ahead of it.
+            let content = front_matter_inject_field(&body, FRONT_MATTER_GENERATED_INDEX_KEY, "true");
             fs::write(&index, content.as_bytes()).ok();
         }
     }
@@ -1556,8 +2034,8 @@ fn run_ingest_sweep(daemon: &dyn DaemonHttp, port: u16, claude_dir: &Path, inges
 
 fn print_ingest_result(slug: &str, r: &IngestResult) {
     println!(
-        "  {slug}: filed {}, removed {}, skipped {}",
-        r.filed, r.removed, r.skipped
+        "  {slug}: filed {}, matched {}, discarded indexes {}, removed {}, skipped {}",
+        r.filed, r.matched, r.discarded_indexes, r.removed, r.skipped
     );
     for reason in &r.skip_reasons {
         println!("{reason}");
@@ -1684,6 +2162,56 @@ mod tests {
                 Ok((200, br#"{"result":{"content":[{"text":"ok"}]}}"#.to_vec()))
             }
         }
+    }
+
+    // ── Response builders for the v2 envelope ─────────────────────────────────
+
+    /// A memory file body in the shape Claude Code writes: a YAML block with
+    /// `name`, `description` and a `metadata:` mapping, then the prose.
+    const SHAPE1_BODY: &str = "---\nname: bob-viewport\ndescription: \"wide\"\nmetadata:\n  node_type: memory\n  type: user\n  originSessionId: ca2fd6e7\n---\nbody\n";
+
+    /// Build a `moot_memory_get` body holding the given `(id, room, content, state)` records.
+    fn get_body(records: &[(&str, &str, &str, &str)]) -> String {
+        let memories: Vec<Value> = records
+            .iter()
+            .map(|(id, room, content, state)| json!({
+                "memory_id": id,
+                "placement": {"wing": "Agentic Memory", "room": room},
+                "content": content,
+                "event_time": "2026-09-09T00:00:00Z",
+                "state": state,
+            }))
+            .collect();
+        json!({"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": {"data": {"memories": memories}, "surface_version": "v2", "tool": "moot_memory_get"}, "isError": false}}).to_string()
+    }
+
+    /// Build a `moot_memory_list` body with one row per id.
+    fn list_body(ids: &[&str], has_more: bool, next_cursor: Option<&str>) -> String {
+        let memories: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({
+                "memory_id": id,
+                "fetch": {"tool": "moot_memory_get", "arguments": {"memory_id": id}},
+                "subject": "s",
+                "provenance": "imported",
+            }))
+            .collect();
+        let mut data = json!({"memories": memories, "has_more": has_more, "revision": 1});
+        if let Some(c) = next_cursor {
+            data["next_cursor"] = json!(c);
+        }
+        json!({"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": {"data": data, "surface_version": "v2", "tool": "moot_memory_list"}, "isError": false}}).to_string()
+    }
+
+    /// A JSON-RPC error body (HTTP 200): what the server answers for an unknown
+    /// or superseded `memory_id`.
+    const RPC_ERROR_BODY: &str = r##"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"unknown memory_id"}}"##;
+
+    /// Tool names of every frame the mock received, in order.
+    fn call_names(daemon: &MockDaemon) -> Vec<String> {
+        daemon.calls.lock().unwrap().iter()
+            .map(|c| c["params"]["name"].as_str().unwrap_or("").to_string())
+            .collect()
     }
 
     // ── ISO 8601 time ─────────────────────────────────────────────────────────
@@ -1958,9 +2486,8 @@ mod tests {
         fs::write(memory_dir.join("note.md"), b"# A note\n").unwrap();
         fs::write(memory_dir.join("MEMORY.md"), b"# Index\n").unwrap();
 
-        // Each file triggers two calls: estate_list (determine_ingest_action) then
-        // estate_file. The MockDaemon queue is intentionally short — exhausted calls
-        // fall back to the default 200 success response, so all 4 calls succeed.
+        // Files without a front-matter id go straight to estate_file: one call
+        // each. Both calls succeed.
         let daemon = MockDaemon::alive(vec![
             (200, r#"{"result":{"content":[{"text":"ok"}]}}"#),
             (200, r#"{"result":{"content":[{"text":"ok"}]}}"#),
@@ -1982,11 +2509,9 @@ mod tests {
         fs::create_dir_all(&memory_dir).unwrap();
         fs::write(memory_dir.join("note.md"), b"important\n").unwrap();
 
-        // estate_list (determine_ingest_action): no `memories` key → empty → CreateFresh.
-        // estate_file: 500 → failure.
+        // No front-matter id → CreateFresh with no lookup; estate_file: 500 → failure.
         let daemon = MockDaemon::alive(vec![
-            (200, r#"{"result":{"content":[{"text":""}]}}"#), // list → empty
-            (500, "internal error"),                           // file → fail
+            (500, "internal error"), // file → fail
         ]);
 
         let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
@@ -2005,8 +2530,8 @@ mod tests {
         fs::write(memory_dir.join(".hidden"), b"secret\n").unwrap();
         fs::write(memory_dir.join("visible.md"), b"ok\n").unwrap();
 
+        // visible.md has no id: one estate_file call.
         let daemon = MockDaemon::alive(vec![
-            (200, r#"{"result":{"content":[{"text":""}]}}"#),
             (200, r#"{"result":{"content":[{"text":"ok"}]}}"#),
         ]);
 
@@ -2017,35 +2542,185 @@ mod tests {
     }
 
     #[test]
-    fn ingest_project_revives_when_content_unchanged() {
+    fn ingest_project_matches_unchanged_restored_file() {
+        // A file restored by disable carries its id; the row's content is the
+        // same, so the file is removed and the estate sees one get and nothing else.
         let dir = tempfile::tempdir().unwrap();
         let memory_dir = dir.path().join("memory");
         fs::create_dir_all(&memory_dir).unwrap();
-        // File content matches what the estate returns (superseded drawer).
-        fs::write(memory_dir.join("note.md"), b"same content\n").unwrap();
+        fs::write(memory_dir.join("note.md"), front_matter_inject(SHAPE1_BODY, "drawer-abc")).unwrap();
 
+        let get_resp = get_body(&[("drawer-abc", "harness-import/slug/note.md", SHAPE1_BODY, "active")]);
+        let daemon = MockDaemon::alive(vec![(200, &get_resp)]);
+
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.matched, 1);
+        assert_eq!(result.removed, 1);
+        assert_eq!(result.filed, 0);
+        assert_eq!(result.skipped, 0);
+        assert!(!memory_dir.join("note.md").exists(), "matched file must be removed");
+
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "matched path: exactly one estate call");
+        assert_eq!(calls[0]["params"]["name"], "moot_memory_get");
+        assert_eq!(calls[0]["params"]["arguments"]["memory_id"], "drawer-abc");
+    }
+
+    #[test]
+    fn ingest_project_files_fresh_when_restored_content_changed() {
+        // Same id, content edited on disk: the row is left untouched and the
+        // stripped body is filed as its own new row, one moot_file_memory call.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        let changed = SHAPE1_BODY.replace("body\n", "body edited on disk\n");
+        fs::write(memory_dir.join("note.md"), front_matter_inject(&changed, "drawer-abc")).unwrap();
+
+        let get_resp = get_body(&[("drawer-abc", "harness-import/slug/note.md", SHAPE1_BODY, "active")]);
         let daemon = MockDaemon::alive(vec![
-            // estate_list response: superseded record at exact location with same content.
-            (200, r#"{"result":{"memories":[{"id":"drawer-abc","location":"harness-import/slug/note.md","content":"same content\n","superseded":true}]}}"#),
-            // estate_update (revive) response.
-            (200, r#"{"result":{"content":[{"text":"revived"}]}}"#),
+            (200, &get_resp),
+            (200, r##"{"result":{"content":[{"text":"filed"}]}}"##),
         ]);
 
         let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
         assert_eq!(result.filed, 1);
         assert_eq!(result.removed, 1);
+        assert_eq!(result.matched, 0);
+        assert_eq!(result.skipped, 0);
+        assert!(!memory_dir.join("note.md").exists());
 
-        // Assert real ARIA frames: list then update(revive).
+        assert_eq!(call_names(&daemon), ["moot_memory_get", "moot_file_memory"]);
         let calls = daemon.calls.lock().unwrap();
-        // First call: moot_memory_list
-        assert_eq!(calls[0]["params"]["name"], "moot_memory_list", "list must use moot_memory_list");
-        assert!(calls[0]["params"]["arguments"]["location_prefix"].is_string(), "list must have location_prefix");
-        // Second call: moot_update_memory with mutation=revive
-        assert_eq!(calls[1]["params"]["name"], "moot_update_memory", "revive must use moot_update_memory");
-        assert_eq!(calls[1]["params"]["arguments"]["id"], "drawer-abc");
-        assert_eq!(calls[1]["params"]["arguments"]["mutation"], "revive");
-        // No "subject" argument — spec-doc drift guard.
-        assert!(calls[1]["params"]["arguments"].get("subject").is_none(), "no subject arg in update");
+        let file_args = &calls[1]["params"]["arguments"];
+        assert_eq!(file_args["location"], "harness-import/slug/note.md");
+        assert_eq!(file_args["content"], changed, "filed content is the stripped body, no id header");
+        assert_eq!(file_args["subject"], extract_subject(&changed, "note.md"));
+        assert!(calls.iter().all(|c| c["params"]["name"] != "moot_update_memory"), "no mutation on a changed file");
+    }
+
+    #[test]
+    fn ingest_project_failed_filing_on_changed_content_leaves_file_and_touches_no_row() {
+        // Filing the changed body fails: the old row was never touched (no
+        // supersede happened), so there is nothing to roll back. The file stays.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        let changed = SHAPE1_BODY.replace("body\n", "body edited on disk\n");
+        let on_disk = front_matter_inject(&changed, "drawer-abc");
+        fs::write(memory_dir.join("note.md"), &on_disk).unwrap();
+
+        let get_resp = get_body(&[("drawer-abc", "harness-import/slug/note.md", SHAPE1_BODY, "active")]);
+        let daemon = MockDaemon::alive(vec![
+            (200, &get_resp),
+            (500, "internal error"),
+        ]);
+
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.skipped, 1);
+        assert_eq!(result.filed, 0);
+        assert_eq!(result.removed, 0);
+        assert_eq!(fs::read_to_string(memory_dir.join("note.md")).unwrap(), on_disk, "file stays on disk untouched");
+
+        assert_eq!(call_names(&daemon), ["moot_memory_get", "moot_file_memory"]);
+        let calls = daemon.calls.lock().unwrap();
+        assert!(calls.iter().all(|c| c["params"]["name"] != "moot_update_memory"), "the old row is never mutated");
+    }
+
+    #[test]
+    fn ingest_project_files_fresh_when_id_is_unknown() {
+        // The id in the file answers memory_not_found (row gone or superseded): file fresh.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("note.md"), front_matter_inject(SHAPE1_BODY, "drawer-gone")).unwrap();
+
+        let daemon = MockDaemon::alive(vec![
+            (200, MEMORY_NOT_FOUND_FRAME),
+            (200, r##"{"result":{"content":[{"text":"filed"}]}}"##),
+        ]);
+
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.filed, 1);
+        assert_eq!(result.matched, 0);
+        assert_eq!(result.skipped, 0);
+        assert_eq!(call_names(&daemon), ["moot_memory_get", "moot_file_memory"]);
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls[1]["params"]["arguments"]["content"], SHAPE1_BODY, "filed body carries no id header");
+        assert!(calls.iter().all(|c| c["params"]["name"] != "moot_update_memory"), "no mutation on a fresh file");
+    }
+
+    #[test]
+    fn ingest_project_skips_file_when_row_lookup_is_refused() {
+        // Any refusal other than memory_not_found means the row could not be read:
+        // the file stays on disk and nothing is filed (no blind duplicate).
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        let on_disk = front_matter_inject(SHAPE1_BODY, "drawer-abc");
+        fs::write(memory_dir.join("note.md"), &on_disk).unwrap();
+
+        let daemon = MockDaemon::alive(vec![(200, ESTATE_UNAVAILABLE_FRAME)]);
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.skipped, 1);
+        assert_eq!(result.filed, 0);
+        assert_eq!(result.matched, 0);
+        assert!(result.skip_reasons[0].contains("estate lookup failed"), "{:?}", result.skip_reasons);
+        assert_eq!(fs::read_to_string(memory_dir.join("note.md")).unwrap(), on_disk);
+        assert_eq!(call_names(&daemon), ["moot_memory_get"], "the lookup is the only call");
+    }
+
+    #[test]
+    fn ingest_project_files_fresh_without_front_matter_id() {
+        // A file that never left the estate (no id) is filed as-is in one call.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("note.md"), SHAPE1_BODY).unwrap();
+
+        let daemon = MockDaemon::alive(vec![(200, r##"{"result":{"content":[{"text":"filed"}]}}"##)]);
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.filed, 1);
+        assert_eq!(result.removed, 1);
+        assert_eq!(result.matched, 0);
+
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "no id: exactly one call, the filing");
+        assert_eq!(calls[0]["params"]["name"], "moot_file_memory");
+        assert_eq!(calls[0]["params"]["arguments"]["content"], SHAPE1_BODY, "content unchanged");
+    }
+
+    #[test]
+    fn ingest_project_matches_capture_born_harness_row_by_identity() {
+        // A row born in the estate lives at harness/<slug>/<file>. Restored and
+        // re-ingested, it matches by (slug, filename), not by location class.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("note.md"), front_matter_inject(SHAPE1_BODY, "cap-1")).unwrap();
+
+        let get_resp = get_body(&[("cap-1", "harness/slug/note.md", SHAPE1_BODY, "active")]);
+        let daemon = MockDaemon::alive(vec![(200, get_resp.as_str())]);
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.matched, 1);
+        assert_eq!(result.filed, 0);
+        assert!(!memory_dir.join("note.md").exists(), "matched file removed");
+        assert_eq!(call_names(&daemon), ["moot_memory_get"], "one call, no mutation");
+
+        // Changed body: the new content is filed fresh at the row's own harness/
+        // location, one moot_file_memory call, the old row left untouched.
+        fs::create_dir_all(&memory_dir).unwrap();
+        let changed = SHAPE1_BODY.replace("body\n", "body edited on disk\n");
+        fs::write(memory_dir.join("note.md"), front_matter_inject(&changed, "cap-1")).unwrap();
+        let daemon = MockDaemon::alive(vec![
+            (200, get_resp.as_str()),
+            (200, r##"{"result":{"content":[{"text":"filed"}]}}"##),
+        ]);
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.filed, 1);
+        assert_eq!(call_names(&daemon), ["moot_memory_get", "moot_file_memory"]);
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls[1]["params"]["arguments"]["location"], "harness/slug/note.md", "a harness/ row stays a harness/ row");
+        assert_eq!(calls[1]["params"]["arguments"]["content"], changed);
     }
 
     // ── hook-capture path logic ───────────────────────────────────────────────
@@ -2314,41 +2989,704 @@ cross-session linking that the flat project-memory directory never had.\n";
         assert!(args.get("command").is_none(), "no command arg");
     }
 
-    #[test]
-    fn estate_update_sends_moot_update_memory_frame() {
-        let daemon = MockDaemon::alive(vec![
-            (200, r#"{"result":{"content":[{"text":"ok"}]}}"#),
-        ]);
-        let result = estate_update(&daemon, 4242, "drawer-uuid-abc", "supersede", "test note");
-        assert!(result.is_ok());
-        let calls = daemon.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let args = &calls[0]["params"]["arguments"];
-        assert_eq!(calls[0]["params"]["name"], "moot_update_memory");
-        assert_eq!(args["id"], "drawer-uuid-abc");
-        assert_eq!(args["mutation"], "supersede");
-        assert_eq!(args["note"], "test note");
-        // No legacy "command" or "subject" args — drift guard.
-        assert!(args.get("command").is_none(), "no command arg");
-        assert!(args.get("subject").is_none(), "no subject arg");
+    // v2 list response: memories[] rows carry only memory_id/fetch/subject/provenance.
+    // Location and content come from a follow-up moot_memory_get call (estate_get).
+    // These response shapes are derived from the captured v2 binary fixtures.
+    const V2_LIST_RESP: &str = r##"{"result":{"structuredContent":{"data":{"memories":[{"memory_id":"m1","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"m1"}},"subject":"test","provenance":"imported"}],"has_more":false},"surface_version":"v2","tool":"moot_memory_list"},"isError":false}}"##;
+    const V2_GET_RESP: &str = r##"{"result":{"structuredContent":{"data":{"memories":[{"memory_id":"m1","placement":{"wing":"Agentic Memory","room":"harness-import/slug1/MEMORY.md"},"content":"Memory Index content","event_time":"2026-09-09T00:00:00Z","state":"active"}]},"surface_version":"v2","tool":"moot_memory_get"},"isError":false}}"##;
+
+    /// The exact ARIA v2 refusal frame for a stale list cursor (HTTP 200, no
+    /// top-level JSON-RPC error, no `data`).
+    const CURSOR_STALE_FRAME: &str = r##"{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"The inventory changed; restart moot_memory_list without the cursor."}],"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","error":{"code":"cursor_stale","message":"The inventory changed; restart moot_memory_list without the cursor.","retryable":true},"meta":{}}}}"##;
+    /// ARIA v2 refusal for an unknown or superseded memory id.
+    const MEMORY_NOT_FOUND_FRAME: &str = r##"{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"memory not found"}],"structuredContent":{"surface_version":"v2","tool":"moot_memory_get","error":{"code":"memory_not_found","message":"memory not found","retryable":false},"meta":{}}}}"##;
+    /// ARIA v2 refusal that is not about the id: the estate itself is unavailable.
+    const ESTATE_UNAVAILABLE_FRAME: &str = r##"{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"estate unavailable"}],"structuredContent":{"surface_version":"v2","tool":"moot_memory_get","error":{"code":"estate_unavailable","message":"estate unavailable","retryable":true},"meta":{}}}}"##;
+
+    const PAGE1_FIXTURE: &str = include_str!("../../../../../distribution/plugin/tests/fixtures/rust_memory_list_page1.json");
+    const PAGE2_FIXTURE: &str = include_str!("../../../../../distribution/plugin/tests/fixtures/rust_memory_list_page2.json");
+    const GET_BATCH_FIXTURE: &str = include_str!("../../../../../distribution/plugin/tests/fixtures/rust_memory_get_batch.json");
+    const LIST_FIXTURE: &str = include_str!("../../../../../distribution/plugin/tests/fixtures/rust_memory_list.json");
+    const GET_FIXTURE: &str = include_str!("../../../../../distribution/plugin/tests/fixtures/rust_memory_get.json");
+
+    /// Test setup only: the ids a list fixture page carries, in page order.
+    fn fixture_page_ids(fixture: &str) -> Vec<String> {
+        let full: Value = serde_json::from_str(fixture).expect("fixture must parse");
+        full.pointer("/result/structuredContent/data/memories").and_then(|v| v.as_array())
+            .expect("fixture page has memories")
+            .iter()
+            .map(|m| m["memory_id"].as_str().expect("row has memory_id").to_string())
+            .collect()
+    }
+
+    /// Test setup only: `next_cursor` of a list fixture page.
+    fn fixture_next_cursor(fixture: &str) -> String {
+        let full: Value = serde_json::from_str(fixture).expect("fixture must parse");
+        full.pointer("/result/structuredContent/data/next_cursor").and_then(|v| v.as_str())
+            .expect("fixture page has next_cursor").to_string()
+    }
+
+    /// The 207 ids of the two-page fixture run, and the five get bodies that
+    /// answer them in 50-id chunks. The recorded batch fixture covers exactly the
+    /// first 50 ids of page 1; the remaining four chunks are synthesized from the
+    /// page ids (distinct `harness-import/bigslug/synth-<n>.md` rooms) because
+    /// no recorded batch exists for them.
+    fn two_page_run() -> (Vec<String>, Vec<String>) {
+        let mut ids = fixture_page_ids(PAGE1_FIXTURE);
+        ids.extend(fixture_page_ids(PAGE2_FIXTURE));
+        assert_eq!(ids.len(), 207, "fixture run is 200 + 7 ids");
+        let mut bodies = vec![GET_BATCH_FIXTURE.to_string()];
+        for (n, chunk) in ids[50..].chunks(50).enumerate() {
+            let rooms: Vec<String> = (0..chunk.len())
+                .map(|i| format!("harness-import/bigslug/synth-{n}-{i}.md"))
+                .collect();
+            let records: Vec<(&str, &str, &str, &str)> = chunk.iter().zip(rooms.iter())
+                .map(|(id, room)| (id.as_str(), room.as_str(), "synth body\n", "active"))
+                .collect();
+            bodies.push(get_body(&records));
+        }
+        (ids, bodies)
     }
 
     #[test]
-    fn estate_list_sends_moot_memory_list_frame() {
+    fn estate_list_exact_file_sends_wing_and_room() {
+        // Production callers pass exact file locations (3 segments, no trailing slash).
+        // estate_list must send wing="Agentic Memory" with the full location as room
+        // and limit 200, then one batched moot_memory_get for the page's ids.
         let daemon = MockDaemon::alive(vec![
-            (200, r#"{"result":{"memories":[{"id":"d1","location":"harness/slug/file.md","content":"c","superseded":false}]}}"#),
+            (200, V2_LIST_RESP),
+            (200, V2_GET_RESP),
         ]);
-        let records = estate_list(&daemon, 4242, "harness/slug");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].id, "d1");
+        let records = estate_list(&daemon, 4242, "harness-import/slug1/MEMORY.md").expect("list ok");
+        assert_eq!(records.len(), 1, "must return 1 record after the batch get");
+        assert_eq!(records[0].id, "m1");
+        assert_eq!(records[0].location, "harness-import/slug1/MEMORY.md");
+        assert_eq!(records[0].content, "Memory Index content");
+        assert!(!records[0].is_superseded);
+
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "must issue list then one batch get");
+        let list_args = &calls[0]["params"]["arguments"];
+        assert_eq!(calls[0]["params"]["name"], "moot_memory_list");
+        assert_eq!(list_args["wing"], "Agentic Memory", "v2 file memories live in Agentic Memory wing");
+        assert_eq!(list_args["room"], "harness-import/slug1/MEMORY.md", "exact file → full location as room");
+        assert_eq!(list_args["limit"], 200, "always ask for the server maximum page");
+        assert!(list_args.get("cursor").is_none(), "first page carries no cursor");
+        assert!(list_args.get("location_prefix").is_none(), "no v1 location_prefix arg");
+        let get_args = &calls[1]["params"]["arguments"];
+        assert_eq!(calls[1]["params"]["name"], "moot_memory_get");
+        assert_eq!(get_args["memory_ids"], json!(["m1"]), "batch form carries memory_ids");
+        assert!(get_args.get("memory_id").is_none(), "batch form never sends the single-id key");
+    }
+
+    #[test]
+    fn estate_list_directory_prefix_omits_room() {
+        // Directory-prefix callers pass a trailing-slash prefix.
+        // estate_list must omit room and filter client-side by the normalized prefix.
+        // Two list items: one matching, one from a different slug (filtered out).
+        let list_resp = list_body(&["m1", "m2"], false, None);
+        let get_resp = get_body(&[
+            ("m1", "harness-import/slug1/MEMORY.md", "c1", "active"),
+            ("m2", "harness-import/other-slug/notes.md", "c2", "active"),
+        ]);
+        let daemon = MockDaemon::alive(vec![
+            (200, list_resp.as_str()),
+            (200, get_resp.as_str()),
+        ]);
+        let records = estate_list(&daemon, 4242, "harness-import/slug1/").expect("list ok");
+        // Only m1 matches the prefix "harness-import/slug1/" (m2 is other-slug).
+        assert_eq!(records.len(), 1, "client-side filter must exclude non-matching locations");
+        assert_eq!(records[0].id, "m1");
+
+        let calls = daemon.calls.lock().unwrap();
+        // list call + one batch get = 2 total
+        assert_eq!(calls.len(), 2);
+        let list_args = &calls[0]["params"]["arguments"];
+        assert_eq!(calls[0]["params"]["name"], "moot_memory_list");
+        assert_eq!(list_args["wing"], "Agentic Memory");
+        // Directory prefix: no room filter.
+        assert!(list_args.get("room").is_none(), "directory prefix must not send room");
+        assert_eq!(calls[1]["params"]["arguments"]["memory_ids"], json!(["m1", "m2"]));
+    }
+
+    #[test]
+    fn estate_list_empty_prefix_returns_empty() {
+        // Empty prefix must return empty without calling the daemon.
+        let daemon = MockDaemon::alive(vec![]);
+        let records = estate_list(&daemon, 4242, "").expect("empty prefix is Ok");
+        assert_eq!(records.len(), 0);
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 0, "empty prefix must not call daemon");
+    }
+
+    #[test]
+    fn estate_list_leading_slash_normalized() {
+        // Leading slash is normalized away; both ports must agree on this shape.
+        let daemon = MockDaemon::alive(vec![
+            (200, V2_LIST_RESP),
+            (200, V2_GET_RESP),
+        ]);
+        let records = estate_list(&daemon, 4242, "/harness-import/slug1/MEMORY.md").expect("list ok");
+        assert_eq!(records.len(), 1, "leading slash must be stripped before matching");
+        let calls = daemon.calls.lock().unwrap();
+        // Must still supply room = the normalized prefix (without leading slash).
+        let list_args = &calls[0]["params"]["arguments"];
+        assert_eq!(list_args["room"], "harness-import/slug1/MEMORY.md");
+    }
+
+    #[test]
+    fn estate_list_walks_every_page_and_batches_get() {
+        // Two pages (200 + 7 ids), then ceil(207 / 50) = 5 get frames of at most 50 ids.
+        let (ids, bodies) = two_page_run();
+        let mut queue = vec![(200, PAGE1_FIXTURE), (200, PAGE2_FIXTURE)];
+        queue.extend(bodies.iter().map(|b| (200, b.as_str())));
+        let daemon = MockDaemon::alive(queue);
+
+        let records = estate_list(&daemon, 4242, "harness-import/").expect("list ok");
+        assert_eq!(records.len(), 207, "every id on every page becomes a record");
+        let got: std::collections::HashSet<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.iter().all(|id| got.contains(id.as_str())), "no id dropped across pages");
+
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 7, "2 list frames + 5 get frames");
+        assert_eq!(calls[0]["params"]["name"], "moot_memory_list");
+        assert!(calls[0]["params"]["arguments"].get("cursor").is_none(), "first page has no cursor");
+        assert_eq!(calls[1]["params"]["name"], "moot_memory_list");
+        assert_eq!(
+            calls[1]["params"]["arguments"]["cursor"],
+            fixture_next_cursor(PAGE1_FIXTURE),
+            "second page continues from page1's next_cursor"
+        );
+        let get_frames: Vec<&Value> = calls.iter().filter(|c| c["params"]["name"] == "moot_memory_get").collect();
+        assert_eq!(get_frames.len(), 5, "ceil(207 / 50) get frames");
+        let lens: Vec<usize> = get_frames.iter()
+            .map(|c| c["params"]["arguments"]["memory_ids"].as_array().expect("memory_ids array").len())
+            .collect();
+        assert_eq!(lens, [50, 50, 50, 50, 7]);
+        assert!(lens.iter().all(|n| *n <= 50), "no get frame carries more than 50 ids");
+        assert_eq!(get_frames[0]["params"]["arguments"]["memory_ids"], json!(ids[..50]), "first chunk is page1's first 50 ids in order");
+    }
+
+    #[test]
+    fn estate_get_sends_moot_memory_get_frame() {
+        // estate_get must send moot_memory_get with the correct key and parse
+        // placement.room as location, plus state="superseded" → is_superseded=true.
+        let get_resp = r##"{"result":{"structuredContent":{"data":{"memories":[{"memory_id":"m1","placement":{"wing":"Agentic Memory","room":"harness-import/slug1/MEMORY.md"},"content":"Index content","event_time":"2026-09-09T00:00:00Z","state":"superseded"}]},"surface_version":"v2","tool":"moot_memory_get"},"isError":false}}"##;
+        let daemon = MockDaemon::alive(vec![(200, get_resp)]);
+        let record = estate_get(&daemon, 4242, "m1").expect("call ok").expect("must return a record");
+        assert_eq!(record.id, "m1");
+        assert_eq!(record.location, "harness-import/slug1/MEMORY.md", "location from placement.room");
+        assert_eq!(record.content, "Index content");
+        assert!(record.is_superseded, "state=superseded → is_superseded=true");
         let calls = daemon.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["params"]["name"], "moot_memory_get");
+        // v2 uses memory_id, not legacy id.
+        assert_eq!(calls[0]["params"]["arguments"]["memory_id"], "m1");
+        assert!(calls[0]["params"]["arguments"].get("id").is_none(), "no legacy id arg");
+    }
+
+    #[test]
+    fn estate_get_none_on_memory_not_found_and_err_on_other_refusals() {
+        // memory_not_found is the daemon's answer for an unknown or superseded id: no row.
+        let daemon = MockDaemon::alive(vec![(200, MEMORY_NOT_FOUND_FRAME)]);
+        assert_eq!(estate_get(&daemon, 4242, "gone"), Ok(None));
+        // Any other refusal is an error the caller must see.
+        let daemon = MockDaemon::alive(vec![(200, ESTATE_UNAVAILABLE_FRAME)]);
+        assert_eq!(
+            estate_get(&daemon, 4242, "m1"),
+            Err(DaemonCallError::Refused { code: "estate_unavailable".into(), message: "estate unavailable".into() })
+        );
+        // A top-level JSON-RPC error object is a refusal with code rpc_error.
+        let daemon = MockDaemon::alive(vec![(200, RPC_ERROR_BODY)]);
+        assert_eq!(
+            estate_get(&daemon, 4242, "m1"),
+            Err(DaemonCallError::Refused { code: "rpc_error".into(), message: "unknown memory_id".into() })
+        );
+        // Transport failures stay transport failures.
+        let daemon = MockDaemon::alive(vec![(500, "internal error")]);
+        assert!(matches!(estate_get(&daemon, 4242, "m1"), Err(DaemonCallError::Transport(_))));
+    }
+
+    #[test]
+    fn estate_list_parses_v2_fixture_envelope() {
+        // The recorded list fixture (two rows) drives estate_list through the mock;
+        // the batch get answers with the recorded get fixture's record for the
+        // first id plus a synthesized record for the second (no recorded get
+        // exists for it). Assertions are on the returned EstateRecord.
+        let ids = fixture_page_ids(LIST_FIXTURE);
+        assert_eq!(ids.len(), 2);
+        let recorded: Value = serde_json::from_str(GET_FIXTURE).expect("fixture must parse");
+        let recorded_item = recorded.pointer("/result/structuredContent/data/memories/0").expect("record").clone();
+        assert_eq!(recorded_item["memory_id"], ids[0], "get fixture answers the list fixture's first id");
+        let batch = json!({"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": {"data": {"memories": [
+            recorded_item,
+            {"memory_id": ids[1], "placement": {"wing": "Agentic Memory", "room": "harness-import/testslug/second.md"}, "content": "second", "event_time": "2026-09-09T00:00:00Z", "state": "active"}
+        ]}, "surface_version": "v2", "tool": "moot_memory_get"}, "isError": false}}).to_string();
+        let daemon = MockDaemon::alive(vec![(200, LIST_FIXTURE), (200, batch.as_str())]);
+
+        let records = estate_list(&daemon, 4242, "harness-import/").expect("list ok");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, "23dcd969-47eb-412b-854f-8ca8eccb5ac3");
+        assert_eq!(records[0].location, "harness-import/testslug/notes.md");
+        assert_eq!(records[0].content, "# Notes for testslug");
+        assert!(!records[0].is_superseded);
+        assert_eq!(records[1].id, ids[1]);
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["params"]["arguments"]["limit"], 200);
+        assert_eq!(calls[1]["params"]["arguments"]["memory_ids"], json!(ids));
+    }
+
+    #[test]
+    fn estate_get_parses_v2_fixture_envelope() {
+        // The recorded moot_memory_get body drives estate_get through the mock.
+        let daemon = MockDaemon::alive(vec![(200, GET_FIXTURE)]);
+        let record = estate_get(&daemon, 4242, "23dcd969-47eb-412b-854f-8ca8eccb5ac3")
+            .expect("call ok")
+            .expect("fixture holds one record");
+        assert_eq!(record.id, "23dcd969-47eb-412b-854f-8ca8eccb5ac3");
+        assert_eq!(record.location, "harness-import/testslug/notes.md", "location from placement.room");
+        assert_eq!(record.content, "# Notes for testslug");
+        assert!(!record.is_superseded, "state=active");
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls[0]["params"]["arguments"]["memory_id"], "23dcd969-47eb-412b-854f-8ca8eccb5ac3");
+    }
+
+    // ── Front matter: the restore id header ──────────────────────────────────
+
+    #[test]
+    fn front_matter_inject_and_strip_are_byte_inverses() {
+        // Vector 1: a real memory file with a metadata: mapping. The id goes
+        // right after `metadata:`; the round trip is exact.
+        let injected = front_matter_inject(SHAPE1_BODY, "abc");
+        let lines: Vec<&str> = injected.lines().collect();
+        assert_eq!(lines.iter().filter(|l| **l == "---").count(), 2, "exactly one front-matter document");
+        let meta = lines.iter().position(|l| *l == "metadata:").expect("metadata: kept");
+        assert_eq!(lines[meta + 1], "  moot_memory_id: abc", "id line sits right after metadata:");
+        let keys: Vec<&str> = lines[1..lines.len() - 2].iter().map(|l| l.split(':').next().unwrap()).collect();
+        assert_eq!(keys, ["name", "description", "metadata", "  moot_memory_id", "  node_type", "  type", "  originSessionId"]);
+        assert_eq!(front_matter_strip(&injected), (Some("abc".to_string()), SHAPE1_BODY.to_string()));
+
+        // Vector 2: a block without metadata: gains the mapping before the fence.
+        let v2 = "---\nname: x\n---\nbody\n";
+        let injected = front_matter_inject(v2, "abc");
+        assert_eq!(injected, "---\nname: x\nmetadata:\n  moot_memory_id: abc\n---\nbody\n");
+        assert_eq!(front_matter_strip(&injected), (Some("abc".to_string()), v2.to_string()));
+
+        // Vector 3: no block (MEMORY.md) gains the three-line header.
+        let v3 = "# Memory Index\n";
+        let injected = front_matter_inject(v3, "abc");
+        assert_eq!(injected, "---\nmetadata:\n  moot_memory_id: abc\n---\n# Memory Index\n");
+        assert_eq!(front_matter_strip(&injected), (Some("abc".to_string()), v3.to_string()));
+
+        // No id line: nothing to strip, content unchanged.
+        assert_eq!(front_matter_strip(SHAPE1_BODY), (None, SHAPE1_BODY.to_string()));
+        assert_eq!(front_matter_strip(v2), (None, v2.to_string()));
+        assert_eq!(front_matter_strip(v3), (None, v3.to_string()));
+    }
+
+    #[test]
+    fn front_matter_field_round_trip_leaves_memory_id_line_in_place() {
+        // A second key on the corpus-shaped body: the new line sits right after
+        // `metadata:`, ahead of the id line; stripping it gives back the exact
+        // bytes and never disturbs `moot_memory_id`.
+        let with_id = front_matter_inject(SHAPE1_BODY, "abc");
+        let both = front_matter_inject_field(&with_id, FRONT_MATTER_GENERATED_INDEX_KEY, "true");
+        let lines: Vec<&str> = both.lines().collect();
+        let meta = lines.iter().position(|l| *l == "metadata:").expect("metadata: kept");
+        assert_eq!(lines[meta + 1], "  moot_generated_index: true");
+        assert_eq!(lines[meta + 2], "  moot_memory_id: abc");
+        assert_eq!(lines.iter().filter(|l| **l == "---").count(), 2, "exactly one front-matter document");
+
+        assert_eq!(
+            front_matter_strip_field(&both, FRONT_MATTER_GENERATED_INDEX_KEY),
+            (Some("true".to_string()), with_id.clone())
+        );
+        // Stripping the id instead leaves the generated-index line behind.
+        assert_eq!(
+            front_matter_strip(&both),
+            (Some("abc".to_string()), front_matter_inject_field(SHAPE1_BODY, FRONT_MATTER_GENERATED_INDEX_KEY, "true"))
+        );
+        // A key that is absent strips nothing.
+        assert_eq!(
+            front_matter_strip_field(&with_id, FRONT_MATTER_GENERATED_INDEX_KEY),
+            (None, with_id.clone())
+        );
+    }
+
+    // ── Regenerated MEMORY.md index: marked at disable, discarded at enable ───
+
+    /// The bytes `regenerate_memory_index` writes for restored `a.md` and
+    /// `b.md`. Shared with the Swift port, which must write the identical bytes.
+    const GENERATED_INDEX_AB: &str =
+        "---\nmetadata:\n  moot_generated_index: true\n---\n# Memory Index\n\n- [a.md](a.md)\n- [b.md](b.md)\n";
+
+    #[test]
+    fn regenerated_index_bytes_are_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join("claude");
+        let memory_dir = claude_dir.join("projects").join("slug").join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        // Locations arrive in the estate's order; the index is byte-ordered.
+        let locations = vec![
+            "harness-import/slug/b.md".to_string(),
+            "harness-import/slug/a.md".to_string(),
+        ];
+        regenerate_memory_index(&claude_dir, &locations);
+        assert_eq!(fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap(), GENERATED_INDEX_AB);
+        assert_eq!(
+            front_matter_strip_field(GENERATED_INDEX_AB, FRONT_MATTER_GENERATED_INDEX_KEY),
+            (Some("true".to_string()), "# Memory Index\n\n- [a.md](a.md)\n- [b.md](b.md)\n".to_string())
+        );
+        assert_eq!(front_matter_strip(GENERATED_INDEX_AB).0, None, "a regenerated index carries no estate id");
+    }
+
+    #[test]
+    fn regenerated_index_is_discarded_on_reingest_not_filed() {
+        // Rows a.md and b.md, no MEMORY.md row: restore writes both files with
+        // their ids plus the marked index. Re-enable matches the two rows and
+        // discards the index without an estate call, so the row count is
+        // unchanged by the cycle.
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join("claude");
+        let memory_dir = claude_dir.join("projects").join("slug").join("memory");
+        let list_resp = list_body(&["id-a", "id-b"], false, None);
+        let get_resp = get_body(&[
+            ("id-a", "harness-import/slug/a.md", "alpha\n", "active"),
+            ("id-b", "harness-import/slug/b.md", "beta\n", "active"),
+        ]);
+        let daemon = MockDaemon::alive(vec![(200, list_resp.as_str()), (200, get_resp.as_str())]);
+
+        let summary = restore_memories(&daemon, 4242, true, false, &claude_dir);
+        assert_eq!(summary, "  Restore: 2 written; estate rows left unchanged.");
+        let mut names: Vec<String> = fs::read_dir(&memory_dir).unwrap().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["MEMORY.md", "a.md", "b.md"]);
+        assert_eq!(fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap(), GENERATED_INDEX_AB);
+        assert_eq!(fs::read_to_string(memory_dir.join("a.md")).unwrap(), front_matter_inject("alpha\n", "id-a"));
+
+        // Re-enable. Files are processed in byte order: MEMORY.md, a.md, b.md.
+        // The index makes no estate call; each row is looked up once.
+        let get_a = get_body(&[("id-a", "harness-import/slug/a.md", "alpha\n", "active")]);
+        let get_b = get_body(&[("id-b", "harness-import/slug/b.md", "beta\n", "active")]);
+        let daemon = MockDaemon::alive(vec![(200, get_a.as_str()), (200, get_b.as_str())]);
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.matched, 2);
+        assert_eq!(result.discarded_indexes, 1);
+        assert_eq!(result.filed, 0);
+        assert_eq!(result.removed, 3);
+        assert_eq!(result.skipped, 0);
+        assert!(result.skip_reasons.is_empty(), "{:?}", result.skip_reasons);
+        let names = call_names(&daemon);
+        assert_eq!(names, ["moot_memory_get", "moot_memory_get"]);
+        assert!(!names.iter().any(|n| n == "moot_file_memory" || n == "moot_update_memory"));
+        assert!(!memory_dir.exists(), "emptied memory dir is removed");
+    }
+
+    #[test]
+    fn authored_memory_index_without_markers_files_as_list() {
+        // A hand-written MEMORY.md has neither an id nor the generated marker:
+        // it files fresh with kind "list", exactly as before.
+        let dir = tempfile::tempdir().unwrap();
+        let memory_dir = dir.path().join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("MEMORY.md"), b"# Memory Index\n\n- [note.md](note.md)\n").unwrap();
+        let daemon = MockDaemon::alive(vec![(200, r#"{"result":{"content":[{"text":"ok"}]}}"#)]);
+
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.filed, 1);
+        assert_eq!(result.discarded_indexes, 0);
+        assert_eq!(result.removed, 1);
+        assert_eq!(call_names(&daemon), ["moot_file_memory"]);
+        let calls = daemon.calls.lock().unwrap();
         let args = &calls[0]["params"]["arguments"];
-        assert_eq!(calls[0]["params"]["name"], "moot_memory_list");
-        assert_eq!(args["location_prefix"], "harness/slug");
-        // No legacy "command" or "path" args — drift guard.
-        assert!(args.get("command").is_none(), "no command arg");
-        assert!(args.get("path").is_none(), "no path arg");
+        assert_eq!(args["kind"], "list");
+        assert_eq!(args["content"], "# Memory Index\n\n- [note.md](note.md)\n");
+        drop(calls);
+        assert!(!memory_dir.join("MEMORY.md").exists());
+    }
+
+    // ── Restore: rows untouched, files carry ids, re-ingest matches ──────────
+
+    #[test]
+    fn restore_leaves_rows_unchanged_and_reingest_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join("claude");
+        let memory_dir = claude_dir.join("projects").join("slug").join("memory");
+        let index_body = "# Memory Index\n";
+        let list_resp = list_body(&["id-index", "id-note"], false, None);
+        let get_resp = get_body(&[
+            ("id-index", "harness-import/slug/MEMORY.md", index_body, "active"),
+            ("id-note", "harness-import/slug/note.md", SHAPE1_BODY, "active"),
+        ]);
+        let daemon = MockDaemon::alive(vec![(200, list_resp.as_str()), (200, get_resp.as_str())]);
+
+        let summary = restore_memories(&daemon, 4242, true, false, &claude_dir);
+        assert_eq!(summary, "  Restore: 2 written; estate rows left unchanged.");
+        assert!(
+            !call_names(&daemon).iter().any(|n| n == "moot_update_memory"),
+            "restore never mutates an estate row"
+        );
+        assert_eq!(
+            fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap(),
+            front_matter_inject(index_body, "id-index")
+        );
+        assert_eq!(
+            fs::read_to_string(memory_dir.join("note.md")).unwrap(),
+            front_matter_inject(SHAPE1_BODY, "id-note")
+        );
+
+        // Re-enable: the same rows are still active, so every file matches.
+        // Files are processed in name order: MEMORY.md, then note.md.
+        let get_index = get_body(&[("id-index", "harness-import/slug/MEMORY.md", index_body, "active")]);
+        let get_note = get_body(&[("id-note", "harness-import/slug/note.md", SHAPE1_BODY, "active")]);
+        let daemon = MockDaemon::alive(vec![(200, get_index.as_str()), (200, get_note.as_str())]);
+        let result = ingest_project(&daemon, 4242, "slug", &memory_dir);
+        assert_eq!(result.matched, 2);
+        assert_eq!(result.filed, 0);
+        assert_eq!(result.removed, 2);
+        assert_eq!(result.skipped, 0);
+        assert_eq!(call_names(&daemon), ["moot_memory_get", "moot_memory_get"]);
+        assert!(!memory_dir.exists(), "emptied memory dir is removed");
+    }
+
+    #[test]
+    fn restore_restarts_enumeration_on_stale_cursor() {
+        // page1, then a cursor_stale refusal on the second page, then the full
+        // run again: every record lands on disk and the retry starts without a cursor.
+        let (ids, bodies) = two_page_run();
+        let mut queue = vec![
+            (200, PAGE1_FIXTURE),
+            (200, CURSOR_STALE_FRAME),
+            (200, PAGE1_FIXTURE),
+            (200, PAGE2_FIXTURE),
+        ];
+        queue.extend(bodies.iter().map(|b| (200, b.as_str())));
+        let daemon = MockDaemon::alive(queue);
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join("claude");
+
+        let summary = restore_memories(&daemon, 4242, true, false, &claude_dir);
+        assert_eq!(summary, "  Restore: 207 written; estate rows left unchanged.");
+
+        let memory_dir = claude_dir.join("projects").join("bigslug").join("memory");
+        let mut with_id = std::collections::HashSet::new();
+        let mut regenerated = Vec::new();
+        for entry in fs::read_dir(&memory_dir).unwrap().flatten() {
+            let text = fs::read_to_string(entry.path()).unwrap();
+            match front_matter_strip(&text).0 {
+                Some(id) => { with_id.insert(id); }
+                None => regenerated.push(entry.file_name().to_string_lossy().into_owned()),
+            }
+        }
+        assert_eq!(with_id.len(), 207, "one file per record, each carrying its id");
+        assert!(ids.iter().all(|id| with_id.contains(id)), "every listed id reached disk");
+        assert!(regenerated.iter().all(|f| f == "MEMORY.md"), "only the regenerated index lacks an id: {regenerated:?}");
+
+        let calls = daemon.calls.lock().unwrap();
+        let list_frames: Vec<&Value> = calls.iter().filter(|c| c["params"]["name"] == "moot_memory_list").collect();
+        assert_eq!(list_frames.len(), 4, "page1, stale page2, page1 again, page2");
+        assert!(list_frames[1]["params"]["arguments"].get("cursor").is_some(), "second frame carried the cursor");
+        assert!(list_frames[2]["params"]["arguments"].get("cursor").is_none(), "restart begins without a cursor");
+        assert!(list_frames[3]["params"]["arguments"].get("cursor").is_some());
+        assert!(!calls.iter().any(|c| c["params"]["name"] == "moot_update_memory"));
+    }
+
+    #[test]
+    fn restore_fails_closed_when_batch_get_is_refused() {
+        // The list succeeds, the batch get is refused: nothing is written and the
+        // summary says so. A refusal is never an empty wing.
+        let list_resp = list_body(&["a", "b", "c"], false, None);
+        let daemon = MockDaemon::alive(vec![(200, list_resp.as_str()), (200, MEMORY_NOT_FOUND_FRAME)]);
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join("claude");
+
+        let summary = restore_memories(&daemon, 4242, true, false, &claude_dir);
+        assert!(summary.starts_with("  Restore FAILED"), "summary was: {summary}");
+        assert!(summary.contains("memory_not_found"));
+        assert!(!claude_dir.exists(), "zero files written");
+        assert_eq!(call_names(&daemon), ["moot_memory_list", "moot_memory_get"]);
+    }
+
+    #[test]
+    fn estate_list_stale_cursor_gives_up_after_three_restarts() {
+        // Four stale answers in a row: three restarts, then the refusal is returned.
+        let daemon = MockDaemon::alive(vec![
+            (200, CURSOR_STALE_FRAME),
+            (200, CURSOR_STALE_FRAME),
+            (200, CURSOR_STALE_FRAME),
+            (200, CURSOR_STALE_FRAME),
+        ]);
+        let err = estate_list(&daemon, 4242, "harness").expect_err("must give up");
+        assert!(matches!(err, DaemonCallError::Refused { ref code, .. } if code == "cursor_stale"));
+        assert_eq!(call_names(&daemon).len(), 4, "initial attempt plus three restarts");
+    }
+
+    #[test]
+    fn estate_get_batch_reports_missing_records_instead_of_dropping_them() {
+        // Two ids asked, one record answered: the missing id is named, never dropped.
+        let one = get_body(&[("a", "harness-import/slug/a.md", "a", "active")]);
+        let daemon = MockDaemon::alive(vec![(200, one.as_str())]);
+        let err = estate_get_batch(&daemon, 4242, &["a".to_string(), "b".to_string()]).expect_err("short batch is an error");
+        match err {
+            DaemonCallError::Refused { code, message } => {
+                assert_eq!(code, "memory_not_found");
+                assert!(message.contains("missing: b"), "message was: {message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn estate_list_malformed_page_is_an_error_not_empty() {
+        // A 200 body without data.memories / data.has_more is a malformed page.
+        let daemon = MockDaemon::alive(vec![(200, r#"{"result":{"content":[{"text":""}]}}"#)]);
+        assert_eq!(
+            estate_list(&daemon, 4242, "harness"),
+            Err(DaemonCallError::Transport("malformed page".to_string()))
+        );
+    }
+
+    #[test]
+    fn estate_list_has_more_without_next_cursor_is_an_error_not_a_truncated_wing() {
+        // has_more true and no next_cursor: the rest of the wing is unreachable.
+        // The pages read so far are never returned as the whole wing.
+        let page = r##"{"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"memories":[{"memory_id":"a1","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"a1"}}}],"has_more":true,"revision":"r"}},"content":[]}}"##;
+        let daemon = MockDaemon::alive(vec![(200, page)]);
+        assert_eq!(
+            estate_list(&daemon, 4242, "harness"),
+            Err(DaemonCallError::Transport("malformed page".to_string()))
+        );
+        assert_eq!(daemon.calls.lock().unwrap().len(), 1, "no get is attempted on an incomplete listing");
+    }
+
+    #[test]
+    fn estate_list_repeated_cursor_is_an_error_not_a_truncated_wing() {
+        // Two pages that hand back the same cursor: the second page cannot be walked past.
+        let page1 = r##"{"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"memories":[{"memory_id":"a1","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"a1"}}}],"has_more":true,"next_cursor":"c1","revision":"r"}},"content":[]}}"##;
+        let page2 = r##"{"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"memories":[{"memory_id":"a2","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"a2"}}}],"has_more":true,"next_cursor":"c1","revision":"r"}},"content":[]}}"##;
+        let daemon = MockDaemon::alive(vec![(200, page1), (200, page2)]);
+        assert_eq!(
+            estate_list(&daemon, 4242, "harness"),
+            Err(DaemonCallError::Transport("malformed page".to_string()))
+        );
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["params"]["arguments"]["cursor"], "c1");
+    }
+
+    #[test]
+    fn estate_list_alternating_cursor_is_an_error_not_an_infinite_loop() {
+        // c1, c2, c1: the third page repeats the FIRST cursor, not the one
+        // immediately before it. A server alternating between two cursors
+        // must not spin this client forever — every cursor seen is tracked,
+        // not just the most recent one.
+        let page1 = r##"{"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"memories":[{"memory_id":"a1","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"a1"}}}],"has_more":true,"next_cursor":"c1","revision":"r"}},"content":[]}}"##;
+        let page2 = r##"{"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"memories":[{"memory_id":"a2","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"a2"}}}],"has_more":true,"next_cursor":"c2","revision":"r"}},"content":[]}}"##;
+        let page3 = r##"{"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"memories":[{"memory_id":"a3","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"a3"}}}],"has_more":true,"next_cursor":"c1","revision":"r"}},"content":[]}}"##;
+        let daemon = MockDaemon::alive(vec![(200, page1), (200, page2), (200, page3)]);
+        assert_eq!(
+            estate_list(&daemon, 4242, "harness"),
+            Err(DaemonCallError::Transport("malformed page".to_string()))
+        );
+        let calls = daemon.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3, "the loop must stop at the third page, not spin forever");
+        assert_eq!(calls[1]["params"]["arguments"]["cursor"], "c1");
+        assert_eq!(calls[2]["params"]["arguments"]["cursor"], "c2");
+    }
+
+    // ── Live round trip (opt-in: MOOT_HARNESS_LIVE_PORT) ─────────────────────
+
+    /// Disable → re-enable against a running scratch daemon. Every harness row
+    /// is restored with its id, every restored file re-ingests as a match, every
+    /// regenerated index is discarded rather than filed, and the set of ids is
+    /// unchanged. Run with
+    /// `MOOT_HARNESS_LIVE_PORT=<port> cargo test --offline live_round_trip -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_round_trip_against_scratch_daemon() {
+        let Some(port) = std::env::var("MOOT_HARNESS_LIVE_PORT").ok().and_then(|p| p.parse::<u16>().ok()) else {
+            println!("LIVE ROUND TRIP skipped: MOOT_HARNESS_LIVE_PORT not set");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join("claude");
+
+        let before = estate_list(&LiveDaemon, port, "harness").expect("live list before");
+        let mut before_ids: Vec<String> = before.iter().map(|r| r.id.clone()).collect();
+        before_ids.sort();
+        before_ids.dedup();
+        let by_id: std::collections::HashMap<&str, &EstateRecord> = before.iter().map(|r| (r.id.as_str(), r)).collect();
+
+        let summary = restore_memories(&LiveDaemon, port, true, false, &claude_dir);
+        assert!(summary.starts_with("  Restore: "), "summary was: {summary}");
+
+        // Every restored file strips back to (Some(id), the row's content). The
+        // regenerated MEMORY.md indexes (no id) carry the generated marker and
+        // stay on disk: re-ingest must discard them, never file them.
+        let mut restored = 0usize;
+        let mut regenerated = 0usize;
+        let mut slug_dirs = Vec::new();
+        for project in fs::read_dir(claude_dir.join("projects")).unwrap().flatten() {
+            let memory_dir = project.path().join("memory");
+            let slug = project.file_name().to_string_lossy().into_owned();
+            for entry in fs::read_dir(&memory_dir).unwrap().flatten() {
+                let text = fs::read_to_string(entry.path()).unwrap();
+                match front_matter_strip(&text) {
+                    (Some(id), body) => {
+                        let record = by_id.get(id.as_str()).unwrap_or_else(|| panic!("restored id {id} not in before set"));
+                        assert_eq!(body, record.content, "restored body differs for {id}");
+                        restored += 1;
+                    }
+                    (None, body) => {
+                        assert_eq!(entry.file_name(), "MEMORY.md", "only a regenerated index lacks an id");
+                        assert_eq!(
+                            front_matter_strip_field(&body, FRONT_MATTER_GENERATED_INDEX_KEY).0.as_deref(),
+                            Some("true"),
+                            "a regenerated index carries the generated marker"
+                        );
+                        regenerated += 1;
+                    }
+                }
+            }
+            slug_dirs.push((slug, memory_dir));
+        }
+
+        let mut matched = 0usize;
+        let mut filed = 0usize;
+        let mut discarded_indexes = 0usize;
+        for (slug, memory_dir) in &slug_dirs {
+            let r = ingest_project(&LiveDaemon, port, slug, memory_dir);
+            assert!(r.skip_reasons.is_empty(), "skips for {slug}: {:?}", r.skip_reasons);
+            matched += r.matched;
+            filed += r.filed;
+            discarded_indexes += r.discarded_indexes;
+        }
+        assert_eq!(matched, restored, "every restored file re-ingests as a match");
+        assert_eq!(discarded_indexes, regenerated, "every regenerated index is discarded");
+        assert_eq!(filed, 0, "nothing is filed twice");
+
+        let after = estate_list(&LiveDaemon, port, "harness").expect("live list after");
+        let mut after_ids: Vec<String> = after.iter().map(|r| r.id.clone()).collect();
+        after_ids.sort();
+        after_ids.dedup();
+        assert_eq!(after_ids, before_ids, "the id set is unchanged by disable + re-enable");
+        let mut locations: Vec<&str> = after.iter().map(|r| r.location.as_str()).collect();
+        locations.sort();
+        let unique = locations.len();
+        locations.dedup();
+        assert_eq!(locations.len(), unique, "no duplicate locations after the round trip");
+        println!(
+            "LIVE ROUND TRIP {port}: before={} after={} restored={restored} matched={matched} discarded_indexes={discarded_indexes} ids={}",
+            before_ids.len(),
+            after_ids.len(),
+            after_ids.join(",")
+        );
+        if before_ids.len() > 200 {
+            assert!(restored > 200, "a wing over one page must restore past the first page");
+        }
     }
 
     // ── Finding 1: hook-path timeout constants ────────────────────────────────
@@ -2456,26 +3794,26 @@ cross-session linking that the flat project-memory directory never had.\n";
         );
     }
 
-    // ── Finding 5: discover_restore_records deduplicates harness-import ──────
+    // ── Finding 5: discover_restore_records covers both classes in one call ──
 
     #[test]
     fn discover_restore_records_deduplicates_harness_import_under_harness_prefix() {
-        // A harness-import record that the estate returns for BOTH the "harness-import"
-        // prefix query AND the "harness" prefix query (because "harness-import" starts
-        // with "harness") must appear exactly once in the result.
-        let harness_import_json = r#"{"result":{"memories":[{"id":"d1","location":"harness-import/slug/note.md","content":"c","superseded":false}]}}"#;
-        let daemon = MockDaemon::alive(vec![
-            // First query (prefix "harness-import"): server returns the record.
-            (200, harness_import_json),
-            // Second query (prefix "harness"): server also returns it (prefix overlap).
-            (200, harness_import_json),
+        // One list call with prefix "harness" covers harness-import/* and harness/*
+        // (prefix overlap). The record must appear exactly once and the estate
+        // must see exactly one moot_memory_list frame.
+        let list_resp = list_body(&["d1", "d2", "d3"], false, None);
+        let get_resp = get_body(&[
+            ("d1", "harness-import/slug/note.md", "c", "active"),
+            ("d2", "harness/slug/captured.md", "c", "active"),
+            ("d3", "harnessless/slug/other.md", "c", "active"),
         ]);
-        let records = discover_restore_records(&daemon, 4242);
-        assert_eq!(
-            records.len(), 1,
-            "harness-import record must appear exactly once despite prefix overlap"
-        );
-        assert_eq!(records[0].id, "d1");
+        let daemon = MockDaemon::alive(vec![(200, list_resp.as_str()), (200, get_resp.as_str())]);
+        let records = discover_restore_records(&daemon, 4242).expect("discover ok");
+        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["d1", "d2"], "harness-import and harness rows once each; other prefixes excluded");
+        let names = call_names(&daemon);
+        assert_eq!(names.iter().filter(|n| *n == "moot_memory_list").count(), 1, "exactly one list frame");
+        assert_eq!(names.len(), 2, "list then one batch get");
     }
 
     // ── Finding 6: memory_kind is case-insensitive ────────────────────────────

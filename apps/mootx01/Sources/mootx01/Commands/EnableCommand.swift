@@ -240,12 +240,11 @@ struct EnableCommand: AsyncParsableCommand {
         print("old secrets should be withdrawn or re-filed restricted after ingest.")
         print()
 
-        // Check whether this is a re-enable (any files already ingested before).
-        let isReEnable = false // First enable: not a re-enable sweep.
-
-        var totalFiled = 0
-        var totalSkipped = 0
-        var totalFailed = 0
+        // Every result feeds the summary line; the words and order match the
+        // Rust port's per-project line (filed, matched, discarded indexes,
+        // removed, skipped), so a matched file is never reported as filed.
+        var allResults: [IngestResult] = []
+        var declinedFiles = 0
 
         for (slug, files) in projectMemories.sorted(by: { $0.key < $1.key }) {
             let shouldIngest: Bool
@@ -258,30 +257,32 @@ struct EnableCommand: AsyncParsableCommand {
             }
             guard shouldIngest else {
                 print("  Skipped '\(slug)'")
-                totalSkipped += files.count
+                declinedFiles += files.count
                 continue
             }
 
+            var slugResults: [IngestResult] = []
             for fileURL in files {
                 let result = await HarnessMemoryIngest.ingestFile(
-                    fileURL, projectSlug: slug, isReEnable: isReEnable, daemon: daemon
+                    fileURL, projectSlug: slug, daemon: daemon
                 )
                 switch result.outcome {
-                case .filed, .revived:
-                    totalFiled += 1
+                case .filed, .matched, .discardedIndex:
+                    break
                 case .skipped(let reason):
                     print("  skip \(result.fileName): \(reason)")
-                    totalSkipped += 1
                 case .failed(let reason):
                     print("  fail \(result.fileName): \(reason)")
-                    totalFailed += 1
                 }
+                slugResults.append(result)
             }
+            print("  \(slug): \(HarnessMemoryIngest.summaryLine(slugResults))")
+            allResults.append(contentsOf: slugResults)
             HarnessMemoryIngest.removeEmptyMemoryDir(projectSlug: slug, homeDirectory: homeDirectory)
         }
 
         print()
-        print("Ingest complete: filed \(totalFiled), skipped \(totalSkipped), failed \(totalFailed)")
+        print("Ingest complete: \(HarnessMemoryIngest.summaryLine(allResults)); declined \(declinedFiles)")
     }
 }
 
@@ -392,25 +393,19 @@ struct DisableCommand: AsyncParsableCommand {
     }
 
     private func runRestoreOffer(homeDirectory: URL, daemon: some DaemonClient) async {
-        // Discover which project slugs have estate memories to restore.
-        // Query both harness-import/* and harness/* location prefixes.
+        // Restore discovers every harness-import/* and harness/* row itself.
         print("Checking estate for memories to restore...")
         guard !restoreAll && !yes else {
             // Non-interactive: restore everything found.
             let results = await HarnessMemoryRestore.restore(
-                projectSlugs: ["*"],  // wildcard: restore will query all slugs
                 homeDirectory: homeDirectory,
-                daemon: daemon,
-                now: Date()
+                daemon: daemon
             )
             summarizeRestore(results)
             return
         }
 
-        // Interactive: ask per project.
-        // For simplicity in the interactive path, restore all slugs the user
-        // confirms. A full slug-discovery pass (querying the estate for known
-        // slugs) is out of scope; offer a catch-all prompt instead.
+        // Interactive: one prompt covers every project the estate holds.
         print("Restore estate memories back to disk? [y/N] ", terminator: "")
         let answer = readLine() ?? ""
         guard answer.lowercased().hasPrefix("y") else {
@@ -419,10 +414,8 @@ struct DisableCommand: AsyncParsableCommand {
         }
 
         let results = await HarnessMemoryRestore.restore(
-            projectSlugs: ["*"],
             homeDirectory: homeDirectory,
-            daemon: daemon,
-            now: Date()
+            daemon: daemon
         )
         summarizeRestore(results)
     }
