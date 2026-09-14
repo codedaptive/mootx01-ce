@@ -1,8 +1,5 @@
 
-#[path = "../src/v2/estate_diagnostics.rs"]
-mod estate_diagnostics;
-
-use estate_diagnostics::{
+use aria_mcp::v2::estate_diagnostics::{
     DiagnosticsFact, DiagnosticsLifecycle, DiagnosticsMemory, EstateDiagnosticsAuthority,
     EstateDiagnosticsContext, EstateDiagnosticsFailure, EstateDiagnosticsGrant,
     EstateDiagnosticsOperation, EstateDiagnosticsRequest, EstateDiagnosticsService,
