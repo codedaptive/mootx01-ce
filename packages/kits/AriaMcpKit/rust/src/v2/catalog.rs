@@ -12,6 +12,22 @@ use super::{
     registry::{V2CatalogInput, V2EffectiveRegistry},
 };
 
+/// The v2 registry owns cognition-lens membership. This internal marker is
+/// deliberately absent from `selected_tools_for_registry`.
+const LENS_LANE_TOOL_NAMES: &[&str] = &[
+    "moot_list_lenses", "moot_list_recipes", "moot_synthesize",
+    "moot_recall_precise", "moot_recall_temporal", "moot_recall_shaped",
+    "moot_recall_connected", "moot_dream", "moot_recall_distilled", "moot_recall_vague",
+    "moot_hunt_contradictions", "moot_recall_walk", "moot_lens_keystones",
+    "moot_lens_constellation", "moot_lens_free_association",
+    "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
+    "moot_lens_drift", "moot_lens_node_motion", "moot_lens_cohesion", "moot_lens_contradiction", "moot_lens_trust_synthesis",
+    "moot_lens_partial_cue", "moot_lens_anticipate", "moot_lens_successors",
+    "moot_lens_overlap", "moot_lens_divergence", "moot_lens_moment", "moot_lens_rhythm",
+    "moot_lens_precedence", "moot_lens_complexity", "moot_lens_associations", "moot_lens_concepts",
+    "moot_lens_apriori",
+];
+
 pub fn selected_registry() -> V2EffectiveRegistry {
     selected_registry_with_vault(crate::tool_list::vault_enabled())
 }
@@ -408,6 +424,7 @@ fn descriptor(
             intents: intents.iter().map(|value| (*value).to_owned()).collect(),
             example: None,
         },
+        lens_lane_member: LENS_LANE_TOOL_NAMES.contains(&name),
         recipe_bindings: Vec::new(),
     }
 }

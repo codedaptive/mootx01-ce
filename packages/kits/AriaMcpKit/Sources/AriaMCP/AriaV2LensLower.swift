@@ -209,7 +209,7 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         case .lensContradiction:
             // The v2 projection preserves the existing contradiction lens's two
             // typed signals.  It reads the persisted output of the atomic hunt
-            // directly; it never invokes LensTools or parses its text response.
+            // directly; it never parses a rendered text response.
             let estate = try await kit.estate(for: handle)
             // COUNT FIRST, THEN WITHHOLD. Filtering by sensitivity before
             // counting makes a restricted contradiction vanish from the total,

@@ -2,10 +2,6 @@
 //! server path — `Dispatcher::new` + `Dispatcher::handle` with a properly-formed
 //! `tools/call` JSON-RPC 2.0 request.
 //!
-//! `dispatch_tool` is the v1 test-helper entry point. The running server never
-//! reaches it (see `rust/src/lib.rs:19` and `rust/src/dispatcher.rs:193-200`).
-//! Every test here goes through the path the production server uses.
-//!
 //! Operations covered:
 //!   moot_lens_anticipate, moot_lens_bias, moot_lens_constellation,
 //!   moot_lens_drift, moot_lens_latent_themes, moot_lens_overlap (refusal),
@@ -44,8 +40,7 @@
 //! # Model test
 //!
 //! The harness shape (make_dispatcher / tools_call / dispatch_and_unwrap) is
-//! copied from `aria_v2_federated_recall_dispatch_coverage_tests.rs`, which
-//! already does it correctly. No test in this file calls `dispatch_tool`.
+//! copied from `aria_v2_federated_recall_dispatch_coverage_tests.rs`.
 
 use aria_mcp::dispatcher::Dispatcher;
 use aria_mcp::estate_posture::EstatePosture;

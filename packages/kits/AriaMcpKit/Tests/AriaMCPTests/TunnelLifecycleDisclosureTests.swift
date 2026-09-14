@@ -146,10 +146,7 @@ struct TunnelLifecycleDisclosureTests {
     // `AriaV2KnowledgeJournalService.connectionSearch`
     // (Sources/AriaMCP/AriaV2KnowledgeJournal.swift:473-477), which still calls
     // `estate.activeTunnelsFrom(drawerId:)` / `activeTunnelsTo(drawerId:)` —
-    // the same LocusKit-level lifecycle/retirement bitmap filter v1 exercised
-    // (see doc comment above `runConnectionSearch`, ToolDispatch.swift:3079-3095,
-    // now dead code but describing the same storage-layer predicate the v2
-    // backend still uses). Response text is reshaped from "found N outgoing
+    // the same LocusKit-level lifecycle/retirement bitmap filter. Response text is reshaped from "found N outgoing
     // connections" to "Found N authorized connections." — the exact new
     // string is pinned below.
     //
