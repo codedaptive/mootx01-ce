@@ -6014,6 +6014,59 @@ fn lens_partial_cue_row_carries_best_span() {
 }
 
 #[test]
+fn partial_cue_row_keys_and_ssc_facts_match_port_contract() {
+    use locus_kit::provenance::Sensitivity;
+
+    let expected_keys = ["bestSpan", "eventTime", "id", "room", "score", "sscFacts", "subject"];
+    let expected_ssc_facts = "kind: meeting, entity: row parity";
+    let registry = new_cue_registry();
+    let anchor_id = seed_cue_memory(
+        &registry, "partial-cue-row-contract-anchor", "004", Sensitivity::Normal);
+    let peer_id = seed_cue_memory_with_subject(
+        &registry,
+        "partial cue row contract subject",
+        "partial cue row contract content",
+        "530",
+        Sensitivity::Normal,
+    );
+    {
+        let coord = registry.coord.lock().unwrap();
+        let estate = coord.estate_for(&registry.default.handle).expect("estate");
+        estate
+            .set_ssc_facts(&peer_id, Some(expected_ssc_facts))
+            .expect("set peer SSC facts");
+    }
+    let dispatcher = make_cue_dispatcher(registry);
+
+    let result = cue_dispatch_unwrap(
+        &dispatcher,
+        cue_tools_call("moot_lens_partial_cue", serde_json::json!({
+            "anchor_memory_id": anchor_id,
+            "mode": "feelsLike",
+            "limit": 5
+        })),
+    );
+
+    assert!(is_success(&result), "partial_cue must succeed; got: {result:?}");
+    let results = result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("results must be an array");
+    let peer_row = results
+        .iter()
+        .find(|row| row["id"].as_str() == Some(peer_id.as_str()))
+        .expect("peer must appear in partial_cue results");
+    let mut actual_keys: Vec<&str> = peer_row
+        .as_object()
+        .expect("peer row must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    actual_keys.sort_unstable();
+    assert_eq!(actual_keys, expected_keys);
+    assert_eq!(peer_row["sscFacts"], serde_json::json!(expected_ssc_facts));
+}
+
+#[test]
 fn partial_cue_row_omits_subject_key_when_drawer_has_none() {
     // AR_LENS_PARTIAL_CUE_ABSENT_SUBJECT_001 (Rust port)
     // A partial-cue result row for an admissible drawer that has no stored
@@ -6063,35 +6116,28 @@ fn partial_cue_row_omits_subject_key_when_drawer_has_none() {
 }
 
 #[test]
-fn partial_cue_row_truncates_before_normalising_best_span() {
+fn partial_cue_row_normalises_before_truncating_best_span() {
     // AR_LENS_PARTIAL_CUE_TRUNCATION_ORDER_001 (Rust port)
-    // BestSpan is produced by truncate-then-normalize, not normalize-then-truncate.
-    // The two orderings give different results for content longer than 120 chars
-    // that contains collapsible whitespace before the cut point.
+    // BestSpan is normalized before it is cut at 120 grapheme clusters.
+    // The order and unit are visible with collapsible whitespace before the cut
+    // point and a multi-scalar emoji exactly at the boundary.
     //
     // Fixture: 50 'A's, five newlines, 100 'B's (155 chars total).
-    //   truncate(120) first: 50 A's + 5 newlines + 65 B's (120 chars)
-    //   then normalize:      "AAAA...AAAA BBBB...BBBB" (50 A's, space, 65 B's)
-    //
-    //   wrong order (normalize first):
-    //   normalize:    "AAAA...AAAA BBBB...BBBB" (151 chars; 5 newlines → 1 space)
-    //   truncate(120): 50 A's + space + 69 B's   (120 chars — four extra B's)
-    //
-    // The expected literal encodes 50 A's, one space, and 65 B's. Both ports
-    // assert the same literal so a difference in ordering shows up in either.
+    //   normalize first: "AAAA...AAAA BBBB...BBBB" (151 graphemes)
+    //   then cut:        50 A's + space + 69 B's (120 graphemes)
     //
     // Drives the shipped path: Dispatcher::handle → surface.rs execute_recall
     // → lens_lower.rs partial_cue → structured_drawers_by_id.
     //
-    // Port parity: the expected_best_span literal must match the Swift twin in
-    // AriaV2LensLowerTests.swift partialCueRowTruncatesBeforeNormalisingBestSpan.
+    // Port parity: both expected literals match the Swift twin in
+    // AriaV2LensLowerTests.swift partialCueRowNormalisesBeforeTruncatingBestSpan.
     use locus_kit::provenance::Sensitivity;
 
     // 50 A's + 5 newlines + 100 B's (155 chars; crosses the 120-char cut).
     let content = format!("{}\n\n\n\n\n{}", "A".repeat(50), "B".repeat(100));
-    // truncate(raw, 120) cuts at char 120: 50 A's + 5 newlines + 65 B's.
-    // normalize collapses the 5 newlines to one space: 50 A's + " " + 65 B's.
-    let expected_best_span = format!("{} {}", "A".repeat(50), "B".repeat(65));
+    let expected_best_span = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    let emoji_content = format!("{}👨‍👩‍👧‍👦TAIL", "C".repeat(119));
+    let expected_emoji_best_span = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC👨‍👩‍👧‍👦";
 
     let registry = new_cue_registry();
     let anchor_id = seed_cue_memory(
@@ -6102,6 +6148,13 @@ fn partial_cue_row_truncates_before_normalising_best_span() {
         &registry,
         "truncation order subject",
         &content,
+        "530",
+        Sensitivity::Normal,
+    );
+    let emoji_peer_id = seed_cue_memory_with_subject(
+        &registry,
+        "grapheme boundary subject",
+        &emoji_content,
         "530",
         Sensitivity::Normal,
     );
@@ -6131,7 +6184,19 @@ fn partial_cue_row_truncates_before_normalising_best_span() {
         .expect("peer row must carry bestSpan");
     assert_eq!(
         actual_best_span, expected_best_span,
-        "bestSpan must be truncate-then-normalize (50 A's + space + 65 B's); got: {actual_best_span:?}"
+        "bestSpan must normalize before cutting (50 A's + space + 69 B's); got: {actual_best_span:?}"
+    );
+
+    let emoji_row = results
+        .iter()
+        .find(|row| row["id"].as_str() == Some(emoji_peer_id.as_str()))
+        .expect("emoji peer must appear in partial_cue results");
+    let actual_emoji_best_span = emoji_row["bestSpan"]
+        .as_str()
+        .expect("emoji peer row must carry bestSpan");
+    assert_eq!(
+        actual_emoji_best_span, expected_emoji_best_span,
+        "bestSpan must retain the complete grapheme at boundary 120; got: {actual_emoji_best_span:?}"
     );
 }
 
@@ -6264,36 +6329,26 @@ fn lens_partial_cue_provenance_secret_row_has_secret_marker() {
 }
 
 // AR_LENS_PARTIAL_CUE_TRIM_ASYMMETRY_001
-// bestSpan for a body that starts with leading whitespace followed by more
-// than 120 chars must be computed by truncating the RAW (untrimmed) body,
-// then normalising — matching Swift's AriaV2LensLower.swift:901-903 which
-// passes drawer.content whole to structuredRowObject where truncation
-// precedes normalisation.
+// Leading whitespace is removed by normalization before the 120-grapheme cut.
 //
 // Fixture: 10 spaces + 115 A's (125 chars total).
-//   truncate(raw, 120): "          " + 110 A's (char 120 is the 111th A).
-//   normalize: leading spaces stripped → 110 A's.
+//   normalize first: leading spaces stripped, leaving 115 A's.
+//   cut: unchanged because 115 is below the limit.
 //
-// Wrong order (trim-then-truncate):
-//   trim: 115 A's (115 < 120 — no cut at all).
-//   normalize: 115 A's.
-//
-// Both ports assert the 110-A literal so a trim-before-truncate regression
-// fails in either.
+// Both ports assert the same 115-A literal.
 //
 // Port parity: the expected literal must match the Swift twin in
-// AriaV2LensLowerTests.swift partialCueLeadingWhitespaceTruncation.
+// AriaV2LensLowerTests.swift partialCueLeadingWhitespaceNormalisesBeforeGraphemeCut.
 //
 // Drives: Dispatcher::handle → surface.rs execute_recall →
 // lens_lower.rs partial_cue → structured_drawers_by_id.
 #[test]
-fn partial_cue_leading_whitespace_truncates_at_raw_character_boundary() {
+fn partial_cue_leading_whitespace_normalises_before_grapheme_cut() {
     use locus_kit::provenance::Sensitivity;
 
     // 10 leading spaces + 115 A's = 125 chars total.
     let content = format!("{}{}", " ".repeat(10), "A".repeat(115));
-    // truncate(raw, 120) cuts 10 spaces + 110 A's; normalize → 110 A's.
-    let expected_best_span = "A".repeat(110);
+    let expected_best_span = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     let registry = new_cue_registry();
     let anchor_id = seed_cue_memory(&registry, "trim-asymmetry-anchor", "004", Sensitivity::Normal);
@@ -6332,7 +6387,7 @@ fn partial_cue_leading_whitespace_truncates_at_raw_character_boundary() {
         .expect("peer row must carry bestSpan");
     assert_eq!(
         actual_best_span, expected_best_span,
-        "bestSpan must be truncate-then-normalize (110 A's); got: {actual_best_span:?}"
+        "bestSpan must be 115 A's after normalize-before-cut; got: {actual_best_span:?}"
     );
 }
 

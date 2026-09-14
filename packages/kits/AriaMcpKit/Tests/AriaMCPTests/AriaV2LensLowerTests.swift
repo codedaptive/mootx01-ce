@@ -435,6 +435,43 @@ struct PartialCueModeTests {
                 "bestSpan must equal the normalised content body")
     }
 
+    @Test("partial-cue row carries the cross-port key set and SSC facts")
+    func partialCueRowKeysAndSSCFactsMatchPortContract() async throws {
+        let (kit, handle) = try await openEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        let expectedKeys = ["bestSpan", "eventTime", "id", "room", "score", "sscFacts", "subject"]
+        let expectedSSCFacts = "kind: meeting, entity: row parity"
+        let anchor = try await kit.capture(handle, CaptureFrame(
+            content: "partial-cue-row-contract-anchor",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("004"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1"))
+        let peer = try await kit.capture(handle, CaptureFrame(
+            content: "partial cue row contract content",
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("530"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1",
+            subject: "partial cue row contract subject"))
+        let estate = try await kit.estate(for: handle)
+        _ = try await estate.setSSCFacts(expectedSSCFacts, for: peer.id)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: "moot_lens_partial_cue",
+            arguments: .object(["anchor_memory_id": .string(anchor.id), "mode": .string("feelsLike")]))
+        let response = try await service.execute(request)
+
+        let results = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue)
+        let peerRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == peer.id })?.objectValue)
+        #expect(peerRow.keys.sorted() == expectedKeys)
+        #expect(peerRow["sscFacts"] == .string(expectedSSCFacts))
+    }
+
     // MARK: Absent-subject and truncation-order parity gates
 
     /// AR_LENS_PARTIAL_CUE_ABSENT_SUBJECT_001 (Swift port)
@@ -489,25 +526,21 @@ struct PartialCueModeTests {
     }
 
     /// AR_LENS_PARTIAL_CUE_TRUNCATION_ORDER_001 (Swift port)
-    /// bestSpan is produced by truncate-then-normalize, not normalize-then-truncate.
-    /// The two orderings give different results when content exceeds 120 chars and
-    /// contains collapsible whitespace before the cut point.
+    /// bestSpan is produced by normalize-then-truncate at 120 grapheme clusters.
+    /// The order and unit are visible when content has collapsible whitespace before
+    /// the cut point or a multi-scalar emoji exactly at the boundary.
     ///
     /// Fixture: 50 'A's, five newlines, 100 'B's (155 chars).
-    ///   truncate(120) first: 50 A's + 5 newlines + 65 B's (120 chars)
-    ///   then normalize:      "AAAA…AAAA BBBB…BBBB" (50 A's, space, 65 B's)
-    ///
-    ///   wrong order (normalize first):
-    ///   normalize:    "AAAA…AAAA BBBB…BBBB" (151 chars; newlines → 1 space)
-    ///   truncate(120): 50 A's + space + 69 B's  (four extra B's)
+    ///   normalize first: "AAAA…AAAA BBBB…BBBB" (151 graphemes)
+    ///   then cut:        50 A's + space + 69 B's (120 graphemes)
     ///
     /// Drives the shipped path: AriaV2LensLowerService.execute → AriaV2LensLower
     /// partialCueOutcome → ResultComposer.structuredRowObject.
     ///
-    /// Port parity: the expectedBestSpan literal must match the Rust twin in
-    /// dispatch_tests.rs partial_cue_row_truncates_before_normalising_best_span.
-    @Test("partial-cue bestSpan applies truncate-then-normalize, not normalize-then-truncate")
-    func partialCueRowTruncatesBeforeNormalisingBestSpan() async throws {
+    /// Port parity: both expected literals match the Rust twin in dispatch_tests.rs
+    /// partial_cue_row_normalises_before_truncating_best_span.
+    @Test("partial-cue bestSpan normalises before the 120-grapheme cut")
+    func partialCueRowNormalisesBeforeTruncatingBestSpan() async throws {
         let (kit, handle) = try await openEstate()
         defer { Task { try? await kit.close(handle) } }
 
@@ -515,12 +548,11 @@ struct PartialCueModeTests {
         let content = String(repeating: "A", count: 50)
             + "\n\n\n\n\n"
             + String(repeating: "B", count: 100)
-        // truncate(raw, 120): 50 A's + 5 newlines + 65 B's (120 chars).
-        // normalize: collapse the 5 newlines to one space → 50 A's + " " + 65 B's.
-        // Both ports assert this same literal.
-        let expectedBestSpan = String(repeating: "A", count: 50)
-            + " "
-            + String(repeating: "B", count: 65)
+        // Normalize collapses the newlines, then the cut retains 69 B's.
+        let expectedBestSpan = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        // The family emoji is one grapheme cluster despite containing seven scalars.
+        let emojiContent = String(repeating: "C", count: 119) + "👨‍👩‍👧‍👦TAIL"
+        let expectedEmojiBestSpan = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC👨‍👩‍👧‍👦"
 
         // Anchor: Normal, UDC "004".
         let anchor = try await kit.capture(handle, CaptureFrame(
@@ -537,6 +569,12 @@ struct PartialCueModeTests {
             latticeAnchor: .udc("530"), addedBy: "partial-cue-mode-tests",
             embeddingModelID: "test-model-v1",
             subject: "truncation order subject"))
+        let emojiPeer = try await kit.capture(handle, CaptureFrame(
+            content: emojiContent,
+            channel: .typed, room: "cue-mode-test",
+            latticeAnchor: .udc("530"), addedBy: "partial-cue-mode-tests",
+            embeddingModelID: "test-model-v1",
+            subject: "grapheme boundary subject"))
 
         let service = AriaV2LensLowerService(
             authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
@@ -558,7 +596,16 @@ struct PartialCueModeTests {
             peerRow["bestSpan"]?.stringValue,
             "peer row must carry bestSpan")
         #expect(actualBestSpan == expectedBestSpan,
-                "bestSpan must be truncate-then-normalize (50 A's + space + 65 B's); got: \(actualBestSpan)")
+                "bestSpan must normalize before cutting (50 A's + space + 69 B's); got: \(actualBestSpan)")
+
+        let emojiRow = try #require(
+            results.first(where: { $0.objectValue?["id"]?.stringValue == emojiPeer.id })?.objectValue,
+            "emoji peer must appear in partial_cue results")
+        let actualEmojiBestSpan = try #require(
+            emojiRow["bestSpan"]?.stringValue,
+            "emoji peer row must carry bestSpan")
+        #expect(actualEmojiBestSpan == expectedEmojiBestSpan,
+                "bestSpan must retain the complete grapheme at boundary 120; got: \(actualEmojiBestSpan)")
     }
 
     /// Parity lock: a drawer with provenance sensitivity Restricted and default
@@ -680,29 +727,24 @@ struct PartialCueModeTests {
                 "provenance-secret row must carry 'id'")
     }
 
-    /// Parity lock: a body that starts with leading whitespace followed by more
-    /// than 120 characters must produce a bestSpan truncated at raw character 120,
-    /// not at character 120 of the trimmed body.
+    /// Parity lock: normalization removes leading whitespace before applying the
+    /// 120-grapheme cut.
     ///
     /// Fixture: 10 spaces + 115 A's (125 chars total).
-    ///   truncate(raw, 120): 10 spaces + 110 A's.
-    ///   normalize: leading spaces stripped → 110 A's.
-    ///
-    /// Wrong order (trim-then-truncate): 115 A's (no cut because 115 < 120).
+    ///   normalize first: leading spaces stripped, leaving 115 A's.
+    ///   cut: unchanged because 115 is below the limit.
     ///
     /// Port parity: the Rust twin is
-    /// dispatch_tests.rs partial_cue_leading_whitespace_truncates_at_raw_character_boundary.
-    /// Both ports assert "A" × 110 so a regression in either fails here.
-    @Test("partial-cue bestSpan truncates leading-whitespace body at raw character 120")
-    func partialCueLeadingWhitespaceTruncation() async throws {
+    /// dispatch_tests.rs partial_cue_leading_whitespace_normalises_before_grapheme_cut.
+    /// Both ports assert the same 115-A literal.
+    @Test("partial-cue bestSpan normalises leading whitespace before grapheme cut")
+    func partialCueLeadingWhitespaceNormalisesBeforeGraphemeCut() async throws {
         let (kit, handle) = try await openEstate()
         defer { Task { try? await kit.close(handle) } }
 
         // 10 leading spaces + 115 A's = 125 chars total.
         let content = String(repeating: " ", count: 10) + String(repeating: "A", count: 115)
-        // truncate(raw, 120) cuts at the 121st character: 10 spaces + 110 A's.
-        // normalize strips leading spaces → 110 A's.
-        let expectedBestSpan = String(repeating: "A", count: 110)
+        let expectedBestSpan = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
         let anchor = try await kit.capture(handle, CaptureFrame(
             content: "trim-asymmetry-anchor",
@@ -739,7 +781,7 @@ struct PartialCueModeTests {
             peerRow["bestSpan"]?.stringValue,
             "peer row must carry bestSpan")
         #expect(actualBestSpan == expectedBestSpan,
-                "bestSpan must be 110 A's (truncate-at-raw-120 then normalize); got: \(actualBestSpan)")
+                "bestSpan must be 115 A's after normalize-before-cut; got: \(actualBestSpan)")
     }
 
     // MARK: - Provenance gate: keystones and trust-synthesis (B6/B7)
