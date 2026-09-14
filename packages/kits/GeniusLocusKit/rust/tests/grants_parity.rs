@@ -680,6 +680,48 @@ fn open_two_estate_coord() -> (
     (coord, src, req)
 }
 
+#[test]
+fn federated_withheld_count_includes_only_grant_authorized_candidates() {
+    use locus_kit::adjectives::AdjectiveSensitivity;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let (mut coord, source, requester) = open_two_estate_coord();
+    let options = GrantOptions {
+        grantee_estate_id: Uuid::from_bytes(requester.estate_uuid),
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::HandedOver,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 48,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } = coord
+        .issue_grant(&source, options, &[0xD1u8; 32], NOW_F64)
+        .expect("issue grant");
+    coord.grant_store_mut(&source).expect("store")
+        .set_budget(grant.id, 1.0).expect("set budget");
+
+    let normal = coord.capture(&source, CaptureFrame::new(
+        "authorized normal", CaptureChannel::Typed, "withheld", LatticeAnchor::udc("001"),
+        "withheld-tests", "test-v1"), NOW).expect("capture normal");
+    let mut restricted_frame = CaptureFrame::new(
+        "authorized restricted", CaptureChannel::Typed, "withheld", LatticeAnchor::udc("001"),
+        "withheld-tests", "test-v1");
+    restricted_frame.sensitivity = AdjectiveSensitivity::Restricted;
+    let restricted = coord.capture(&source, restricted_frame, NOW + 1)
+        .expect("capture restricted");
+
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]), &source, &requester,
+        NOW_F64 + 1.0, NOW + 1,
+    ).expect("federated recall");
+    assert!(result.drawers.iter().any(|drawer| drawer.id == normal.id));
+    assert!(!result.drawers.iter().any(|drawer| drawer.id == restricted.id));
+    assert_eq!(result.withheld_by_sensitivity, 1,
+        "only the authorized source's restricted primary row is counted");
+}
+
 /// GRT-05a: mode-1 (Mediated) — vault holds key → federated_recall succeeds.
 ///
 /// Swift mirror: CrossEstateFederationTests test 15
