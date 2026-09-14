@@ -78,7 +78,7 @@ enum AriaV2SelectedCatalog {
                     "maxItems": .integer(Int64(AriaV2MemoryGetRequest.maximumIDs)),
                     "uniqueItems": .bool(true),
                 ]),
-                "depth": enumSchema(AriaV2MemoryDepth.allCases.map(\.rawValue)),
+                "depth": .object(["type": .string("string"), "enum": .array(AriaV2MemoryDepth.allCases.map { .string($0.rawValue) }), "description": .string("skim returns a source-order distilled preview with a 512 UTF-8 byte target; intact groups may exceed it. Fetch distilled or full for the remainder.")]),
                 "estate_id": uuidSchema(),
             ], inputSchemaAdditions: ["oneOf": exactlyOneOf("memory_id", "memory_ids")],
             dataSchema: memoryGetDataSchema()
@@ -1630,6 +1630,7 @@ enum AriaV2SelectedCatalog {
         // and depth:distilled, so it is declared here but not required.
         orderedExactObjectSchema([
             "memory_id": uuidSchema(), "subject": stringSchema(), "distilled": stringSchema(),
+            "skim": orderedExactObjectSchema(["text": stringSchema(), "complete": .object(["type": .string("boolean")]), "budgetHonored": .object(["type": .string("boolean")]), "savings": stringSchema()], required: ["text", "complete", "budgetHonored", "savings"]),
             "content": stringSchema(), "placement": placementSchema(), "filed_at": dateSchema(),
             "event_time": dateSchema(), "state": stringSchema(), "trust": stringSchema(),
             "sensitivity": stringSchema(), "exportability": stringSchema(), "confirmation": stringSchema(),
