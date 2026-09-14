@@ -113,6 +113,6 @@ private final class CodexMemoryMockDaemon: DaemonClient, @unchecked Sendable {
         filed.append((location, content)); return true
     }
     func listMemories(locationPrefix: String) async throws -> [HarnessMemoryRecord] { [] }
-    func updateMemory(id: String, mutation: String, note: String) async throws {}
+    func getMemory(id: String) async throws -> HarnessMemoryRecord? { nil }
     func ping() async -> Bool { true }
 }

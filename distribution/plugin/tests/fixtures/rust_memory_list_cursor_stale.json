@@ -1,0 +1,28 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "The inventory changed; restart moot_memory_list without the cursor.",
+        "type": "text"
+      }
+    ],
+    "isError": true,
+    "structuredContent": {
+      "error": {
+        "code": "cursor_stale",
+        "message": "The inventory changed; restart moot_memory_list without the cursor.",
+        "retryable": true
+      },
+      "meta": {
+        "build_id": "20260909190149/687717bd",
+        "capability_digest": "3fc57f13dfefe357fd8ee556b6e90bc60ededf1298f96e5582fdcb0d9fe0b8d8",
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_list"
+    }
+  }
+}

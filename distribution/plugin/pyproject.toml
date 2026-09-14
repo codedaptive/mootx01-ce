@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mootx01-plugin"
+version = "1.0.0"
+description = "MOOTx01 Claude plugin: skills, hooks, rules, and catalog-parity tests"
+requires-python = ">=3.10"
+authors = [{name = "Codedaptive"}]
+
+[tool.pytest.ini_options]
+# Run all four test files under tests/. A bare `python3 -m pytest` from the
+# distribution/plugin directory (what scripts/moot-test's product-python lane
+# runs) discovers them here; `make test-one DIR=distribution/plugin` resolves
+# the same root via find_owner.
+testpaths = ["tests"]
