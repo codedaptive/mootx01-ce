@@ -185,6 +185,32 @@ fn depth_distilled_carries_no_tunnels_key() {
     );
 }
 
+#[test]
+fn depth_skim_is_output_only_and_keeps_full_fetch_available() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let source = format!("{}\n\nTAIL_ONLY_MARKER {}", "Opening conference fact. ".repeat(12), "detail ".repeat(80));
+    let filed = call(&dispatcher, "moot_file_memory", json!({"content":source, "subject":"Conference facts", "location":"wire-parity-tests"}));
+    assert!(is_success(&filed), "file failed: {filed}");
+    let id = data(&filed)["memory_id"].as_str().unwrap().to_owned();
+    let mem = get_depth(&dispatcher, &id, "skim");
+    assert!(mem.get("content").is_none());
+    assert!(mem.get("distilled").is_none());
+    assert!(mem.get("tunnels").is_none());
+    assert_eq!(mem["skim"]["complete"], false);
+    assert_eq!(mem["skim"]["budgetHonored"], true);
+    assert!(!mem["skim"].to_string().contains("TAIL_ONLY_MARKER"));
+    assert!(mem["skim"]["savings"].as_str().unwrap().starts_with("🌱"));
+    assert_eq!(mem["fetch"]["arguments"]["memory_id"], id);
+    let response = call(&dispatcher, "moot_memory_get", json!({"memory_id":id,"depth":"skim"}));
+    let display = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(display.contains(mem["skim"]["savings"].as_str().unwrap()));
+    assert!(display.contains("budgetHonored: true"));
+    let full = get_full(&dispatcher, &id);
+    assert_eq!(full["content"], source);
+    assert!(full.get("skim").is_none());
+}
+
 // ---------------------------------------------------------------------------
 // A3 — TunnelKind wire strings must be camelCase in both wire paths.
 //
