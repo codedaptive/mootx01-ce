@@ -1,8 +1,8 @@
 // brain/span_encode_duty.rs — Rust mirror of `SpanEncodeDuty.swift`.
 //
 // Drain duty for the `span-encode` standing signal (signal 13, REM-ALPHA, 30 s).
-// Replaces `adornment_pass.rs` (removed): encodes drawers with bit 27 clear
-// into int8 span vectors and writes them to `vectors_v6` (contract §3).
+// Encodes drawers with bit 27 clear into int8 span vectors and writes them
+// to `vectors_v6` (contract §3).
 //
 // The duty reads drawers whose bit 27 is clear, windows their content with
 // CorpusKit's `spanner`, encodes through the registered CorpusKit
