@@ -1,0 +1,106 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Enumerated a complete current authorized memory inventory.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "has_more": false,
+        "memories": [
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "f23f4917-89a5-465e-a087-92d682f0f714"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "f23f4917-89a5-465e-a087-92d682f0f714",
+            "provenance": "user",
+            "subject": "m160"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "f28c4f39-f32c-461c-a627-d5a3de378dcf"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "f28c4f39-f32c-461c-a627-d5a3de378dcf",
+            "provenance": "user",
+            "subject": "m104"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "f5db7e25-dc2d-44e7-bc5a-67cc0ce6bf61"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "f5db7e25-dc2d-44e7-bc5a-67cc0ce6bf61",
+            "provenance": "user",
+            "subject": "m075"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fa8564f8-c596-4425-adc4-41599e42d0d3"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fa8564f8-c596-4425-adc4-41599e42d0d3",
+            "provenance": "user",
+            "subject": "m056"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fb4228fd-443c-47ce-8ace-ca1107c9003c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fb4228fd-443c-47ce-8ace-ca1107c9003c",
+            "provenance": "user",
+            "subject": "m096"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fb5c0999-e27e-4d32-a69e-69747c68c74a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fb5c0999-e27e-4d32-a69e-69747c68c74a",
+            "provenance": "user",
+            "subject": "m038"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "fd5f4e22-8e6c-42c9-8a1a-b170552f84f9"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "fd5f4e22-8e6c-42c9-8a1a-b170552f84f9",
+            "provenance": "user",
+            "subject": "m191"
+          }
+        ],
+        "revision": "4f955cea209f14500bca68f18d9ba3975abc0a72af5c36ed262e5a03cf9cc103"
+      },
+      "meta": {
+        "build_id": "20260909190149/687717bd",
+        "capability_digest": "3fc57f13dfefe357fd8ee556b6e90bc60ededf1298f96e5582fdcb0d9fe0b8d8",
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_list"
+    }
+  }
+}
