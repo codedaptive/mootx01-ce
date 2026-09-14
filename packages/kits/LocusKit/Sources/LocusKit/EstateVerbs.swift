@@ -1110,23 +1110,25 @@ public extension Estate {
     /// The audit event is sealed atomically inside the storage transaction —
     /// correct for direct callers that own the full expunge. GeniusLocusKit's
     /// two-step §B-2a orchestration (seal after cross-kit vector delete) must
-    /// use `expungeReturningUnsealedEvent(rowID:reason:confirmation:now:)` instead;
+    /// use `expungeReturningUnsealedEvent(rowID:reason:confirmation:sensitivityCeiling:now:)` instead;
     /// that method is the only path that defers the seal. Removing `sealAudit`
     /// from this public surface prevents any caller from accidentally suppressing
     /// the audit event (secfix/ws2-coredelete).
     ///
     /// Returns the full `DrawerStore.ExpungeOutcome`. `refusedSiblingIDs`
-    /// names every lineage member the gate refused (accepted rows, S-3);
-    /// `auditEvent` is nil on this path because the event was sealed inside
-    /// the transaction. The result is deliberately NOT `@discardableResult`:
-    /// an expunge that refused a sibling is not a success, and a layer that
-    /// summarises it as one is the defect (SPEC B-8b, MXE-FA). Every caller
-    /// must consume the outcome and propagate — or explicitly acknowledge —
-    /// the refusal.
+    /// names every lineage member not tombstoned: ceiling-refused (sensitivity
+    /// exceeds `sensitivityCeiling`; checked before gate admission) or
+    /// gate-refused (accepted rows, S-3). `auditEvent` is nil on this path
+    /// because the event was sealed inside the transaction. The result is
+    /// deliberately NOT `@discardableResult`: an expunge that refused a
+    /// sibling is not a success, and a layer that summarises it as one is the
+    /// defect (SPEC B-8b, MXE-FA). Every caller must consume the outcome and
+    /// propagate — or explicitly acknowledge — the refusal.
     func expunge(
         rowID: RowID,
         reason: String,
         confirmation: Bool,
+        sensitivityCeiling: AdjectiveSensitivity = .secret,
         now: Date = Date()
     ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
@@ -1154,7 +1156,8 @@ public extension Estate {
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
             now: now,
-            sealAudit: true
+            sealAudit: true,
+            sensitivityCeiling: sensitivityCeiling
         )
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member — not just the room of the
@@ -1183,8 +1186,10 @@ public extension Estate {
     /// swallowed — GLK uses a force-unwrap (`!`) as a deliberate
     /// programmer-error trap.
     ///
-    /// `refusedSiblingIDs` names every lineage member the gate refused
-    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
+    /// `refusedSiblingIDs` names every lineage member not tombstoned:
+    /// ceiling-refused (sensitivity exceeds `sensitivityCeiling`; checked
+    /// before gate admission) or gate-refused (accepted rows, S-3). Invariant
+    /// (SPEC B-8b, MXE-FA): an expunge that
     /// refused a sibling is not a success, and a layer that summarises it as
     /// one is the defect — GLK must scope its cross-kit vector delete to the
     /// members that were actually scrubbed and must report the refusal to its
@@ -1197,6 +1202,7 @@ public extension Estate {
         rowID: RowID,
         reason: String,
         confirmation: Bool,
+        sensitivityCeiling: AdjectiveSensitivity = .secret,
         now: Date = Date()
     ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
@@ -1222,7 +1228,8 @@ public extension Estate {
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
             now: now,
-            sealAudit: false
+            sealAudit: false,
+            sensitivityCeiling: sensitivityCeiling
         )
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member (WS2-F2, fixed 2026-06-28).
