@@ -90,6 +90,7 @@ pub fn execute(
     registry: &EstateRegistry,
     meta: &V2ResultMeta,
     now_millis: i64,
+    maximum_sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
 ) -> Result<Value, JSONRPCError> {
     let meta = V2ResultMeta::incomplete(
         meta.build_id.clone(), meta.capability_digest.clone(), V2OperationEffect::Read,
@@ -102,11 +103,14 @@ pub fn execute(
         Ok(coordinator) => coordinator,
         Err(_) => return Ok(unavailable("estate_unavailable", "The estate coordinator is unavailable.", &meta)),
     };
+    // Match Swift's explicit caller ceiling. CurrentlyBelieve remains a
+    // default predicate; the recipe and count companion share this exact filter.
+    let filter = locus_kit::filter::Filter::SensitivityAtMost(maximum_sensitivity);
     let output = match cognition_kit::run_transcript_recall(
         &coordinator,
         &estate.handle,
         &request.query,
-        locus_kit::filter::Filter::CurrentlyBelieve,
+        filter.clone(),
         now_millis,
         &HashMap::new(),
     ) {
@@ -122,6 +126,14 @@ pub fn execute(
 
     if !output.strict.available {
         return Ok(unavailable_with_evidence(&output.strict, &meta));
+    }
+
+    let mut frame = locus_kit::filter::RecallFrame::new(vec![filter]);
+    frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+    frame.limit = Some(50);
+    frame.ordering = locus_kit::filter::Ordering::ByCaptureTimeDesc;
+    if super::report_withheld::recall(&coordinator, &estate.handle, frame, now_millis).is_err() {
+        return Ok(unavailable("estate_unavailable", "The estate recall is unavailable.", &meta));
     }
 
     project_success(output.matches, output.strict, &meta)
