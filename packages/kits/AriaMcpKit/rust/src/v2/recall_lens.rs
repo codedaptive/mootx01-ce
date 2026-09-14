@@ -975,7 +975,9 @@ pub fn execute_connected_recall(
     // `wing` controls only the tunnel side of ConnectedRecall.  The anchor
     // search remains caller-filtered but estate-wide, exactly as the Swift v2
     // authority does.  Folding wing into this filter would make an otherwise
-    // eligible anchor invisible before the graph walk starts.
+    // eligible anchor invisible before the graph walk starts. The withheld
+    // count is taken over the wing-scoped frame, as the Swift port does, so
+    // both ports report the same number.
     let filter = recall_filter(request)?;
     let mut counted_frame = locus_kit::filter::RecallFrame::new(vec![scoped_filter(request)?]);
     counted_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;

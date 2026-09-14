@@ -168,13 +168,19 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
             return try await precise(request)
         case .recallConnected:
             let a = request.arguments; let f = try filter(a["filter"]?.stringValue)
+            // `wing` controls only the tunnel side of ConnectedRecall. The anchor
+            // search stays caller-filtered but estate-wide in both ports (shared
+            // vector aria_v2_connected_recall_parity_vector.json): folding the wing
+            // into the anchor filter hides an eligible anchor before the walk starts.
+            // The withheld count is taken over the wing-scoped frame, as the Rust
+            // port does, so both ports report the same number.
             let scoped = a["wing"]?.stringValue.map { LocusKit.Filter.all([f, .inWing($0)]) } ?? f
-            let rows = try await ConnectedRecall.run(kit: kit, handle: handle, query: a["query"]!.stringValue!, wing: a["wing"]?.stringValue ?? "", filter: scoped, limit: Int(a["limit"]?.integerValue ?? 20))
+            let rows = try await ConnectedRecall.run(kit: kit, handle: handle, query: a["query"]!.stringValue!, wing: a["wing"]?.stringValue ?? "", filter: f, limit: Int(a["limit"]?.integerValue ?? 20))
             try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: .init(
                 filterChain: [scoped], hydrationLevel: .full, limit: max(Int(a["limit"]?.integerValue ?? 20), 20)))
             return try await projectedResult(
                 rows.map { .init(id: $0.id, retrievalSource: $0.source) },
-                filterChain: [scoped], label: "connected recall")
+                filterChain: [f], label: "connected recall")
         case .recallShaped:
             let a = request.arguments; let f = try filter(a["filter"]?.stringValue)
             let preset = a["preset"]?.stringValue ?? "balanced"
