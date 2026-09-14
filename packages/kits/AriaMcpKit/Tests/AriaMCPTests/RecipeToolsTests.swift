@@ -172,8 +172,10 @@ struct RecipeToolsTests {
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         func fileOne(_ content: String) async throws -> String {
+            var fields = try #require(fileArgs(content: content).objectValue)
+            fields["wing"] = .string("recipe-tests")
             let result = try await dispatcher.dispatch(
-                name: "moot_file_memory", arguments: fileArgs(content: content))
+                name: "moot_file_memory", arguments: .object(fields))
             let text = result.objectValue?["content"]?.arrayValue?.first?
                 .objectValue?["text"]?.stringValue ?? ""
             // "filed memory <UUID>" — first line, third token.
@@ -367,6 +369,7 @@ struct RecipeToolsTests {
                 "content": .string(content),
                 "subject": .string(String(content.prefix(120))),
                 "location": .string("recipe-tests"),
+                "wing": .string("recipe-tests"),
             ]
             if let e = exportability { fields["exportability"] = .string(e) }
             let result = try await dispatcher.dispatch(
@@ -391,12 +394,9 @@ struct RecipeToolsTests {
         }
         let anchor = try await fileWith(anchorContent, anchorExportability)
 
-        // Capture the tunnel DIRECTLY with sourceWing "recipe-tests": the
-        // walk reads tunnels whose SOURCE wing matches the query's wing arg,
-        // and moot_link_memories records the drawers' resolved wing (the
-        // estate default), which the "recipe-tests" query would never see —
-        // the tunnel would be invisible and the gate test vacuous. Same
-        // shape as the Rust fixture's direct capture_tunnel.
+        // Keep drawers and tunnel in the requested wing: location names the
+        // room, not the wing. Direct capture keeps this fixture focused on
+        // walk hydration, matching Rust's direct capture_tunnel fixture.
         let estate = try await kit.estate(for: handle)
         let tunnelFrame = TunnelCaptureFrame(
             sourceWing: "recipe-tests", sourceRoom: "recipe-tests",

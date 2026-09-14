@@ -85,6 +85,9 @@ impl ConsolidationSweepReport {
 pub struct VagueRecallResult {
     /// Hop-1 hits: ACTIVE vague items in lane-proximity order.
     pub vague_hits: Vec<locus_kit::drawer::Drawer>,
+    /// Hop-1 primary candidates excluded by the default elevated sensitivity
+    /// ceiling. Hydrated constituents never contribute to this count.
+    pub withheld_by_sensitivity: usize,
     /// Hop-2 answer set: hydrated constituents, bounded by K per hit and M
     /// total (D12).
     pub constituents: Vec<locus_kit::drawer::Drawer>,
