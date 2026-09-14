@@ -52,10 +52,6 @@ fn is_success(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(false)
 }
 
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
-}
-
 // ---------------------------------------------------------------------------
 // 1. In-memory impatient capture → search (BM25 lane)
 // ---------------------------------------------------------------------------

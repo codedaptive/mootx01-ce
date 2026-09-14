@@ -1,12 +1,8 @@
 
-#[path = "../src/jsonrpc.rs"] mod jsonrpc;
-#[path = "../src/v2/codec.rs"] mod codec;
-#[path = "../src/v2/knowledge_journal.rs"] mod knowledge_journal;
-
 use std::{collections::BTreeMap, sync::Mutex};
 use genius_locus_kit::EstateHandle;
-use jsonrpc::JsonValue;
-use knowledge_journal::*;
+use aria_mcp::jsonrpc::JsonValue;
+use aria_mcp::v2::knowledge_journal::*;
 use locus_kit::adjectives::AdjectiveSensitivity;
 use uuid::Uuid;
 
