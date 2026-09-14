@@ -423,6 +423,37 @@ struct AriaSurfaceV2Tests {
         }
     }
 
+    @Test func fixtureCatalogVariantsMatchLiveProjectedCatalogs() throws {
+        let conformanceDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Conformance")
+        let fixture = try JSONValue.parse(Data(contentsOf:
+            conformanceDir.appendingPathComponent("aria_v2_mission02_vectors.json")))
+        let variants = try #require(
+            fixture.objectValue?["catalog"]?.objectValue?["catalog_variants"]?.arrayValue
+        )
+        let gates: [(id: String, environment: [String: String])] = [
+            ("vault_on_memory_off", ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "0"]),
+            ("vault_off_memory_off", ["MOOTX01_VAULT": "0", "MOOTX01_MEMORY_TOOL": "0"]),
+            ("vault_on_memory_on", ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "1"]),
+            ("vault_off_memory_on", ["MOOTX01_VAULT": "0", "MOOTX01_MEMORY_TOOL": "1"]),
+        ]
+
+        for gate in gates {
+            let variant = try #require(variants.first {
+                $0.objectValue?["id"]?.stringValue == gate.id
+            }?.objectValue)
+            let expectedNames = try #require(variant["tools"]?.arrayValue).compactMap(\.stringValue)
+            let expectedCount = try #require(variant["expected_tool_count"]?.integerValue)
+            let liveNames = ToolProjection.tools(environment: gate.environment).map(\.name)
+            #expect(
+                liveNames == expectedNames && liveNames.count == Int(expectedCount),
+                "\(gate.id) must match its exact ordered live projection and count"
+            )
+        }
+    }
+
     @Test func selectedCatalogUsesEffectiveVaultAvailabilityForListHelpDispatchAndDigest() async throws {
         let enabled = ToolProjection.tools(environment: [:])
         let explicitlyEnabled = ToolProjection.tools(environment: ["MOOTX01_VAULT": "1"])
