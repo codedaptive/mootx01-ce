@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 mod test_support;
 use test_support::SelectedV2Session;
+use unicode_segmentation::UnicodeSegmentation;
 
 use aria_mcp::{
     estate_registry::EstateRegistry,
@@ -111,30 +112,28 @@ fn file_memory_oversize_subject_returns_contract_error() {
     assert_eq!(error_path(&err), "$.subject", "got: {err:?}");
 }
 
-/// The 120 of the subject contract is 120 Unicode SCALARS, the unit this port
-/// has always counted and the unit both moot-bridge ports now cut on. A
-/// non-ASCII case is what tells the rules apart: 70 clusters of "e" + U+0301
-/// is 70 grapheme clusters — under the limit by that count — and 140 scalars,
-/// over it. Twin of the Swift `subjectLengthCountsScalarsNotGraphemes`.
+/// The subject contract is 120 grapheme CLUSTERS, the same unit Swift's
+/// String.count returns. A subject of 120 clusters carrying 240 scalars
+/// is ACCEPTED. This is the discriminating fixture: it was REFUSED under the
+/// old scalar rule and is ACCEPTED under the new cluster rule. An ASCII-only
+/// fixture proves nothing — it is 120 under both rules.
+///
+/// Twin of the Swift `subjectLengthCountsGraphemeClustersNotScalars`.
 #[test]
-fn subject_length_counts_scalars_not_graphemes() {
+fn subject_length_counts_grapheme_clusters_not_scalars() {
+    let subject: String = "e\u{0301}".repeat(120); // 120 clusters, 240 scalars
+    assert_eq!(subject.chars().count(), 240);
+    assert_eq!(UnicodeSegmentation::graphemes(subject.as_str(), true).count(), 120);
+
     let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
-    let clusters = 70;
-    let combining = "e\u{0301}".repeat(clusters);
-    assert_eq!(combining.chars().count(), clusters * 2, "140 Unicode scalars");
-    let err = session.call(
+    let result = session.call(
         "moot_file_memory",
         &args!["content" => "some content",
-               "subject" => combining.as_str(),
+               "subject" => subject.as_str(),
                "location" => "subject-tests"],
-    )
-    .expect_err("a 140-scalar subject must be rejected by selected v2");
-    // The reported length is the scalar count, so the model is told how much
-    // to cut in the unit the contract measures.
-    assert!(
-        error_detail(&err).contains(&(clusters * 2).to_string()) || error_detail(&err).contains("subject"),
-        "the refusal must identify the subject contract, got: {err:?}"
     );
+    assert!(result.is_ok(),
+        "120-cluster/240-scalar subject must be accepted through moot_file_memory; got: {result:?}");
 }
 
 #[test]
@@ -151,6 +150,71 @@ fn set_subject_oversize_returns_contract_error() {
                "subject" => oversize.as_str()],
     )
     .expect_err("oversize set_subject must be rejected by selected v2");
+    assert_eq!(err.code, -32602, "got: {err:?}");
+    assert_eq!(error_path(&err), "$.subject", "got: {err:?}");
+}
+
+/// The 121-cluster/242-scalar subject is refused through moot_file_memory
+/// with code -32602 at path $.subject. This test holds the ceiling: a subject
+/// of 121 clusters is over the limit whether the rule counts clusters or
+/// scalars, so it does not by itself distinguish the two rules. The test that
+/// discriminates them is `subject_length_counts_grapheme_clusters_not_scalars`,
+/// which asserts that the 120-cluster/240-scalar subject is accepted.
+#[test]
+fn file_memory_subject_121_clusters_is_refused() {
+    let oversize: String = "e\u{0301}".repeat(121); // 121 clusters, 242 scalars
+    assert_eq!(oversize.chars().count(), 242);
+    assert_eq!(UnicodeSegmentation::graphemes(oversize.as_str(), true).count(), 121);
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let err = session.call(
+        "moot_file_memory",
+        &args!["content" => "some content",
+               "subject" => oversize.as_str(),
+               "location" => "subject-tests"],
+    )
+    .expect_err("121-cluster subject must be rejected by moot_file_memory");
+    assert_eq!(err.code, -32602, "got: {err:?}");
+    assert_eq!(error_path(&err), "$.subject", "got: {err:?}");
+}
+
+/// moot_update_memory with mutation=set_subject ACCEPTS the 120-cluster/240-
+/// scalar subject. This is the only fixture that tells the two rules apart.
+#[test]
+fn set_subject_via_update_accepts_120_cluster_subject() {
+    let subject: String = "e\u{0301}".repeat(120); // 120 clusters, 240 scalars
+    assert_eq!(subject.chars().count(), 240);
+    assert_eq!(UnicodeSegmentation::graphemes(subject.as_str(), true).count(), 120);
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let id = capture_without_subject(&session, "needs a subject", "subject-tests");
+    let result = session.call(
+        "moot_update_memory",
+        &args!["memory_id" => id.as_str(),
+               "mutation" => "set_subject",
+               "subject" => subject.as_str()],
+    );
+    assert!(result.is_ok(),
+        "120-cluster/240-scalar subject must be accepted by set_subject; got: {result:?}");
+}
+
+/// moot_update_memory with mutation=set_subject REFUSES the 121-cluster/242-
+/// scalar subject with code -32602 at path $.subject.
+#[test]
+fn set_subject_via_update_refuses_121_cluster_subject() {
+    let oversize: String = "e\u{0301}".repeat(121); // 121 clusters, 242 scalars
+    assert_eq!(oversize.chars().count(), 242);
+    assert_eq!(UnicodeSegmentation::graphemes(oversize.as_str(), true).count(), 121);
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let id = capture_without_subject(&session, "needs a subject", "subject-tests");
+    let err = session.call(
+        "moot_update_memory",
+        &args!["memory_id" => id.as_str(),
+               "mutation" => "set_subject",
+               "subject" => oversize.as_str()],
+    )
+    .expect_err("121-cluster subject must be rejected by set_subject");
     assert_eq!(err.code, -32602, "got: {err:?}");
     assert_eq!(error_path(&err), "$.subject", "got: {err:?}");
 }

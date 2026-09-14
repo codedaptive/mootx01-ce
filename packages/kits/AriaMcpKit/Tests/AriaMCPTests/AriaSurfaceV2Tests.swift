@@ -766,7 +766,13 @@ struct AriaSurfaceV2Tests {
         #expect(!summary.contains("secrettoken"))
         for row in rows {
             let object = try #require(row.objectValue)
-            #expect(object["context"] == nil)
+            // context is now wired: every visible row must carry the drawer subject
+            // and must not leak sensitive content tokens.
+            let context = try #require(
+                object["context"]?.stringValue,
+                "every visible row must carry a non-null context field")
+            #expect(!context.contains("restrictedtoken"))
+            #expect(!context.contains("secrettoken"))
             #expect((object["excerpt"]?.stringValue?.unicodeScalars.count ?? 0) <= 512)
             #expect(object["fetch"]?.objectValue?["tool"] == .string("moot_memory_get"))
         }

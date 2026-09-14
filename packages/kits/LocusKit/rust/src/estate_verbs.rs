@@ -48,7 +48,7 @@ use crate::default_wings::{
 };
 use crate::drawer::Drawer;
 use crate::drawer_operational::DrawerFeatureFlags;
-use crate::drawer_store::{SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
+use crate::drawer_store::{subject_length, SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
 use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::estate_types::LatticeAnchor;
@@ -318,9 +318,10 @@ impl Estate {
         // Subject length contract (SPEC B-18) checked at the frame boundary
         // so the error surfaces before any row exists. Empty-string subjects
         // are rejected the same way — a caller with no subject passes None
-        // (subject debt, B-21), never "". Mirrors Swift capture().
+        // (subject debt, B-21), never "". Count is grapheme clusters, the
+        // same unit Swift's String.count returns. Mirrors Swift capture().
         if let Some(ref subject) = frame.subject {
-            let n = subject.chars().count();
+            let n = subject_length(subject);
             if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
                 return Err(LocusKitError::InvalidContent(format!(
                     "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
@@ -548,10 +549,10 @@ impl Estate {
                     "embeddingModelID must not be empty".to_string(),
                 ));
             }
-            // Same subject contract as capture() (SPEC B-18): 1–120 chars
-            // when present; None files as subject debt (B-21).
+            // Same subject contract as capture() (SPEC B-18): 1–120 grapheme
+            // clusters when present; None files as subject debt (B-21).
             if let Some(ref subject) = frame.subject {
-                let n = subject.chars().count();
+                let n = subject_length(subject);
                 if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
                     return Err(LocusKitError::InvalidContent(format!(
                         "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
