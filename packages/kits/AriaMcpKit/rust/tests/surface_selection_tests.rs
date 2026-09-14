@@ -277,15 +277,14 @@ fn v2_catalog_and_admission_are_the_same_ready_subset() {
             "{name} effect"
         );
     }
-    // inputSchema-only loop. Every one of the fixture's rows carries an
-    // outputSchema, so the separation is not about frozen-ness:
-    // moot_memory_search, moot_link_memories and moot_review_tunnel carry a
-    // placeholder data schema in the fixture, {"type":"object",
-    // "additionalProperties":true}, which no side fixture patches and which does
-    // not match the live typed schema. moot_memory_get's and moot_file_dataset's
-    // fixture outputSchemas do match live; moot_file_dataset is gated strictly
-    // above, so its inputSchema check here is redundant but kept for
-    // explicitness.
+    // inputSchema-only loop. Every fixture row now carries a live outputSchema;
+    // these five operations remain here as a historical test-partition boundary
+    // retained so both loops remain an independent check against the hand-written
+    // typed schemas in the side fixtures (aria_v2_output_schemas_*.json). The new
+    // fixture_snapshot_gates_all_80_operations test gates all 80 operations verbatim
+    // against the fixture without side-fixture patching.
+    // moot_file_dataset is also gated in the strict loop above; its inputSchema
+    // check here is redundant but kept for explicitness.
     for name in [
         "moot_memory_get", "moot_memory_search", "moot_link_memories",
         "moot_review_tunnel", "moot_file_dataset",
@@ -1659,6 +1658,124 @@ fn v2_dream_past_now_stamps_associations_with_admitted_instant() {
              got {} ms — diff {} ms > {margin_ms} ms",
             assoc.filed_at,
             diff
+        );
+    }
+}
+
+#[test]
+fn fixture_snapshot_gates_all_80_operations() {
+    // Snapshot gate for the full 80-operation fixture. Loads the mission02
+    // fixture, derives the name list from the fixture itself (sorted — so a
+    // future catalog addition enters the loop with no hand edit), and compares
+    // every row against the live Rust catalog on four fields: inputSchema,
+    // outputSchema, description, and effect.
+    //
+    // The outputSchema field is compared verbatim from the fixture with no
+    // patching from the side fixtures (aria_v2_output_schemas_*.json). The
+    // existing loop in v2_catalog_and_admission_are_the_same_ready_subset
+    // patches outputSchema.properties.data from those side fixtures for the
+    // 48 operations it covers, providing an independent check against a
+    // hand-written typed schema; both loops are kept.
+    //
+    // What this test proves by port:
+    //   Swift side (snapshotGatesCatalogAgainstMission02Fixture): the fixture
+    //     was generated from the live Swift catalog, so comparing live Swift to
+    //     the fixture is a snapshot gate — it catches unintended catalog changes
+    //     between regenerations but does not independently verify the schema,
+    //     because both sides derive from the same source.
+    //   Rust side (this test): the fixture carries Swift's values, so comparing
+    //     live Rust to it is a genuine port-parity gate. Any divergence on any
+    //     of the 32 operations not covered by the existing loop means a real
+    //     Swift/Rust discrepancy in that field.
+    //
+    // Count gate: if the live catalog gains an 81st operation, the assertion
+    // that live count equals 80 will fail. Both name directions are checked:
+    // every fixture row must have a live tool, and every live tool must have
+    // a fixture row. A one-directional check would let a catalog addition pass.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set during cargo test");
+    let fixture_path = Path::new(&manifest_dir)
+        .parent()
+        .expect("rust manifest must sit beneath AriaMcpKit")
+        .join("Tests/Conformance/aria_v2_mission02_vectors.json");
+    let raw = fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("read mission02 fixture at {}: {e}", fixture_path.display()));
+    let fixture: serde_json::Value = serde_json::from_str(&raw)
+        .expect("mission02 fixture must be valid JSON");
+
+    let fixture_ops = fixture["catalog"]["operations"]
+        .as_array()
+        .expect("fixture must contain catalog.operations array");
+
+    // Derive name list from the fixture itself — sorted so a future catalog
+    // addition enters the loop with no hand edit.
+    let mut fixture_names: Vec<String> = fixture_ops
+        .iter()
+        .map(|op| op["name"].as_str().expect("operation must have name field").to_owned())
+        .collect();
+    fixture_names.sort();
+
+    let fixture_by_name: std::collections::HashMap<&str, &serde_json::Value> = fixture_ops
+        .iter()
+        .map(|op| (op["name"].as_str().unwrap(), op))
+        .collect();
+
+    // Build the live tool list (vault enabled by default — absent env var = vault on).
+    let probe = Arc::new(MonitoringProbe::enabled());
+    let dispatcher = v2_dispatcher(Arc::clone(&probe));
+    let tools_response = tool_list(&dispatcher);
+    let live_tools = tools_response["result"]["tools"]
+        .as_array()
+        .expect("tools/list must return a tools array");
+    // Build the registry to read effect; tools/list does not emit effect.
+    let registry = selected_registry_with_vault(true);
+
+    // Count gates.
+    assert_eq!(
+        fixture_ops.len(), 80,
+        "fixture must contain exactly 80 operations; got {}",
+        fixture_ops.len()
+    );
+    assert_eq!(
+        live_tools.len(), 80,
+        "live catalog must contain exactly 80 tools; got {}",
+        live_tools.len()
+    );
+
+    // Bidirectional name coverage.
+    let live_name_set: std::collections::HashSet<&str> = live_tools
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for name in &fixture_names {
+        assert!(
+            live_name_set.contains(name.as_str()),
+            "fixture row {name} has no live tool"
+        );
+    }
+    let fixture_name_set: std::collections::HashSet<&str> = fixture_by_name.keys().copied().collect();
+    for name in &live_name_set {
+        assert!(
+            fixture_name_set.contains(*name),
+            "live tool {name} has no fixture row"
+        );
+    }
+
+    // Four-field comparison for every fixture row against live.
+    for name in &fixture_names {
+        let expected = fixture_by_name.get(name.as_str())
+            .unwrap_or_else(|| panic!("fixture missing {name}"));
+        let actual = live_tools.iter().find(|t| t["name"] == name.as_str())
+            .unwrap_or_else(|| panic!("{name}: live tool missing from tools/list"));
+        assert_eq!(actual["inputSchema"], expected["inputSchema"], "{name} inputSchema");
+        assert_eq!(actual["outputSchema"], expected["outputSchema"], "{name} outputSchema");
+        assert_eq!(actual["description"], expected["description"], "{name} description");
+        let descriptor = registry.operation(name)
+            .unwrap_or_else(|| panic!("{name}: missing from registry"));
+        assert_eq!(
+            serde_json::to_value(descriptor.effect).unwrap(),
+            expected["effect"],
+            "{name} effect"
         );
     }
 }
