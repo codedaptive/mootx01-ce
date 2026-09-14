@@ -455,15 +455,16 @@ impl V2MemorySearchRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum V2MemoryDepth { Subject, Distilled, Full }
+pub enum V2MemoryDepth { Subject, Distilled, Skim, Full }
 
 impl V2MemoryDepth {
     fn decode(value: Option<&str>) -> V2DecodeResult<Self> {
         match value.unwrap_or("full") {
             "subject" => Ok(Self::Subject),
             "distilled" => Ok(Self::Distilled),
+            "skim" => Ok(Self::Skim),
             "full" => Ok(Self::Full),
-            _ => Err(V2InvalidArgument::new("$.depth", "must be subject, distilled, or full")),
+            _ => Err(V2InvalidArgument::new("$.depth", "must be subject, distilled, skim, or full")),
         }
     }
 }
@@ -540,6 +541,7 @@ pub struct V2Memory {
     pub memory_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")] pub subject: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub distilled: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub skim: Option<crate::recall_skim::RecallSkim>,
     #[serde(skip_serializing_if = "Option::is_none")] pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")] pub placement: Option<V2Placement>,
     #[serde(skip_serializing_if = "Option::is_none")] pub filed_at: Option<String>,
@@ -728,7 +730,18 @@ pub fn execute_memory_get(request: V2MemoryGetRequest, dependencies: &V2CoreMemo
                 &memories.iter().map(|memory| memory.memory_id).collect::<Vec<_>>(),
                 dependencies.surfaced_recall_ledger,
             );
-            success(MEMORY_GET_TOOL, &GetData { memories }, &meta, "memory get").map_err(jsonrpc_internal)
+            let compact = if request.depth == V2MemoryDepth::Skim {
+                memories.iter().filter_map(|memory| memory.skim.as_ref().map(|skim|
+                    format!("{}\n{}\ncomplete: {}; budgetHonored: {}\n{}", canonical_uuid(memory.memory_id), skim.text, skim.complete, skim.budget_honored, skim.savings)))
+                    .collect::<Vec<_>>().join("\n\n")
+            } else { "memory get".to_owned() };
+            let mut response = success(MEMORY_GET_TOOL, &GetData { memories }, &meta, &compact).map_err(jsonrpc_internal)?;
+            // Do not apply the generic compact-summary truncation to a preview
+            // that is already budgeted and carries mandatory flags and savings.
+            if request.depth == V2MemoryDepth::Skim {
+                response["content"] = serde_json::json!([{"type":"text", "text":compact}]);
+            }
+            Ok(response)
         }
         Err(failure) => Ok(failure.render(MEMORY_GET_TOOL, &meta)),
     }
@@ -743,6 +756,7 @@ fn fetch(id: Uuid) -> V2FetchReference { fetch_id(&canonical_uuid(id)) }
 fn fetch_id(id: &str) -> V2FetchReference { V2FetchReference { tool: MEMORY_GET_TOOL, arguments: V2FetchArguments { memory_id: id.to_owned() } } }
 fn nonempty<'a>(value: &'a str, path: &str) -> V2DecodeResult<&'a str> { if value.is_empty() { Err(V2InvalidArgument::new(path, "must not be empty")) } else { Ok(value) } }
 fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) {
+    memory.skim = None;
     match depth {
         V2MemoryDepth::Subject => {
             memory.distilled = None;
@@ -757,6 +771,21 @@ fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) {
             memory.content = None;
             // depth:distilled carries no tunnels key — same rationale as Subject.
             memory.tunnels = None;
+        }
+        V2MemoryDepth::Skim => {
+            memory.skim = memory.content.as_deref().map(crate::recall_skim::render);
+            memory.distilled = None;
+            memory.content = None;
+            memory.tunnels = None;
+            memory.placement = None;
+            memory.filed_at = None;
+            memory.event_time = None;
+            memory.state = None;
+            memory.trust = None;
+            memory.sensitivity = None;
+            memory.exportability = None;
+            memory.confirmation = None;
+            memory.lineage_id = None;
         }
         V2MemoryDepth::Full => {
             // depth:full always emits the tunnels key. tunnels is already
