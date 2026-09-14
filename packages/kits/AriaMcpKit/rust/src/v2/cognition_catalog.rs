@@ -120,7 +120,7 @@ impl CognitionCatalogService {
     ) -> Result<CognitionLensesData, CognitionCatalogFailure> {
         self.validate(request)?;
         let registry = crate::v2::catalog::selected_registry();
-        let tools = registry
+        let mut tools: Vec<CognitionToolDescriptor> = registry
             .operations()
             .filter(|operation| {
                 operation.lens_lane_member
@@ -145,6 +145,10 @@ impl CognitionCatalogService {
                 }
             })
             .collect();
+        // moot_list_lenses emits alphabetically by operation name. Sort
+        // explicitly so the contract holds regardless of registry container
+        // order.
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(CognitionLensesData { tools })
     }
 
