@@ -4,8 +4,7 @@
 // + brain-layer governor ownership (TemporalCausalitySignal signal 7, TrainingSignal signal 9)
 // + contradiction-scout (signal 10) + consolidation-sweep (signal 11)
 // + P3a anomaly-flag sweep (signal 12, AnomalySweepSignal)
-// + ENCODER_RERANK_CONTRACT §10 span-encode drain (signal 13, SpanEncodeSignal,
-//   replaces the former AdornmentPassSignal which is removed).
+// + ENCODER_RERANK_CONTRACT §10 span-encode drain (signal 13, SpanEncodeSignal).
 //
 // Each signal is a thin factory that produces a `SignalSpec` carrying the
 // same name, cadence, and emit semantics as its Swift counterpart. The

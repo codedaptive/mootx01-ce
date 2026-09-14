@@ -20,8 +20,7 @@
 //                of AnomalySweepSignal.swift.
 //   Signal 13    ENCODER_RERANK_CONTRACT §10 / 2026-09-05: SpanEncodeSignal
 //                (REM-ALPHA 30 s span-encode drain; writes int8 vectors to
-//                vectors_v6, sets bit 27 spanIndexed). Replaces the former
-//                AdornmentPassSignal (removed). Rust twin of SpanEncodeSignal.swift.
+//                vectors_v6, sets bit 27 spanIndexed). Rust twin of SpanEncodeSignal.swift.
 //   Signal 14    Distilled Fact Extraction / 2026-09-08: bounded bit-28
 //                extraction debt drain. Rust twin of FactExtractionSignal.swift.
 //

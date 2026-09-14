@@ -2,8 +2,8 @@ import Foundation
 
 /// Span-encode standing signal — ENCODER_RERANK_CONTRACT §10, signal 13.
 ///
-/// Replaces `AdornmentPassSignal` (removed): fires the span-encode drain
-/// duty on each REM-ALPHA (30 s) tick and surfaces the encoded-drawer count
+/// Fires the span-encode drain duty on each REM-ALPHA (30 s) tick and
+/// surfaces the encoded-drawer count
 /// as a diagnostic. `SpanEncodeDuty.encodeBatch(estate:encoder:store:limit:now:)`
 /// pulls up to `encoder_batch` drawers with operational bit 27 clear, encodes
 /// their content into int8 span vectors, writes rows to `vectors_v6`, and
@@ -13,9 +13,8 @@ import Foundation
 /// diagnostic-only emission, injected closure for the live cycle. Registered
 /// 13th in `registerDefaultStandingSignals`.
 ///
-/// Cadence is REM-ALPHA (30 s, `RemCycleTable.swift` line 78). This is
-/// significantly faster than the hourly adornment-pass it replaces because
-/// span encoding must index fresh content before queries arrive; the 30 s
+/// Cadence is REM-ALPHA (30 s, `RemCycleTable.swift` line 78): span
+/// encoding must index fresh content before queries arrive, so the 30 s
 /// drain keeps bit-27-clear debt bounded to at most one poll interval.
 ///
 /// Usage pattern (mirrors AnomalySweepSignal):
@@ -31,9 +30,9 @@ import Foundation
 public enum SpanEncodeSignal {
 
     /// REM-ALPHA cadence in seconds — 30 s, matching the ALPHA row in
-    /// `RemCycleTable` (NEURONKIT_SPEC §12.6).  Significantly faster than the
-    /// hourly adornment pass this signal replaces: fast indexing of fresh content
-    /// is required for retrieval quality, while adornment minting was low-priority.
+    /// `RemCycleTable` (NEURONKIT_SPEC §12.6). Fast indexing of fresh content
+    /// is required for retrieval quality, so span encoding runs at this
+    /// high cadence to bound bit-27-clear debt to at most one poll interval.
     public static let defaultCadenceSeconds: TimeInterval = 30
 
     /// Stable name surfaced in `SignalReport.name` and in

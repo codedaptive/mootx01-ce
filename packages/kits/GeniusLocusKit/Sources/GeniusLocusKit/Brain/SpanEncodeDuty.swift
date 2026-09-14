@@ -137,9 +137,8 @@ public struct SpanEncodeBatchResult: Sendable, Equatable {
 
 /// Drain duty for the `spanEncode` standing signal (signal 13, REM-ALPHA, 30 s).
 ///
-/// Replaces `AdornmentPass` in the dream-time slot: encodes unindexed drawers
-/// into int8 span vectors during REM-ALPHA cycles and sets bit 27 (spanIndexed,
-/// contract §5) when the write completes.
+/// Encodes unindexed drawers into int8 span vectors during REM-ALPHA cycles
+/// and sets bit 27 (spanIndexed, contract §5) when the write completes.
 ///
 /// Registered in `DefaultStandingSignals` as signal 13. The duty never blocks
 /// the query path; it runs only when the encoder is non-nil. `now` is always
@@ -244,7 +243,8 @@ public enum SpanEncodeDuty {
                 log.debug("spanEncode: encoded drawer=\(item.id, privacy: .public) spans=\(inputs.count, privacy: .public)")
             } catch {
                 // Per-drawer failure is non-fatal: bit 27 stays clear, drawer
-                // retries on next pump. Matches AdornmentPass per-pair isolation.
+                // retries on next pump. Each drawer's error is isolated — a
+                // failure on one does not abort the remaining batch.
                 failed += 1
                 log.warning("spanEncode: drawer=\(item.id, privacy: .public) error: \(error, privacy: .public)")
             }
