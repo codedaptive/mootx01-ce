@@ -1,5 +1,5 @@
 {
-  "binary": "/Users/bob/devlop/mootx01-ee-taggate/apps/mootx01/.build/out/Products/Debug/mootx01",
+  "binary": "swift port, debug build",
   "count": 80,
   "names": [
     "moot_confirm_memory",
