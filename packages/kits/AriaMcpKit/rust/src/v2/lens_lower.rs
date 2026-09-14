@@ -117,9 +117,9 @@ enum DrawerFill {
 ///    enforcement point; each call site applies its own display convention.
 ///
 /// No display convention is applied here: `raw_subject` is `None` when absent,
-/// `raw_content` is raw (not trimmed, not normalised).  Partial-cue truncates
-/// at raw character 120 before normalising; keystones and trust-synthesis
-/// normalise only.
+/// and `raw_content` remains raw. Keystones, trust-synthesis, and partial-cue
+/// all pass admissible content to the shared helper, which normalises first and
+/// then cuts at 120 grapheme clusters.
 fn structured_drawers_by_id(
     coord: &genius_locus_kit::coordinator::EstateCoordinator,
     handle: &genius_locus_kit::handle::EstateHandle,
@@ -147,13 +147,9 @@ fn structured_drawers_by_id(
                             let fill = match super::recall_lens::v2_raw_provenance_sensitivity(&d) {
                                 0 | 16 => DrawerFill::Admissible {
                                     raw_subject: d.subject.clone(),
-                                    // Raw content, not trimmed: truncation precedes
-                                    // normalisation on the partial-cue path, matching
-                                    // Swift's AriaV2LensLower.swift:905-907 which passes
-                                    // drawer.content whole to structuredRowObject.
-                                    // Keystones and trust-synthesis call normalize_value
-                                    // directly, which trims internally, so removing the
-                                    // pre-trim here does not change their output.
+                                    // Preserve raw content here. All three lens surfaces
+                                    // pass it to truncate_first_sentence, which normalises
+                                    // before its 120-grapheme-cluster cut.
                                     raw_content: d.content.to_owned(),
                                     event_time: crate::result_composer::iso8601_flex(d.event_time),
                                 },
@@ -218,16 +214,14 @@ impl CoordinatorRecallLensLower {
                     // Dense fields: present only for admissible (non-gated) rows.
                     // Restricted/secret rows remain sparse (id + centrality only).
                     if let Some(DrawerFill::Admissible { raw_subject, raw_content, event_time }) = structured.get(&keystone.id) {
-                        // Preserve existing keystones behaviour: emit subject with
-                        // NO_SUBJECT_MARKER filler, and bestSpan as normalize_value(raw)
-                        // without prior truncation — matching the normalisation
-                        // candidate_from_drawer previously applied at the data layer.
+                        // Emit subject with the NO_SUBJECT_MARKER filler and route
+                        // bestSpan through the shared normalize-then-cut helper.
                         r.insert("subject".to_owned(), JsonValue::String(
                             raw_subject.as_deref()
                                 .unwrap_or(crate::result_composer::NO_SUBJECT_MARKER)
                                 .to_owned(),
                         ));
-                        let bs_norm = crate::result_composer::normalize_value(raw_content);
+                        let bs_norm = crate::result_composer::truncate_first_sentence(raw_content);
                         r.insert(
                             "best_span".to_owned(),
                             JsonValue::String(
@@ -706,16 +700,14 @@ impl CoordinatorRecallLensLower {
                 if let Some(DrawerFill::Admissible { raw_subject, raw_content, event_time }) = structured.get(id) {
                     let mut obj: BTreeMap<String, JsonValue> = BTreeMap::new();
                     obj.insert("id".to_owned(), JsonValue::String(id.clone()));
-                    // Preserve existing trust-synthesis behaviour: emit subject with
-                    // NO_SUBJECT_MARKER filler, and bestSpan as normalize_value(raw)
-                    // without prior truncation — matching the normalisation
-                    // candidate_from_drawer previously applied at the data layer.
+                    // Emit subject with the NO_SUBJECT_MARKER filler and route
+                    // bestSpan through the shared normalize-then-cut helper.
                     obj.insert("subject".to_owned(), JsonValue::String(
                         raw_subject.as_deref()
                             .unwrap_or(crate::result_composer::NO_SUBJECT_MARKER)
                             .to_owned(),
                     ));
-                    let bs_norm = crate::result_composer::normalize_value(raw_content);
+                    let bs_norm = crate::result_composer::truncate_first_sentence(raw_content);
                     obj.insert(
                         "best_span".to_owned(),
                         JsonValue::String(
@@ -794,13 +786,28 @@ impl CoordinatorRecallLensLower {
         let estate = coordinator
             .estate_for(&admission.estate_handle)
             .map_err(|_| ())?;
-        let rows = matches
-            .into_iter()
+        let drawers = matches
+            .iter()
             .map(|matched| {
                 let drawer = estate
                     .drawer_by_id(&matched.id)
                     .map_err(|_| ())?
                     .ok_or(())?;
+                Ok(drawer)
+            })
+            .collect::<Result<Vec<_>, V2RecallLensError>>()?;
+        let parent_node_ids: Vec<String> = drawers
+            .iter()
+            .map(|drawer| drawer.parent_node_id.clone())
+            .collect();
+        let node_names = coordinator.resolve_drawer_node_names(
+            &admission.estate_handle,
+            &parent_node_ids,
+        );
+        let rows = matches
+            .into_iter()
+            .zip(drawers)
+            .map(|(matched, drawer)| {
                 let mut r: BTreeMap<String, JsonValue> = BTreeMap::new();
                 r.insert("memory_id".to_owned(), JsonValue::String(matched.id.clone()));
                 r.insert(
@@ -820,18 +827,21 @@ impl CoordinatorRecallLensLower {
                         if let Some(subj) = raw_subject.as_deref() {
                             r.insert("subject".to_owned(), JsonValue::String(subj.to_owned()));
                         }
-                        // Apply truncate-then-normalize (Swift order). Swift contract at
-                        // ResultComposer.swift:614: "Applied before normalization so the
-                        // byte count is over raw UTF-8 chars." A pre-normalized span
-                        // moves the 120-char cut because whitespace runs collapse before
-                        // counting.
-                        let truncated = crate::result_composer::truncate_first_sentence(raw_content);
-                        let bs_norm = crate::result_composer::normalize_value(truncated);
+                        let bs_norm = crate::result_composer::truncate_first_sentence(raw_content);
                         let subj_norm = raw_subject.as_deref()
                             .map(|s| crate::result_composer::normalize_value(s))
                             .unwrap_or_default();
                         if !bs_norm.is_empty() && bs_norm != subj_norm {
                             r.insert("best_span".to_owned(), JsonValue::String(bs_norm));
+                        }
+                        if let Some(ssc_facts) = drawer.ssc_facts.as_deref() {
+                            r.insert(
+                                "ssc_facts".to_owned(),
+                                JsonValue::String(ssc_facts.to_owned()),
+                            );
+                        }
+                        if let Some((_, room)) = node_names.get(&drawer.parent_node_id) {
+                            r.insert("room".to_owned(), JsonValue::String(room.clone()));
                         }
                     }
                     Some(DrawerFill::Restricted) => {
@@ -1812,8 +1822,9 @@ pub fn project_data(result: &V2RecallLensResult) -> Result<serde_json::Value, ()
         }
         V2RecallLensOperation::LensPartialCue => {
             // Map internal snake_case row fields to camelCase wire keys.
-            // Dense fields (subject, bestSpan) are conditionally present: admissible rows
-            // carry them; restricted/secret rows carry only id, eventTime, and score.
+            // Dense fields (subject, bestSpan, sscFacts, room) are conditionally projected.
+            // Only admissible rows may carry bestSpan, sscFacts, or room; restricted/secret
+            // rows may carry a redaction-marker subject.
             let items: Result<Vec<serde_json::Value>, ()> = result.rows.iter().map(|row| {
                 let mut obj = serde_json::Map::new();
                 obj.insert("id".to_owned(), json_value(required_field(row, "memory_id")?)?);
@@ -1823,8 +1834,14 @@ pub fn project_data(result: &V2RecallLensResult) -> Result<serde_json::Value, ()
                 if let Some(v) = row.get("best_span") {
                     obj.insert("bestSpan".to_owned(), json_value(v)?);
                 }
+                if let Some(v) = row.get("ssc_facts") {
+                    obj.insert("sscFacts".to_owned(), json_value(v)?);
+                }
                 obj.insert("eventTime".to_owned(), json_value(required_field(row, "event_time")?)?);
                 obj.insert("score".to_owned(), json_value(required_field(row, "score")?)?);
+                if let Some(v) = row.get("room") {
+                    obj.insert("room".to_owned(), json_value(v)?);
+                }
                 Ok(serde_json::Value::Object(obj))
             }).collect();
             Ok(json!({ "results": items? }))
