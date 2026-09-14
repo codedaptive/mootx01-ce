@@ -15,6 +15,7 @@
 //! `set_subject_representation` / `count_missing_subject` / expunge logic
 //! (SQLite and Postgres wrappers delegate to it).
 
+use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer::Drawer;
 use locus_kit::drawer_store::{DrawerStore, SUBJECT_LENGTH_CONTRACT};
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -187,7 +188,7 @@ fn expunge_clears_subject_with_content() {
         .expect("set subject");
 
     store
-        .expunge_gated(&id, "test", None, NOW + 200, false)
+        .expunge_gated(&id, "test", None, NOW + 200, false, AdjectiveSensitivity::Secret)
         .expect("expunge_gated");
 
     let d = get(&store, &id);
@@ -221,7 +222,7 @@ fn count_missing_subject_semantics() {
         .set_subject_representation(&i3, "Stale-contract subject.", "ai-v0-legacy", NOW + 100, TEST_ACTOR, None)
         .expect("set d3");
     store
-        .expunge_gated(&i4, "test", None, NOW + 200, false)
+        .expunge_gated(&i4, "test", None, NOW + 200, false, AdjectiveSensitivity::Secret)
         .expect("expunge d4");
 
     let missing = store

@@ -2137,12 +2137,14 @@ impl Estate {
     ///
     /// Returns the full `ExpungeOutcome`: `event` is the gate-produced audit
     /// event (sealed when `seal_audit` was true, unsealed otherwise) and
-    /// `refused_sibling_ids` names every lineage member the gate refused
-    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
-    /// refused a sibling is not a success, and a layer that summarises it as
-    /// one is the defect — every caller must consume the outcome and
-    /// propagate, or explicitly acknowledge, the refusal. Twin of the Swift
-    /// `Estate.expunge` / `expungeReturningUnsealedEvent` wrappers.
+    /// `refused_sibling_ids` names every lineage member not tombstoned:
+    /// ceiling-refused (sensitivity exceeds `sensitivity_ceiling`; checked
+    /// before gate admission) or gate-refused (accepted rows, S-3). Invariant
+    /// (SPEC B-8b, MXE-FA): an expunge that refused a sibling is not a
+    /// success, and a layer that summarises it as one is the defect — every
+    /// caller must consume the outcome and propagate, or explicitly
+    /// acknowledge, the refusal. Twin of the Swift `Estate.expunge` /
+    /// `expungeReturningUnsealedEvent` wrappers.
     pub fn expunge(
         &self,
         row_id: &str,
@@ -2150,6 +2152,7 @@ impl Estate {
         confirmation: bool,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         if !confirmation {
             return Err(LocusKitError::InvalidContent(
@@ -2198,7 +2201,7 @@ impl Estate {
         }
 
         let outcome = self.store
-            .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit)?;
+            .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit, sensitivity_ceiling)?;
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member — not just the room of the
         // initiating drawer — so cross-room lineage expunge keeps every
@@ -4287,7 +4290,7 @@ mod tests {
     fn mutate_revive_from_tombstoned_refused_unrecoverable() {
         let estate = make_estate();
         let drawer = basic_capture(&estate, "tombstone target", "r");
-        estate.expunge(&drawer.id, "test", true, 0, true).unwrap();
+        estate.expunge(&drawer.id, "test", true, 0, true, crate::adjectives::AdjectiveSensitivity::Secret).unwrap();
         assert_eq!(state_of(&estate, &drawer.id), State::Tombstoned);
 
         let err = estate.mutate(&drawer.id, MutationKind::Revive, None).unwrap_err();
@@ -5011,7 +5014,7 @@ mod tests {
     fn estate_expunge_requires_confirmation() {
         let estate = make_estate();
         let d = basic_capture(&estate, "to be expunged", "office");
-        let err = estate.expunge(&d.id, "", false, 0, true).unwrap_err();
+        let err = estate.expunge(&d.id, "", false, 0, true, crate::adjectives::AdjectiveSensitivity::Secret).unwrap_err();
         assert!(
             matches!(err, LocusKitError::InvalidContent(_)),
             "expected InvalidContent for confirmation=false, got {:?}",
@@ -5027,7 +5030,7 @@ mod tests {
     fn estate_expunge_forwards_through_to_store_with_confirmation() {
         let estate = make_estate();
         let d = basic_capture(&estate, "to be expunged", "office");
-        estate.expunge(&d.id, "operator request", true, 0, true).unwrap();
+        estate.expunge(&d.id, "operator request", true, 0, true, crate::adjectives::AdjectiveSensitivity::Secret).unwrap();
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
         assert_ne!(
@@ -5043,7 +5046,7 @@ mod tests {
     fn estate_expunge_rejects_absent_row() {
         let estate = make_estate();
         let err = estate
-            .expunge("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "", true, 0, true)
+            .expunge("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "", true, 0, true, crate::adjectives::AdjectiveSensitivity::Secret)
             .unwrap_err();
         match err {
             LocusKitError::DrawerNotFound { .. } => {}
