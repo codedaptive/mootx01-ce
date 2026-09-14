@@ -58,6 +58,7 @@
 //! `composer_conformance.rs` over `Tests/Conformance/composer_fixtures.json`.
 
 use serde_json::{json, Value};
+use unicode_segmentation::UnicodeSegmentation;
 
 // ─── separator ───────────────────────────────────────────────────────────────
 
@@ -147,8 +148,9 @@ pub fn render_s2_row_unhydrated(id: &str) -> String {
 /// renderer at all, but callers that hydrate outside that path (lens arms, etc.)
 /// still get a safe row.
 ///
-/// `best_span` is extracted from `drawer.content` (first 60 words of content
-/// body). SSC facts are absent at structured hydration level — they render as `-`.
+/// `best_span` is the normalized first sentence of `drawer.content`, capped at
+/// 120 grapheme clusters. Admissible rows copy `drawer.ssc_facts`; restricted or
+/// secret rows withhold it, and absent facts render as `-`.
 /// The score field is None (S2 is unranked).
 pub fn candidate_from_drawer(drawer: &locus_kit::drawer::Drawer) -> CandidateRowData {
     use locus_kit::provenance::Sensitivity;
@@ -161,7 +163,7 @@ pub fn candidate_from_drawer(drawer: &locus_kit::drawer::Drawer) -> CandidateRow
     // Redaction boundary: best_span is body-derived content.
     // Restricted/secret drawers MUST NOT leak body text through the best_span
     // column — the same access control that gates the subject field applies here.
-    // Non-redacted drawers: use content as the best span (capped at 60 words).
+    // Non-redacted drawers use the normalized first sentence, capped at 120 grapheme clusters.
     let best_span: Option<String> = match sens {
         Sensitivity::Restricted | Sensitivity::Secret => None, // never leak body
         _ => {
@@ -169,17 +171,21 @@ pub fn candidate_from_drawer(drawer: &locus_kit::drawer::Drawer) -> CandidateRow
             if body.is_empty() {
                 None
             } else {
-                let normalized = normalize_value(body);
-                if normalized.is_empty() { None } else { Some(normalized) }
+                let row_text = truncate_first_sentence(body);
+                if row_text.is_empty() { None } else { Some(row_text) }
             }
         }
+    };
+    let ssc_facts = match sens {
+        Sensitivity::Restricted | Sensitivity::Secret => None,
+        _ => drawer.ssc_facts.clone(),
     };
     let event_time = iso8601_flex(drawer.event_time);
     CandidateRowData::new(
         drawer.id.clone(),
         subject,
         best_span,
-        None::<String>, // sscFacts stubbed nil until W1 schema-19 Drawer.ssc_facts lands
+        ssc_facts,
         event_time,
         None,           // S2 is unranked — no score
     )
@@ -214,8 +220,7 @@ pub struct CandidateRowData {
     pub best_span: Option<String>,
 
     /// SSC (Semantic Search Candle) facts as a raw string (column 4).
-    /// Format: "kind: hobby, entity: painting". Stubbed nil until W1 schema-19
-    /// Drawer.ssc_facts lands. Absent renders `-`.
+    /// Format: "kind: hobby, entity: painting". Absent renders `-`.
     pub ssc_facts: Option<String>,
 
     /// Event time in ISO-8601 form with trailing Z (column 5).
@@ -544,21 +549,11 @@ pub fn normalize_value(raw: &str) -> String {
 
 // ─── first-sentence truncation (§11.1 rule 3) ────────────────────────────────
 
-/// Hard cut the first sentence at 120 characters with no ellipsis.
-/// Counts Unicode scalars through `char_indices`. Swift's `String.prefix`
-/// and `count` are grapheme-cluster based; on strings with combining marks
-/// or emoji ZWJ sequences the two ports may cut at different byte positions.
-/// On plain ASCII and common BMP code points the counts agree.
-pub fn truncate_first_sentence(raw: &str) -> &str {
-    // Find the char boundary for the 120th Unicode scalar, matching Swift.
-    let mut char_count = 0;
-    for (byte_pos, _ch) in raw.char_indices() {
-        if char_count == 120 {
-            return &raw[..byte_pos];
-        }
-        char_count += 1;
-    }
-    raw   // fewer than 120 chars
+/// Normalize the first sentence, then hard cut it at 120 grapheme clusters
+/// with no ellipsis.
+pub fn truncate_first_sentence(raw: &str) -> String {
+    let normalized = normalize_value(raw);
+    normalized.graphemes(true).take(120).collect()
 }
 
 // ─── single row rendering ─────────────────────────────────────────────────────
@@ -569,8 +564,7 @@ fn normalized_subject(row: &CandidateRowData) -> String {
 
 fn normalized_best_span(row: &CandidateRowData, subject_normalized: &str) -> String {
     let Some(bs) = &row.best_span else { return "-".to_string() };
-    let truncated = truncate_first_sentence(bs);
-    let normalized = normalize_value(truncated);
+    let normalized = truncate_first_sentence(bs);
     if normalized.is_empty() || normalized == subject_normalized {
         "-".to_string()
     } else {
@@ -1134,8 +1128,7 @@ pub fn structured_row_object(row: &CandidateRowData) -> Value {
     // after normalization (same rule as text rendering).
     let subj_norm = row.subject.as_deref().map(normalize_value).unwrap_or_default();
     if let Some(bs) = &row.best_span {
-        let truncated = truncate_first_sentence(bs);
-        let bs_norm = normalize_value(truncated);
+        let bs_norm = truncate_first_sentence(bs);
         if !bs_norm.is_empty() && bs_norm != subj_norm {
             obj.insert("bestSpan".to_string(), json!(bs_norm));
         }
