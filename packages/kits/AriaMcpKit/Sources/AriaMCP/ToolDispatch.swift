@@ -2546,10 +2546,10 @@ extension ToolDispatcher {
         // Batch `ids:[...]` makes the Case-2 winnow one call: pinpoint a
         // shortlist at depth:subject/distilled without hauling full text.
         let depthName = try optionalString(args["depth"], argument: "depth") ?? "full"
-        guard ["subject", "distilled", "full"].contains(depthName) else {
+        guard ["subject", "distilled", "skim", "full"].contains(depthName) else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
-                message: "Unknown depth: \(depthName). Valid: subject, distilled, full"
+                message: "Unknown depth: \(depthName). Valid: subject, distilled, skim, full"
             )
         }
         // `id` (single, the original arg) or `ids` (batch) — at least one.
@@ -2665,6 +2665,7 @@ extension ToolDispatcher {
             // depth:distilled — S2 row + distilled continuation; depth:full in
             // batch mode — one S3 record per drawer. Both render per-row.
             var lines: [String] = []
+            var skimRows: [JSONValue] = []
             for id in rowIDs {
                 guard let d = admissibleByID[id] else {
                     lines.append("not found: \(id)"); continue
@@ -2678,7 +2679,14 @@ extension ToolDispatcher {
                     case .normal, .elevated: break
                     }
                 }
-                if depthName == "distilled" {
+                if depthName == "skim" {
+                    let skim = try RecallSkim(original: d.content)
+                    lines.append(ResultComposer.renderS2Row(CandidateRowData(id: d.id, subject: d.subject, eventTime: ResultComposer.iso8601(d.eventTime))))
+                    lines.append(skim.rendered)
+                    var row: [String: JSONValue] = ["id": .string(d.id), "skim": skim.json]
+                    if let subject = d.subject { row["subject"] = .string(subject) }
+                    skimRows.append(.object(row))
+                } else if depthName == "distilled" {
                     // S2 row header (no score column) + inline-distilled continuation.
                     // Distillation is computed at read time via ContextDistiller —
                     // the stored distilled column is removed in schema 19 (W1).
@@ -2731,7 +2739,7 @@ extension ToolDispatcher {
                 lines.append("")   // blank separator between multi-row replies
             }
             if lines.last == "" { lines.removeLast() }
-            return Self.composedResult(ComposedResult(text: lines.joined(separator: "\n")))
+            return Self.composedResult(ComposedResult(text: lines.joined(separator: "\n"), structured: depthName == "skim" ? .object(["results": .array(skimRows)]) : nil))
         }
 
         // Single-id depth:full path — S3 full record via renderS3Record (absorbs fullRecordLines).
