@@ -62,6 +62,10 @@ unicode-normalization = "0.1"
 # DatasetColumnSummary with #[serde(rename_all = "camelCase")] for Swift parity.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# unicode-segmentation supplies the grapheme-cluster count for the B-18
+# subject length contract. The unit is the grapheme cluster (same as
+# Swift's String.count), so the two ports agree on the same input.
+unicode-segmentation = "=1.13.3"
 
 [dev-dependencies]
 # serde_json for test-vector parsing (tests/lp0_vectors.rs) resolves from the

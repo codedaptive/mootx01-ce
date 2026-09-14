@@ -510,7 +510,23 @@ impl CoordinatorRecallLensLower {
             .into_iter()
             .filter(|(_, facts)| facts.iter().map(|fact| fact.object.to_lowercase()).collect::<BTreeSet<_>>().len() > 1)
             .take(20)
-            .map(|((subject, predicate), facts)| {
+            .map(|((subject, predicate), mut facts)| {
+                // Sort by filed_at then object text so that facts filed in the same
+                // instant come out in a stable, deterministic order. filed_at alone
+                // is insufficient because two facts can share the same instant;
+                // object text is the only remaining stable key.
+                // filed_at is i64 epoch milliseconds — exactly the granularity that
+                // survives SQLite TEXT ISO8601 storage (three fractional digits).
+                // This comparator needs no normalisation: the type already enforces
+                // the persisted granularity. The Swift port holds filedAt as a Date
+                // at full precision, so it must normalise before comparing, and it
+                // rounds to the NEAREST millisecond — the rule ISO8601DateFormatter
+                // with .withFractionalSeconds applies when it writes the row. See
+                // AriaV2LensLower.swift, which carries the measurement. Flooring
+                // there would disagree with this comparator for any Date whose
+                // sub-millisecond residue rounds up, so do not describe the Swift
+                // key as a floor. Neither port uses a narrowing conversion.
+                facts.sort_by(|a, b| a.filed_at.cmp(&b.filed_at).then_with(|| a.object.cmp(&b.object)));
                 let mut seen = BTreeSet::new();
                 let objects = facts
                     .into_iter()
