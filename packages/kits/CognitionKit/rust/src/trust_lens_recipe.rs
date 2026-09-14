@@ -131,6 +131,9 @@ pub fn run_trust_grounded_synthesis(
                 wing,
                 room,
                 is_currently_believed: true,
+                // Carry provenance so make_key_insights can apply the
+                // KEYINSIGHTS-PROV = a ruling (bits 30–35 sensitivity gate).
+                provenance: d.provenance,
             }
         })
         .collect();
