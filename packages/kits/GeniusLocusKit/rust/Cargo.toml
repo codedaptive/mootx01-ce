@@ -143,13 +143,8 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 # substrate) does NOT invert (lattice-lib has no dependency on GLK).
 # Per in-repository dependency direction (Rust no-inversion rule).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
-# AdornmentLib: dream-time adornment generation and certification.
-# Used by AdornmentPass (Brain standing signal 13) to invoke the MOOT_MINT_CMD
-# seam and certify generated adornments via adornment_validators before
 # writing to the drawer row. Layering: genius-locus-kit (composition) →
-# adornment-lib (pure functions, zero kit deps) does NOT invert.
 # Per BRR Group 10. Per in-repository dependency direction.
-adornment-lib = { path = "../../../libs/AdornmentLib/rust" }
 
 [features]
 # test-seams: exposes EstateCoordinator::inject_vector_hamming_error and
