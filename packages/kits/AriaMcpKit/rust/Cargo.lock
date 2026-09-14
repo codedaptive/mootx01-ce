@@ -98,6 +98,7 @@ name = "aria-mcp"
 version = "0.1.0"
 dependencies = [
  "cognition-kit",
+ "context-distill-lib",
  "convergence-kit",
  "corpus-kit",
  "corpus-kit-providers",
