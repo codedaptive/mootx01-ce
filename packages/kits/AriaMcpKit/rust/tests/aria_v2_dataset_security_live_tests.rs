@@ -48,7 +48,10 @@ fn selected_dataset_refuses_a_real_file_outside_the_import_root() {
 
 #[test]
 fn selected_dataset_discloses_only_the_csv_basename() {
-    let root = PathBuf::from("/Users/bob/devlop/builds/mootx01-ee/unit1-bilby4/home");
+    // The dataset import root is HOME (dataset_tools.rs, root resolution D11), so
+    // the scratch folder this test files from has to live inside it. Reading HOME
+    // rather than naming a directory keeps the test runnable on any machine.
+    let root = PathBuf::from(std::env::var("HOME").expect("HOME defines the dataset import root"));
     fs::create_dir_all(&root).expect("authorized test scratch root");
     let folder = root.join(format!("aria-v2-basename-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&folder).unwrap();
