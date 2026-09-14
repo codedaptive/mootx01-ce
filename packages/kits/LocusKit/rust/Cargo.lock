@@ -741,6 +741,7 @@ dependencies = [
  "substrate-ml",
  "substrate-types",
  "unicode-normalization",
+ "unicode-segmentation",
  "uuid",
 ]
 
