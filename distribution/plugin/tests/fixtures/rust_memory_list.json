@@ -1,0 +1,51 @@
+{
+  "id": 2,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Enumerated a complete current authorized memory inventory.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "has_more": false,
+        "memories": [
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "23dcd969-47eb-412b-854f-8ca8eccb5ac3"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "23dcd969-47eb-412b-854f-8ca8eccb5ac3",
+            "provenance": "user",
+            "subject": "notes for testslug"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "31c3a33c-fea9-455a-95ab-69a7d8fb0d49"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "31c3a33c-fea9-455a-95ab-69a7d8fb0d49",
+            "provenance": "user",
+            "subject": "MEMORY.md index for testslug"
+          }
+        ],
+        "revision": "5b81f57c4bfe17f33ec48c2cc7ca1556ef4634888d59c763626cee4ea71d5652"
+      },
+      "meta": {
+        "build_id": "20260909170802/68775622",
+        "capability_digest": "3fc57f13dfefe357fd8ee556b6e90bc60ededf1298f96e5582fdcb0d9fe0b8d8",
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_list"
+    }
+  }
+}
