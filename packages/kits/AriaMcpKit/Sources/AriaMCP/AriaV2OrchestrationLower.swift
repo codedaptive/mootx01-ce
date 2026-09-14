@@ -68,8 +68,15 @@ public struct AriaV2GeniusLocusOrchestrationProvider: AriaV2OrchestrationProvide
             else { throw AriaV2OrchestrationLowerError.invalidLowerIdentity(id) }
             return .init(
                 memoryID: memoryID,
-                subject: drawer.subject,
+                // 512-scalar compact form is the frozen v2 contract; subject and context
+                // must carry identical text across both ports.
+                subject: drawer.subject.map { AriaV2Envelope.compactText($0) },
                 provenance: String(describing: drawer.sourceType).lowercased(),
+                // context carries the drawer's subject so every compact row exposes the
+                // one-sentence assertion the user filed, matching the search-path shape.
+                // 512-scalar compact form is the frozen v2 contract; subject and context
+                // must carry identical text across both ports.
+                context: drawer.subject.map { AriaV2Envelope.compactText($0) },
                 excerpt: drawer.content)
         }
         return .init(
@@ -345,8 +352,15 @@ public struct AriaV2GeniusLocusOrchestrationProvider: AriaV2OrchestrationProvide
         }
         return .init(
             memoryID: memoryID,
-            subject: drawer.subject,
+            // 512-scalar compact form is the frozen v2 contract; subject and context
+            // must carry identical text across both ports.
+            subject: drawer.subject.map { AriaV2Envelope.compactText($0) },
             provenance: String(describing: drawer.sourceType).lowercased(),
+            // context carries the drawer's subject so every compact row exposes the
+            // one-sentence assertion the user filed, matching the search-path shape.
+            // 512-scalar compact form is the frozen v2 contract; subject and context
+            // must carry identical text across both ports.
+            context: drawer.subject.map { AriaV2Envelope.compactText($0) },
             excerpt: drawer.content)
     }
 

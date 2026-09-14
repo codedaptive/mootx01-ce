@@ -17,9 +17,15 @@
 
 use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::{DrawerStore, SUBJECT_LENGTH_CONTRACT};
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::estate::Estate;
+use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+use locus_kit::frames::CaptureFrame;
+use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
+use std::sync::Arc;
 
 const NOW: i64 = 1_700_000_000;
 const AI_V1: &str = "ai-v1";
@@ -172,6 +178,110 @@ fn length_contract_enforced_at_boundary() {
         .set_subject_representation(&id, &exact, AI_V1, NOW + 201, TEST_ACTOR, None)
         .expect("exact-length subject accepted");
     assert_eq!(updated, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Grapheme-cluster contract (SPEC B-18)
+//
+// The counting unit is the grapheme cluster, the same unit Swift's
+// String.count returns. A subject of 120 clusters carrying 240 scalars
+// is ACCEPTED; a subject of 121 clusters is REFUSED with a count of 121.
+// These are the only fixtures that tell the two counting rules apart.
+// ---------------------------------------------------------------------------
+
+fn new_estate(store: Arc<InMemoryDrawerStore>) -> Estate {
+    Estate::create(
+        store as Arc<dyn DrawerStore>,
+        OwnerCredentials::new("owner"),
+        None,
+    )
+    .expect("estate create")
+}
+
+fn capture_frame_with_subject(content: &str, subject: &str) -> CaptureFrame {
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "test-room",
+        LatticeAnchor::udc("001"),
+        "test-agent",
+        "test-v1",
+    );
+    frame.subject = Some(subject.to_owned());
+    frame
+}
+
+/// The discriminating fixture: 120 grapheme clusters carrying 240 Unicode
+/// scalars. capture() accepts it and the subject round-trips byte-identical.
+#[test]
+fn subject_length_counts_grapheme_clusters_not_scalars_capture_accepts() {
+    let subject: String = "e\u{0301}".repeat(120); // 120 clusters, 240 scalars
+    assert_eq!(subject.chars().count(), 240);
+    assert_eq!(UnicodeSegmentation::graphemes(subject.as_str(), true).count(), 120);
+
+    let store = Arc::new(new_store());
+    let estate = new_estate(Arc::clone(&store));
+    let frame = capture_frame_with_subject("test content", &subject);
+    let drawer = estate.capture(frame, NOW).expect("120-cluster/240-scalar subject must be accepted by capture");
+    assert_eq!(drawer.subject.as_deref(), Some(subject.as_str()),
+        "120-cluster/240-scalar subject must round-trip byte-identical");
+}
+
+/// The over-limit fixture: 121 grapheme clusters carrying 242 scalars.
+/// capture() refuses it. The reported count is 121, not 242 — that is what
+/// proves the refusal is in the grapheme-cluster unit.
+#[test]
+fn subject_length_counts_grapheme_clusters_not_scalars_capture_refuses_121() {
+    let oversize: String = "e\u{0301}".repeat(121); // 121 clusters, 242 scalars
+    assert_eq!(oversize.chars().count(), 242);
+    assert_eq!(UnicodeSegmentation::graphemes(oversize.as_str(), true).count(), 121);
+
+    let store = Arc::new(new_store());
+    let estate = new_estate(Arc::clone(&store));
+    let frame = capture_frame_with_subject("test content", &oversize);
+    let err = estate.capture(frame, NOW).expect_err("121-cluster subject must be rejected by capture");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("121"),
+        "reported count must be 121 (grapheme clusters), not 242 (scalars); got: {msg}");
+}
+
+/// set_subject_representation accepts the 120-cluster/240-scalar subject on a
+/// subject-debt drawer.
+#[test]
+fn subject_length_counts_grapheme_clusters_not_scalars_set_subject_accepts() {
+    let subject: String = "e\u{0301}".repeat(120); // 120 clusters, 240 scalars
+    assert_eq!(subject.chars().count(), 240);
+    assert_eq!(UnicodeSegmentation::graphemes(subject.as_str(), true).count(), 120);
+
+    let store = new_store();
+    let id = make_id();
+    store.add_drawer(&sample_drawer(&id), NOW).expect("add");
+    let updated = store
+        .set_subject_representation(&id, &subject, AI_V1, NOW + 200, TEST_ACTOR, None)
+        .expect("120-cluster/240-scalar subject must be accepted by set_subject");
+    assert_eq!(updated, 1);
+    let loaded = get(&store, &id);
+    assert_eq!(loaded.subject.as_deref(), Some(subject.as_str()),
+        "subject must round-trip byte-identical");
+}
+
+/// set_subject_representation refuses the 121-cluster subject. The reported
+/// count is 121, not 242.
+#[test]
+fn subject_length_counts_grapheme_clusters_not_scalars_set_subject_refuses_121() {
+    let oversize: String = "e\u{0301}".repeat(121); // 121 clusters, 242 scalars
+    assert_eq!(oversize.chars().count(), 242);
+    assert_eq!(UnicodeSegmentation::graphemes(oversize.as_str(), true).count(), 121);
+
+    let store = new_store();
+    let id = make_id();
+    store.add_drawer(&sample_drawer(&id), NOW).expect("add");
+    let err = store
+        .set_subject_representation(&id, &oversize, AI_V1, NOW + 200, TEST_ACTOR, None)
+        .expect_err("121-cluster subject must be rejected by set_subject");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("121"),
+        "reported count must be 121 (grapheme clusters), not 242 (scalars); got: {msg}");
 }
 
 // ---------------------------------------------------------------------------
