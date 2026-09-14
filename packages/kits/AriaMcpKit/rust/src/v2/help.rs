@@ -16,7 +16,8 @@ mode \u{2014} global modifier applied at the ARIA door before every operation de
 Grammar: mode:\"Name\" sets the mode; mode:\"Name=Variant\" sets mode and variant; \
 a bare name clears any prior variant for that mode; the last declaration on a call wins.\n\
 Fail-open: an unknown mode name or variant is silently ignored and does not clobber existing sticky state.\n\
-Excluded (own mode in their input schema): moot_reclassify_fdc, moot_palace_import, moot_vault_import, moot_lens_partial_cue.";
+Excluded (own mode in their input schema): moot_reclassify_fdc, moot_palace_import, moot_vault_import, moot_lens_partial_cue.\n\
+report_withheld — per-call global modifier; only true enables it (default off). For precise, shaped, vague, connected, distilled, federated and transcript recall, and partial-cue, keystones and trust-synthesis lenses, adds integer meta.withheldBySensitivity: primary candidates excluded only by LocusKit's default adjective-sensitivity ceiling while all other frame predicates admit. An explicit sensitivity filter yields zero. Keystones counts only ranked topK endpoint drawers rejected at hydration by that ceiling, not all graph endpoints. Later provenance projection and tunnel counts are separate. Rows and ordering are unchanged; the key is absent when off.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct V2HelpRequest { pub intent: Option<String>, pub tool: Option<String> }

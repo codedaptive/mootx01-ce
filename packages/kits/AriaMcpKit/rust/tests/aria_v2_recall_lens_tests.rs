@@ -9,6 +9,7 @@ use locus_kit::{
     drawer_store::DrawerStore,
     drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::{LatticeAnchor, OwnerCredentials},
+    filter::RecallFrame,
     frames::CaptureFrame,
     provenance::Sensitivity,
 };
@@ -47,6 +48,7 @@ impl V2RecallLensAuthority for Authority {
             estate_handle: EstateHandle::new([8; 16], 0, 0).unwrap(),
             caller_binding: "caller".to_owned(),
             authorization_generation: "g1".to_owned(),
+            authorization_frame: RecallFrame::new(vec![]),
             now_millis: 100,
         })
     }

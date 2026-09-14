@@ -535,6 +535,7 @@ impl V2OrchestrationProvider for SelectedOrchestrationLower<'_> {
             }) => return Err(V2OrchestrationFailure::FederatedAccessUnavailable),
             Err(_) => return Err(V2OrchestrationFailure::LowerUnavailable),
         };
+        super::report_withheld::record(result.withheld_by_sensitivity);
         let results = result
             .drawers
             .iter()

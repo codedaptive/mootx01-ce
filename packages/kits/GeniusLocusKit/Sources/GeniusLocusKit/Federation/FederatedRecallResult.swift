@@ -33,6 +33,11 @@ public struct FederatedRecallResult: Sendable {
     /// because the recall runs against the source estate alone).
     public let drawers: [Drawer]
 
+    /// Primary source-estate rows excluded only by the caller's default
+    /// sensitivity ceiling, after this grant's content and scope gates. The
+    /// count never includes another estate or an unauthorized source row.
+    public let withheldBySensitivity: Int
+
     /// The grant that authorized this read. Carried so the caller and
     /// the audit trail can attribute the disclosure to a concrete,
     /// signed grant. When more than one active grant names the requester,
@@ -48,11 +53,13 @@ public struct FederatedRecallResult: Sendable {
     /// Construct a federated-read result.
     public init(
         drawers: [Drawer],
+        withheldBySensitivity: Int = 0,
         grant: Grant,
         sourceHandle: EstateHandle,
         requesterHandle: EstateHandle
     ) {
         self.drawers = drawers
+        self.withheldBySensitivity = withheldBySensitivity
         self.grant = grant
         self.sourceHandle = sourceHandle
         self.requesterHandle = requesterHandle

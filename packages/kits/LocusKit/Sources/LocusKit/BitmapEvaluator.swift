@@ -55,11 +55,29 @@ import SubstrateTypes
 ///
 /// Entry point: `BitmapEvaluator.evaluate(frame:drawers:store:)`.
 ///
-/// Declared `internal` rather than `public` because `DrawerStore` is
-/// internal — the substrate handle never crosses the kit boundary,
-/// so neither can a function that takes it. Public callers reach this
-/// pipeline through `Estate.recall(_:)` in `EstateVerbs.swift`.
-struct BitmapEvaluator {
+/// Public callers normally reach this pipeline through `Estate.recall(_:)` in
+/// `EstateVerbs.swift`; the evaluator result is also available to composition
+/// layers that need the count withheld by the default sensitivity ceiling.
+public struct BitmapEvaluationResult: Sendable {
+    /// The ordered drawers admitted by the complete effective filter chain.
+    public let rows: [Drawer]
+
+    /// Rows excluded only by the default-injected sensitivity ceiling.
+    ///
+    /// This is zero when the caller supplied any sensitivity filter because
+    /// the default ceiling is then not part of the effective filter chain.
+    public let withheldBySensitivity: Int
+
+    /// Creates a result whose `rows` are admitted by the effective filter
+    /// chain and whose count covers only rows excluded by its default-injected
+    /// sensitivity ceiling.
+    public init(rows: [Drawer], withheldBySensitivity: Int) {
+        self.rows = rows
+        self.withheldBySensitivity = withheldBySensitivity
+    }
+}
+
+public struct BitmapEvaluator {
 
     // MARK: - Packed provenance layout constants
     //
@@ -146,13 +164,62 @@ struct BitmapEvaluator {
     ///   `RecallStream` to page out.
     /// - Throws: Propagates substrate errors from `DrawerStore.auditEventsForRow`
     ///   during historical reconstruction.
-    static func evaluate(
+    public static func evaluate(
         frame: RecallFrame,
         drawers: [Drawer],
         store: DrawerStore,
         nodeNames: [String: (wing: String, room: String)] = [:]
     ) async throws -> [Drawer] {
+        try await evaluate(
+            chain: insertDefaults(frame.filterChain),
+            frame: frame,
+            drawers: drawers,
+            store: store,
+            nodeNames: nodeNames
+        )
+    }
+
+    /// Evaluates `frame` and reports rows withheld only by the implicit
+    /// sensitivity ceiling.
+    ///
+    /// The count is derived by evaluating the same loaded candidates with all
+    /// non-sensitivity defaults intact and the implicit ceiling omitted. Rows
+    /// withheld by another predicate never contribute to this value.
+    public static func evaluateResult(
+        frame: RecallFrame,
+        drawers: [Drawer],
+        store: DrawerStore,
+        nodeNames: [String: (wing: String, room: String)] = [:]
+    ) async throws -> BitmapEvaluationResult {
         let chain = insertDefaults(frame.filterChain)
+        let rows = try await evaluate(
+            chain: chain, frame: frame, drawers: drawers, store: store, nodeNames: nodeNames
+        )
+
+        guard !frame.filterChain.contains(where: isBitmapSensitivityFilter) else {
+            return BitmapEvaluationResult(rows: rows, withheldBySensitivity: 0)
+        }
+
+        let rowsWithoutDefaultCeiling = try await evaluate(
+            chain: insertDefaults(frame.filterChain, includeSensitivityDefault: false),
+            frame: frame,
+            drawers: drawers,
+            store: store,
+            nodeNames: nodeNames
+        )
+        return BitmapEvaluationResult(
+            rows: rows,
+            withheldBySensitivity: rowsWithoutDefaultCeiling.count - rows.count
+        )
+    }
+
+    private static func evaluate(
+        chain: [Filter],
+        frame: RecallFrame,
+        drawers: [Drawer],
+        store: DrawerStore,
+        nodeNames: [String: (wing: String, room: String)]
+    ) async throws -> [Drawer] {
 
         // 1. Per-row bitmap evaluation, with historical reconstruction
         //    when `asOf` is set. Reconstruction touches the substrate;
@@ -220,7 +287,9 @@ struct BitmapEvaluator {
     /// No confirmation default is inserted. Freshly captured drawers are
     /// unconfirmed by design; callers that need the aging/retention-vouched
     /// subset must ask for `.userConfirmed` explicitly.
-    private static func insertDefaults(_ chain: [Filter]) -> [Filter] {
+    private static func insertDefaults(
+        _ chain: [Filter], includeSensitivityDefault: Bool = true
+    ) -> [Filter] {
         var result = chain
         if !chain.contains(where: isBitmapStateFilter) {
             result.insert(.currentlyBelieve, at: 0)
@@ -228,7 +297,7 @@ struct BitmapEvaluator {
         if !chain.contains(where: isBitmapTrustFilter) {
             result.insert(.trustworthy, at: 0)
         }
-        if !chain.contains(where: isBitmapSensitivityFilter) {
+        if includeSensitivityDefault && !chain.contains(where: isBitmapSensitivityFilter) {
             // Sensitivity default — ceiling is `.elevated`, the Normal-tier
             // ceiling per data-movement privacy tiers / VK-TIER-01 mapping (Normal
             // tier = normal + elevated; restricted = Private tier; secret =

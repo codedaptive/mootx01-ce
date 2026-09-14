@@ -318,6 +318,8 @@ pub fn flush(
 /// Result of a hydration: the Estate, its UnifiedAuditLog, and its MatrixTier.
 pub struct HydratedEstate {
     pub estate: Estate,
+    /// The already-opened store retained for GLK's public recall coordinator.
+    pub recall_store: Arc<dyn DrawerStore>,
     pub unified_log: UnifiedAuditLog,
     pub matrix_tier: MatrixTier,
     /// The in-memory storage the hydrated estate runs on. Retained so the
@@ -382,7 +384,7 @@ pub fn open_hydrating(
     let store = InMemoryDrawerStore::with_storage(in_memory, now, None)
         .map_err(|e| HydrateError::Estate(format!("{e:?}")))?;
     let store_arc: Arc<dyn DrawerStore> = Arc::new(store);
-    let estate = Estate::open(store_arc, owner)
+    let estate = Estate::open(Arc::clone(&store_arc), owner)
         .map_err(|e| HydrateError::Estate(format!("{e:?}")))?;
 
     // Step 5 — Audit log feed: walk all drawers and convert their audit trail
@@ -420,7 +422,13 @@ pub fn open_hydrating(
         .collect();
     let matrix_tier = MatrixTier::full_rebuild(&unified_log, &event_times);
 
-    Ok(HydratedEstate { estate, unified_log, matrix_tier, storage })
+    Ok(HydratedEstate {
+        estate,
+        recall_store: store_arc,
+        unified_log,
+        matrix_tier,
+        storage,
+    })
 }
 
 // MARK: - EstateCoordinator extension
@@ -479,6 +487,7 @@ impl EstateCoordinator {
                 zoom_window_high,
             )
             .map_err(|e| HydrateError::Coordinator(format!("{e:?}")))?;
+        self.recall_stores.insert(handle, hydrated.recall_store);
 
         // Install the rebuilt audit log and matrix tier on the coordinator so a
         // hydrated estate's `current_audit_log` reads the replayed history and
