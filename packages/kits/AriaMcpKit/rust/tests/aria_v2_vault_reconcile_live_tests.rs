@@ -24,9 +24,16 @@ macro_rules! args {
     }};
 }
 
+/// Per-process sequence for vault directories. Test threads run in parallel
+/// and the system clock is coarser than a nanosecond on macOS, so two tests
+/// can read the same `SystemTime` and would otherwise share one vault.
+static VAULT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn vault() -> PathBuf {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let path = std::env::temp_dir().join(format!("aria-v2-reconcile-{nonce}"));
+    let sequence = VAULT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir()
+        .join(format!("aria-v2-reconcile-{}-{nonce}-{sequence}", std::process::id()));
     fs::create_dir_all(&path).unwrap();
     path
 }
