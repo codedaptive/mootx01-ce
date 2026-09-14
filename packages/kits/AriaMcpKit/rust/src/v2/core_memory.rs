@@ -581,13 +581,18 @@ pub fn run_file_memory(arguments: &JsonValue, dependencies: &V2CoreMemoryDepende
     execute_file_memory(request, dependencies)
 }
 
-pub fn execute_file_memory(request: V2FileMemoryRequest, dependencies: &V2CoreMemoryDependencies<'_>) -> Result<Value, JSONRPCError> {
+pub fn execute_file_memory(mut request: V2FileMemoryRequest, dependencies: &V2CoreMemoryDependencies<'_>) -> Result<Value, JSONRPCError> {
     let meta = meta_for(&dependencies.meta, super::operation::V2OperationEffect::Write);
     let context = context_for(request.estate_id, dependencies);
     if let (Some(requested), Some(ceiling)) = (request.sensitivity, context.sensitivity_ceiling) {
         if requested.rank() < ceiling.rank() {
             return Ok(V2MemoryFailure { code: "operation_failed".to_owned(), message: "requested sensitivity is below the live grant ceiling".to_owned(), retryable: false, recovery: None }.render(FILE_MEMORY_TOOL, &meta));
         }
+    }
+    // An omitted tier means "file at the live grant ceiling", rather than
+    // bypassing the ceiling by falling through to the storage default.
+    if request.sensitivity.is_none() {
+        request.sensitivity = context.sensitivity_ceiling;
     }
     if let Err(failure) = dependencies.authorization.authorize(V2CoreMemoryOperation::File, &context) {
         return Ok(failure.render(FILE_MEMORY_TOOL, &meta));

@@ -9,7 +9,7 @@
 //   4. Hardcoded "status: connected" literal is absent from all responses.
 //   5. "sync:" field is always present in the output.
 //
-// These tests exercise the full dispatch path through ToolDispatcher.runEstateStatus
+// These tests exercise the selected-v2 estate-status dispatch path.
 // so the assertion covers both the GLK accessor and the ARIA_MCP formatting layer.
 
 import Testing

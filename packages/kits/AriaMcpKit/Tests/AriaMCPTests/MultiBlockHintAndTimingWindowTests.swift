@@ -10,11 +10,11 @@
 //   subsequent blocks through unchanged (mirroring the Rust port, which
 //   mutates content[0]["text"] in place and never had the defect).
 //
-//   Finding A: runTimingReport collected the caller-requested audit window
-//   with no call-level bound — since_ms: 0 forced the entire audit log into
-//   memory before deriving. The fix caps collection at
-//   ToolDispatcher.timingWindowMaxEvents per call and reports truncation,
-//   with the existing watermark_ms contract paging the remainder.
+//   Finding A: the estate-diagnostics timing window collected the
+//   caller-requested audit history with no call-level bound — since_ms: 0
+//   forced the entire audit log into memory before deriving. The selected-v2
+//   provider caps collection per call and reports truncation, with the
+//   existing watermark_ms contract paging the remainder.
 
 import Testing
 import Foundation

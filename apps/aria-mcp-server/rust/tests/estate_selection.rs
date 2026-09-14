@@ -15,17 +15,33 @@
 //! Swift twin: `CharterSeedingTests.swift` in `Tests/aria-mcpTests/`.
 //! Lower-level Rust twin: `transient_charter_gate_tests.rs` in AriaMcpKit.
 
-use std::collections::BTreeMap;
-
 use aria_mcp::{
-    dispatch::dispatch_tool,
+    dispatcher::Dispatcher,
     estate_registry::{EstateRegistry, EstateOpening},
-    surfaced_recall_ledger::SurfacedRecallLedger,
+    jsonrpc::JSONRPCRequest,
 };
 
-/// Extract the text content from a successful dispatch result.
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
+/// Invoke the public selected-v2 dispatcher path used by MCP clients.
+fn selected_v2_call(dispatcher: &Dispatcher, name: &str) -> serde_json::Value {
+    let request = JSONRPCRequest::decode(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": {} },
+    }))
+    .expect("tools/call request must decode");
+    serde_json::to_value(dispatcher.handle(&request))
+        .expect("selected-v2 dispatcher response must serialize")["result"].clone()
+}
+
+fn charter_room_count(result: &serde_json::Value) -> usize {
+    result["structuredContent"]["data"]["wings"]
+        .as_array()
+        .expect("selected-v2 estate map must expose wings")
+        .iter()
+        .flat_map(|wing| wing["rooms"].as_array().into_iter().flatten())
+        .filter(|room| room["name"] == "AI_Charter_Hint")
+        .count()
 }
 
 /// A unique scratch SQLite path under the system temp directory.
@@ -56,24 +72,18 @@ fn registered_opening_seeds_seven_charter_drawers() {
         EstateRegistry::new_sqlite_with(&path, "estate-sel-owner", EstateOpening::REGISTERED)
             .expect("scratch SQLite estate with REGISTERED opening must open");
 
-    let result = dispatch_tool(
-        "moot_estate_map",
-        &BTreeMap::new(),
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("moot_estate_map must not return a transport fault");
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+    let result = selected_v2_call(&dispatcher, "moot_estate_map");
 
-    let text = content_text(&result);
-    let charter_line_count = text.lines().filter(|l| l.contains("AI_Charter_Hint:")).count();
+    let charter_line_count = charter_room_count(&result);
     // Seven default wings each contribute one AI_Charter_Hint room line.
     assert_eq!(
         charter_line_count, 7,
         "registered opening must seed exactly 7 AI_Charter_Hint room lines in moot_estate_map; \
-         got {charter_line_count} in:\n{text}"
+         got {charter_line_count} in: {result:?}"
     );
 
-    drop(registry);
+    drop(dispatcher);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -87,22 +97,16 @@ fn transient_opening_seeds_no_charter_drawers() {
         EstateRegistry::new_sqlite_with(&path, "estate-sel-owner", EstateOpening::TRANSIENT)
             .expect("scratch SQLite estate with TRANSIENT opening must open");
 
-    let result = dispatch_tool(
-        "moot_estate_map",
-        &BTreeMap::new(),
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("moot_estate_map must not return a transport fault");
+    let dispatcher = Dispatcher::new(registry, "aria-mcp-test", "test", "test-serial", None);
+    let result = selected_v2_call(&dispatcher, "moot_estate_map");
 
-    let text = content_text(&result);
-    let charter_line_count = text.lines().filter(|l| l.contains("AI_Charter_Hint:")).count();
+    let charter_line_count = charter_room_count(&result);
     assert_eq!(
         charter_line_count, 0,
         "transient opening must seed zero AI_Charter_Hint room lines in moot_estate_map; \
-         got {charter_line_count} in:\n{text}"
+         got {charter_line_count} in: {result:?}"
     );
 
-    drop(registry);
+    drop(dispatcher);
     let _ = std::fs::remove_file(&path);
 }

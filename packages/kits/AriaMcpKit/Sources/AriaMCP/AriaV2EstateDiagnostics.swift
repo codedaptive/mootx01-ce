@@ -305,7 +305,7 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
         let drains = try await typedDrains()
         // FDC recalculation state: compare the stored floor meta key against
         // the current recalculation version. Reuses the same computation as
-        // the v1 runEstateStatus in ToolDispatch.swift. See contract §5.
+        // the retired v1 status renderer. See contract §5.
         let fdcFloor = try await estate.meta(key: AriaV2GeniusLocusDataMobilityAuthority.fdcRecalcedDataVersionMetaKey)
         let fdcRecalculation: String
         if fdcFloor == FDC.recalculationVersion {

@@ -232,9 +232,30 @@ public struct GroundedSynthesis: Recipe {
             pages.append(page)
         }
         let recalledRows = pages.flatMap { $0.rows }
-        let allRows = input.excludeProvenanceSensitive
+        let admittedRows = input.excludeProvenanceSensitive
             ? recalledRows.filter { Self.publicCaptureProvenance($0.provenance) }
             : recalledRows
+
+        // Grounding is a ranking guarantee: a row that carries an explicit
+        // cue term is presented before every row that carries none. The
+        // scored lane may admit broad semantic candidates, but the fused
+        // order it hands back depends on which evidence that lane yielded,
+        // and the two ports' scored lanes do not yield identical evidence
+        // on identical estates. The stable partition keeps the hybrid order
+        // inside each bucket and makes the cue-first contract hold in both
+        // ports by construction. Twin of the partition in the Rust
+        // `run_grounded_synthesis_impl`; the Rust and Swift twin tests
+        // `selected_synthesis_ranks_cue_matches_before_unrelated_rows` and
+        // `testGroundedSynthesisQueryRanksCueMatchesFirst` pin it.
+        let normalizedCues = input.cueTerms.map { $0.lowercased() }
+        let carriesCue = { (content: String) -> Bool in
+            let lowered = content.lowercased()
+            return normalizedCues.contains { lowered.contains($0) }
+        }
+        let allRows = normalizedCues.isEmpty
+            ? admittedRows
+            : admittedRows.filter { carriesCue($0.content) }
+                + admittedRows.filter { !carriesCue($0.content) }
 
         // Apply cap BEFORE synthesis so the synthesizer's work is bounded
         // by the user limit, not the pool size. Cap is applied after reranking:

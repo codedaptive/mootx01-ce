@@ -5,8 +5,7 @@ import AriaMCPWire
 // The VaultKit control surface on ARIA_MCP — the `moot_vault_*` tool
 // family that exposes VaultKit's `VaultBridge` (export / import / status)
 // plus drift detection (`moot_vault_reconcile`) and a candidate-enqueue
-// seam. Same dispatch shape as LensTools/RecipeTools:
-// matched by name ABOVE the lexicon projection (these tools have no
+// seam. Matched by name ABOVE the lexicon projection (these tools have no
 // (verb, noun) pair, so `parseToolName` would reject them).
 //
 // ## Shipped MCP binary
@@ -170,105 +169,9 @@ enum VaultTools {
         stringSchema("Job ID returned by moot_vault_import or moot_vault_export.")
     }
 
-    // MARK: - Dispatch
-
-    /// Run the named vault tool. Same contract as `LensTools.dispatch`:
-    /// out-of-band faults (missing `vaultPath` or `job_id`, malformed
-    /// `estateID`) throw `JSONRPCError`; everything else returns a result.
-    ///
-    /// `moot_vault_import` and `moot_vault_export` return a `job_id`
-    /// immediately and run the bridge in a background `Task`. Poll with
-    /// `moot_vault_job` to retrieve the outcome.
-    static func dispatch(
-        name: String,
-        args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        defaultHandle: EstateHandle,
-        resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
-        jobRegistry: VaultJobRegistry,
-        environment: [String: String]
-    ) async throws -> JSONValue {
-        // Guard: vault surface is disabled (installed with --vault-off).
-        // Return a clear refusal rather than an opaque failure. The tool
-        // should never be called when disabled (it is absent from tools/list),
-        // but the guard ensures a clean error if a client hard-codes the name.
-        // MOOTX01_VAULT env var: absent/≠"0" = enabled; "0" = disabled.
-        guard ToolProjection.vaultEnabled(environment: environment) else {
-            return ToolDispatcher.errorResult(
-                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
-            )
-        }
-
-        // moot_vault_job only needs a job_id — no vaultPath.
-        if name == "moot_vault_job" {
-            let jobID = try requireString(args, "job_id")
-            return await runJob(jobID: jobID, registry: jobRegistry)
-        }
-
-        // All remaining vault tools require vaultPath.
-        let vaultURL = URL(
-            fileURLWithPath: try requireString(args, "vaultPath"), isDirectory: true)
-
-        switch name {
-        case "moot_vault_export":
-            // export/import target an estate, resolved through the
-            // dispatcher's own registry exactly like the lexicon tools.
-            // Parse the optional scope string; default to .believed.
-            let scope = try parseScope(args["scope"])
-            return try await runExport(
-                kit: kit, handle: try resolveHandle(args), vaultURL: vaultURL,
-                scope: scope, jobRegistry: jobRegistry)
-
-        case "moot_vault_import":
-            // mode = encode SPEED (foreground default); the WRITE strategy (bulk
-            // vs per-item stream) is size-gated automatically (ImportPolicy), not
-            // chosen here. Fail-closed on an unknown value.
-            let modeStr = (args["mode"]?.stringValue ?? "foreground").lowercased()
-            let importMode: EncodeSpeed
-            switch modeStr {
-            case "foreground": importMode = .foreground
-            case "background": importMode = .background
-            default:
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)")
-            }
-            return try await runImport(
-                kit: kit, handle: try resolveHandle(args), vaultURL: vaultURL,
-                mode: importMode, jobRegistry: jobRegistry)
-
-        case "moot_vault_status":
-            // status reads only the filesystem — no estate is consulted,
-            // so it takes no estateID.
-            return try runStatus(vaultURL: vaultURL)
-
-        case "moot_vault_reconcile":
-            // `apply` is optional — absent or false means dry-run.
-            let apply = args["apply"]?.boolValue ?? false
-            return try await runReconcile(
-                kit: kit, handle: try resolveHandle(args),
-                vaultURL: vaultURL, apply: apply, now: Date())
-
-        default:
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.methodNotFound,
-                message: "Unknown vault tool: \(name)")
-        }
-    }
 
     // MARK: - Handlers
 
-    /// Register a vault export job and immediately return its `job_id`.
-    ///
-    /// The bridge export and manifest stamp run in an unstructured `Task`
-    /// so the MCP channel is freed before the bridge finishes — critical
-    /// for vaults large enough to exceed the MCP timeout. All captured
-    /// values (`VaultBridge` struct Sendable, `EstateHandle` Sendable,
-    /// `VaultExportScope` enum Sendable, `URL` struct Sendable,
-    /// `VaultJobRegistry` actor Sendable) satisfy Swift 6 task-capture
-    /// requirements. `Date()` inside the Task samples the real export
-    /// instant (a wall-clock event, not a deterministic computation —
-    /// same precedent as `LensTools` sampling `Date()` for manifests).
     /// Maximum number of vault jobs (import or export) that may run concurrently.
     ///
     /// Each vault job spawns an unstructured Task that performs potentially
@@ -279,24 +182,9 @@ enum VaultTools {
     /// running-job count before registration so it is enforced per-process.
     private static let maxConcurrentVaultJobs = 4
 
-    private static func runExport(
-        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
-        scope: VaultExportScope = .exportable,
-        jobRegistry: VaultJobRegistry
-    ) async throws -> JSONValue {
-        let launch = try await launchExport(
-            kit: kit, handle: handle, vaultURL: vaultURL,
-            scope: scope, jobRegistry: jobRegistry)
-        return ToolDispatcher.textResult("""
-        job_id: \(launch.jobID.uuidString)
-        vault: \(launch.vaultPath)
-        scope: \(launch.scope ?? scope.rawValue)
-        poll: moot_vault_job to check status
-        """)
-    }
 
     /// Starts the real asynchronous export and returns the registry-minted job
-    /// identity.  V1 rendering and v2 structured projection share this core.
+    /// identity for the selected v2 data-mobility provider.
     static func launchExport(
         kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
         scope: VaultExportScope = .exportable,
@@ -391,26 +279,9 @@ enum VaultTools {
     /// handles bridge throws.
     ///
     /// The bridge import itself runs in an unstructured `Task`; all captured
-    /// values satisfy Swift 6 task-capture requirements (see `runExport` for
+/// values satisfy Swift 6 task-capture requirements (see `launchExport` for
     /// the same Sendability analysis). The bridge is idempotent per note's
     /// `stableSourceKey`.
-    private static func runImport(
-        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
-        mode: EncodeSpeed, jobRegistry: VaultJobRegistry
-    ) async throws -> JSONValue {
-        let launch = try await launchImport(
-            kit: kit, handle: handle, vaultURL: vaultURL,
-            mode: mode, jobRegistry: jobRegistry)
-        return ToolDispatcher.textResult("""
-        job_id: \(launch.jobID.uuidString)
-        vault: \(launch.vaultPath)
-        note_count: \(launch.noteCount ?? 0)
-        status: RUNNING — import is processing in the background.
-        IMPORTANT: Vault imports are long-running (~2 seconds per document). A \(launch.noteCount ?? 0)-note \
-        vault will take approximately \((launch.noteCount ?? 0) * 2 / 60) minutes. Do NOT cancel or re-issue \
-        the import — it is running correctly. Poll moot_vault_job with this job_id to check progress.
-        """)
-    }
 
     /// Starts the real asynchronous import and returns its typed lifecycle
     /// receipt.  This preserves the cap/preflight/task ownership of v1.
@@ -576,22 +447,6 @@ enum VaultTools {
         .init(path: vaultURL.path, manifest: try readManifest(vaultURL: vaultURL))
     }
 
-    private static func runStatus(vaultURL: URL) throws -> JSONValue {
-        let snapshot = try statusSnapshot(vaultURL: vaultURL)
-        guard let manifest = snapshot.manifest else {
-            return ToolDispatcher.textResult("""
-            vault_status: no export manifest at \(manifestRelativePath)
-            path: \(snapshot.path)
-            (run moot_vault_export to stamp one)
-            """)
-        }
-        return ToolDispatcher.textResult("""
-        vault_status: manifest present
-        path: \(snapshot.path)
-        noteCount: \(manifest.noteCount)
-        lastExport: \(manifest.exportedAt)
-        """)
-    }
 
     /// Re-hash the vault, report drift against the export manifest, and
     /// surface the FULL import set — the review gate (VR-01 Finding B).
@@ -744,129 +599,15 @@ enum VaultTools {
             restampedCount: report == nil ? nil : selected.count)
     }
 
-    private static func runReconcile(
-        kit: GeniusLocusKit,
-        handle: EstateHandle,
-        vaultURL: URL,
-        apply: Bool,
-        now: Date
-    ) async throws -> JSONValue {
-        guard let snapshot = try await reconcileSnapshot(
-            kit: kit, handle: handle, vaultURL: vaultURL, apply: apply, now: now
-        ) else {
-            return ToolDispatcher.errorResult(
-                "vault_reconcile: no export manifest at \(manifestRelativePath). Run moot_vault_export first.")
-        }
-        return ToolDispatcher.textResult(renderReconcile(snapshot))
-    }
 
-    private static func renderReconcile(_ snapshot: VaultReconcileSnapshot) -> String {
-        var lines = [
-            "vault_reconcile: \(snapshot.added.count) added, \(snapshot.modified.count) modified, \(snapshot.deleted.count) deleted",
-        ]
-        if snapshot.manifestWasLegacy {
-            let currentCount = snapshot.candidates.count
-            lines.append("manifest: legacy (pre-certification) — prior hashes unavailable; all \(currentCount) note(s) classified changed / needs review")
-        }
-        lines.append("added:")
-        lines += snapshot.added.map { "  + \($0)" }
-        lines.append("modified:")
-        lines += snapshot.modified.map { "  ~ \($0)" }
-        lines.append("deleted (reported, not actioned):")
-        lines += snapshot.deleted.map { "  - \($0)" }
-        lines.append("missing (estate lacks — apply imports these):")
-        lines += snapshot.missing.map { "  * \($0)" }
-        lines.append("import set: \(snapshot.importSetCount) note(s) — \(snapshot.candidateCount) candidate(s) + \(snapshot.missing.count) missing")
-        if let report = snapshot.importReport {
-            lines.append("apply: true — imported exactly the surfaced import set")
-            lines.append("  drawersWritten: \(report.drawersWritten)")
-            lines.append("  drawersUpdated: \(report.drawersUpdated)")
-            lines.append("  itemsSkipped: \(report.itemsSkipped)")
-            lines.append("  tunnelsCreated: \(report.tunnelsCreated)")
-            lines.append("  fdcClassified: \(report.fdcClassified)")
-            lines.append("  fdcUnclassified: \(report.fdcUnclassified)")
-            lines.append("  drawersSkippedUnchanged: \(report.drawersSkippedUnchanged)")
-            lines.append("  drawersSkippedTombstoned: \(report.drawersSkippedTombstoned)")
-            lines.append("manifest: re-stamped \(snapshot.restampedCount ?? 0) imported path(s) (schema v\(manifestSchemaVersion))")
-        } else {
-            lines.append("candidates (dry-run — pass apply=true to action):")
-            for candidate in snapshot.candidates {
-                lines.append("  candidate stableSourceKey=\(candidate.stableSourceKey) vaultPath=\(candidate.vaultPath) sha256=\(candidate.sha256)")
-            }
-            lines.append("no Proposal written — dry-run")
-        }
-        return lines.joined(separator: "\n")
-    }
 
     /// Return the current status of a vault job, or an error result when
     /// `jobID` is not registered. Sampling `Date()` here is correct —
     /// `elapsed_s` is a real-time measurement, not a deterministic
     /// computation.
-    private static func runJob(
-        jobID: String, registry: VaultJobRegistry
-    ) async -> JSONValue {
-        guard let parsedID = UUID(uuidString: jobID),
-              let snapshot = await registry.snapshot(for: parsedID) else {
-            return ToolDispatcher.errorResult("unknown job_id: \(jobID)")
-        }
-        return ToolDispatcher.textResult(renderJobSnapshot(snapshot))
-    }
 
     /// V1's presentation layer over the same typed lifecycle snapshot exposed
     /// to the v2 data-mobility provider.  No response text is read back.
-    static func renderJobSnapshot(_ snapshot: VaultJobSnapshot) -> String {
-        let elapsedStr = String(format: "%.1f", snapshot.elapsedSeconds)
-
-        switch snapshot.state {
-        case .running(let progress):
-            var runningLines = """
-            job_id: \(snapshot.jobID.uuidString)
-            kind: \(snapshot.kind.rawValue)
-            vault: \(snapshot.vaultPath)
-            status: running
-            elapsed_s: \(elapsedStr)
-            """
-            if let p = progress {
-                runningLines += "\nprogress: \(p.processed)/\(p.total)"
-            }
-            return runningLines
-        case .imported(let r):
-            return """
-            job_id: \(snapshot.jobID.uuidString)
-            kind: \(snapshot.kind.rawValue)
-            vault: \(snapshot.vaultPath)
-            status: complete
-            elapsed_s: \(elapsedStr)
-            drawersWritten: \(r.drawersWritten)
-            drawersUpdated: \(r.drawersUpdated)
-            itemsSkipped: \(r.itemsSkipped)
-            tunnelsCreated: \(r.tunnelsCreated)
-            fdcClassified: \(r.fdcClassified)
-            fdcUnclassified: \(r.fdcUnclassified)
-            drawersSkippedUnchanged: \(r.drawersSkippedUnchanged)
-            drawersSkippedTombstoned: \(r.drawersSkippedTombstoned)
-            """
-        case .exported(let r):
-            return """
-            job_id: \(snapshot.jobID.uuidString)
-            kind: \(snapshot.kind.rawValue)
-            vault: \(snapshot.vaultPath)
-            status: complete
-            elapsed_s: \(elapsedStr)
-            noteCount: \(r.noteCount)
-            exportedAt: \(r.exportedAt)
-            """
-        case .failed(let error):
-            return """
-            job_id: \(snapshot.jobID.uuidString)
-            kind: \(snapshot.kind.rawValue)
-            vault: \(snapshot.vaultPath)
-            status: failed
-            elapsed_s: \(elapsedStr)
-            error: \(error)
-            """
-        }
-    }
 
     // MARK: - Manifest IO + hashing
 
@@ -918,8 +659,7 @@ enum VaultTools {
             files[rel] = ManifestEntry(sha256: sha256Hex(data))
         }
         // Fresh formatter per call: ISO8601DateFormatter is not Sendable,
-        // so it cannot be a shared static under Swift 6 strict concurrency
-        // (same per-call construction LensTools uses).
+        // so it cannot be a shared static under Swift 6 strict concurrency.
         return ExportManifest(
             version: manifestSchemaVersion,
             exportedAt: ISO8601DateFormatter().string(from: now),
@@ -936,7 +676,7 @@ enum VaultTools {
     ///   directory named `something.md` or a broken `.md` symlink — these are
     ///   not notes. Reading their resource value and skipping non-regular entries
     ///   prevents a spurious throw and, as defense-in-depth, avoids triggering
-    ///   the slot-release guard in `runImport` on non-note entries. A genuinely
+///   the slot-release guard in `launchImport` on non-note entries. A genuinely
     ///   unreadable REGULAR `.md` file still throws — that is a real error; the
     ///   guard releases the slot via `fail()` and propagates the error to the caller.
     /// - Skips OKF navigation files (`index.md`, `log.md`) that `fromIR`
@@ -1047,8 +787,7 @@ enum VaultTools {
 
     /// Forward-slash vault-relative path of `fileURL` under `root`. A
     /// local copy of `ObsidianAdapter`'s path logic (that helper is
-    /// internal to VaultKit); same precedent as the LensTools schema
-    /// helpers being small local copies.
+    /// internal to VaultKit).
     static func relativePath(of fileURL: URL, under root: URL) -> String {
         let rootComponents = root.standardizedFileURL.pathComponents
         let fileComponents = fileURL.standardizedFileURL.pathComponents
@@ -1073,7 +812,7 @@ enum VaultTools {
         return value
     }
 
-    // MARK: - JSON schema helpers (same small copies as LensTools)
+    // MARK: - JSON schema helpers
 
     private static var vaultPathSchema: JSONValue {
         stringSchema("Filesystem path of the vault directory.")
@@ -1165,7 +904,7 @@ enum VaultTools {
     /// A dataset handle note record from a vault scan.
     ///
     /// Declared as a `Sendable` struct (rather than a named tuple) so it can be
-    /// captured safely in the unstructured `Task` inside `runImport`.
+/// captured safely in the unstructured `Task` inside `launchImport`.
     private struct VaultDatasetNoteRecord: Sendable {
         let path: String
         let frontmatter: [String: String]
@@ -1315,7 +1054,7 @@ enum VaultTools {
 
     /// Export companion CSV files alongside dataset handle notes in the vault.
     ///
-    /// Called as a post-step in `runExport` after `bridge.export` and
+/// Called as a post-step in `launchExport` after `bridge.export` and
     /// `writeManifest` complete. For each note with `contentKind: 7`, queries
     /// the DatasetStore and writes a companion `<slug>.csv` next to the `.md`.
     ///

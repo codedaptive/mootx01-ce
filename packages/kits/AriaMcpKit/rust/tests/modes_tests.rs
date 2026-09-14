@@ -83,7 +83,6 @@ fn response_text(response: &serde_json::Value) -> &str {
 
 #[test]
 fn unknown_mode_name_is_fail_open() {
-    // Modes are handled at the Dispatcher level (not in dispatch_tool).
     // Here we test ModeDeclaration directly.
     let decl = ModeDeclaration::parse("Quantum");
     assert!(decl.recognized_mode().is_none(), "Unknown mode should not be recognized");

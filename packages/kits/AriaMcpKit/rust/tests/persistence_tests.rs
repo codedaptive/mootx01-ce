@@ -27,8 +27,10 @@
 
 use std::collections::BTreeMap;
 
-use aria_mcp::{dispatch::dispatch_tool,
-    surfaced_recall_ledger::SurfacedRecallLedger, estate_registry::EstateRegistry, jsonrpc::JsonValue};
+mod test_support;
+use test_support::SelectedV2Session;
+
+use aria_mcp::{estate_registry::EstateRegistry, jsonrpc::JsonValue};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -58,11 +60,6 @@ fn temp_sqlite_path(label: &str) -> String {
         .join(format!("aria_mcp_persist_{}_{}", label, Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create per-estate temp dir");
     dir.join("estate.sqlite").to_string_lossy().into_owned()
-}
-
-/// Extract content[0].text from a dispatch result.
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
 }
 
 // ---------------------------------------------------------------------------
@@ -156,26 +153,18 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
 
     // --- Pass 1: file a memory. ---
     let filed_id = {
-        let registry =
-            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-1 open must succeed");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-1 open must succeed"),
+        );
 
         let a = args![
             "content" => "persistent content for round-trip test",
         "subject" => "persistent content for round-trip test",
             "location" => "persistence-room"
         ];
-        let result =
-            dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new()).expect("capture must succeed");
-        let text = content_text(&result);
-        assert!(
-            text.starts_with("filed memory "),
-            "file_memory result must start with id prefix; got: {text}"
-        );
-
-        // Parse the drawer id from "filed memory <id>\nroom: ...\nlineage: ..."
-        let id_line = text.lines().next().unwrap_or("");
-        let id = id_line
-            .strip_prefix("filed memory ")
+        let result = session.call("moot_file_memory", &a).expect("capture must succeed");
+        let id = result["structuredContent"]["data"]["memory_id"]
+            .as_str()
             .unwrap_or("")
             .to_owned();
         assert!(!id.is_empty(), "filed memory id must be non-empty");
@@ -185,13 +174,15 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
 
     // --- Pass 2: open a new registry at the same path and search. ---
     {
-        let registry2 =
-            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-2 reopen must succeed");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-2 reopen must succeed"),
+        );
 
         let search_a = args!["query" => "persistent content"];
-        let search_result = dispatch_tool("moot_memory_search", &search_a, &registry2, &SurfacedRecallLedger::new())
-            .expect("search must succeed");
-        let search_text = content_text(&search_result);
+        let search_result = session.call("moot_memory_search", &search_a).expect("search must succeed");
+        let rows = search_result["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("selected-v2 search rows");
 
         // The persisted memory must survive reopen and be found. A reopened
         // SQLite estate also re-seeds the seven default wings (each an
@@ -199,16 +190,16 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
         // exactly 1. The id + content assertions below prove THIS memory
         // round-tripped; here we only require the search found something.
         assert!(
-            !search_text.starts_with("found 0"),
-            "reopen must find the persisted memory; got: {search_text}"
+            !rows.is_empty(),
+            "reopen must find the persisted memory; got: {search_result}"
         );
         assert!(
-            search_text.contains(&filed_id),
-            "search result must include the filed memory id {filed_id}; got: {search_text}"
+            rows.iter().any(|row| row["memory_id"] == filed_id),
+            "search result must include the filed memory id {filed_id}; got: {search_result}"
         );
         assert!(
-            search_text.contains("persistent content"),
-            "search result must include memory content; got: {search_text}"
+            rows.iter().any(|row| row["subject"] == "persistent content for round-trip test"),
+            "search result must include memory subject; got: {search_result}"
         );
     }
 
@@ -406,28 +397,19 @@ fn new_sqlite_on_reserve12_estate_survives_write_through() {
 
     // Pass 1: open via new_sqlite and file a memory through the returned handle.
     let filed_id = {
-        let registry = EstateRegistry::new_sqlite(&path, "test-owner")
-            .expect("new_sqlite must open a reserve=12 estate without error");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner")
+                .expect("new_sqlite must open a reserve=12 estate without error"),
+        );
         let a = args![
             "content" => "geo-norm write-survival regression marker",
             "subject" => "geo-norm write-survival regression marker",
             "location" => "geo-norm-room"
         ];
-        let result = dispatch_tool(
-            "moot_file_memory",
-            &a,
-            &registry,
-            &SurfacedRecallLedger::new(),
-        )
+        let result = session.call("moot_file_memory", &a)
         .expect("moot_file_memory must succeed on the reserve=12 estate");
-        let text = content_text(&result);
-        assert!(
-            text.starts_with("filed memory "),
-            "moot_file_memory must return an id; got: {text}"
-        );
-        let id_line = text.lines().next().unwrap_or("");
-        let id = id_line
-            .strip_prefix("filed memory ")
+        let id = result["structuredContent"]["data"]["memory_id"]
+            .as_str()
             .unwrap_or("")
             .to_owned();
         assert!(!id.is_empty(), "filed memory id must be non-empty");
@@ -438,25 +420,24 @@ fn new_sqlite_on_reserve12_estate_survives_write_through() {
     // Pass 2: reopen at the same canonical path and assert the write survived.
     // After Part 1 the file is reserve=0 and the connection received the writes.
     {
-        let registry2 = EstateRegistry::new_sqlite(&path, "test-owner")
-            .expect("pass-2 reopen must succeed on the normalized estate");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner")
+                .expect("pass-2 reopen must succeed on the normalized estate"),
+        );
         let search_a = args!["query" => "geo-norm write-survival regression"];
-        let result = dispatch_tool(
-            "moot_memory_search",
-            &search_a,
-            &registry2,
-            &SurfacedRecallLedger::new(),
-        )
+        let result = session.call("moot_memory_search", &search_a)
         .expect("moot_memory_search must succeed on reopen");
-        let text = content_text(&result);
+        let rows = result["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("selected-v2 search rows");
         assert!(
-            text.contains(&filed_id),
+            rows.iter().any(|row| row["memory_id"] == filed_id),
             "write must survive geometry normalization and registry drop: \
-             expected id={filed_id} in search result; got: {text}"
+             expected id={filed_id} in search result; got: {result}"
         );
         assert!(
-            text.contains("geo-norm write-survival regression marker"),
-            "write content must survive geometry normalization; got: {text}"
+            rows.iter().any(|row| row["subject"] == "geo-norm write-survival regression marker"),
+            "write subject must survive geometry normalization; got: {result}"
         );
     }
 
@@ -486,8 +467,9 @@ fn new_sqlite_on_reserve12_estate_survives_write_through() {
 fn memory_get_after_search_sets_used_bit() {
     let path = temp_sqlite_path("b10a-get-reward");
 
-    let registry = EstateRegistry::new_sqlite(&path, "test-owner")
-        .expect("new_sqlite must succeed");
+    let session = SelectedV2Session::new(
+        EstateRegistry::new_sqlite(&path, "test-owner").expect("new_sqlite must succeed"),
+    );
 
     // File a memory so the estate is non-empty.
     let drawer_id = {
@@ -496,38 +478,32 @@ fn memory_get_after_search_sets_used_bit() {
             "subject" => "memory get reward wiring test",
             "location" => "get-reward-room"
         ];
-        let result = dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
-            .expect("moot_file_memory must succeed");
-        let text = content_text(&result);
-        let id_line = text.lines().next().unwrap_or("");
-        let id = id_line.strip_prefix("filed memory ").unwrap_or("").to_owned();
-        assert!(!id.is_empty(), "filed memory id must be non-empty; got: {text}");
+        let result = session.call("moot_file_memory", &a).expect("moot_file_memory must succeed");
+        let id = result["structuredContent"]["data"]["memory_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        assert!(!id.is_empty(), "filed memory id must be non-empty; got: {result}");
         id
     };
 
-    // Search using a SHARED ledger — the ledger carries surfaced ids across
-    // calls within the same simulated session. dispatch_tool takes &SurfacedRecallLedger
-    // (thread-safe interior mutex), so we create one and pass it to both calls.
-    let session_ledger = SurfacedRecallLedger::new();
-
-    let search_result = dispatch_tool(
-        "moot_memory_search",
-        &args!["query" => "memory get reward"],
-        &registry,
-        &session_ledger,
-    )
-    .expect("moot_memory_search must succeed");
-    let search_text = content_text(&search_result);
+    // The persistent selected-v2 dispatcher owns the surfaced-id ledger across
+    // this search and dereference pair.
+    let search_result = session.call("moot_memory_search", &args!["query" => "memory get reward"])
+        .expect("moot_memory_search must succeed");
+    let rows = search_result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search rows");
     assert!(
-        search_text.contains(&drawer_id),
-        "search must surface the filed drawer; got: {search_text}"
+        rows.iter().any(|row| row["memory_id"] == drawer_id),
+        "search must surface the filed drawer; got: {search_result}"
     );
 
     // Verify trace rows were written (B-10a external-origin contract).
     {
-        let coord = registry.coord.lock().unwrap();
+        let coord = session.coord.lock().unwrap();
         let trace_count = coord
-            .count_recall_traces(&registry.default.handle)
+            .count_recall_traces(&session.default.handle)
             .expect("count_recall_traces");
         assert!(
             trace_count > 0,
@@ -535,14 +511,9 @@ fn memory_get_after_search_sets_used_bit() {
         );
     }
 
-    // Dereference via moot_memory_get — passes the SAME session ledger so
-    // note_usage can find the drawer id and call mark_recall_used.
-    let get_result = dispatch_tool(
-        "moot_memory_get",
-        &args!["id" => drawer_id.as_str()],
-        &registry,
-        &session_ledger,
-    )
+    // Dereference through the same selected-v2 dispatcher so note_usage reaches
+    // its dispatcher-owned surfaced-id ledger.
+    let get_result = session.call("moot_memory_get", &args!["memory_id" => drawer_id.as_str()])
     .expect("moot_memory_get must succeed");
     let is_error = get_result["isError"].as_bool().unwrap_or(true);
     assert!(
@@ -555,10 +526,10 @@ fn memory_get_after_search_sets_used_bit() {
     // used=true on all rows, the probe finds 0 rows with used=false → returns 0.
     // A non-zero result means memory_get did NOT fire the reward path.
     let probe_count = {
-        let coord = registry.coord.lock().unwrap();
+        let coord = session.coord.lock().unwrap();
         coord
             .mark_recall_used(
-                &registry.default.handle,
+                &session.default.handle,
                 &drawer_id,
                 "2000-01-01T00:00:00Z", // since: far past — guaranteed to cover test rows
                 "3000-01-01T00:00:00Z", // now: far future — guaranteed to be after recalledAt

@@ -1,0 +1,25 @@
+{
+  "purpose": "Shared Rust and Swift ARIA v2 connected-recall parity vector: wing limits tunnel lookup only, while full caller-filtered hydration prevents graph endpoints from disclosing bodies.",
+  "schema_version": "1.0",
+  "vector": {
+    "name": "wing_independent_anchor_and_filtered_walk_hydration",
+    "anchor": {
+      "content": "ParallaxAster anchor meeting is scheduled for Thursday morning",
+      "location": "parity-anchor-wing",
+      "exportability": "public"
+    },
+    "target": {
+      "content": "ObsidianMoth private connected detail must stay opaque",
+      "location": "parity-target-wing"
+    },
+    "tunnel_wing": "parity-tunnel-wing",
+    "query": "ParallaxAster meeting Thursday",
+    "control_filter": "unconfirmed",
+    "filtered_filter": "exportable",
+    "limit": 10,
+    "expected": {
+      "control_result_keys": ["anchor", "target"],
+      "filtered_result_keys": ["anchor"]
+    }
+  }
+}
