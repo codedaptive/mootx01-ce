@@ -5,6 +5,7 @@
 //! feature flag gating it.
 
 pub mod call_chain;
+pub(crate) mod report_withheld;
 pub mod chain_registry;
 pub mod coach;
 pub mod codec;

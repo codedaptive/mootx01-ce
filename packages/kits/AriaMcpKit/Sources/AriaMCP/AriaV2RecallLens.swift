@@ -169,10 +169,13 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
             return try await precise(request)
         case .recallConnected:
             let a = request.arguments; let f = try filter(a["filter"]?.stringValue)
-            let rows = try await ConnectedRecall.run(kit: kit, handle: handle, query: a["query"]!.stringValue!, wing: a["wing"]?.stringValue ?? "", filter: f, limit: Int(a["limit"]?.integerValue ?? 20))
+            let scoped = a["wing"]?.stringValue.map { LocusKit.Filter.all([f, .inWing($0)]) } ?? f
+            let rows = try await ConnectedRecall.run(kit: kit, handle: handle, query: a["query"]!.stringValue!, wing: a["wing"]?.stringValue ?? "", filter: scoped, limit: Int(a["limit"]?.integerValue ?? 20))
+            try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: .init(
+                filterChain: [scoped], hydrationLevel: .full, limit: max(Int(a["limit"]?.integerValue ?? 20), 20)))
             return try await projectedResult(
                 rows.map { .init(id: $0.id, retrievalSource: $0.source) },
-                filterChain: [f], label: "connected recall")
+                filterChain: [scoped], label: "connected recall")
         case .recallShaped:
             let a = request.arguments; let f = try filter(a["filter"]?.stringValue)
             let preset = a["preset"]?.stringValue ?? "balanced"
@@ -190,11 +193,17 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
             // Thread frontier_k through to the engine; absent means nil (engine default formula).
             let frontierK = a["frontier_k"]?.integerValue.map { Int($0) }
             let rows = try await ShapedRecall().run(input: .init(query: a["query"]!.stringValue!, preset: preset, filter: a["wing"]?.stringValue.map { .all([f, .inWing($0)]) } ?? f, limit: Int(a["limit"]?.integerValue ?? 20), frontierK: frontierK), estate: handle, kit: kit).matches
+            try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: .init(
+                filterChain: [a["wing"]?.stringValue.map { .all([f, .inWing($0)]) } ?? f],
+                hydrationLevel: .full, limit: Int(a["limit"]?.integerValue ?? 20), ordering: .byCaptureTimeDesc))
             return try await projectedResult(
                 rows.map { .init(id: $0.id, score: $0.score) },
                 control: discrimination(rows.map(\.score)), label: "shaped recall")
         case .recallDistilled:
             let a = request.arguments; let out = try await DistilledRecall().run(input: .init(query: a["query"]!.stringValue!, filter: try filter(a["filter"]?.stringValue), limit: Int(a["limit"]?.integerValue ?? 20)), estate: handle, kit: kit)
+            try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: .init(
+                filterChain: [try filter(a["filter"]?.stringValue)], hydrationLevel: .full,
+                limit: Int(a["limit"]?.integerValue ?? 20)))
             return try await projectedResult(
                 out.matches.map {
                     .init(id: $0.id, score: $0.score, distilled: $0.text, representation: "distilled",
@@ -228,6 +237,7 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
                 label: "walk recall")
         case .recallVague:
             let a = request.arguments; let out = try await kit.vagueRecall(handle, query: a["query"]!.stringValue!, hitLimit: Int(a["limit"]?.integerValue ?? 8), constituentsPerHit: 8, totalConstituents: 32)
+            await AriaV2Withheld.record(out.withheldBySensitivity)
             let inputs = out.vagueHits.map { ProjectedMatch(id: $0.id, tier: "summary") }
                 + out.constituents.map { ProjectedMatch(id: $0.id, tier: "original") }
             return try await projectedResult(inputs, label: "vague recall")
@@ -254,6 +264,9 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
                 allowed: NeuronKit.CompositionGrid.names).jsonRPCError
         }
         let matches = try await PreciseRecall.run(kit: kit, handle: handle, query: query, filter: scoped, limit: limit, pool: pool, composition: composition)
+        try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: .init(
+            filterChain: [scoped], hydrationLevel: .bitmapOnly,
+            limit: max(pool, limit), ordering: .byCaptureTimeDesc))
         return try await projectedResult(
             matches.map { .init(id: $0.id, score: $0.score) },
             control: discrimination(matches.map(\.score)), label: "precise recall")

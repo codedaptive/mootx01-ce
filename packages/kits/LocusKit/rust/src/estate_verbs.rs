@@ -1284,6 +1284,30 @@ impl Estate {
         })
     }
 
+    /// Hydrate exactly these IDs and count only default-sensitivity exclusions.
+    /// Rejected rows and loaded IDs never leave LocusKit through this API.
+    pub fn hydrate_with_sensitivity_count(
+        &self,
+        ids: &[RowID],
+        frame: &RecallFrame,
+    ) -> Result<crate::bitmap_evaluator::BitmapEvaluationResult, LocusKitError> {
+        let mut loaded = Vec::new();
+        let mut seen = HashSet::new();
+        for id in ids {
+            if seen.insert(id) {
+                if let Some(drawer) = self.store.get_drawer(id)? {
+                    loaded.push(drawer);
+                }
+            }
+        }
+        let node_names = self.resolve_node_names_for_drawers(&loaded);
+        let mut result = BitmapEvaluator::evaluate_result(frame, &loaded, self.store.as_ref(), &node_names)?;
+        if frame.hydration_level == HydrationLevel::BitmapOnly {
+            for drawer in &mut result.rows { drawer.content.clear(); }
+        }
+        Ok(result)
+    }
+
     /// Delete recall-trace rows whose `recalled_at` is strictly before
     /// `cutoff`. Estate-level pass-through over
     /// `DrawerStore::prune_recall_traces`. Returns the number of rows deleted.
