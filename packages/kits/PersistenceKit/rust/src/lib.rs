@@ -59,6 +59,12 @@ pub mod storage;
 // report_storage_stats wraps StorageIntrospection::stats and emits persistence.db.*
 // metrics. Off by default — zero cost when monitoring is disabled.
 pub mod telemetry;
+// Faulting Storage/RowStore decorator for fail-closed pre-read tests.
+// Gated behind the `test-support` feature so the types are absent from
+// production binaries. Enable via dev-dep:
+//   persistence-kit = { features = ["test-support"] }
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod types;
 
 pub use audit_log::*;

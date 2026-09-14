@@ -952,7 +952,9 @@ public extension GeniusLocusKit {
         // cross-kit delete (§B-2a ordering). Storage failure remaps via remap
         // and aborts; the cross-kit step is never reached.
         // expungeReturningUnsealedEvent returns the full ExpungeOutcome:
-        // the unsealed audit event plus the gate-refused sibling ids.
+        // the unsealed audit event plus the ids of siblings left
+        // untouched — refused by the ceiling (.elevated, checked first,
+        // never reaching the gate) or refused by the gate (S-3).
         let storageOutcome: DrawerStore.ExpungeOutcome
         let unsealedEvent: AuditEvent
         do {
@@ -960,6 +962,11 @@ public extension GeniusLocusKit {
                 rowID: frame.rowID,
                 reason: frame.reason,
                 confirmation: frame.confirmation,
+                // GLK-CEILING: the erase verb enforces the same .elevated ceiling
+                // on siblings that step 0.5 enforces on the target. A caller who
+                // cannot read above .elevated must not be able to erase above it
+                // through the lineage cascade either.
+                sensitivityCeiling: .elevated,
                 now: now
             )
             // Force-unwrap is a deliberate programmer-error trap:
