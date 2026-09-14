@@ -1,5 +1,4 @@
 // brain/mod.rs — Rust mirror of the GeniusLocusKit Brain layer.
-// adornment_pass.rs removed by ENCODER_RERANK_CONTRACT (replaced by span_encode_duty.rs).
 //
 // Mission GLK-04. Parity-gated against the Swift reference under
 // `GeniusLocusKit/Sources/GeniusLocusKit/Brain/`. The conformance
