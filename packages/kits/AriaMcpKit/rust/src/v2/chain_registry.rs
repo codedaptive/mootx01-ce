@@ -80,7 +80,7 @@ pub const EGRESS_MODE: i32 = 20;
 /// Build the pre-decode (transform-phase) chain registration for one v2 call.
 ///
 /// Called per call from `Dispatcher::tools_call` before the surface decoder
-/// runs.  The registration carries ONLY a transform hook; no ingress or egress
+/// runs. These registrations carry ONLY transform hooks; no ingress or egress
 /// hooks are present.
 ///
 /// The mode concern's transform hook performs two jobs, in order:
@@ -169,6 +169,12 @@ pub(crate) fn aria_v2_pre_decode_registrations(
     vec![
         V2ChainRegistration::new("mode")
             .with_transform(TRANSFORM_RESERVED, transform),
+        V2ChainRegistration::new("report_withheld").with_transform(2, Arc::new(|_, mut arguments| {
+            if let JsonValue::Object(ref mut args) = arguments {
+                super::report_withheld::configure(args.remove("report_withheld"));
+            }
+            Ok(arguments)
+        })),
     ]
 }
 
@@ -179,9 +185,10 @@ pub(crate) fn aria_v2_pre_decode_registrations(
 /// Called per call: the egress hook captures the decoded request and an
 /// `Arc`-clone of the session state, both of which vary per call.
 ///
-/// Two registrations are returned:
+/// Three registrations are returned:
 ///   - `"mode"`: ingress at position 5, egress at position 20.
 ///   - `"coaching"`: ingress at position 10, egress at position 10.
+///   - `"report_withheld"`: conditional metadata egress at position 30.
 ///
 /// **Ingress order** (5 before 10): the mode ingress reads `pending_declaration`
 /// and returns its `unknown_hint` as per-concern state, before coaching at
@@ -293,6 +300,8 @@ pub(crate) fn aria_v2_production_registrations(
         V2ChainRegistration::new("coaching")
             .with_ingress(INGRESS_COACHING, ingress)
             .with_egress(EGRESS_COACHING, V2EgressHook::Transform(egress)),
+        V2ChainRegistration::new("report_withheld").with_egress(30,
+            V2EgressHook::Transform(Box::new(|_, result, _| Ok(super::report_withheld::egress(result))))),
     ]
 }
 

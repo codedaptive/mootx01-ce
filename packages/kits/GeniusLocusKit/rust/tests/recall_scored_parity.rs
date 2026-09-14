@@ -311,6 +311,7 @@ fn a9_glk_recall_result_drawers_filters_none() {
         request: req,
         plan,
         union_profile: None,
+        withheld_by_sensitivity: 0,
         // A-9 is a structural parity test — dense_lane_status is None for
         // a hand-constructed result (no lane was run).
         #[cfg(feature = "whole-record-dense")]

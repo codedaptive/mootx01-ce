@@ -128,6 +128,8 @@ struct RecallFrameGatedScoringTests {
         // The admissible drawer must still surface.
         #expect(result.hits.contains { $0.id == admissible.id },
             "admissible drawer MUST surface in recall; hits: \(result.hits.map(\.id))")
+        #expect(result.withheldBySensitivity == 1,
+            "the GLK result must carry the one default-ceiling exclusion")
     }
 
     // MARK: - B. Multiple restricted drawers — none surfaces, count is exact
