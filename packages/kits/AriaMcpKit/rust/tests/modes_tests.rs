@@ -32,7 +32,6 @@ use aria_mcp::{
     mode_registry::{ModeDeclaration, MootMode, RecallVariant},
     mode_session_state::{CoachingSnapshot, ModeSessionState},
     periodic_coach::render_block,
-    tool_list::build_tool_list,
 };
 use genius_locus_kit::coordinator::ModesManifest;
 

@@ -1,11 +1,7 @@
 
-#[path = "../src/jsonrpc.rs"] mod jsonrpc;
-#[path = "../src/v2/codec.rs"] mod codec;
-#[path = "../src/v2/orchestration.rs"] mod orchestration;
-
 use std::{collections::BTreeMap, sync::Mutex};
-use jsonrpc::JsonValue;
-use orchestration::*;
+use aria_mcp::jsonrpc::JsonValue;
+use aria_mcp::v2::orchestration::*;
 use uuid::Uuid;
 
 const ESTATE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
