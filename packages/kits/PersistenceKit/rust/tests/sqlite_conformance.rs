@@ -5,6 +5,7 @@ mod conformance;
 
 use conformance::{run_all, vector_fixtures, Factory};
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
+use rusqlite::Connection;
 use uuid::Uuid;
 
 #[test]
@@ -22,6 +23,118 @@ fn sqlite_conformance() {
     });
     run_all("SQLite", &factory);
     vector_fixtures("SQLite", &factory);
+}
+
+#[test]
+fn migration_ledger_writes_canonical_text_and_normalizes_legacy_timestamps() {
+    let path = std::env::temp_dir().join(format!("pk_migration_ledger_{}.sqlite", Uuid::new_v4()));
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let schema = persistence_kit::SchemaDeclaration::new("TestKit", 1, vec![]);
+
+    let writer = SqliteStorage::new(config.clone()).expect("writer storage");
+    writer.open(&schema).expect("writer schema open");
+    drop(writer);
+    let conn = Connection::open(&path).expect("raw writer read");
+    let written: (String, String) = conn
+        .query_row(
+            "SELECT typeof(\"applied_at\"), \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("written ledger row");
+    assert!(
+        written.0 == "text"
+            && written.1.contains('T')
+            && written.1.ends_with('Z')
+            && written.1 != "1970-01-01T00:00:00.000Z",
+        "new migration rows must be current canonical ISO-8601 TEXT; got {:?}",
+        written
+    );
+    conn.execute_batch(
+        "DROP TABLE \"_storagekit_migrations\";
+         CREATE TABLE \"_storagekit_migrations\" (
+             \"kit_id\" TEXT NOT NULL,
+             \"version\" INTEGER NOT NULL,
+             \"applied_at\" INTEGER NOT NULL,
+             PRIMARY KEY (\"kit_id\")
+         );
+         INSERT INTO \"_storagekit_migrations\" (\"kit_id\", \"version\", \"applied_at\")
+         VALUES ('TestKit', 1, 1700000123456);",
+    )
+    .expect("seed integer legacy migration table");
+    drop(conn);
+
+    let integer_legacy = SqliteStorage::new(config.clone()).expect("integer legacy storage");
+    assert_eq!(
+        integer_legacy.current_schema_version_for("TestKit").expect("legacy version read"),
+        1,
+        "version reader must accept a legacy INTEGER applied_at value"
+    );
+    integer_legacy.open(&schema).expect("normalize integer legacy timestamp");
+    drop(integer_legacy);
+    let conn = Connection::open(&path).expect("read normalized integer");
+    let normalized_integer: (String, String) = conn
+        .query_row(
+            "SELECT typeof(\"applied_at\"), \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("normalized integer ledger row");
+    assert_eq!(
+        normalized_integer,
+        ("text".to_string(), "2023-11-14T22:15:23.456Z".to_string()),
+        "schema application must normalize the legacy INTEGER timestamp once"
+    );
+    conn.execute(
+        "UPDATE \"_storagekit_migrations\" SET \"applied_at\" = '1970-01-01T00:00:00.000Z' WHERE \"kit_id\" = 'TestKit'",
+        [],
+    )
+    .expect("seed Rust epoch sentinel");
+    drop(conn);
+
+    let sentinel_legacy = SqliteStorage::new(config.clone()).expect("sentinel legacy storage");
+    sentinel_legacy.open(&schema).expect("normalize sentinel timestamp");
+    drop(sentinel_legacy);
+    let conn = Connection::open(&path).expect("read normalized sentinel");
+    let normalized_sentinel: (String, String) = conn
+        .query_row(
+            "SELECT typeof(\"applied_at\"), \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("normalized sentinel ledger row");
+    assert!(
+        normalized_sentinel.0 == "text" && normalized_sentinel.1 != "1970-01-01T00:00:00.000Z",
+        "the Rust epoch sentinel must be replaced once; got {:?}",
+        normalized_sentinel
+    );
+    conn.execute(
+        "UPDATE \"_storagekit_migrations\" SET \"applied_at\" = '2024-02-03T04:05:06.789Z' WHERE \"kit_id\" = 'TestKit'",
+        [],
+    )
+    .expect("seed canonical timestamp");
+    drop(conn);
+
+    let canonical = SqliteStorage::new(config).expect("canonical storage");
+    canonical.open(&schema).expect("reopen canonical timestamp");
+    drop(canonical);
+    let conn = Connection::open(&path).expect("read canonical timestamp");
+    let preserved: String = conn
+        .query_row(
+            "SELECT \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("preserved canonical ledger row");
+    assert_eq!(preserved, "2024-02-03T04:05:06.789Z");
+    drop(conn);
+    std::fs::remove_file(path).expect("remove migration-ledger fixture");
 }
 
 // ─────────────────────────────────────────────────────────────────────
