@@ -1,0 +1,51 @@
+{
+  "id": 2,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "memory get",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "memories": [
+          {
+            "confirmation": "unconfirmed",
+            "content": "# Notes for testslug",
+            "distilled": "# Notes for testslug",
+            "event_time": "2026-09-09T00:01:00Z",
+            "exportability": "private",
+            "fetch": {
+              "arguments": {
+                "memory_id": "23dcd969-47eb-412b-854f-8ca8eccb5ac3"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T18:27:48Z",
+            "lineage_id": "76af68c9-3cb8-4b36-a3a0-83a3f743e70f",
+            "memory_id": "23dcd969-47eb-412b-854f-8ca8eccb5ac3",
+            "placement": {
+              "room": "harness-import/testslug/notes.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "notes for testslug",
+            "trust": "verbatim"
+          }
+        ]
+      },
+      "meta": {
+        "build_id": "20260909170802/68775622",
+        "capability_digest": "3fc57f13dfefe357fd8ee556b6e90bc60ededf1298f96e5582fdcb0d9fe0b8d8",
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_get"
+    }
+  }
+}

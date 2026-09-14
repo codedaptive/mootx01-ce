@@ -1,0 +1,25 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "The memory list changed; restart enumeration.",
+        "type": "text"
+      }
+    ],
+    "isError": true,
+    "structuredContent": {
+      "error": {
+        "code": "cursor_stale",
+        "message": "The memory list changed; restart enumeration.",
+        "recovery": {
+          "action": "restart"
+        },
+        "retryable": true
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_list"
+    }
+  }
+}
