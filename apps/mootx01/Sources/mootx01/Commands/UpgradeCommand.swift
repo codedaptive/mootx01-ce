@@ -528,6 +528,11 @@ struct UpgradeCommand: AsyncParsableCommand {
                     await storage.close()
                     return false
                 case .current:
+                    // Schema application also converges legacy migration-ledger
+                    // timestamps. Keep this inside mootx01 upgrade: the raw
+                    // version gate above remains the only authority for schema
+                    // acceptance before an open can mutate the estate.
+                    try await storage.open(schema: LocusKitSchema.schema)
                     print("  ✓ schema: already at LocusKit schema \(LocusKitSchema.version)")
                 case .fresh:
                     print("  ✓ schema: no LocusKit ledger row; schema \(LocusKitSchema.version) is created on the first open")
@@ -1063,9 +1068,9 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// debt once (`GeniusLocusKit.backfillSSCFacts`) and, when it wrote
     /// anything, rebuilds every derived lane (`reindexCorpus`) so the
     /// supplement reaches the posting lists. A converged estate writes
-    /// nothing and skips the rebuild. Runs after the schema upgrade and the
-    /// shared-content reclaim, before the dense pooling convergence, so the
-    /// rebuild happens once under the final schema.
+    /// nothing and skips the rebuild. In the shared convergence sequence it
+    /// runs after the kg_facts identity backfill and before search projection,
+    /// so every later derived step sees the completed facts.
     ///
     /// Returns `true` on success or when there is nothing to write.
     private func runSSCFactsBackfill(estate: EstateRecord, home: URL) async -> Bool {
@@ -1566,6 +1571,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             retireLegacyEncryptionOptOut(estate: estate)
             refreshManifest(estate: estate)
             await runKGFactIdentityBackfill(estate: estate, home: home)
+            await runSSCFactsBackfill(estate: estate, home: home)
             await runSearchProjectionBackfill(estate: estate, home: home)
             await runSharedContentReclaimIfPending(estate: estate, home: home)
             await runWholeRecordVacuum(estate: estate, home: home)
