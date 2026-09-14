@@ -1,6 +1,6 @@
 {
-  "purpose": "Shared Rust and Swift ARIA v2 connected-recall parity vector: wing limits tunnel lookup only, while full caller-filtered hydration prevents graph endpoints from disclosing bodies.",
-  "schema_version": "1.0",
+  "purpose": "Shared Rust and Swift ARIA v2 connected-recall parity vectors: wing limits tunnel lookup only (never the anchor search), while full caller-filtered hydration prevents graph endpoints from disclosing bodies.",
+  "schema_version": "1.1",
   "vector": {
     "name": "wing_independent_anchor_and_filtered_walk_hydration",
     "anchor": {
@@ -21,5 +21,18 @@
       "control_result_keys": ["anchor", "target"],
       "filtered_result_keys": ["anchor"]
     }
+  },
+  "anchor_wing_independence_vector": {
+    "name": "anchor_outside_request_wing_without_tunnel",
+    "anchor": {
+      "content": "CranefolioX discovery yields VellichorMist at the base of the spiral observatory",
+      "location": "parity-unlinked-anchor-room",
+      "exportability": "public"
+    },
+    "request_wing": "parity-tunnel-wing",
+    "query": "CranefolioX VellichorMist observatory",
+    "control_filter": "unconfirmed",
+    "limit": 10,
+    "expected": { "control_result_keys": ["anchor"] }
   }
 }
