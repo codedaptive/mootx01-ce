@@ -610,14 +610,12 @@ public enum ResultComposer {
 
     // MARK: - First-sentence truncation (§11.1 rule 3)
 
-    /// Hard cut the first sentence at 120 characters with no ellipsis.
-    /// Applied before normalization so the byte count is over raw UTF-8 chars.
+    /// Normalize the first sentence, then hard cut it at 120 grapheme clusters
+    /// with no ellipsis.
     public static func truncateFirstSentence(_ raw: String) -> String {
-        // Hard cut at 120 Unicode scalar values (not bytes) — the spec says
-        // "120 characters". Swift String.prefix works on Character/scalar
-        // boundaries, which is the correct interpretation for AI-facing text.
-        if raw.count <= 120 { return raw }
-        return String(raw.prefix(120))
+        let normalized = normalizeValue(raw)
+        if normalized.count <= 120 { return normalized }
+        return String(normalized.prefix(120))
     }
 
     // MARK: - Single row rendering
@@ -1145,8 +1143,7 @@ dataset \(data.datasetID) "\(data.datasetName)": \
         // after normalization (same dedup rule as text rendering).
         let subjNorm = row.subject.map(normalizeValue) ?? ""
         if let span = row.bestSpan {
-            let truncated = truncateFirstSentence(span)
-            let spanNorm = normalizeValue(truncated)
+            let spanNorm = truncateFirstSentence(span)
             if !spanNorm.isEmpty && spanNorm != subjNorm {
                 obj["bestSpan"] = .string(spanNorm)
             }
@@ -1264,8 +1261,7 @@ dataset \(data.datasetID) "\(data.datasetName)": \
         subjectNormalized: String
     ) -> String {
         guard let span = row.bestSpan else { return "-" }
-        let truncated = truncateFirstSentence(span)
-        let normalized = normalizeValue(truncated)
+        let normalized = truncateFirstSentence(span)
         if normalized.isEmpty { return "-" }
         if normalized == subjectNormalized { return "-" }
         return normalized
