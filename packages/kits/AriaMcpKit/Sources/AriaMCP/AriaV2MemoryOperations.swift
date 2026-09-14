@@ -73,6 +73,7 @@ public struct AriaV2NoopMemoryUsageLedger: AriaV2MemoryUsageLedger {
 public enum AriaV2MemoryDepth: String, Sendable, Equatable, CaseIterable {
     case subject
     case distilled
+    case skim
     case full
 }
 
@@ -968,8 +969,27 @@ public struct AriaV2MemoryOperations: Sendable {
                 code: "memory_not_found", message: "No authorized memory matched the requested reference.", retryable: false))
         }
         await context.usageLedger.recordDereferenced(records.map(\.memoryID), estateID: context.estateID, callerID: context.callerID, at: context.now())
-        let data: JSONValue = .object(["memories": .array(records.map { Self.full($0, depth: request.depth) })])
-        return AriaV2Envelope.success(tool: "moot_memory_get", effect: .read, data: data, meta: Self.meta(), compactText: "Fetched \(records.count) authorized memories.")
+        var rows: [JSONValue] = []
+        var previews: [String] = []
+        for record in records {
+            if request.depth == .skim {
+                let skim = try RecallSkim(original: record.content)
+                var row: [String: JSONValue] = ["memory_id": .string(Self.id(record.memoryID)),
+                    "fetch": Self.fetch(record.memoryID), "skim": skim.json]
+                if let subject = record.subject { row["subject"] = .string(subject) }
+                rows.append(.object(row))
+                previews.append("\(Self.id(record.memoryID))\n\(skim.rendered)")
+            } else {
+                rows.append(Self.full(record, depth: request.depth))
+            }
+        }
+        let data: JSONValue = .object(["memories": .array(rows)])
+        let response = AriaV2Envelope.success(tool: "moot_memory_get", effect: .read, data: data, meta: Self.meta(), compactText: "Fetched \(records.count) authorized memories.")
+        guard request.depth == .skim, var object = response.objectValue else { return response }
+        // Already budgeted per record; the generic 512-scalar summary would
+        // truncate the preview a second time and drop its flags/savings.
+        object["content"] = .array([.object(["type": .string("text"), "text": .string(previews.joined(separator: "\n\n"))])])
+        return .object(object)
     }
 
     private static func meta() -> [String: JSONValue] { ["completeness": .string("incomplete")] }
