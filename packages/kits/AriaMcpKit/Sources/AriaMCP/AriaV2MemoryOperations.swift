@@ -757,7 +757,11 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             filedAt: drawer.filedAt, eventTime: drawer.eventTime, state: String(describing: drawer.state),
             trust: String(describing: drawer.trust), sensitivity: String(describing: drawer.adjectiveSensitivity),
             exportability: String(describing: drawer.exportability), confirmation: String(describing: drawer.confirmation),
-            lineageID: drawer.lineageID, provenance: String(describing: drawer.sourceType), isAuthorized: authorized,
+            lineageID: drawer.lineageID, provenance: String(describing: drawer.sourceType),
+            // context carries the drawer's subject so every compact search row exposes
+            // the one-sentence assertion the user filed.
+            context: drawer.subject,
+            isAuthorized: authorized,
             tunnels: tunnels)
     }
 

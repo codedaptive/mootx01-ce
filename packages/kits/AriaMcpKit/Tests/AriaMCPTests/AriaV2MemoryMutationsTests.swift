@@ -68,7 +68,8 @@ struct AriaV2MemoryMutationsTests {
             ["memory_id": .string(memoryID), "mutation": .string("confirm"), "note": .string("ignored")],
             ["memory_id": .string(memoryID), "mutation": .string("set_subject")],
             ["memory_id": .string(memoryID), "mutation": .string("set_subject"), "subject": .string(String(repeating: "x", count: DrawerStore.subjectLengthContract + 1))],
-            ["memory_id": .string(memoryID), "mutation": .string("set_subject"), "subject": .string(String(repeating: "e\u{301}", count: 120))],
+            // 121 grapheme clusters (each e + combining accent = one cluster) is over the limit.
+            ["memory_id": .string(memoryID), "mutation": .string("set_subject"), "subject": .string(String(repeating: "e\u{301}", count: 121))],
             ["memory_id": .string(memoryID), "mutation": .string("set_subject"), "subject": .string(" " + String(repeating: "x", count: 120))],
             ["memory_id": .string(memoryID), "mutation": .string("correct_sensitivity")],
             ["memory_id": .string(memoryID), "mutation": .string("correct_exportability")],

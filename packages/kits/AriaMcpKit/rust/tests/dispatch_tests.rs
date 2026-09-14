@@ -6189,3 +6189,420 @@ fn file_memory_bad_kind_carries_both_refusal_fields() {
         "kind allowed must contain exactly the six catalog-declared content-kind values (sorted); response: {response:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Contradiction lens — deterministic object order within one filed instant
+// ---------------------------------------------------------------------------
+
+/// `moot_lens_contradiction` must emit objects inside each conflicting group in
+/// filed_at-then-object-text order, not storage-insertion order.
+///
+/// Five facts share (subject="sort-test-subject", predicate="sort-test-pred") and
+/// ONE identical filed_at. They are stored in non-sorted order
+/// ("ähnlich", "zeta", "gamma", "beta", "alpha") so that the assertion goes
+/// red without the sort. The expected order is UTF-8 byte order:
+/// ["alpha", "beta", "gamma", "zeta", "ähnlich"]. "ä" has UTF-8 lead byte
+/// 0xC3, so it sorts after all ASCII letters including "z" (0x7A). An
+/// all-ASCII fixture cannot detect the Swift/Rust ordering divergence because
+/// both ports agree on ASCII; the non-ASCII object is load-bearing.
+///
+/// The test routes through `SelectedV2Session.call("moot_lens_contradiction", …)`
+/// and asserts the camelCase wire payload so the full dispatch stack is exercised.
+#[test]
+fn contradiction_objects_sort_by_utf8_byte_order_within_one_filed_instant() {
+    use locus_kit::kg_fact::KGFactOrigin;
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    // Pin a single filed_at (epoch-millis) so all five facts share the same
+    // instant. The secondary sort by UTF-8 byte order is what the fix adds.
+    let pinned_at: i64 = 1_700_000_000_000;
+
+    {
+        let coord = session.coord.lock().unwrap();
+        // Store in non-sorted order so the assertion goes red if the sort is
+        // absent. "ähnlich" has UTF-8 lead byte 0xC3, so it sorts AFTER all
+        // ASCII objects including "zeta" (lead byte 0x7A).
+        for object in &["ähnlich", "zeta", "gamma", "beta", "alpha"] {
+            coord.add_kg_fact_with_origin(
+                &session.default.handle,
+                "sort-test-subject",
+                "sort-test-pred",
+                object,
+                "",
+                &KGFactOrigin::default(),
+                pinned_at,
+            )
+            .expect("add_kg_fact_with_origin must succeed");
+        }
+    }
+
+    let result = session
+        .call("moot_lens_contradiction", &args![])
+        .expect("moot_lens_contradiction must succeed");
+    assert!(
+        is_success(&result),
+        "lens_contradiction must succeed; got: {result:?}"
+    );
+
+    let groups = selected_data(&result)["conflictingFacts"]
+        .as_array()
+        .expect("conflictingFacts must be an array");
+    assert_eq!(groups.len(), 1, "exactly one conflicting group; got: {groups:?}");
+
+    let objects: Vec<&str> = groups[0]["objects"]
+        .as_array()
+        .expect("objects must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("object must be a string"))
+        .collect();
+    assert_eq!(
+        objects,
+        vec!["alpha", "beta", "gamma", "zeta", "ähnlich"],
+        "objects within one filed instant must be sorted by UTF-8 byte order; got: {objects:?}"
+    );
+}
+
+/// Twin of the Swift `contradiction_objects_tie_within_one_persisted_millisecond`
+/// test. The Swift test files two facts whose `Date` values differ by 0.4 ms,
+/// which fall in the same millisecond once normalised. Rust's API takes i64
+/// epoch milliseconds directly, so a sub-millisecond difference IS the same i64;
+/// both facts are filed at 1_700_000_000_000. Both ports are therefore asserting
+/// the same emitted order from the same persisted input — that is the parity claim.
+#[test]
+fn contradiction_objects_tie_within_one_persisted_millisecond() {
+    use locus_kit::kg_fact::KGFactOrigin;
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    // The Swift fixture uses times 1_700_000_000 and 1_700_000_000.0004 —
+    // a 0.4 ms gap that collapses to the same i64 millisecond.
+    // Filed so that "zeta" is inserted first and "alpha" second, mirroring
+    // the Swift test. The tie-break must emit ["alpha", "zeta"].
+    let pinned_at: i64 = 1_700_000_000_000;
+
+    {
+        let coord = session.coord.lock().unwrap();
+        for object in &["zeta", "alpha"] {
+            coord.add_kg_fact_with_origin(
+                &session.default.handle,
+                "ms-tie-subject",
+                "ms-tie-pred",
+                object,
+                "",
+                &KGFactOrigin::default(),
+                pinned_at,
+            )
+            .expect("add_kg_fact_with_origin must succeed");
+        }
+    }
+
+    let result = session
+        .call("moot_lens_contradiction", &args![])
+        .expect("moot_lens_contradiction must succeed");
+    assert!(
+        is_success(&result),
+        "lens_contradiction must succeed; got: {result:?}"
+    );
+
+    let groups = selected_data(&result)["conflictingFacts"]
+        .as_array()
+        .expect("conflictingFacts must be an array");
+    assert_eq!(groups.len(), 1, "exactly one conflicting group; got: {groups:?}");
+
+    let objects: Vec<&str> = groups[0]["objects"]
+        .as_array()
+        .expect("objects must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("object must be a string"))
+        .collect();
+    assert_eq!(
+        objects,
+        vec!["alpha", "zeta"],
+        "facts within one persisted millisecond must sort by UTF-8 byte order; got: {objects:?}"
+    );
+}
+
+/// Discriminating pre-epoch test for the round-nearest vs. truncate-toward-zero distinction.
+///
+/// The Swift twin files two `Date` values at -1.0006 and -1.0 seconds since epoch.
+/// Under round-nearest: -1000.6 → -1001 and -1000.0 → -1000; they land in different
+/// milliseconds and time order decides — "zeta" (at -1001) before "alpha" (at -1000).
+/// Under truncate-toward-zero: both become -1000; the tie-break fires and
+/// "alpha" < "zeta" (alphabetically), giving the wrong order.
+///
+/// This test files the same facts as their persisted i64 millisecond values
+/// (-1001 and -1000), which are the persisted form of those Swift Dates under
+/// round-nearest (measured via ISO8601DateFormatter round-trip). Both ports
+/// therefore assert one ordering from one persisted input.
+///
+/// Twin: AriaV2LensLowerTests.swift
+/// contradictionObjectsOrderByPersistedMillisecondBeforeEpoch.
+#[test]
+fn contradiction_objects_order_by_persisted_millisecond_before_epoch() {
+    use locus_kit::kg_fact::KGFactOrigin;
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    // -1001 is the round-nearest of (-1.0006 * 1000) = -1000.6; "zeta" is earlier.
+    // -1000 is the round-nearest of (-1.0 * 1000) = -1000.0; "alpha" is later.
+    // These are the persisted i64 millisecond values for the Swift test's two Dates,
+    // confirmed by ISO8601DateFormatter round-trip measurement.
+    {
+        let coord = session.coord.lock().unwrap();
+        coord.add_kg_fact_with_origin(
+            &session.default.handle,
+            "pre-epoch-round-subject",
+            "pre-epoch-round-pred",
+            "zeta",
+            "",
+            &KGFactOrigin::default(),
+            -1001_i64,
+        )
+        .expect("add_kg_fact_with_origin must succeed");
+        coord.add_kg_fact_with_origin(
+            &session.default.handle,
+            "pre-epoch-round-subject",
+            "pre-epoch-round-pred",
+            "alpha",
+            "",
+            &KGFactOrigin::default(),
+            -1000_i64,
+        )
+        .expect("add_kg_fact_with_origin must succeed");
+    }
+
+    let result = session
+        .call("moot_lens_contradiction", &args![])
+        .expect("moot_lens_contradiction must succeed");
+    assert!(
+        is_success(&result),
+        "lens_contradiction must succeed; got: {result:?}"
+    );
+
+    let groups = selected_data(&result)["conflictingFacts"]
+        .as_array()
+        .expect("conflictingFacts must be an array");
+    assert_eq!(groups.len(), 1, "exactly one conflicting group; got: {groups:?}");
+
+    let objects: Vec<&str> = groups[0]["objects"]
+        .as_array()
+        .expect("objects must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("object must be a string"))
+        .collect();
+    // -1001 < -1000, so time order decides — "zeta" (earlier) before "alpha" (later).
+    // Under truncate-toward-zero both would be -1000 and "alpha" would win the
+    // tie-break: ["alpha", "zeta"], which is the wrong answer.
+    assert_eq!(
+        objects,
+        vec!["zeta", "alpha"],
+        "pre-epoch facts must sort by filed_at millisecond (earliest first); got: {objects:?}"
+    );
+}
+
+/// Two facts whose stored i64 milliseconds differ by exactly one. The sort must
+/// put the earlier fact first regardless of the object string.
+///
+/// The earlier fact carries "zeta" (alphabetically later); the later fact carries
+/// "alpha" (alphabetically earlier). Without time-order dominance the result would
+/// be reversed.
+///
+/// These i64 values correspond to the Swift fixture Dates 1_400_000_000.002 and
+/// 1_400_000_000.003, both of which are integral-millisecond values that survive
+/// the ISO8601DateFormatter round trip unchanged.
+///
+/// Twin: AriaV2LensLowerTests.swift
+/// contradictionObjectsOrderByTimeWhenStoredMillisecondsDiffer.
+#[test]
+fn contradiction_objects_order_by_time_when_stored_milliseconds_differ() {
+    use locus_kit::kg_fact::KGFactOrigin;
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    // 1_400_000_000_002 and 1_400_000_000_003 differ by exactly 1 ms, mirroring
+    // the Swift fixture at 1_400_000_000.002 and 1_400_000_000.003 seconds.
+    {
+        let coord = session.coord.lock().unwrap();
+        coord.add_kg_fact_with_origin(
+            &session.default.handle,
+            "time-order-subject",
+            "time-order-pred",
+            "zeta",
+            "",
+            &KGFactOrigin::default(),
+            1_400_000_000_002_i64,
+        )
+        .expect("add_kg_fact_with_origin must succeed");
+        coord.add_kg_fact_with_origin(
+            &session.default.handle,
+            "time-order-subject",
+            "time-order-pred",
+            "alpha",
+            "",
+            &KGFactOrigin::default(),
+            1_400_000_000_003_i64,
+        )
+        .expect("add_kg_fact_with_origin must succeed");
+    }
+
+    let result = session
+        .call("moot_lens_contradiction", &args![])
+        .expect("moot_lens_contradiction must succeed");
+    assert!(
+        is_success(&result),
+        "lens_contradiction must succeed; got: {result:?}"
+    );
+
+    let groups = selected_data(&result)["conflictingFacts"]
+        .as_array()
+        .expect("conflictingFacts must be an array");
+    assert_eq!(groups.len(), 1, "exactly one conflicting group; got: {groups:?}");
+
+    let objects: Vec<&str> = groups[0]["objects"]
+        .as_array()
+        .expect("objects must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("object must be a string"))
+        .collect();
+    // Time order: "zeta" at _002 before "alpha" at _003, despite "alpha" < "zeta".
+    assert_eq!(
+        objects,
+        vec!["zeta", "alpha"],
+        "time order must dominate when stored milliseconds differ; got: {objects:?}"
+    );
+}
+
+/// Two facts filed at the same i64 millisecond. The UTF-8 byte-order tie-break
+/// must decide the order.
+///
+/// The Swift twin files "zeta" at an exact-millisecond Date and "alpha" at a
+/// sub-ms offset that rounds to the same stored text; both therefore land at the
+/// same i64 millisecond. In Rust the API takes i64 directly, so both facts are
+/// filed at the same i64 value. Both ports assert that UTF-8 byte order decides.
+///
+/// Twin: AriaV2LensLowerTests.swift
+/// contradictionObjectsTieBreakWhenStoredTextsIdentical.
+#[test]
+fn contradiction_objects_tie_break_when_stored_texts_identical() {
+    use locus_kit::kg_fact::KGFactOrigin;
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    // Both facts at the same i64 ms; the tie-break must fire.
+    let pinned_ms: i64 = 1_400_000_000_002;
+    {
+        let coord = session.coord.lock().unwrap();
+        for object in &["zeta", "alpha"] {
+            coord.add_kg_fact_with_origin(
+                &session.default.handle,
+                "tie-break-subject",
+                "tie-break-pred",
+                object,
+                "",
+                &KGFactOrigin::default(),
+                pinned_ms,
+            )
+            .expect("add_kg_fact_with_origin must succeed");
+        }
+    }
+
+    let result = session
+        .call("moot_lens_contradiction", &args![])
+        .expect("moot_lens_contradiction must succeed");
+    assert!(
+        is_success(&result),
+        "lens_contradiction must succeed; got: {result:?}"
+    );
+
+    let groups = selected_data(&result)["conflictingFacts"]
+        .as_array()
+        .expect("conflictingFacts must be an array");
+    assert_eq!(groups.len(), 1, "exactly one conflicting group; got: {groups:?}");
+
+    let objects: Vec<&str> = groups[0]["objects"]
+        .as_array()
+        .expect("objects must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("object must be a string"))
+        .collect();
+    // Same ms: UTF-8 byte order decides. "alpha" (0x61) < "zeta" (0x7A).
+    assert_eq!(
+        objects,
+        vec!["alpha", "zeta"],
+        "UTF-8 tie-break must decide when stored milliseconds are identical; got: {objects:?}"
+    );
+}
+
+/// Discriminates round-nearest from floor for the specific pre-epoch pair touched
+/// by the sort-key change in this stream.
+///
+/// The Swift twin (AriaV2LensLowerTests.swift
+/// contradictionObjectsPreEpochSubMillisecondResidueTiesAtThePersistedMillisecond)
+/// files facts at Date(-1.0004 s) and Date(-1.0 s); both persist to -1000 ms via
+/// ISO8601DateFormatter round-trip. The Rust API takes i64 milliseconds directly,
+/// so both facts are filed at -1000 ms here.
+///
+/// "zeta" is filed first so insertion order cannot produce the expected result.
+///
+/// What each sort-key expression gives:
+///   floor  -> floor(-1000.4) = -1001 and floor(-1000.0) = -1000
+///            different keys, time order, ["zeta", "alpha"]  (WRONG)
+///   round  -> -1000 and -1000, equal keys, UTF-8 tie-break, ["alpha", "zeta"] (RIGHT)
+///
+/// Twin: AriaV2LensLowerTests.swift
+/// contradictionObjectsPreEpochSubMillisecondResidueTiesAtThePersistedMillisecond.
+#[test]
+fn contradiction_objects_pre_epoch_sub_millisecond_residue_ties_at_the_persisted_millisecond() {
+    use locus_kit::kg_fact::KGFactOrigin;
+
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    // Both facts at -1000 ms — the persisted form of -1.0004 s and -1.0 s under
+    // ISO8601DateFormatter round-nearest (confirmed by the Swift measurement test).
+    // "zeta" is filed first so insertion order cannot produce ["alpha", "zeta"].
+    {
+        let coord = session.coord.lock().unwrap();
+        coord.add_kg_fact_with_origin(
+            &session.default.handle,
+            "pre-epoch-residue-tie-subject",
+            "pre-epoch-residue-tie-pred",
+            "zeta",
+            "",
+            &KGFactOrigin::default(),
+            -1000_i64,
+        )
+        .expect("add_kg_fact_with_origin must succeed");
+        coord.add_kg_fact_with_origin(
+            &session.default.handle,
+            "pre-epoch-residue-tie-subject",
+            "pre-epoch-residue-tie-pred",
+            "alpha",
+            "",
+            &KGFactOrigin::default(),
+            -1000_i64,
+        )
+        .expect("add_kg_fact_with_origin must succeed");
+    }
+
+    let result = session
+        .call("moot_lens_contradiction", &args![])
+        .expect("moot_lens_contradiction must succeed");
+    assert!(
+        is_success(&result),
+        "lens_contradiction must succeed; got: {result:?}"
+    );
+
+    let groups = selected_data(&result)["conflictingFacts"]
+        .as_array()
+        .expect("conflictingFacts must be an array");
+    assert_eq!(groups.len(), 1, "exactly one conflicting group; got: {groups:?}");
+
+    let objects: Vec<&str> = groups[0]["objects"]
+        .as_array()
+        .expect("objects must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("object must be a string"))
+        .collect();
+    // Both facts at -1000 ms: UTF-8 byte order decides.
+    // "alpha" (0x61) < "zeta" (0x7A), so ["alpha", "zeta"].
+    assert_eq!(
+        objects,
+        vec!["alpha", "zeta"],
+        "pre-epoch facts tied at -1000 ms must sort by UTF-8 byte order; got: {objects:?}"
+    );
+}
