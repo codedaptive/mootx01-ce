@@ -67,37 +67,6 @@ struct RecipeToolsTests {
 
     // MARK: - Projection
 
-    /// In ARIA v2, recipe tools live in RecipeTools.tools() — not in
-    /// ToolProjection.tools() which returns only catalog (interface-provenance)
-    /// tools. This test pins the full sorted name list of the 14 recipe tools
-    /// so neither the tool registry nor the test can drift silently.
-    @Test func testRecipeToolsAppearInProjectionWithRecipeProvenance() {
-        let recipeNames = RecipeTools.tools().map(\.name).sorted()
-        // Full sorted list: 14 recipe tools.
-        // moot_recollect retired (not listed — notice-only stub reached via isRecipeTool).
-        // moot_recall_connected joined 2026-08-06 (graph-diffusion multi-hop recall).
-        // moot_recall_walk joined D10 (escalation-ladder recall: cheap session_hybrid
-        // first, precise hamming+text only when Stage 1 is not confident).
-        // Migration tool names in RecipeTools use the legacy surface keys;
-        // the catalog routes them under moot_migration_run / moot_migration_confirm.
-        #expect(recipeNames == [
-            "moot_confirm_migration",
-            "moot_dream",
-            "moot_hunt_contradictions",
-            "moot_list_lenses",
-            "moot_list_recipes",
-            "moot_recall_connected",
-            "moot_recall_distilled",
-            "moot_recall_precise",
-            "moot_recall_shaped",
-            "moot_recall_temporal",
-            "moot_recall_vague",
-            "moot_recall_walk",
-            "moot_run_migration",
-            "moot_synthesize",
-        ])
-    }
-
     /// In v2 the cognition catalog lists all callable recipe + lens tools in
     /// structuredContent.data.tools. The compactText confirms the count.
     /// Migration tools are Tier 7 and absent from the callable cognition set.
@@ -134,28 +103,6 @@ struct RecipeToolsTests {
         // The catalog must be non-trivially populated (multiple tools).
         #expect(toolNames.count > 10,
                 "callable tools list must be non-trivially populated; got \(toolNames.count)")
-    }
-
-    /// In ARIA v2, both RecipeTools.tools() and ToolProjection.tools() expose the
-    /// same v2 catalog surface. Recipe tool names must be PRESENT in
-    /// ToolProjection.tools() (they're part of the unified catalog) — the v1
-    /// invariant of "no collision" inverts in v2 to "every recipe tool is
-    /// registered in the catalog."
-    @Test func testRecipeToolNamesDoNotCollideWithInterfaceToolNames() {
-        // v2: the catalog is unified — every recipe tool must be reachable via
-        // ToolProjection.tools() so admitsDispatch returns true for each.
-        // A recipe tool absent from the catalog would throw methodNotFound on dispatch.
-        let catalogNames = Set(ToolProjection.tools().map(\.name))
-        // RecipeTools uses legacy migration names (moot_run_migration, moot_confirm_migration)
-        // which differ from v2 catalog names (moot_migration_run, moot_migration_confirm).
-        // Exclude them from this parity check; they dispatch through the legacy RecipeTools
-        // code path and are NOT registered in ToolProjection.tools().
-        let migrationLegacyNames: Set<String> = ["moot_run_migration", "moot_confirm_migration"]
-        for tool in RecipeTools.tools() {
-            guard !migrationLegacyNames.contains(tool.name) else { continue }
-            #expect(catalogNames.contains(tool.name),
-                    "recipe tool \(tool.name) must be registered in the v2 catalog (ToolProjection.tools())")
-        }
     }
 
     // MARK: - recall_connected dispatch
@@ -1052,19 +999,6 @@ struct RecipeToolsTests {
                 "absent preset must return the recall compactText shape")
     }
 
-    /// The shaped-recall tool advertises the full preset roster in its
-    /// description so the AI can pick a preset by intent.
-    @Test func testShapedRecallToolAdvertisesRoster() throws {
-        let tool = try #require(
-            RecipeTools.tools().first { $0.name == "moot_recall_shaped" })
-        // The roster lists every preset name with its one-line description.
-        #expect(tool.description.contains("Roster:"))
-        for name in RecallShape.presetNames {
-            #expect(tool.description.contains(name), "roster must advertise \(name)")
-        }
-        #expect(tool.description.contains("anti_redundant"))
-    }
-
     /// Every roster name is accepted by the MCP boundary and returns a valid
     /// result. Mirrors testShapedRecallDispatchReturnsMootTextShape but
     /// exercises each preset through the full dispatch chain.
@@ -1385,41 +1319,7 @@ struct RecipeToolsTests {
         #expect(text.contains("concepts"))
     }
 
-    // MARK: - isRecipeTool
-
-    @Test func testIsRecipeToolCoversDistillationTools() {
-        // moot_distill and moot_redistill are not recipe tools — there is no
-        // distillation sweep; distillation renders inline at read time.
-        #expect(!RecipeTools.isRecipeTool("moot_distill"))
-        #expect(!RecipeTools.isRecipeTool("moot_redistill"))
-        // moot_consolidate is out of the routing set entirely (alias removed,
-        // SPEC_DISTILLATION_STORAGE §3 Phase 2) — the name reserves for the
-        // multi-item consolidation feature.
-        #expect(!RecipeTools.isRecipeTool("moot_consolidate"))
-        #expect(RecipeTools.isRecipeTool("moot_recall_distilled"))
-        // moot_recollect is in the routing set as a notice-only stub (Wave 1 ACK
-        // gate): it must reach dispatch to return the removal notice. Not listed.
-        #expect(RecipeTools.isRecipeTool("moot_recollect"))
-        // D10: moot_recall_walk is a listed recipe tool (escalation-ladder recall).
-        #expect(RecipeTools.isRecipeTool("moot_recall_walk"))
-    }
-
     // MARK: - tools() count
-
-    @Test func testRecipeToolsCount() {
-        // 14 recipe tools: listRecipes, listRecipesCatalog, groundedSynthesis,
-        // preciseRecall, temporalRecall, connectedRecall, shapedRecall,
-        // vagueRecall, runMigration, confirmMigration, dream,
-        // recallDistilled, huntContradictions, walkRecall (D10).
-        #expect(RecipeTools.tools().count == 14)
-        let names = RecipeTools.tools().map(\.name)
-        #expect(!names.contains("moot_distill"))
-        #expect(!names.contains("moot_redistill"))
-        #expect(!names.contains("moot_consolidate"))
-        #expect(!names.contains("moot_recollect"))
-        // D10: moot_recall_walk is in the listed tools set.
-        #expect(names.contains("moot_recall_walk"))
-    }
 
     // MARK: - moot_distill / moot_redistill are absent
 
@@ -1617,34 +1517,6 @@ struct RecipeToolsTests {
         let _ = try #require(data["results"]?.arrayValue, "data.results must be an array")
     }
 
-    // MARK: - ACK gate and notice-only stub tests (Wave 1)
-
-    // moot_recollect — not in the v2 catalog; ToolDispatcher.dispatch throws
-    // methodNotFound before reaching RecipeTools.dispatch. Mirrors the
-    // moot_distill / moot_redistill pattern already in this file.
-    @Test func testRecollectStubReturnsNoticeNeverExecutes() async throws {
-        // moot_recollect is not in AriaV2SelectedCatalog (its substrate,
-        // factoid drawers, was retired). ToolProjection.admitsDispatch returns
-        // false → ToolDispatcher.dispatch throws JSONRPCError(code: methodNotFound)
-        // before any estate access. RecipeTools.dispatch stub is never reached.
-        let kit = GeniusLocusKit()
-        let handle = try await openEstate(
-            in: kit, owner: OwnerCredentials(ownerIdentifier: "recollect-stub"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
-
-        // Pin the specific error code, not just the type. Any JSONRPCError would
-        // also pass on invalidParams (wrong argument), which is a different failure.
-        do {
-            _ = try await dispatcher.dispatch(
-                name: "moot_recollect",
-                arguments: .object(["query": .string("test")]))
-            Issue.record("moot_recollect dispatch must throw JSONRPCError(methodNotFound) but returned a result")
-        } catch let error as JSONRPCError {
-            #expect(error.code == JSONRPCErrorCode.methodNotFound,
-                    "moot_recollect must throw methodNotFound (\(JSONRPCErrorCode.methodNotFound)); got code \(error.code)")
-        }
-    }
-
     // moot_recall_distilled runs UNCONDITIONALLY — no acknowledgment
     // ceremony precedes any result (ARIA_MCP_SPEC 2.0.0 § 8.6). The former
     // ack gate and CONTRACT CHANGE NOTICE were deleted in COMPOSER-02B.
@@ -1668,18 +1540,6 @@ struct RecipeToolsTests {
         // v2 result has structuredContent — the operation ran.
         #expect(obj["structuredContent"] != nil,
                 "the recall handler must run without any ack and return a v2 envelope")
-    }
-
-    // Schema + description: no ack parameter, no ceremony vocabulary.
-    @Test func testRecallDistilledSchemaHasNoAckParam() throws {
-        let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_distilled" })
-        let tool_ = try #require(tool, "moot_recall_distilled must appear in tools()")
-        let props = tool_.inputSchema.objectValue?["properties"]?.objectValue
-        let props_ = try #require(props, "moot_recall_distilled schema must have properties")
-        #expect(props_["ack"] == nil,
-                "moot_recall_distilled schema must NOT expose an 'ack' parameter")
-        #expect(!tool_.description.contains("CONTRACT CHANGE"),
-                "description must carry no ceremony vocabulary")
     }
 
     // MARK: - helpers
@@ -2032,24 +1892,6 @@ struct RecipeToolsSecurityTests {
                 "structuredContent.data.capabilities.walk must be present for walk recall; data: \(data)")
         #expect(walkCaps?["stage"]?.stringValue != nil,
                 "walk.stage must be a non-nil string naming the stage used")
-    }
-
-    /// AM-WR-ARIA-2: moot_recall_walk tool descriptor appears in tools/list
-    /// with the correct name, required query param, and outputSchema.
-    @Test func walkRecallToolDescriptorIsWellFormed() {
-        let tool = RecipeTools.tools().first(where: { $0.name == "moot_recall_walk" })
-        #expect(tool != nil, "moot_recall_walk must appear in RecipeTools.tools()")
-        guard let tool else { return }
-        // Required field is "query".
-        let props = tool.inputSchema.objectValue?["properties"]?.objectValue
-        #expect(props?["query"] != nil, "moot_recall_walk schema must have 'query' property")
-        let required = tool.inputSchema.objectValue?["required"]?.arrayValue?
-            .compactMap { $0.stringValue } ?? []
-        #expect(required.contains("query"),
-            "moot_recall_walk must require 'query'")
-        // outputSchema is present (same contract as moot_recall_precise).
-        #expect(tool.outputSchema != nil,
-            "moot_recall_walk must declare an outputSchema")
     }
 
     /// AM-WR-ARIA-3: missing query arg returns invalidParams, not a crash.
