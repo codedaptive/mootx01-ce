@@ -1170,6 +1170,9 @@ fn lenses_reproduce_shared_vectors() {
                     let state_raw = (r.adjective_bitmap & 0x3F) as u8;
                     ((state_raw >> 4) & 0x3) == 0
                 },
+                // Conformance test vectors carry no provenance column; default
+                // 0 (normal) classifies as admissible for all rows here.
+                provenance: 0,
             })
             .collect();
         let page = RecallPage {

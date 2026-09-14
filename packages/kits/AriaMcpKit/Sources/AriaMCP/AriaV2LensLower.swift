@@ -207,8 +207,10 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // counting makes a restricted contradiction vanish from the total,
             // so an estate with three contradictions reports one and the
             // caller is told the estate is more consistent than it is. For a
-            // contradiction lens the count IS the product. The rows stay
-            // redacted; only the tally is complete.
+            // contradiction lens the count IS the product. Restricted tunnel
+            // rows are omitted from the emitted set; only the tally is complete.
+            // Endpoint ids within kept (Normal/Elevated) tunnel rows are always
+            // emitted — an id is not body-derived content (WITHHELD-ID-ONLY = a).
             let allContradictions = (try await estate.allTunnels()).filter {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
                     && ($0.lifecycle == .active || $0.lifecycle == .proposed)
@@ -216,27 +218,15 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             let tunnels = allContradictions.filter { $0.adjectiveSensitivity.isBulkExportable }
             let withheldTunnelCount = allContradictions.count - tunnels.count
             let emittedTunnels = Array(tunnels.prefix(50))
-            let endpointIDs = Set(emittedTunnels.flatMap {
-                [$0.sourceDrawerId, $0.targetDrawerId].compactMap { $0 }
-            })
-            let hiddenEndpointIDs: Set<String>
-            if endpointIDs.isEmpty {
-                hiddenEndpointIDs = []
-            } else {
-                let result = try await estate.getDrawers(
-                    ids: Array(endpointIDs), matchingFrame: RecallFrame(filterChain: []),
-                    hydrationLevel: .structured)
-                hiddenEndpointIDs = result.loadedIDs.subtracting(Set(result.admissible.map(\.id)))
-            }
             let tunnelRows = emittedTunnels.map { tunnel -> JSONValue in
                 var row: [String: JSONValue] = [
                     "id": .string(tunnel.id),
                     "lifecycle": .string(tunnel.lifecycle == .proposed ? "proposed" : "active"),
                 ]
-                if let source = tunnel.sourceDrawerId, !hiddenEndpointIDs.contains(source) {
+                if let source = tunnel.sourceDrawerId {
                     row["sourceDrawerId"] = .string(source)
                 }
-                if let target = tunnel.targetDrawerId, !hiddenEndpointIDs.contains(target) {
+                if let target = tunnel.targetDrawerId {
                     row["targetDrawerId"] = .string(target)
                 }
                 return .object(row)
