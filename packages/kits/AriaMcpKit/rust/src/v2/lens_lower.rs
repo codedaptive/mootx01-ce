@@ -414,8 +414,11 @@ impl CoordinatorRecallLensLower {
         // COUNT FIRST, THEN WITHHOLD. Filtering by sensitivity before counting
         // makes a restricted contradiction vanish from the total, so an estate
         // with three contradictions reports one and reads as more consistent
-        // than it is. For a contradiction lens the count IS the product; the
-        // rows stay redacted, only the tally is complete.
+        // than it is. For a contradiction lens the count IS the product.
+        // Restricted tunnel rows are omitted from the emitted set; only the
+        // tally is complete. Endpoint ids within kept (Normal/Elevated) tunnel
+        // rows are always emitted — an id is not body-derived content
+        // (WITHHELD-ID-ONLY = a).
         let all_contradictions = coordinator
             .all_tunnels(&admission.estate_handle)
             .map_err(|_| ())?
@@ -433,19 +436,6 @@ impl CoordinatorRecallLensLower {
             .collect::<Vec<_>>();
         let withheld_contradiction_count = total_contradiction_count - tunnels.len() as i64;
         let emitted_tunnels = tunnels.iter().take(50).collect::<Vec<_>>();
-        let endpoint_ids = emitted_tunnels
-            .iter()
-            .flat_map(|tunnel| [tunnel.source_drawer_id.as_ref(), tunnel.target_drawer_id.as_ref()])
-            .flatten()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let hidden_endpoint_ids = coordinator
-            .all_drawers(&admission.estate_handle)
-            .map_err(|_| ())?
-            .into_iter()
-            .filter(|drawer| endpoint_ids.contains(&drawer.id) && !drawer.adjective_sensitivity().is_bulk_exportable())
-            .map(|drawer| drawer.id)
-            .collect::<BTreeSet<_>>();
         let contradicts_tunnels = emitted_tunnels
             .into_iter()
             .map(|tunnel| {
@@ -459,10 +449,10 @@ impl CoordinatorRecallLensLower {
                         }),
                     ),
                 ]);
-                if let Some(source) = tunnel.source_drawer_id.as_ref().filter(|id| !hidden_endpoint_ids.contains(*id)) {
+                if let Some(source) = tunnel.source_drawer_id.as_ref() {
                     row.insert("source_drawer_id".to_owned(), JsonValue::String(source.clone()));
                 }
-                if let Some(target) = tunnel.target_drawer_id.as_ref().filter(|id| !hidden_endpoint_ids.contains(*id)) {
+                if let Some(target) = tunnel.target_drawer_id.as_ref() {
                     row.insert("target_drawer_id".to_owned(), JsonValue::String(target.clone()));
                 }
                 row
@@ -2240,6 +2230,255 @@ mod tests {
                 "withheldContradictionCount": 0,
                 "withheldConflictingFactGroupCount": 0,
             }))
+        );
+    }
+
+    /// A contradiction tunnel keeps its endpoint ids even when one endpoint
+    /// was later restricted (stale edge). WITHHELD-ID-ONLY = a ruling: an id
+    /// is not body-derived content, so it is always emitted for kept tunnels.
+    ///
+    /// Asserted at the wire layer (camelCase keys via `project_data`).
+    #[test]
+    fn contradiction_lens_emits_restricted_stale_edge_endpoint_id() {
+        use locus_kit::frames::{CaptureFrame, TunnelCaptureFrame, MutationKind};
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::tunnel_operational::TunnelKind;
+        use locus_kit::adjectives::AdjectiveSensitivity;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        const CANARY: &str = "PROV_B_STALE_EDGE_CANARY_40ef72a1";
+
+        let registry = EstateRegistry::new_inmemory();
+        let estate_handle = registry.default.handle.clone();
+
+        let (source_id, target_id) = {
+            let coord = registry.coord.lock().expect("coord lock");
+
+            // Both drawers Normal at capture: tunnel inherits Normal bitmap.
+            let source = coord.capture(
+                &estate_handle,
+                CaptureFrame::new(
+                    "prov-b source content",
+                    CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("004"), "prov-b", "test-embed-v1",
+                ),
+                NOW,
+            ).expect("capture source");
+
+            let target = coord.capture(
+                &estate_handle,
+                {
+                    let mut f = CaptureFrame::new(
+                        format!("prov-b target content {}", CANARY),
+                        CaptureChannel::Typed, "default",
+                        LatticeAnchor::udc("004"), "prov-b", "test-embed-v1",
+                    );
+                    f.subject = Some(format!("{} prov-b target subject", CANARY));
+                    f
+                },
+                NOW + 1,
+            ).expect("capture target");
+
+            // Capture a .Contradicts tunnel while both endpoints are Normal.
+            let estate = coord.estate_for(&estate_handle).expect("estate_for");
+            let mut frame = TunnelCaptureFrame::new(
+                "study", "r", "study", "r", "contradicts", "prov-b",
+            );
+            frame.source_drawer_id = Some(source.id.clone());
+            frame.target_drawer_id = Some(target.id.clone());
+            frame.kind = TunnelKind::Contradicts;
+            estate.capture_tunnel(frame, NOW + 2).expect("capture tunnel");
+
+            // Stale edge: raise target to Restricted after the tunnel exists.
+            // The tunnel's adjective bitmap is not updated by CorrectSensitivity.
+            coord.mutate(
+                &estate_handle, &target.id,
+                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted), None,
+            ).expect("raise target to Restricted");
+
+            (source.id, target.id)
+        };
+
+        let admission = V2RecallLensAdmission {
+            estate_id: uuid::Uuid::from_bytes(estate_handle.estate_uuid),
+            estate_handle,
+            caller_binding: "test-caller".to_owned(),
+            authorization_generation: "test-generation".to_owned(),
+            now_millis: NOW,
+        };
+        let request = V2RecallLensRequest {
+            operation: V2RecallLensOperation::LensContradiction,
+            estate_id: None,
+            values: BTreeMap::new(),
+        };
+
+        let lower = CoordinatorRecallLensLower::new(Arc::clone(&registry.default.coord));
+        let result = lower.execute(&admission, &request).expect("contradiction lens execute");
+        let data = project_data(&result).expect("project_data");
+
+        // The tunnel must be present.
+        let tunnels = data["contradictsTunnels"].as_array().expect("contradictsTunnels array");
+        assert_eq!(tunnels.len(), 1, "one contradiction tunnel must be present");
+
+        let row = &tunnels[0];
+        // Both endpoint ids must appear regardless of the target's restriction.
+        assert_eq!(
+            row["sourceDrawerId"].as_str(), Some(source_id.as_str()),
+            "sourceDrawerId must be emitted"
+        );
+        assert_eq!(
+            row["targetDrawerId"].as_str(), Some(target_id.as_str()),
+            "targetDrawerId must be emitted even for the restricted endpoint (WITHHELD-ID-ONLY = a)"
+        );
+
+        // The row may carry only id, lifecycle, sourceDrawerId, targetDrawerId.
+        let row_obj = row.as_object().expect("row is an object");
+        for key in row_obj.keys() {
+            assert!(
+                matches!(key.as_str(), "id" | "lifecycle" | "sourceDrawerId" | "targetDrawerId"),
+                "unexpected key in tunnel row: {key}"
+            );
+        }
+
+        // Canary from the restricted endpoint must not bleed into the response.
+        let serialized = data.to_string();
+        assert!(
+            !serialized.contains(CANARY),
+            "canary from restricted endpoint must not appear in the lens output"
+        );
+
+        // withheldContradictionCount is 0: the tunnel bitmap is Normal.
+        assert_eq!(
+            data["withheldContradictionCount"], 0,
+            "the tunnel is Normal; the endpoint restriction does not withhold it"
+        );
+    }
+
+    /// Trust-synthesis keyInsights omits provenance-restricted rows (KEYINSIGHTS-PROV = a).
+    ///
+    /// Mirrors Swift `trustSynthesisKeyInsightsOmitsProvenanceRestrictedRows`.
+    ///
+    /// Scenario: two drawers. The admissible drawer has normal provenance
+    /// sensitivity (default raw 0); its first line must appear in keyInsights.
+    /// The restricted drawer is captured with `provenance_sensitivity:
+    /// Sensitivity::Restricted` (bits 30–35, raw 32); its canary first line
+    /// must NOT appear in keyInsights. Both ids must appear in ranked_ids.
+    ///
+    /// Take-then-filter: max_count rows in stream order first, then drop
+    /// non-admissible rows from that slice. Filter-then-take would be wrong.
+    #[test]
+    fn trust_synthesis_key_insights_omits_provenance_restricted_rows() {
+        use locus_kit::frames::CaptureFrame;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::provenance::Sensitivity;
+
+        const NOW: i64 = 1_700_000_001_000_i64;
+        const ADMISSIBLE_FIRST_LINE: &str = "PROV_B_ADMISSIBLE_LINE_for_keyInsights";
+        const RESTRICTED_CANARY: &str = "PROV_B_RESTRICTED_CANARY_keyInsights_c3d1a7";
+
+        // No charter seeding: the two test drawers must be the only rows so
+        // keyInsights is not pre-filled by the charter hints that
+        // `new_inmemory()` writes. Semantic recall lanes are still wired via
+        // `EstateOpening { seed_charters: false }`.
+        let registry = EstateRegistry::new_inmemory_with(
+            crate::estate_registry::EstateOpening { federate: false, seed_charters: false },
+        );
+        let estate_handle = registry.default.handle.clone();
+
+        let (admissible_id, restricted_id) = {
+            let coord = registry.coord.lock().expect("coord lock");
+
+            // Admissible drawer: normal provenance sensitivity (default raw 0).
+            let admissible = coord.capture(
+                &estate_handle,
+                CaptureFrame::new(
+                    format!("{}\nSecond line of admissible content.", ADMISSIBLE_FIRST_LINE),
+                    CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("004"), "prov-b", "test-embed-v1",
+                ),
+                NOW,
+            ).expect("capture admissible");
+
+            // Restricted drawer: provenance_sensitivity = Restricted (bits 30–35 raw 32).
+            // This is the provenance axis, NOT the adjective axis. Adjective restriction
+            // (CorrectSensitivity) removes the row from recall entirely; provenance
+            // restriction keeps the row in rankedIDs but gates its content from keyInsights.
+            let mut restricted_frame = CaptureFrame::new(
+                format!("{}\nSecond line of restricted content.", RESTRICTED_CANARY),
+                CaptureChannel::Typed, "default",
+                LatticeAnchor::udc("004"), "prov-b", "test-embed-v1",
+            );
+            restricted_frame.provenance_sensitivity = Sensitivity::Restricted;
+            let restricted = coord.capture(
+                &estate_handle,
+                restricted_frame,
+                NOW + 1,
+            ).expect("capture restricted");
+
+            (admissible.id, restricted.id)
+        };
+
+        let admission = V2RecallLensAdmission {
+            estate_id: uuid::Uuid::from_bytes(estate_handle.estate_uuid),
+            estate_handle,
+            caller_binding: "test-caller".to_owned(),
+            authorization_generation: "test-generation".to_owned(),
+            now_millis: NOW,
+        };
+        let request = V2RecallLensRequest {
+            operation: V2RecallLensOperation::LensTrustSynthesis,
+            estate_id: None,
+            values: BTreeMap::new(),
+        };
+
+        let lower = CoordinatorRecallLensLower::new(Arc::clone(&registry.default.coord));
+        let result = lower.execute(&admission, &request)
+            .expect("trust synthesis execute");
+        let data = project_data(&result).expect("project_data");
+
+        // Retrieve keyInsights from context.
+        let key_insights = data["context"]["keyInsights"]
+            .as_array()
+            .expect("keyInsights must be an array");
+        let insight_strings: Vec<&str> = key_insights
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+
+        // Restricted drawer's canary must not appear in keyInsights.
+        assert!(
+            !insight_strings.iter().any(|s| s.contains(RESTRICTED_CANARY)),
+            "provenance-restricted canary must not appear in keyInsights: {:?}",
+            insight_strings,
+        );
+
+        // Admissible drawer's first line must appear in keyInsights.
+        assert!(
+            insight_strings.iter().any(|s| s.contains(ADMISSIBLE_FIRST_LINE)),
+            "admissible drawer first line must appear in keyInsights: {:?}",
+            insight_strings,
+        );
+
+        // Both drawer ids must appear in rankedIDs (id is not body-derived content).
+        // project_data maps ranked_ids → rankedIDs (camelCase wire key).
+        let ranked_ids = data["rankedIDs"]
+            .as_array()
+            .expect("rankedIDs must be an array");
+        let ranked_id_strs: Vec<&str> = ranked_ids
+            .iter()
+            .filter_map(|v| v["id"].as_str())
+            .collect();
+        assert!(
+            ranked_id_strs.iter().any(|s| s.eq_ignore_ascii_case(&admissible_id)),
+            "admissible drawer id must be present in rankedIDs: {:?}",
+            ranked_id_strs,
+        );
+        assert!(
+            ranked_id_strs.iter().any(|s| s.eq_ignore_ascii_case(&restricted_id)),
+            "restricted drawer id must be present in rankedIDs (id is not body-derived content): {:?}",
+            ranked_id_strs,
         );
     }
 

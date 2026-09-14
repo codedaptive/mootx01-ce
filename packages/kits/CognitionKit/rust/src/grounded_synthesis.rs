@@ -381,6 +381,9 @@ fn run_grounded_synthesis_impl(
                     wing,
                     room,
                     is_currently_believed: true,
+                    // Carry provenance so make_key_insights can apply the
+                    // KEYINSIGHTS-PROV = a ruling (bits 30–35 sensitivity gate).
+                    provenance: d.provenance,
                 },
             )
         })
