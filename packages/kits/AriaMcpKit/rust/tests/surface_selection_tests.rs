@@ -1064,10 +1064,8 @@ fn v2_monitoring_set_writes_only_when_live_and_returns_confirmed_state() {
 // ---------------------------------------------------------------------------
 
 /// Asserts the v2 envelope text for `moot_list_lenses` in terse and verbose
-/// modes through the live v2 dispatch path (`execute_cognition_catalog`), NOT
-/// through `dispatch_tool`. The legacy text-runner path never reaches
-/// `execute_cognition_catalog`, so only a test dispatched through the v2
-/// surface proves the envelope text changed.
+/// modes through the live v2 dispatch path (`execute_cognition_catalog`),
+/// the only dispatch route the crate ships.
 ///
 /// Swift twin: the text assertions in `listLensesTerseDefaultAndVerbose`
 /// (UtilityTierTests.swift).

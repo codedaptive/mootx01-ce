@@ -3,8 +3,7 @@
 //!
 //! `moot_federated_recall` is a v2-surface operation decoded by
 //! `surface::SelectedSurface::decode` and executed by `execute_federated_recall`
-//! in `surface.rs`. It does NOT pass through the v1 `dispatch_tool` convenience
-//! function. Tests here go through `Dispatcher::new` + `Dispatcher::handle` with
+//! in `surface.rs`. Tests here go through `Dispatcher::new` + `Dispatcher::handle` with
 //! a properly-formed `tools/call` JSON-RPC 2.0 request — the same path the
 //! production server uses.
 //!
