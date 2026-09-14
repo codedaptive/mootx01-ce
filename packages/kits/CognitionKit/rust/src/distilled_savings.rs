@@ -82,6 +82,23 @@ pub struct DistilledSavings {
 /// Mirrors `DistilledSavings.estimatorName` in the Swift port.
 pub const ESTIMATOR_NAME: &str = "ContextDistillLib.estimateTokens (TokenCompaction v1)";
 
+/// Text-pair accounting with one internal opt-in check. Disabled calls do no
+/// counting. Supply only authorized bodies and the actual skim preview, if any.
+pub fn distilled_savings_text(
+    original: &str, reduced: &str, enabled: bool, skimmed: Option<&str>,
+) -> String {
+    if !enabled { return String::new(); }
+    use genius_locus_kit::hydration_representation::estimated_token_count;
+    let original_count = estimated_token_count(original);
+    let reduced_count = estimated_token_count(reduced);
+    let omitted = skimmed.map(|text| reduced_count - estimated_token_count(text));
+    if omitted.is_some_and(|n| n < 0) {
+        return measure_distilled_savings(original_count,
+            estimated_token_count(skimmed.unwrap()), None).display;
+    }
+    measure_distilled_savings(original_count, reduced_count, omitted).display
+}
+
 // MARK: - Thousands formatter
 
 /// Format a non-negative `i64` with comma separators every three digits.
