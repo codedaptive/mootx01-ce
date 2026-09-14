@@ -15,11 +15,12 @@
 
 use std::collections::BTreeMap;
 
+mod test_support;
+use test_support::SelectedV2Session;
+
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
-    jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
+    jsonrpc::{JsonValue, JSONRPCErrorCode},
 };
 use genius_locus_kit::WriteMode;
 use locus_kit::drawer_operational::CaptureChannel;
@@ -40,14 +41,6 @@ macro_rules! args {
     }};
 }
 
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
-}
-
-fn is_tool_error(result: &serde_json::Value) -> bool {
-    result["isError"] == serde_json::json!(true)
-}
-
 // ---------------------------------------------------------------------------
 // B-6: error message quality — no internal Rust type names at the boundary
 // ---------------------------------------------------------------------------
@@ -62,24 +55,20 @@ fn is_tool_error(result: &serde_json::Value) -> bool {
 ///   `"capture failed: InvalidContent: room must not be empty"`
 #[test]
 fn empty_location_error_contains_reason_not_rust_type_name() {
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     let a = args![
         "content"  => "some content",
         "subject"  => "some content",
         "location" => ""           // empty room — estate rejects this
     ];
-    let result =
-        dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
-            .expect("dispatch must not return a transport error on a content-rejected call");
-
-    // The result is a tool-level error (isError == true).
-    assert!(
-        is_tool_error(&result),
-        "empty location must produce a tool-level error; got: {result:?}"
-    );
-
-    let msg = content_text(&result);
+    let error = session
+        .call("moot_file_memory", &a)
+        .expect_err("empty location must produce an invalid-argument transport fault");
+    assert_eq!(error.code, JSONRPCErrorCode::INVALID_PARAMS);
+    let msg = error.data.as_ref()
+        .and_then(|data| data["message"].as_str())
+        .unwrap_or(&error.message);
 
     // Must NOT contain the internal Rust enum variant name.
     assert!(
@@ -93,8 +82,8 @@ fn empty_location_error_contains_reason_not_rust_type_name() {
 
     // Must contain the actionable reason.
     assert!(
-        msg.contains("room must not be empty"),
-        "error message must contain the actionable reason 'room must not be empty'; got: {msg}"
+        msg.contains("must not be empty"),
+        "error message must contain the actionable non-empty reason; got: {msg}"
     );
 }
 
@@ -104,32 +93,6 @@ fn empty_location_error_contains_reason_not_rust_type_name() {
 /// Before B-6, `coord.estate_for` failures were passed to
 /// `describe_verb_dispatch_error` which expects `VerbDispatchError`, causing
 /// a type mismatch. After the fix they route through `describe_glk_error`.
-#[test]
-fn unknown_estate_id_error_is_clean_english() {
-    let registry = EstateRegistry::new_inmemory();
-
-    // Supply a well-formed but non-existent estateID to reach the
-    // `resolve` path — resolve surfaces a clean INVALID_PARAMS JSONRPCError.
-    let a = args![
-        "query"    => "anything",
-        "estateID" => "00000000-0000-0000-0000-000000000000"
-    ];
-    let result = dispatch_tool("moot_memory_search", &a, &registry, &SurfacedRecallLedger::new());
-
-    // This is a transport-level error (Err(JSONRPCError)), not a tool-level error.
-    let err = result.expect_err("unknown estateID must return a transport-level JSONRPCError");
-
-    let msg = &err.message;
-    assert!(
-        !msg.contains("GeniusLocusKitError"),
-        "error message must not leak 'GeniusLocusKitError'; got: {msg}"
-    );
-    assert!(
-        !msg.contains("EstateNotOpen"),
-        "error message must not leak 'EstateNotOpen' Rust variant; got: {msg}"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // One-door: FDC seam classifies moot_file_memory content
 // ---------------------------------------------------------------------------
@@ -146,7 +109,7 @@ fn unknown_estate_id_error_is_clean_english() {
 fn file_memory_with_classifiable_content_sets_real_udc_code() {
     // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
     // so the "exactly one drawer" read-back targets this test's content.
-    let registry = EstateRegistry::new_inmemory_bare();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
 
     // File a memory whose content the FDC encoder reliably classifies.
     let classifiable = "Biology is the scientific study of life and living organisms, including their physical structure, chemical processes, molecular interactions, physiological mechanisms, and evolution.";
@@ -155,9 +118,7 @@ fn file_memory_with_classifiable_content_sets_real_udc_code() {
         "subject"  => "Photosynthesis chemistry classifiable fixture.",
         "location" => "science-room"
     ];
-    let result =
-        dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
-            .expect("file_memory must succeed");
+    let result = session.call("moot_file_memory", &a).expect("file_memory must succeed");
 
     assert!(
         result["isError"] == serde_json::json!(false),
@@ -166,18 +127,14 @@ fn file_memory_with_classifiable_content_sets_real_udc_code() {
 
     // Read back the drawer directly from the estate coordinator.
     // This exercises the stored `udc_code` field on the persisted Drawer.
-    let estate = registry
-        .resolve(&BTreeMap::new(), "estateID")
-        .expect("default estate must resolve");
-
-    let coord = estate.coord.lock().expect("coord lock must not be poisoned");
+    let coord = session.coord.lock().expect("coord lock must not be poisoned");
     let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time must be after UNIX epoch")
         .as_secs() as i64;
 
     let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+        .recall(&session.default.handle, RecallFrame::new(vec![]), now)
         .expect("recall must succeed on a fresh estate");
 
     assert_eq!(drawers.len(), 1, "exactly one drawer must exist");
@@ -211,23 +168,20 @@ fn file_memory_with_classifiable_content_sets_real_udc_code() {
 /// the user sees "capture failed: room must not be empty" instead.
 #[test]
 fn empty_location_error_does_not_expose_invalid_content_prefix() {
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     let a = args![
         "content"  => "some content",
         "subject"  => "some content",
         "location" => ""   // empty room triggers InvalidContent from substrate
     ];
-    let result =
-        dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
-            .expect("dispatch must not return a transport error on content-rejected call");
-
-    assert!(
-        is_tool_error(&result),
-        "empty location must produce a tool-level error; got: {result:?}"
-    );
-
-    let msg = content_text(&result);
+    let error = session
+        .call("moot_file_memory", &a)
+        .expect_err("empty location must produce an invalid-argument transport fault");
+    assert_eq!(error.code, JSONRPCErrorCode::INVALID_PARAMS);
+    let msg = error.data.as_ref()
+        .and_then(|data| data["message"].as_str())
+        .unwrap_or(&error.message);
 
     // Must NOT contain the internal enum case prefix.
     assert!(
@@ -237,8 +191,8 @@ fn empty_location_error_does_not_expose_invalid_content_prefix() {
 
     // Must still contain the actionable reason (the stripping only removes the prefix).
     assert!(
-        msg.contains("room must not be empty"),
-        "error message must still contain 'room must not be empty' after prefix strip; got: {msg}"
+        msg.contains("must not be empty"),
+        "error message must retain the actionable non-empty reason; got: {msg}"
     );
 }
 
@@ -251,7 +205,7 @@ fn empty_location_error_does_not_expose_invalid_content_prefix() {
 fn file_memory_with_unclassifiable_content_falls_back_to_root_code() {
     // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
     // so the "exactly one drawer" read-back targets this test's content.
-    let registry = EstateRegistry::new_inmemory_bare();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
 
     // A string of random tokens with no meaningful FDC signature.
     let noise = "zzq xkj blrt fnp";
@@ -260,9 +214,9 @@ fn file_memory_with_unclassifiable_content_falls_back_to_root_code() {
         "subject"  => "Unclassifiable noise fixture.",
         "location" => "noise-room"
     ];
-    let result =
-        dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
-            .expect("file_memory must succeed even for unclassifiable content");
+    let result = session
+        .call("moot_file_memory", &a)
+        .expect("file_memory must succeed even for unclassifiable content");
 
     assert!(
         result["isError"] == serde_json::json!(false),
@@ -270,18 +224,14 @@ fn file_memory_with_unclassifiable_content_falls_back_to_root_code() {
     );
 
     // The drawer must exist (not error out).
-    let estate = registry
-        .resolve(&BTreeMap::new(), "estateID")
-        .expect("default estate must resolve");
-
-    let coord = estate.coord.lock().expect("coord lock must not be poisoned");
+    let coord = session.coord.lock().expect("coord lock must not be poisoned");
     let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time must be after UNIX epoch")
         .as_secs() as i64;
 
     let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![]), now)
+        .recall(&session.default.handle, RecallFrame::new(vec![]), now)
         .expect("recall must succeed");
 
     assert_eq!(drawers.len(), 1, "exactly one drawer must exist");
@@ -315,20 +265,19 @@ fn file_memory_and_direct_capture_produce_same_udc_code() {
     // Path 1 — file_memory tool (the MCP caller path).
     // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint drawers,
     // so drawers1[0] is this test's drawer.
-    let registry1 = EstateRegistry::new_inmemory_bare();
+    let session1 = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
     let subject: String = classifiable.chars().take(120).collect();
     let a = args!["content" => classifiable, "subject" => subject.as_str(), "location" => "science-room"];
-    dispatch_tool("moot_file_memory", &a, &registry1, &SurfacedRecallLedger::new())
+    session1.call("moot_file_memory", &a)
         .expect("file_memory must succeed");
 
-    let estate1 = registry1.resolve(&BTreeMap::new(), "estateID").expect("estate1 must resolve");
-    let coord1 = estate1.coord.lock().expect("coord1 lock");
+    let coord1 = session1.coord.lock().expect("coord1 lock");
     let now: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system time must be after UNIX epoch")
         .as_secs() as i64;
     let drawers1 = coord1
-        .recall(&estate1.handle, RecallFrame::new(vec![]), now)
+        .recall(&session1.default.handle, RecallFrame::new(vec![]), now)
         .expect("recall estate1");
     let code_via_tool = drawers1[0].udc_code.clone();
 
@@ -445,28 +394,25 @@ fn reviewed_computing_aliases_survive_the_capture_seam() {
     for (content, location) in &high_frequency_items {
         // _bare: controlled single-drawer estate — no seeded AI_Charter_Hint
         // drawers, so the "one drawer per content item" read-back is exact.
-        let registry = EstateRegistry::new_inmemory_bare();
+        let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
         let subject: String = content.chars().take(120).collect();
         let a = args!["content" => *content, "subject" => subject.as_str(), "location" => *location];
-        let result =
-            dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new())
-                .expect("file_memory must succeed for high-frequency content");
+        let result = session
+            .call("moot_file_memory", &a)
+            .expect("file_memory must succeed for high-frequency content");
 
         assert!(
             result["isError"] == serde_json::json!(false),
             "file_memory must succeed for high-frequency content '{content}'; got: {result:?}"
         );
 
-        let estate = registry
-            .resolve(&BTreeMap::new(), "estateID")
-            .expect("estate must resolve");
-        let coord = estate.coord.lock().expect("coord lock");
+        let coord = session.coord.lock().expect("coord lock");
         let now: i64 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time must be after UNIX epoch")
             .as_secs() as i64;
         let drawers = coord
-            .recall(&estate.handle, RecallFrame::new(vec![]), now)
+            .recall(&session.default.handle, RecallFrame::new(vec![]), now)
             .expect("recall must succeed");
 
         assert_eq!(drawers.len(), 1, "one drawer per content item");

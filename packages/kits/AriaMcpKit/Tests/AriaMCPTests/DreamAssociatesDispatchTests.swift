@@ -189,6 +189,35 @@ struct DreamAssociatesDispatchTests {
                 "associationsWritten must be > 0 for high-overlap pairs; got \(written)")
     }
 
+    /// A second identical all-mode pass may inspect the same estate, but it
+    /// must not persist a duplicate association for a pair already settled by
+    /// the first pass.
+    @Test
+    func dreamAssociatesAllSecondPassWritesNoDuplicateAssociations() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        for content in [
+            "idempotent dream association alpha signal",
+            "idempotent dream association beta signal",
+            "idempotent dream association gamma signal",
+        ] {
+            try await file(content, via: dispatcher)
+        }
+        let arguments: JSONValue = .object([
+            "now": .string("2026-09-01T00:00:00Z"),
+            "associates": .string("all"),
+        ])
+        let first = try await dispatcher.dispatch(name: "moot_dream", arguments: arguments)
+        let firstData = try #require(first.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue)
+        let firstWritten = try #require(firstData["associationsWritten"]?.integerValue)
+        #expect(firstWritten > 0, "the first pass must settle a real association")
+
+        let second = try await dispatcher.dispatch(name: "moot_dream", arguments: arguments)
+        let secondData = try #require(second.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue)
+        #expect(secondData["associationsWritten"]?.integerValue == 0,
+                "an unchanged second pass must not write duplicate associations")
+    }
+
     // MARK: - Test 2 — associates=off skips the step entirely
 
     /// When `associates=off` is passed, step 3.5 is entirely bypassed — the

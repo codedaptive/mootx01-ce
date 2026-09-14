@@ -119,54 +119,29 @@ impl CognitionCatalogService {
         request: CognitionCatalogRequest,
     ) -> Result<CognitionLensesData, CognitionCatalogFailure> {
         self.validate(request)?;
-        // inputSchema and outputSchema keys are camelCase in the catalog JSON
-        // produced by selected_tools() (Swift catalog format). The struct fields
-        // and serialized keys are snake_case (Serde default), so the mismatch
-        // is intentional: we read camelCase from the catalog, emit snake_case.
-        let catalog = crate::v2::catalog::selected_tools();
-        let tools = catalog
-            .as_array()
-            .expect("the v2 catalog must return an array")
-            .iter()
-            .filter_map(|tool| {
-                let name = tool.get("name")?.as_str()?;
-                if !(crate::recipe_tools::is_recipe_tool(name)
-                    || crate::lens_tools::is_lens_tool(name))
-                    || !self.callable_tool_names.contains(name)
-                {
-                    return None;
-                }
-                let description = tool["description"]
-                    .as_str()
-                    .expect("lower tool descriptors must have descriptions")
-                    .to_owned();
+        let registry = crate::v2::catalog::selected_registry();
+        let tools = registry
+            .operations()
+            .filter(|operation| {
+                operation.lens_lane_member
+                    && self.callable_tool_names.contains(&operation.public_name)
+            })
+            .map(|operation| {
+                let description = operation.help.description.clone();
                 if request.verbose {
-                    // Verbose: include the full input and output schemas.
-                    Some(CognitionToolDescriptor {
-                        name: name.to_owned(),
+                    CognitionToolDescriptor {
+                        name: operation.public_name.clone(),
                         description,
-                        input_schema: Some(tool["inputSchema"].clone()),
-                        // `.get().cloned()` and NOT `tool["outputSchema"]`:
-                        // indexing a serde_json::Value with a missing key
-                        // yields Value::Null, which would serialize as
-                        // `"output_schema": null`. Swift omits the key via
-                        // `if let outputSchema = catalog.outputSchema` in
-                        // AriaV2CognitionCatalog.swift (buildCatalogLookup path),
-                        // so emitting null here would diverge from Swift.
-                        // Neither port ever emits a null output_schema.
-                        output_schema: tool
-                            .get("outputSchema")
-                            .filter(|schema| !schema.is_null())
-                            .cloned(),
-                    })
+                        input_schema: Some(operation.input_schema.clone()),
+                        output_schema: Some(operation.projection.output_schema.clone()),
+                    }
                 } else {
-                    // Terse: name and description only.
-                    Some(CognitionToolDescriptor {
-                        name: name.to_owned(),
+                    CognitionToolDescriptor {
+                        name: operation.public_name.clone(),
                         description,
                         input_schema: None,
                         output_schema: None,
-                    })
+                    }
                 }
             })
             .collect();
