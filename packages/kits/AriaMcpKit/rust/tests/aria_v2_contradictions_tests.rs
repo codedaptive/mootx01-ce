@@ -1,20 +1,11 @@
-#[path = "../src/jsonrpc.rs"]
-mod jsonrpc;
-
-#[path = "../src/v2/codec.rs"]
-mod codec;
-
-#[path = "../src/v2/contradictions.rs"]
-mod contradictions;
-
-use contradictions::{
+use aria_mcp::v2::contradictions::{
     candidate_evidence_from_drawers, coordinator_candidate_evidence, execute_hunt, V2ReadOnlyContradictionHuntSource,
     V2ContradictionAnalysisBinding, V2ContradictionAnalysisCache,
     V2ContradictionCacheError, V2ContradictionCandidate, V2ContradictionFinding, V2ContradictionHuntRequest, V2ContradictionProposalRequest,
     V2ContradictionProposalStatus, ANALYSIS_REFERENCE_TTL_MS, MAX_CANDIDATES_PER_ANALYSIS,
     MAX_LIVE_ANALYSES_PER_CONTEXT,
 };
-use jsonrpc::JsonValue;
+use aria_mcp::jsonrpc::JsonValue;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -428,7 +419,7 @@ fn v2_hunt_finds_older_contradiction_beyond_fifty_recent_probes() {
     let legacy = coordinator.tiered_contradiction_search(&handle, None, 50, "minilm-v6", 50, 1_700_000_100_000).unwrap();
     assert!(legacy.tier1.is_empty() && legacy.tier2.is_empty() && legacy.tier3.is_empty(), "control must exclude the old pair");
     let context = V2ContradictionAnalysisBinding { estate_id: Uuid::from_bytes(handle.estate_uuid), ..binding() };
-    let findings = contradictions::hunt_from_coordinator(&Arc::new(Mutex::new(coordinator)),
+    let findings = aria_mcp::v2::contradictions::hunt_from_coordinator(&Arc::new(Mutex::new(coordinator)),
         &handle, &context, 1, 1_700_000_100_000).unwrap();
     assert_eq!(findings.len(), 1, "v2 must discover the older pair while honoring result limit");
     let actual: std::collections::BTreeSet<_> = [findings[0].source_memory_id.clone(), findings[0].target_memory_id.clone()].into_iter().collect();

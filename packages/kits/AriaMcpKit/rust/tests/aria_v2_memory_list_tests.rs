@@ -1,10 +1,7 @@
 
-#[path = "../src/v2/memory_list.rs"]
-mod memory_list;
-
 use std::sync::{Arc, Mutex};
 
-use memory_list::{
+use aria_mcp::v2::memory_list::{
     MemoryListAuthorization, MemoryListError, MemoryListFilter, MemoryListProjection,
     MemoryListRequest, MemoryListService, MemoryListSnapshot, MemoryListSnapshotProvider,
     MemoryListSnapshotRow, CURSOR_TTL_MILLIS,
@@ -38,9 +35,13 @@ impl MemoryListSnapshotProvider for Provider {
     fn revalidate(&self, _: &MemoryListAuthorization) -> Result<(), MemoryListError> { Ok(()) }
 }
 
-impl MemoryListSnapshotProvider for Arc<Provider> {
+// Newtype wrapper so we can implement the external trait for a shared provider.
+// Arc<Provider> cannot implement an external trait directly (orphan rule).
+struct SharedProvider(Arc<Provider>);
+
+impl MemoryListSnapshotProvider for SharedProvider {
     fn authorize(&self, requested: Option<Uuid>) -> Result<MemoryListAuthorization, MemoryListError> {
-        self.as_ref().authorize(requested)
+        self.0.as_ref().authorize(requested)
     }
 
     fn capture_authorized_inventory(
@@ -50,11 +51,11 @@ impl MemoryListSnapshotProvider for Arc<Provider> {
         room: Option<&str>,
         filter: Option<MemoryListFilter>,
     ) -> Result<MemoryListSnapshot, MemoryListError> {
-        self.as_ref().capture_authorized_inventory(authorization, wing, room, filter)
+        self.0.as_ref().capture_authorized_inventory(authorization, wing, room, filter)
     }
 
     fn revalidate(&self, authorization: &MemoryListAuthorization) -> Result<(), MemoryListError> {
-        self.as_ref().revalidate(authorization)
+        self.0.as_ref().revalidate(authorization)
     }
 }
 
@@ -94,7 +95,7 @@ fn request(cursor: Option<String>) -> MemoryListRequest {
     }
 }
 
-fn service() -> (MemoryListService<Arc<Provider>>, Arc<Provider>) {
+fn service() -> (MemoryListService<SharedProvider>, Arc<Provider>) {
     let provider = Arc::new(Provider {
         authorization: Mutex::new(MemoryListAuthorization {
             caller_binding: "caller-a".to_owned(), context_id: "context-a".to_owned(), policy_version: "policy-v1".to_owned(),
@@ -105,7 +106,7 @@ fn service() -> (MemoryListService<Arc<Provider>>, Arc<Provider>) {
             row("80000000-0000-4000-8000-000000000000", Some("middle")),
         ])),
     });
-    (MemoryListService::new(Arc::clone(&provider), uuid(ESTATE)), provider)
+    (MemoryListService::new(SharedProvider(Arc::clone(&provider)), uuid(ESTATE)), provider)
 }
 
 #[test]
@@ -188,10 +189,10 @@ fn revision_matches_shared_swift_vector_and_preserves_projection_nulls() {
         estate_id: None, wing: material["scope"]["wing"].as_str().unwrap().to_owned(), room: None,
         filter: Some(MemoryListFilter::MissingSubject), limit: 200, cursor: None,
     };
-    let page = MemoryListService::new(Arc::clone(&provider), uuid(material["estate_id"].as_str().unwrap()))
+    let page = MemoryListService::new(SharedProvider(Arc::clone(&provider)), uuid(material["estate_id"].as_str().unwrap()))
         .list(request, NOW).unwrap();
     assert_eq!(page.revision, fixture["expected_sha256"].as_str().unwrap());
-    // The test-local fixture's projection() helper (lines 63-70 in this file) explicitly
+    // The test-local fixture's projection() helper (lines 64-71 in this file) explicitly
     // inserts "subject" and "provenance" as Value::Null when the argument is None — so
     // the keys are genuinely present here and null. The production builder
     // (public_projection in memory_list_snapshot_provider.rs) OMITS absent fields rather
