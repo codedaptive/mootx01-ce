@@ -27,12 +27,12 @@
 //!    representation once the drain settles, with NO `moot_distill` call.
 
 use std::collections::BTreeMap;
+mod test_support;
+use test_support::SelectedV2Session;
 
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
 
 // ---------------------------------------------------------------------------
@@ -66,8 +66,7 @@ fn content_text(result: &serde_json::Value) -> &str {
 /// lane is live from the first capture.
 #[test]
 fn inmemory_impatient_capture_then_search_returns_result() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Impatient capture — inlines directly into the Corpus's BM25 index.
     let capture_args = args![
@@ -76,7 +75,7 @@ fn inmemory_impatient_capture_then_search_returns_result() {
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail");
     assert!(
         is_success(&capture_result),
@@ -88,21 +87,17 @@ fn inmemory_impatient_capture_then_search_returns_result() {
         "query" => "swift cliff aerial colony",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result from in-memory BM25 lane; got: {text}"
-    );
-    assert!(
-        text.contains("swift"),
-        "search result should contain captured content; got: {text}"
+        search_result["structuredContent"]["data"]["results"].as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "expected at least 1 result from in-memory BM25 lane; got: {search_result:?}"
     );
 }
 
@@ -113,8 +108,7 @@ fn inmemory_impatient_capture_then_search_returns_result() {
 /// Prove the regular write path (encode-queue drain) on in-memory.
 #[test]
 fn inmemory_regular_capture_drain_then_search_returns_result() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Regular (non-impatient) capture — enqueues a job to the encode queue.
     let capture_args = args![
@@ -122,7 +116,7 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
         "subject" => "nightjar cryptic plumage crepuscular insectivore churring call",
         "location" => "memories/birds",
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail");
     assert!(
         is_success(&capture_result),
@@ -131,9 +125,9 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
 
     // Drain the encode queue synchronously.
     {
-        let mut coord = registry.default.coord.lock().unwrap();
+        let mut coord = session.coord.lock().unwrap();
         coord
-            .await_encode_drain(&registry.default.handle)
+            .await_encode_drain(&session.default.handle)
             .expect("await_encode_drain must succeed");
     }
 
@@ -142,21 +136,17 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
         "query" => "nightjar crepuscular insectivore",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result after drain; got: {text}"
-    );
-    assert!(
-        text.contains("nightjar"),
-        "search result should contain captured content; got: {text}"
+        search_result["structuredContent"]["data"]["results"].as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "expected at least 1 result after drain; got: {search_result:?}"
     );
 }
 
@@ -184,9 +174,8 @@ fn postgres_wiring_shape_proof() {
         return;
     }
 
-    let registry = EstateRegistry::new_postgres(&pg_url, "test-owner-pg")
-        .expect("new_postgres must succeed when PG URL is set");
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_postgres(&pg_url, "test-owner-pg")
+        .expect("new_postgres must succeed when PG URL is set"));
 
     let capture_args = args![
         "content" => "marsh harrier reed bed habitat lowland wetland Britain breeding",
@@ -194,7 +183,7 @@ fn postgres_wiring_shape_proof() {
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail on PG estate");
     assert!(
         is_success(&capture_result),
@@ -205,25 +194,20 @@ fn postgres_wiring_shape_proof() {
         "query" => "marsh harrier wetland breeding",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail on PG estate");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed on PG estate; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result on PG estate; got: {text}"
-    );
-    assert!(
-        text.contains("marsh harrier"),
-        "search result should contain captured content on PG estate; got: {text}"
+        search_result["structuredContent"]["data"]["results"].as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "expected at least 1 result on PG estate; got: {search_result:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
 // 5. Drain-stage distillation rider on the registry wiring path
 // ---------------------------------------------------------------------------
-

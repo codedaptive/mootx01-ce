@@ -417,6 +417,30 @@ fn run_grounded_synthesis_impl(
     };
     let reranked = rerank(&rows, &effective_tuning, cue_terms);
 
+    // Grounding is a ranking guarantee: a row that carries an explicit cue
+    // term is presented before every row that carries none. The scored lane
+    // may contribute broad semantic candidates, but the fused order depends
+    // on which evidence that lane yielded, and the two ports' scored lanes do
+    // not yield identical evidence on identical estates. The stable partition
+    // keeps the hybrid order inside each bucket and makes the cue-first
+    // contract hold in both ports by construction. Twin of the partition in
+    // Swift `GroundedSynthesis.run`; pinned by
+    // `selected_synthesis_ranks_cue_matches_before_unrelated_rows` and the
+    // Swift `testGroundedSynthesisQueryRanksCueMatchesFirst`.
+    let reranked = if cue_terms.is_empty() {
+        reranked
+    } else {
+        let normalized_cues = cue_terms
+            .iter()
+            .map(|term| term.to_lowercase())
+            .collect::<Vec<_>>();
+        let (cue_matches, other_rows): (Vec<_>, Vec<_>) = reranked.into_iter().partition(|row| {
+            let content = row.content.to_lowercase();
+            normalized_cues.iter().any(|term| content.contains(term))
+        });
+        cue_matches.into_iter().chain(other_rows).collect()
+    };
+
     // Apply cap BEFORE synthesis so the synthesizer's work is bounded by
     // the user limit, not the pool size. The cap is applied after reranking
     // so the most cue-relevant drawers survive, not the most recent.
