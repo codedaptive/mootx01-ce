@@ -202,8 +202,9 @@ pub struct KGFact {
     /// time per `the packed provenance layout`.
     pub provenance_bitmap: i64,
 
-    /// When this fact was filed. Epoch seconds in the Rust port; the
-    /// SQLite column is TEXT ISO8601 per the fleet rule.
+    /// When this fact was filed. Epoch milliseconds — the granularity
+    /// that survives SQLite TEXT ISO8601 storage (three fractional
+    /// digits). The SQLite column is TEXT ISO8601 per the fleet rule.
     pub filed_at: i64,
 }
 
