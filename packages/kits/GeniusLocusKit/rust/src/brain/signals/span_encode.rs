@@ -1,7 +1,7 @@
 // brain/signals/span_encode.rs — Rust mirror of `SpanEncodeSignal.swift`.
 //
-// ENCODER_RERANK_CONTRACT §10, signal 13. Replaces `adornment.rs` (removed):
-// fires the span-encode drain duty on each REM-ALPHA (30 s) tick and
+// ENCODER_RERANK_CONTRACT §10, signal 13. Fires the span-encode drain duty
+// on each REM-ALPHA (30 s) tick and
 // surfaces the encoded-drawer count as a diagnostic.
 //
 // Mirrors `AnomalySweepSignal` exactly in structure: 30 s cadence (REM-ALPHA),
@@ -20,7 +20,7 @@ pub struct SpanEncodeSignal;
 
 impl SpanEncodeSignal {
     /// REM-ALPHA cadence in seconds — 30 s, matching `RemCycleTable`.
-    /// Significantly faster than the hourly adornment pass this replaces.
+    /// Fast span indexing bounds bit-27-clear debt to at most one poll interval.
     /// Mirrors Swift `SpanEncodeSignal.defaultCadenceSeconds`.
     pub const DEFAULT_CADENCE_SECONDS: u64 = 30;
 
