@@ -99,7 +99,7 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                     json!({"type":"object","properties":{
                         "memory_id":{"type":"string","format":"uuid"},
                         "memory_ids":{"type":"array","items":{"type":"string","format":"uuid"},"minItems":1,"maxItems":50,"uniqueItems":true},
-                        "depth":{"type":"string","enum":["subject","distilled","full"]},
+                        "depth":{"type":"string","enum":["subject","distilled","skim","full"],"description":"skim returns a source-order distilled preview with a 512 UTF-8 byte target; intact groups may exceed it. Fetch distilled or full for the remainder."},
                         "estate_id":{"type":"string","format":"uuid"}},
                         "oneOf":[
                             {"required":["memory_id"],"not":{"required":["memory_ids"]}},
@@ -553,7 +553,7 @@ fn remaining_data_schema(name: &str) -> Option<Value> {
                 json!(["tunnel_id", "kind", "lifecycle"]),
             );
             let memory = exact(
-                json!({"memory_id":uuid(),"subject":{"type":"string"},"distilled":{"type":"string"},"content":{"type":"string"},"placement":placement_schema(),"filed_at":{"type":"string","format":"date-time"},"event_time":{"type":"string","format":"date-time"},"state":{"type":"string"},"trust":{"type":"string"},"sensitivity":{"type":"string"},"exportability":{"type":"string"},"confirmation":{"type":"string"},"lineage_id":uuid(),"tunnels":{"type":"array","items":tunnel_row},"fetch":fetch_schema()}),
+                json!({"memory_id":uuid(),"subject":{"type":"string"},"distilled":{"type":"string"},"skim":exact(json!({"text":{"type":"string"},"complete":{"type":"boolean"},"budgetHonored":{"type":"boolean"},"savings":{"type":"string"}}),json!(["text","complete","budgetHonored","savings"])),"content":{"type":"string"},"placement":placement_schema(),"filed_at":{"type":"string","format":"date-time"},"event_time":{"type":"string","format":"date-time"},"state":{"type":"string"},"trust":{"type":"string"},"sensitivity":{"type":"string"},"exportability":{"type":"string"},"confirmation":{"type":"string"},"lineage_id":uuid(),"tunnels":{"type":"array","items":tunnel_row},"fetch":fetch_schema()}),
                 json!(["memory_id", "fetch"]),
             );
             Some(exact(
