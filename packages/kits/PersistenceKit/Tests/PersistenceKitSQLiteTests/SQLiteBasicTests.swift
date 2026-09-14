@@ -5,6 +5,7 @@ import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitSQLite
+import SQLCipher
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -51,6 +52,44 @@ struct SQLiteBasicTests {
                 )
             ]
         )
+    }
+
+    private func rawExec(_ dbURL: URL, _ sql: String) throws {
+        var db: OpaquePointer?
+        let rc = sqlite3_open(dbURL.path, &db)
+        defer { sqlite3_close(db) }
+        guard rc == SQLITE_OK, let db else {
+            throw StorageError.backendError(underlying: "raw ledger exec open failed: \(rc)")
+        }
+        var errMsg: UnsafeMutablePointer<CChar>?
+        let exec = sqlite3_exec(db, sql, nil, nil, &errMsg)
+        if exec != SQLITE_OK {
+            let message = errMsg.map { String(cString: $0) } ?? "raw ledger exec failed"
+            sqlite3_free(errMsg)
+            throw StorageError.backendError(underlying: message)
+        }
+    }
+
+    private func rawMigrationTimestamp(_ dbURL: URL) throws -> (storageClass: String, value: String) {
+        var db: OpaquePointer?
+        let rc = sqlite3_open(dbURL.path, &db)
+        defer { sqlite3_close(db) }
+        guard rc == SQLITE_OK, let db else {
+            throw StorageError.backendError(underlying: "raw ledger read open failed: \(rc)")
+        }
+        var statement: OpaquePointer?
+        let sql = "SELECT typeof(\"applied_at\"), \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'"
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw StorageError.backendError(underlying: "raw ledger read prepare failed")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let storageClass = sqlite3_column_text(statement, 0),
+              let value = sqlite3_column_text(statement, 1)
+        else {
+            throw StorageError.backendError(underlying: "raw ledger row missing")
+        }
+        return (String(cString: storageClass), String(cString: value))
     }
 
     @Test func openAndSchemaVersion() async throws {
@@ -256,6 +295,68 @@ struct SQLiteBasicTests {
         let v2Version = try await storage.currentSchemaVersion()
         #expect(v2Version == 2)
         await storage.close()
+    }
+
+    @Test func migrationLedgerWritesCanonicalTextAndNormalizesLegacyTimestamps() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("migration-ledger-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        let dbURL = tempDirectory.appendingPathComponent("estate.sqlite")
+        let configuration = EstateConfiguration(
+            estateID: UUID(), backend: .sqlite(url: dbURL, busyTimeout: 5.0))
+        let schema = makeSchema()
+
+        let writer = try SQLiteStorage(configuration: configuration)
+        try await writer.open(schema: schema)
+        await writer.close()
+        let written = try rawMigrationTimestamp(dbURL)
+        #expect(written.storageClass == "text"
+            && written.value.contains("T")
+            && written.value.hasSuffix("Z")
+            && written.value != "1970-01-01T00:00:00.000Z")
+
+        try rawExec(dbURL, """
+            DROP TABLE "_storagekit_migrations";
+            CREATE TABLE "_storagekit_migrations" (
+                "kit_id" TEXT NOT NULL,
+                "version" INTEGER NOT NULL,
+                "applied_at" INTEGER NOT NULL,
+                PRIMARY KEY ("kit_id")
+            );
+            INSERT INTO "_storagekit_migrations" ("kit_id", "version", "applied_at")
+            VALUES ('TestKit', 1, 1700000123456);
+            """)
+        let integerLegacy = try SQLiteStorage(configuration: configuration)
+        #expect(try await integerLegacy.currentSchemaVersion(for: "TestKit") == 1)
+        try await integerLegacy.open(schema: schema)
+        await integerLegacy.close()
+        let normalizedInteger = try rawMigrationTimestamp(dbURL)
+        #expect(normalizedInteger.storageClass == "text"
+            && normalizedInteger.value == "2023-11-14T22:15:23.456Z",
+            "normalized integer timestamp: \(normalizedInteger.value)")
+
+        try rawExec(dbURL, """
+            UPDATE "_storagekit_migrations"
+            SET "applied_at" = '1970-01-01T00:00:00.000Z'
+            WHERE "kit_id" = 'TestKit'
+            """)
+        let sentinelLegacy = try SQLiteStorage(configuration: configuration)
+        try await sentinelLegacy.open(schema: schema)
+        await sentinelLegacy.close()
+        let normalizedSentinel = try rawMigrationTimestamp(dbURL)
+        #expect(normalizedSentinel.storageClass == "text"
+            && normalizedSentinel.value != "1970-01-01T00:00:00.000Z")
+
+        try rawExec(dbURL, """
+            UPDATE "_storagekit_migrations"
+            SET "applied_at" = '2024-02-03T04:05:06.789Z'
+            WHERE "kit_id" = 'TestKit'
+            """)
+        let canonical = try SQLiteStorage(configuration: configuration)
+        try await canonical.open(schema: schema)
+        await canonical.close()
+        #expect(try rawMigrationTimestamp(dbURL).value == "2024-02-03T04:05:06.789Z")
     }
 
     @Test func schemasFromMultipleKitsRetainTypedValues() async throws {
