@@ -96,7 +96,7 @@ pub use distilled_recall::{
     DistilledMatch, DistilledRecallInput, DistilledRecallOutput,
 };
 pub use distilled_savings::{
-    measure_distilled_savings, DistilledSavings, DistilledSkim, ESTIMATOR_NAME,
+    distilled_savings_text, measure_distilled_savings, DistilledSavings, DistilledSkim, ESTIMATOR_NAME,
 };
 pub use association_rules_recipe::{
     run_apriori_rules, run_association_rules, AprioriRulesOutput, AssociationRuleResult,
