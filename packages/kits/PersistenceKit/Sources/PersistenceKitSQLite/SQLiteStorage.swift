@@ -497,6 +497,7 @@ actor SQLiteBackend {
         // so the existing callers that invoke migrate(to:) after open(schema:) are
         // unaffected.
         try connection.exec(SQLiteSchema.migrationsTableSQL)
+        try normalizeLegacyMigrationTimestamps()
         for table in schema.tables {
             try connection.exec(SQLiteSchema.createTable(table))
             for trigger in SQLiteSchema.appendOnlyTriggers(table) {
@@ -536,6 +537,45 @@ actor SQLiteBackend {
         if final < schema.version {
             try recordSchemaVersion(kitID: schema.kitID, version: schema.version)
         }
+    }
+
+    /// Normalize ledger timestamps written by pre-convergence SQLite ports.
+    ///
+    /// The ledger's public readers only require its version, so legacy
+    /// INTEGER epoch-millisecond values remain readable while this schema
+    /// application rewrites them to the canonical TEXT representation. Rust
+    /// builds that wrote the epoch sentinel also carry no useful applied-at
+    /// instant, so replace that exact value with this migration's timestamp.
+    /// Both predicates are false after the rewrite, making repeat opens no-ops.
+    private func normalizeLegacyMigrationTimestamps() throws {
+        let stmt = try connection.prepare("""
+            UPDATE "_storagekit_migrations"
+            SET "applied_at" = CASE
+                WHEN typeof("applied_at") = 'integer'
+                    THEN strftime('%Y-%m-%dT%H:%M:%S',
+                        CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                             THEN "applied_at" / 1000 - 1
+                             ELSE "applied_at" / 1000
+                        END,
+                        'unixepoch'
+                    ) || printf('.%03dZ',
+                        CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                             THEN 1000 + "applied_at" % 1000
+                             ELSE "applied_at" % 1000
+                        END
+                    )
+                WHEN typeof("applied_at") = 'text'
+                    AND "applied_at" = '1970-01-01T00:00:00.000Z'
+                    THEN ?
+                ELSE "applied_at"
+            END
+            WHERE typeof("applied_at") = 'integer'
+               OR (typeof("applied_at") = 'text'
+                   AND "applied_at" = '1970-01-01T00:00:00.000Z')
+            """)
+        defer { stmt.finalize() }
+        try stmt.bind(.text(ISO8601.string(from: Date())), at: 1)
+        _ = try stmt.step()
     }
 
     /// Add a schema package's tables to the read-time type registry.
