@@ -5,9 +5,9 @@ import AriaMCPWire
 
 /// Regenerates aria_v2_mission02_vectors.json from the live Swift catalog.
 ///
-/// Gate: set REGENERATE_FIXTURE=1 in the environment. Ordinary suite runs
-/// exit immediately — this test has no assertions and produces no output
-/// when the gate is absent.
+/// Gate: set REGENERATE_FIXTURE=1 in the environment to write the fixture.
+/// Ordinary suite runs regenerate in memory and assert byte-for-byte equality
+/// with the committed fixture.
 ///
 /// The generator is a reconciler, not a from-scratch writer. It loads the
 /// existing fixture with JSONValue.parse, overwrites the live-derivable fields
@@ -19,10 +19,8 @@ import AriaMCPWire
 /// has been in the fixture since its row was added and is carried forward like
 /// any other row. Nothing is appended.
 ///
-/// B1: Renames the three dead tool names inside every catalog_variants.tools
-/// array, using the same mapping listed under "Rename mapping" below. Without
-/// this pass the variants would silently retain the old names after the
-/// catalog.operations rows are updated.
+/// Catalog variants, optional operations, and non-callable help records are
+/// rebuilt from the same live availability projections used by the server.
 ///
 /// B2: Removes moot_memory_recall_transcript from
 /// negative_catalog_assertions.absent and from absent_reason, because both
@@ -48,29 +46,43 @@ import AriaMCPWire
 struct FixtureRegeneratorTests {
 
     @Test func regenerateAriaV2Mission02Fixture() throws {
-        guard ProcessInfo.processInfo.environment["REGENERATE_FIXTURE"] == "1" else {
-            return
-        }
-
         // Locate the fixture from this source file's compile-time path.
         let fixturePath = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // .../Tests/AriaMCPTests
             .deletingLastPathComponent()   // .../Tests
             .appendingPathComponent("Conformance/aria_v2_mission02_vectors.json")
 
-        // Parse the existing fixture.
         let existingData = try Data(contentsOf: fixturePath)
+        let regeneratedData = try regeneratedFixture(from: existingData)
+
+        if ProcessInfo.processInfo.environment["REGENERATE_FIXTURE"] == "1" {
+            try regeneratedData.write(to: fixturePath, options: .atomic)
+        }
+
+        let committedData = try Data(contentsOf: fixturePath)
+        #expect(
+            try regeneratedFixture(from: committedData) == committedData,
+            "Regenerating aria_v2_mission02_vectors.json must reproduce its committed bytes"
+        )
+
+        if ProcessInfo.processInfo.environment["REGENERATE_FIXTURE"] == "1" {
+            print("Regenerated \(fixturePath.lastPathComponent) deterministically.")
+        }
+    }
+
+    private func regeneratedFixture(from existingData: Data) throws -> Data {
+        // Parse the existing fixture.
         guard case .object(var root) = try JSONValue.parse(existingData) else {
             Issue.record("Fixture root is not a JSON object")
-            return
+            return existingData
         }
         guard case .object(var catalog) = root["catalog"] else {
             Issue.record("catalog key missing or not an object")
-            return
+            return existingData
         }
         guard case .array(let existingOps) = catalog["operations"] else {
             Issue.record("operations key missing or not an array")
-            return
+            return existingData
         }
 
         // Build lookup: existing fixture row by its current name
@@ -189,32 +201,84 @@ struct FixtureRegeneratorTests {
 
         catalog["operations"] = .array(updatedOps.map { .object($0) })
 
-        // B1: Rename dead tool names in catalog_variants.tools arrays.
-        // The rename mapping mirrors the three renames applied to catalog.operations
-        // above: dead fixture names → live ARIA v2 names.
-        let toolRenames: [String: String] = [
-            "moot_federated_search":  "moot_federated_recall",
-            "moot_run_migration":     "moot_migration_run",
-            "moot_confirm_migration": "moot_migration_confirm",
+        // Derive every variant's exact ordered roster from the live projection.
+        // The fixture owns variant identity and feature labels; only the live
+        // fields (tools and count) are refreshed here.
+        let variantEnvironments: [String: [String: String]] = [
+            "vault_on_memory_off": ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "0"],
+            "vault_off_memory_off": ["MOOTX01_VAULT": "0", "MOOTX01_MEMORY_TOOL": "0"],
+            "vault_on_memory_on": ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "1"],
+            "vault_off_memory_on": ["MOOTX01_VAULT": "0", "MOOTX01_MEMORY_TOOL": "1"],
         ]
         if case .array(let variants) = catalog["catalog_variants"] {
             let updatedVariants: [JSONValue] = variants.map { variant in
                 guard case .object(var variantObj) = variant,
-                      case .array(let tools) = variantObj["tools"] else {
+                      case .string(let id) = variantObj["id"],
+                      let environment = variantEnvironments[id] else {
+                    Issue.record("catalog variant is missing a recognized id")
                     return variant
                 }
-                let updatedTools: [JSONValue] = tools.map { tool in
-                    guard case .string(let name) = tool,
-                          let liveName = toolRenames[name] else {
-                        return tool
-                    }
-                    return .string(liveName)
-                }
-                variantObj["tools"] = .array(updatedTools)
+                let liveNames = ToolProjection.tools(environment: environment).map(\.name)
+                variantObj["expected_tool_count"] = .integer(Int64(liveNames.count))
+                variantObj["tools"] = .array(liveNames.map { .string($0) })
                 return .object(variantObj)
             }
             catalog["catalog_variants"] = .array(updatedVariants)
+        } else {
+            Issue.record("catalog_variants key missing or not an array")
         }
+
+        // Optional operations are the live memory-on minus memory-off projection
+        // under an otherwise identical gate set. Refresh all fields represented by
+        // ProjectedTool while retaining fixture-only identity, effect, availability,
+        // and help metadata from the existing optional row.
+        let memoryOffEnvironment = ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "0"]
+        let memoryOnEnvironment = ["MOOTX01_VAULT": "1", "MOOTX01_MEMORY_TOOL": "1"]
+        let memoryOffNames = Set(
+            ToolProjection.tools(environment: memoryOffEnvironment).map(\.name)
+        )
+        let liveOptionalTools = ToolProjection.tools(environment: memoryOnEnvironment)
+            .filter { !memoryOffNames.contains($0.name) }
+        if case .array(let existingOptional) = catalog["optional_operations"] {
+            let fixtureOptionalByName: [String: [String: JSONValue]] = Dictionary(
+                uniqueKeysWithValues: existingOptional.compactMap { value in
+                    guard case .object(let row) = value,
+                          case .string(let name) = row["name"] else { return nil }
+                    return (name, row)
+                }
+            )
+            let updatedOptional: [JSONValue] = liveOptionalTools.compactMap { tool in
+                guard var row = fixtureOptionalByName[tool.name] else {
+                    Issue.record("live optional tool \(tool.name) has no fixture metadata row")
+                    return nil
+                }
+                row["name"] = .string(tool.name)
+                row["description"] = .string(tool.description)
+                row["accepted_keys"] = .array(
+                    inputSchemaPropertyNames(tool.inputSchema).map { .string($0) }
+                )
+                row["inputSchema"] = tool.inputSchema
+                row["outputSchema"] = tool.outputSchema ?? .null
+                return .object(row)
+            }
+            catalog["optional_operations"] = .array(updatedOptional)
+        } else {
+            Issue.record("optional_operations key missing or not an array")
+        }
+
+        // The production help service owns the non-callable directory roster.
+        // Its default roster is currently empty, so the fixture must be empty too.
+        let helpRecords = AriaV2HelpService(registry: registry).directoryRecords.map { record in
+            JSONValue.object([
+                "availability": .array(record.availability.requiredCapabilities
+                    .map(\.rawValue).sorted().map { .string($0) }),
+                "callable": .bool(record.isCallable),
+                "callable_tools": .array(record.callableTools.map { .string($0) }),
+                "description": .string(record.description),
+                "recipe_id": .string(record.recipeID),
+            ])
+        }
+        catalog["non_callable_help_records"] = .array(helpRecords)
 
         // B2: Remove moot_memory_recall_transcript from negative_catalog_assertions.
         // The fixture now carries this operation in catalog.operations and the live
@@ -240,11 +304,7 @@ struct FixtureRegeneratorTests {
         // Serialize with all object keys sorted for a deterministic byte sequence.
         let serialized = sortedJSON(.object(root), indent: 0) + "\n"
 
-        try serialized.write(to: fixturePath, atomically: true, encoding: .utf8)
-
-        print(
-            "Regenerated \(fixturePath.lastPathComponent): \(updatedOps.count) operations."
-        )
+        return Data(serialized.utf8)
     }
 
     // MARK: - Schema helpers
