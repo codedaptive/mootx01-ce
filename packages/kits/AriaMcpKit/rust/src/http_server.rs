@@ -688,6 +688,7 @@ pub fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
 /// [`http_gates_from_env`]; a test constructs them directly to pin exact
 /// capacities, because the environment is process-global and cargo runs the
 /// test binary on many threads at once.
+#[doc(hidden)]
 pub struct HttpGates {
     pub normal: Arc<ConcurrencyGate>,
     pub sse: Arc<ConcurrencyGate>,
@@ -702,6 +703,7 @@ pub struct HttpGates {
 ///
 /// SSE gate maxQueued=0: shed immediately when the SSE cap is hit (SSE clients
 /// reconnect via EventSource retry, so queuing adds no value).
+#[doc(hidden)]
 pub fn http_gates_from_env() -> HttpGates {
     let max_concurrent = std::env::var("MOOTX01_HTTP_MAX_CONCURRENT")
         .ok()

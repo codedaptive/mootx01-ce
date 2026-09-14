@@ -1,16 +1,9 @@
 
-#[path = "../src/jsonrpc.rs"]
-mod jsonrpc;
-#[path = "../src/v2/codec.rs"]
-mod codec;
-#[path = "../src/v2/memory_mutations.rs"]
-mod memory_mutations;
-
 use std::{collections::BTreeMap, sync::{Arc, Mutex}};
 
 use genius_locus_kit::EstateHandle;
-use jsonrpc::JsonValue;
-use memory_mutations::*;
+use aria_mcp::jsonrpc::JsonValue;
+use aria_mcp::v2::memory_mutations::*;
 use uuid::Uuid;
 
 const ESTATE: &str = "11111111-1111-4111-8111-111111111111";
