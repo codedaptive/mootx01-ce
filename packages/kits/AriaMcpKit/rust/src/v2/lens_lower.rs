@@ -2349,6 +2349,7 @@ mod tests {
             estate_handle,
             caller_binding: "test-caller".to_owned(),
             authorization_generation: "test-generation".to_owned(),
+            authorization_frame: RecallFrame::new(vec![]),
             now_millis: NOW,
         };
         let request = V2RecallLensRequest {
@@ -2469,6 +2470,7 @@ mod tests {
             estate_handle,
             caller_binding: "test-caller".to_owned(),
             authorization_generation: "test-generation".to_owned(),
+            authorization_frame: RecallFrame::new(vec![]),
             now_millis: NOW,
         };
         let request = V2RecallLensRequest {
