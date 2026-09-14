@@ -98,6 +98,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use substrate_lib::row_state::RowVerb;
 use substrate_types::fingerprint256::Fingerprint256;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Policy-neutral request for one selected contradiction proposal. The caller
 /// supplies the existing decline-matrix function; this lower layer owns the
@@ -174,11 +175,23 @@ pub fn conflict_proposal_digests(
 /// store, including minimal fakes, must implement them. Production backends —
 /// the LP-1E `InMemoryDrawerStore` and `SqliteDrawerStore` (both wrapping
 /// `DrawerStoreCore`) — override every method.
-/// The subject length contract (characters). One capped sentence in the
-/// AI-facing register — the bound that keeps every contact-sheet row's
-/// context cost near-uniform. Twin of Swift
-/// `DrawerStore.subjectLengthContract`.
+/// The subject length contract (grapheme clusters). One capped sentence in
+/// the AI-facing register — the bound that keeps every contact-sheet row's
+/// context cost near-uniform. Twin of Swift `DrawerStore.subjectLengthContract`.
+/// The unit is grapheme clusters, the same unit Swift's `String.count` returns.
 pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
+
+/// Returns the grapheme-cluster count of `subject`.
+///
+/// The unit is the grapheme cluster, the same unit Swift's `String.count`
+/// returns. Both ports must agree on the same count for the same input
+/// (contract B-18). Use this function at every site that enforces or
+/// reports the `SUBJECT_LENGTH_CONTRACT` — never call `.chars().count()`
+/// directly, which counts Unicode scalars and disagrees with Swift on
+/// subjects that contain combining characters.
+pub fn subject_length(subject: &str) -> usize {
+    UnicodeSegmentation::graphemes(subject, true).count()
+}
 
 /// Pipeline-version tag for subjects authored by a calling AI at the
 /// capture/mutate boundary (as opposed to the future miniLLM producer,

@@ -129,7 +129,8 @@ fn inapplicable_or_missing_update_payloads_are_rejected_before_lower() {
         arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("confirm".to_owned())), ("note", JsonValue::String("ignored".to_owned()))]),
         arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("set_subject".to_owned()))]),
         arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("set_subject".to_owned())), ("subject", JsonValue::String("x".repeat(121)))]),
-        arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("set_subject".to_owned())), ("subject", JsonValue::String("e\u{301}".repeat(120)))]),
+        // 121 grapheme clusters (242 scalars): over the cluster limit, rejected.
+        arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("set_subject".to_owned())), ("subject", JsonValue::String("e\u{301}".repeat(121)))]),
         arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("set_subject".to_owned())), ("subject", JsonValue::String(format!(" {}", "x".repeat(120))))]),
         arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("correct_sensitivity".to_owned()))]),
         arguments([("memory_id", JsonValue::String(MEMORY.to_owned())), ("mutation", JsonValue::String("correct_exportability".to_owned()))]),

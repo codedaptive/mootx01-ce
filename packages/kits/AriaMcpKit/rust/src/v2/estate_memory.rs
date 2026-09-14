@@ -435,7 +435,9 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
                 subject: drawer.subject.clone(),
                 score: Some(hit.score.final_score as f64),
                 provenance,
-                context: None,
+                // context carries the drawer's subject so every compact search row
+                // exposes the one-sentence assertion the user filed.
+                context: drawer.subject.clone(),
                 excerpt: (!drawer.content.is_empty())
                     .then(|| crate::v2::render::compact_text(&drawer.content)),
                 fetch: placeholder_fetch(memory_id),

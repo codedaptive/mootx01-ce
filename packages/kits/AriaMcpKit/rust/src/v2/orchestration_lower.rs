@@ -34,6 +34,7 @@ use super::orchestration::{
     V2MigrationRanking, V2OrchestrationFailure, V2OrchestrationProvider, V2RunMigrationRequest,
     V2SynthesisData, V2SynthesizeRequest,
 };
+use super::render;
 
 const DEFAULT_LIMIT: usize = 20;
 
@@ -131,11 +132,19 @@ impl<'a> SelectedOrchestrationLower<'a> {
         }
         Ok(V2CompactMemory {
             memory_id: Uuid::parse_str(&drawer.id).map_err(|_| V2OrchestrationFailure::LowerUnavailable)?,
-            subject: drawer.subject.clone(),
+            // 512-scalar compact form is the frozen v2 contract; subject and context
+            // must carry identical text across both ports.
+            subject: drawer.subject.as_deref().map(render::compact_text),
             score: None,
             provenance: Some(format!("{:?}", drawer.source_type()).to_lowercase()),
-            context: None,
-            excerpt: (!drawer.content.is_empty()).then(|| drawer.content.chars().take(512).collect()),
+            // context carries the drawer's subject so every compact row exposes the
+            // one-sentence assertion the user filed, matching the search-path and
+            // Swift-side compact shapes.
+            // 512-scalar compact form is the frozen v2 contract; subject and context
+            // must carry identical text across both ports.
+            context: drawer.subject.as_deref().map(render::compact_text),
+            // One shared helper, no second copy of the 512-scalar rule.
+            excerpt: (!drawer.content.is_empty()).then(|| render::compact_text(&drawer.content)),
         })
     }
 

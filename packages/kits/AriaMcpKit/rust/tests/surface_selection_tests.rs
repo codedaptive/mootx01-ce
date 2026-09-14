@@ -700,7 +700,16 @@ fn v2_memory_search_and_get_exclude_provenance_sensitive_rows() {
     assert!(ids.contains(elevated.as_str()));
     assert!(!ids.contains(restricted.as_str()));
     assert!(!ids.contains(secret.as_str()));
-    assert!(rows.iter().all(|row| row.get("context").is_none()));
+    // context is now wired: every visible row must carry the drawer subject,
+    // and it must not leak restricted or secret content tokens.
+    for row in rows {
+        let context = row["context"].as_str()
+            .expect("every synthesis row must carry a non-null context field");
+        assert!(!context.contains("restricted"),
+            "context must not contain sensitive token 'restricted'; context: {context}");
+        assert!(!context.contains("secret"),
+            "context must not contain sensitive token 'secret'; context: {context}");
+    }
     assert!(rows.iter().all(|row| row["excerpt"].as_str()
         .is_some_and(|excerpt| excerpt.chars().count() <= 512)));
     let summary = data["summary"].as_str().expect("typed synthesis summary");
