@@ -577,6 +577,10 @@ let package = Package(
                 // into a fresh InMemory instance to verify logical equivalence.
                 // Blast-radius citation: GLK_HYDRATE_01_BLAST_RADIUS.md §New files item 3.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                // PersistenceKitTestSupport: faulting Storage/RowStore decorator used
+                // by FailClosedPreReadTests to drive the thrown-error branch of the
+                // fail-closed pre-read paths in `expunge` and `retireKGFact`.
+                .product(name: "PersistenceKitTestSupport", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
                 // IntellectusLib: test suite needs to install capturing sinks

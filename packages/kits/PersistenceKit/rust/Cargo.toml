@@ -11,6 +11,12 @@ publish = false
 name = "persistence_kit"
 path = "src/lib.rs"
 
+[features]
+# Enables the `test_support` module (FaultCell, FaultingRowStore, FaultingStorage).
+# Gated so the types are absent from production builds. Consumers add this to
+# their dev-dependencies: persistence-kit = { features = ["test-support"] }.
+test-support = []
+
 [dependencies]
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 uuid = { version = "1", features = ["v4"] }

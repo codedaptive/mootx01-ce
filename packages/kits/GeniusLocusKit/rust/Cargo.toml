@@ -207,6 +207,14 @@ corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
 # tests/expunge_vector_orphan.rs E8. The production dependency above carries
 # no features, so this remains test-only wiring.
 locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
+# test-support enables FaultCell/FaultingStorage in persistence-kit, used by
+# coordinator.rs fail-closed pre-read tests (ERASE_CEILING Phase B). Cargo
+# unifies features at test time: the `test-support` feature activates only
+# for test compilation because this is a dev-dependency. The production
+# [dependencies] entry above carries no features so the types are absent
+# from the shipped binary. No layering inversion (persistence-kit is a
+# substrate lib below GLK).
+persistence-kit = { path = "../../PersistenceKit/rust", features = ["test-support"] }
 # FED-SIG-01 grant-signature tests: LocalIdentity::from_secret / ::sign /
 # ::public_key_bytes to build and verify Ed25519-signed grants for D9 tests.
 # convergence-kit is already a production dep; the dev-dep makes it directly
