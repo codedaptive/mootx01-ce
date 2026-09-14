@@ -873,8 +873,9 @@ fn v2_cognition_directories_advertise_only_selected_handlers_and_typed_recipes()
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name"))
         .collect();
-    // The registry stores operations in a BTreeMap keyed by public_name, so
-    // moot_list_lenses returns tools in alphabetical order.
+    // moot_list_lenses emits alphabetically by operation name. The service
+    // sorts explicitly so the contract holds regardless of registry container
+    // order.
     assert_eq!(names, [
         "moot_dream", "moot_hunt_contradictions",
         "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",

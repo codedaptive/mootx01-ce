@@ -835,18 +835,22 @@ struct AriaSurfaceV2Tests {
             name: "moot_list_lenses", arguments: .object(["verbose": .bool(true)]))
         let lensData = lenses.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
         let tools = try #require(lensData?["tools"]?.arrayValue)
+        // moot_list_lenses emits alphabetically by operation name. The
+        // service sorts explicitly; this list pins that contract.
         #expect(tools.map { $0.objectValue?["name"]?.stringValue } == [
-            "moot_list_lenses", "moot_list_recipes", "moot_synthesize",
-            "moot_recall_precise", "moot_recall_temporal", "moot_recall_shaped",
-            "moot_recall_connected", "moot_dream", "moot_recall_distilled", "moot_recall_vague",
-            "moot_hunt_contradictions", "moot_recall_walk", "moot_lens_keystones",
-            "moot_lens_constellation", "moot_lens_free_association",
-            "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
-            "moot_lens_drift", "moot_lens_node_motion", "moot_lens_cohesion", "moot_lens_contradiction", "moot_lens_trust_synthesis",
-            "moot_lens_partial_cue", "moot_lens_anticipate", "moot_lens_successors",
-            "moot_lens_overlap", "moot_lens_divergence", "moot_lens_moment", "moot_lens_rhythm",
-            "moot_lens_precedence", "moot_lens_complexity", "moot_lens_associations", "moot_lens_concepts",
-            "moot_lens_apriori",
+            "moot_dream", "moot_hunt_contradictions",
+            "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",
+            "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity",
+            "moot_lens_concepts", "moot_lens_constellation", "moot_lens_contradiction",
+            "moot_lens_divergence", "moot_lens_drift", "moot_lens_free_association",
+            "moot_lens_keystones", "moot_lens_latent_themes", "moot_lens_moment",
+            "moot_lens_node_motion", "moot_lens_overlap", "moot_lens_partial_cue",
+            "moot_lens_precedence", "moot_lens_rhythm", "moot_lens_successors",
+            "moot_lens_theme_weather", "moot_lens_trust_synthesis",
+            "moot_list_lenses", "moot_list_recipes",
+            "moot_recall_connected", "moot_recall_distilled", "moot_recall_precise",
+            "moot_recall_shaped", "moot_recall_temporal", "moot_recall_vague", "moot_recall_walk",
+            "moot_synthesize",
         ])
         for tool in tools {
             let row = try #require(tool.objectValue)
