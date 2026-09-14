@@ -4772,6 +4772,78 @@ fn connected_recall_matches_shared_cross_port_vector() {
         "caller-filtered full hydration must omit the graph endpoint from selected v2 results");
 }
 
+/// Wing scopes the tunnel lookup only, never the anchor search.
+/// A tunnel-less anchor outside the request wing must still appear in the control result.
+#[test]
+fn connected_recall_anchor_outside_request_wing_without_tunnel() {
+    use std::{fs, path::Path};
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set during cargo test");
+    let path = Path::new(&manifest_dir)
+        .parent()
+        .expect("rust manifest must sit beneath AriaMcpKit")
+        .join("Tests/Conformance/aria_v2_connected_recall_parity_vector.json");
+    let doc: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read shared connected-recall vector at {}: {error}", path.display())),
+    )
+    .expect("shared connected-recall vector must be valid JSON");
+    let vec = &doc["anchor_wing_independence_vector"];
+    let anchor_spec = &vec["anchor"];
+    let string = |object: &serde_json::Value, key: &str| {
+        object[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("anchor-wing vector missing string {key}"))
+            .to_owned()
+    };
+    let anchor_content = string(anchor_spec, "content");
+    let anchor_location = string(anchor_spec, "location");
+    let request_wing = string(vec, "request_wing");
+    let query = string(vec, "query");
+    let control_filter = string(vec, "control_filter");
+    let limit = vec["limit"].as_i64().expect("anchor-wing vector limit");
+
+    let registry = EstateRegistry::new_inmemory_bare();
+    let session = SelectedV2Session::new(registry);
+    // File the anchor in its own room; capture no tunnel so nothing bridges it into the request wing.
+    let anchor = file_one_memory_v2_with_exportability(
+        &session,
+        &anchor_content,
+        &anchor_location,
+        anchor_spec["exportability"].as_str(),
+    );
+
+    // Derive the expected set from the fixture so a change to expected.control_result_keys is caught.
+    let expected = &vec["expected"];
+    let expected_ids = |field: &str| -> std::collections::BTreeSet<String> {
+        expected[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("anchor-wing vector missing expected {field} keys"))
+            .iter()
+            .map(|key| match key.as_str() {
+                Some("anchor") => anchor.clone(),
+                _ => panic!("anchor-wing vector has unknown result key {key}"),
+            })
+            .collect()
+    };
+
+    let control = session.call(
+        "moot_recall_connected",
+        &args![
+            "query" => query.as_str(),
+            "wing" => request_wing.as_str(),
+            "filter" => control_filter.as_str(),
+            "limit" => limit
+        ],
+    ).expect("anchor-wing connected recall must dispatch");
+    assert!(is_success(&control), "anchor-wing control must succeed: {control:?}");
+    let control_ids: std::collections::BTreeSet<String> = selected_result_ids(&control)
+        .into_iter().map(str::to_owned).collect();
+    assert_eq!(control_ids, expected_ids("control_result_keys"),
+        "folding the request wing into the anchor filter would exclude the tunnel-less anchor; got IDs: {control_ids:?}");
+}
+
 /// A query whose every token is a stopword or too short must be rejected
 /// (invalidParams), never silently degraded to an unscoped digest.
 /// Twin of Swift `testGroundedSynthesisAllStopwordQueryThrowsInvalidParams`.
