@@ -143,6 +143,37 @@ struct AriaV2MemoryOperationsTests {
         #expect(spellings == [firstID.uuidString, firstID.uuidString.lowercased()])
     }
 
+    @Test func skimReturnsOnlyPreviewAndPreservesFetchAndAuthorization() async throws {
+        let body = (0..<50).map { "Event \($0) occurred in location \($0) with participant \($0)." }.joined(separator: "\n\n")
+        let backend = FakeMemoryBackend(records: [record(firstID, content: body), record(hiddenID, content: "PRIVATE_SENTINEL", authorized: false)])
+        let response = try await service(backend: backend).get(arguments: .object([
+            "memory_ids": .array([.string(firstID.uuidString), .string(hiddenID.uuidString)]), "depth": .string("skim")]))
+        let rows = try #require(response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["memories"]?.arrayValue)
+        #expect(rows.count == 1)
+        let row = try #require(rows.first?.objectValue)
+        let skim = try #require(row["skim"]?.objectValue)
+        #expect(skim["complete"] == .bool(false))
+        #expect(skim["budgetHonored"] == .bool(true))
+        #expect(try #require(skim["text"]?.stringValue).utf8.count <= 512)
+        #expect(skim["savings"]?.stringValue?.contains("🌱") == true)
+        let display = try #require(response.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(display.contains(try #require(skim["savings"]?.stringValue)))
+        #expect(display.contains("budgetHonored: true"))
+        #expect(row["content"] == nil && row["distilled"] == nil && row["tunnels"] == nil)
+        #expect(skim["continuation"] == nil && skim["fullText"] == nil)
+        #expect(row["fetch"]?.objectValue?["tool"] == .string("moot_memory_get"))
+        #expect(!String(describing: response).contains("PRIVATE_SENTINEL"))
+    }
+
+    @Test func skimShortAndOversizedGroupsReportTruthfulFlags() throws {
+        let short = try RecallSkim(original: "Maya approved the budget.")
+        #expect(short.complete && short.budgetHonored)
+        let long = try RecallSkim(original: String(repeating: "界", count: 600))
+        #expect(long.complete && !long.budgetHonored)
+        #expect(long.text.utf8.count > 512)
+        #expect(try RecallSkim(original: "").text == "")
+    }
+
     @Test func productionProjectionRawProvenancePolicyFailsClosed() {
         #expect(AriaV2GeniusLocusMemoryBackend.provenanceVisible(0 << 30))
         #expect(AriaV2GeniusLocusMemoryBackend.provenanceVisible(16 << 30))

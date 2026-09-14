@@ -479,8 +479,10 @@
               "enum": [
                 "subject",
                 "distilled",
+                "skim",
                 "full"
-              ]
+              ],
+              "description": "skim returns a source-order distilled preview with a 512 UTF-8 byte target; intact groups may exceed it. Fetch distilled or full for the remainder."
             },
             "estate_id": {
               "type": "string",
@@ -537,6 +539,17 @@
                       },
                       "distilled": {
                         "type": "string"
+                      },
+                      "skim": {
+                        "type": "object",
+                        "properties": {
+                          "text": {"type": "string"},
+                          "complete": {"type": "boolean"},
+                          "budgetHonored": {"type": "boolean"},
+                          "savings": {"type": "string"}
+                        },
+                        "required": ["text", "complete", "budgetHonored", "savings"],
+                        "additionalProperties": false
                       },
                       "content": {
                         "type": "string"
