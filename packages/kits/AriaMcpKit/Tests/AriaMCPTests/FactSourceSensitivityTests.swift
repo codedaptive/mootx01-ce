@@ -49,12 +49,19 @@ private func captureSource(
         sensitivity: sensitivity))
 }
 
-private func factSearchText(
+private func factRows(
     _ dispatcher: ToolDispatcher, query: String
-) async throws -> String {
-    let result = try await dispatcher.runFactSearch(["query": .string(query)])
-    return result.objectValue?["content"]?.arrayValue?.first?
-        .objectValue?["text"]?.stringValue ?? ""
+) async throws -> [[String: JSONValue]] {
+    let result = try await dispatcher.dispatch(
+        name: "moot_fact_search", arguments: .object(["query": .string(query)]))
+    return result.objectValue?["structuredContent"]?.objectValue?["data"]?
+        .objectValue?["facts"]?.arrayValue?.compactMap(\.objectValue) ?? []
+}
+
+private func fileFact(
+    _ dispatcher: ToolDispatcher, _ arguments: [String: JSONValue]
+) async throws -> JSONValue {
+    try await dispatcher.dispatch(name: "moot_file_fact", arguments: .object(arguments))
 }
 
 @Suite("KG facts inherit their source drawer's sensitivity", .serialized)
@@ -68,21 +75,23 @@ struct FactSourceSensitivityTests {
         defer { Task { try? await kit.close(handle) } }
         let source = try await captureSource(kit, handle, sensitivity: .secret)
 
-        _ = try await dispatcher.runFileFact([
+        let filed = try await fileFact(dispatcher, [
             "subject": .string("Ceres"),
             "predicate": .string("classified_as"),
             "object": .string("dwarf planet"),
-            "source_id": .string(source.id),
-        ], now: Date())
+            "source_memory_id": .string(source.id),
+        ])
+        #expect(filed.objectValue?["isError"] == .bool(true),
+                "v2 must refuse a Secret source at the public door; got: \(filed)")
 
         // The search header echoes the query verbatim, so the fact row itself
         // is what must be absent — match on the predicate, which appears only
         // in a rendered row.
-        let body = try await factSearchText(dispatcher, query: "Ceres")
-        #expect(!body.contains("classified_as"),
-                "a fact drawn from a Secret drawer must be withheld; got: \(body)")
-        #expect(!body.contains(source.id),
-                "the Secret source drawer id must not leak; got: \(body)")
+        let rows = try await factRows(dispatcher, query: "Ceres")
+        #expect(!rows.contains { $0["predicate"] == .string("classified_as") },
+                "a fact drawn from a Secret drawer must be withheld; got: \(rows)")
+        #expect(!rows.contains { $0["source_memory_id"] == .string(source.id) },
+                "the Secret source drawer id must not leak; got: \(rows)")
     }
 
     /// Same rule one tier down: Restricted is also outside the default
@@ -92,16 +101,18 @@ struct FactSourceSensitivityTests {
         defer { Task { try? await kit.close(handle) } }
         let source = try await captureSource(kit, handle, sensitivity: .restricted)
 
-        _ = try await dispatcher.runFileFact([
+        let filed = try await fileFact(dispatcher, [
             "subject": .string("Vesta"),
             "predicate": .string("classified_as"),
             "object": .string("asteroid"),
-            "source_id": .string(source.id),
-        ], now: Date())
+            "source_memory_id": .string(source.id),
+        ])
+        #expect(filed.objectValue?["isError"] == .bool(true),
+                "v2 must refuse a Restricted source at the public door; got: \(filed)")
 
-        let body = try await factSearchText(dispatcher, query: "Vesta")
-        #expect(!body.contains("classified_as"),
-                "a fact drawn from a Restricted drawer must be withheld; got: \(body)")
+        let rows = try await factRows(dispatcher, query: "Vesta")
+        #expect(!rows.contains { $0["predicate"] == .string("classified_as") },
+                "a fact drawn from a Restricted drawer must be withheld; got: \(rows)")
     }
 
     /// Inheritance must not over-withhold: Normal and Elevated sources are
@@ -112,40 +123,40 @@ struct FactSourceSensitivityTests {
         let normal = try await captureSource(kit, handle, sensitivity: .normal)
         let elevated = try await captureSource(kit, handle, sensitivity: .elevated)
 
-        _ = try await dispatcher.runFileFact([
+        _ = try await fileFact(dispatcher, [
             "subject": .string("Pallas"),
             "predicate": .string("classified_as"),
             "object": .string("asteroid"),
-            "source_id": .string(normal.id),
-        ], now: Date())
-        _ = try await dispatcher.runFileFact([
+            "source_memory_id": .string(normal.id),
+        ])
+        _ = try await fileFact(dispatcher, [
             "subject": .string("Juno"),
             "predicate": .string("classified_as"),
             "object": .string("asteroid"),
-            "source_id": .string(elevated.id),
-        ], now: Date())
+            "source_memory_id": .string(elevated.id),
+        ])
 
         // Match on the rendered row (predicate + source anchor), not on the
         // query term, which the header echoes whether or not a row matched.
-        let normalBody = try await factSearchText(dispatcher, query: "Pallas")
-        #expect(normalBody.contains("classified_as") && normalBody.contains(normal.id),
-                "a Normal-source fact must still surface; got: \(normalBody)")
-        let elevatedBody = try await factSearchText(dispatcher, query: "Juno")
-        #expect(elevatedBody.contains("classified_as") && elevatedBody.contains(elevated.id),
-                "an Elevated-source fact must still surface; got: \(elevatedBody)")
+        let normalRows = try await factRows(dispatcher, query: "Pallas")
+        #expect(normalRows.contains { $0["predicate"] == .string("classified_as") && $0["source_memory_id"] == .string(UUID(uuidString: normal.id)!.uuidString.lowercased()) },
+                "a Normal-source fact must still surface; got: \(normalRows)")
+        let elevatedRows = try await factRows(dispatcher, query: "Juno")
+        #expect(elevatedRows.contains { $0["predicate"] == .string("classified_as") && $0["source_memory_id"] == .string(UUID(uuidString: elevated.id)!.uuidString.lowercased()) },
+                "an Elevated-source fact must still surface; got: \(elevatedRows)")
     }
 
-    /// A fact filed with no source_id is sourceless: it keeps the zero-bitmap
+    /// A fact filed with no source_memory_id is sourceless: it keeps the zero-bitmap
     /// defaults, renders an empty source=, and surfaces normally.
     @Test func sourcelessFactFilesWithDefaults() async throws {
         let (dispatcher, kit, handle) = try await openEstateForSensitivity()
         defer { Task { try? await kit.close(handle) } }
 
-        _ = try await dispatcher.runFileFact([
+        _ = try await fileFact(dispatcher, [
             "subject": .string("Eris"),
             "predicate": .string("classified_as"),
             "object": .string("dwarf planet"),
-        ], now: Date())
+        ])
 
         let facts = try await kit.recallKGFacts(handle)
         let filed = try #require(facts.first { $0.subject == "Eris" })
@@ -158,38 +169,30 @@ struct FactSourceSensitivityTests {
         #expect(filed.addedBy == "mootx01",
                 "the filing host identity is recorded in addedBy")
 
-        let body = try await factSearchText(dispatcher, query: "Eris")
-        #expect(body.contains("classified_as"),
-                "a sourceless fact must surface; got: \(body)")
+        let rows = try await factRows(dispatcher, query: "Eris")
+        #expect(rows.contains { $0["predicate"] == .string("classified_as") },
+                "a sourceless fact must surface; got: \(rows)")
     }
 
-    /// The inheritance is literal: the filed fact's bitmaps equal the source
-    /// drawer's, asserted field-for-field rather than inferred from
-    /// disclosure behaviour.
-    @Test func filedBitmapsEqualTheSourceDrawers() async throws {
+    /// The selected-v2 door must reject a Restricted source before filing a
+    /// fact, rather than allowing a high-sensitivity anchor to escape through
+    /// a lower-sensitivity fact row.
+    @Test func restrictedSourceIsRefusedBeforeFactIsFiled() async throws {
         let (dispatcher, kit, handle) = try await openEstateForSensitivity()
         defer { Task { try? await kit.close(handle) } }
         let source = try await captureSource(kit, handle, sensitivity: .restricted)
 
-        _ = try await dispatcher.runFileFact([
+        let result = try await fileFact(dispatcher, [
             "subject": .string("Hygiea"),
             "predicate": .string("classified_as"),
             "object": .string("asteroid"),
-            "source_id": .string(source.id),
-        ], now: Date())
+            "source_memory_id": .string(source.id),
+        ])
 
-        // recallKGFacts returns the unfiltered set — the disclosure ceiling is
-        // applied at the ARIA tool boundary, not here — so the Restricted fact
-        // is visible for direct inspection.
+        #expect(result.objectValue?["isError"] == .bool(true),
+                "restricted source must be refused by selected-v2; got: \(result)")
         let facts = try await kit.recallKGFacts(handle)
-        let filed = try #require(facts.first { $0.subject == "Hygiea" })
-        #expect(filed.adjectiveBitmap == source.adjectiveBitmap,
-                "adjective bitmap must be carried verbatim from the source drawer")
-        #expect(filed.provenanceBitmap == source.provenance,
-                "provenance bitmap must be carried verbatim from the source drawer")
-        #expect(filed.adjectiveSensitivity == .restricted,
-                "the inherited sensitivity must decode back to the source's tier")
-        #expect(filed.sourceDrawerID == source.id,
-                "an anchored fact records the local drawer id it came from")
+        #expect(!facts.contains { $0.subject == "Hygiea" },
+                "a refused v2 filing must not create a fact")
     }
 }

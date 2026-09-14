@@ -4,11 +4,6 @@
 //!
 //!   Dispatcher::handle → surface::execute → data_mobility_lower.rs::reclassify_fdc
 //!
-//! None of these tests call `dispatch_tool`, `dispatch_tool_with_vault_flag`,
-//! `dispatch_tool_with_vault_ledger`, or `interface_tools::dispatch`. Those are
-//! the v1 helper paths the running server cannot reach; tests through the v1
-//! path proved nothing about the v2 lower, which is what shipped broken.
-
 use aria_mcp::{dispatcher::Dispatcher, estate_registry::EstateRegistry, jsonrpc::JSONRPCRequest};
 use locus_kit::{
     drawer_operational::CaptureChannel,

@@ -9,19 +9,11 @@ import Testing
 @testable import AriaMCP
 
 // MARK: - Unit 2 coverage: moot_link_memories, moot_move_memory, moot_update_memory,
-// moot_erase_memory, moot_recall_connected, moot_recall_distilled, moot_federated_recall,
-// and moot_recollect. Each test calls ToolDispatcher.dispatch with the literal operation
+// moot_erase_memory, moot_recall_connected, moot_recall_distilled, and moot_federated_recall.
+// Each test calls ToolDispatcher.dispatch with the literal operation
 // name and asserts a value from the returned payload that would change if the handler
 // were replaced with a no-op stub.
 //
-// FINDING — moot_recollect unreachable stub:
-//   RecipeTools.swift:577 contains a notice-only stub that executes
-//   `if name == recollectToolName { return ToolDispatcher.textResult(...) }`.
-//   That stub lives inside RecipeTools.dispatch, which has no production caller —
-//   ToolDispatcher.dispatch never reaches it. ToolProjection.admitsDispatch returns
-//   false for "moot_recollect", so the dispatcher throws -32601 methodNotFound
-//   before any decoder or handler runs. The stub is dark code. The test below pins
-//   the production behavior: -32601 is always thrown.
 //
 // NOTE — moot_recall_distilled ACK gate removed:
 //   An earlier draft documented an ACK gate for moot_recall_distilled requiring the
@@ -444,31 +436,6 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
                 "error code must be operation_failed; got error: \(errorObj)")
         #expect(errorObj["message"]?.stringValue?.isEmpty == false,
                 "error message must be non-empty")
-    }
-
-    // MARK: - moot_recollect
-
-    // FINDING: RecipeTools.swift:577 contains a notice-only stub behind
-    // `RecipeTools.dispatch`. That function has no production caller — ToolDispatcher
-    // never routes through it. ToolProjection.admitsDispatch("moot_recollect") returns
-    // false, so the dispatcher throws -32601 methodNotFound before decoding or handling.
-    // The stub is unreachable dead code from the production v2 path.
-
-    /// Pins the current production behavior: moot_recollect throws -32601 methodNotFound
-    /// because the tool is absent from the selected v2 catalog. The test name is the
-    /// behavioral specification for future readers.
-    @Test func recollectIsNotAdmittedByTheSelectedCatalog() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-        do {
-            _ = try await dispatcher.dispatch(
-                name: "moot_recollect",
-                arguments: .object(["query": .string("any query")]))
-            Issue.record("moot_recollect must throw JSONRPCError -32601 methodNotFound, never reach a handler")
-        } catch let error as JSONRPCError {
-            #expect(error.code == JSONRPCErrorCode.methodNotFound,
-                    "moot_recollect must produce code -32601; got code: \(error.code)")
-        }
     }
 
     // MARK: - moot_erase_memory partial-expunge gate
