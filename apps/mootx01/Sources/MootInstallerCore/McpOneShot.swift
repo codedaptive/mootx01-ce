@@ -35,6 +35,43 @@ public enum McpOneShotError: Error, CustomStringConvertible {
     }
 }
 
+/// A one-shot latch for a `Process` termination callback.
+///
+/// The termination handler may run before the task reaches its waiter, so the
+/// latch retains that signal until the continuation is installed. `NSLock`
+/// also keeps the handler's arbitrary Foundation thread separate from Swift
+/// task isolation.
+private final class ProcessTerminationWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminated = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func signalTermination() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            guard !terminated else { return nil }
+            terminated = true
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        continuation?.resume()
+    }
+
+    func waitForTermination() async {
+        await withCheckedContinuation { continuation in
+            let resumeImmediately = lock.withLock {
+                if terminated {
+                    return true
+                }
+                self.continuation = continuation
+                return false
+            }
+            if resumeImmediately {
+                continuation.resume()
+            }
+        }
+    }
+}
+
 /// Loopback daemon liveness probing, shared by `query` and `botlink`
 /// (BL-1: one probe implementation, two command-layer callers).
 public enum McpLoopback {
@@ -174,9 +211,31 @@ public enum McpOneShot {
         // contract: serve banners land on stderr, never in the JSON stdout.
         process.standardError = FileHandle.standardError
 
-        try process.run()
+        let terminationWaiter = ProcessTerminationWaiter()
+        process.terminationHandler = { _ in
+            terminationWaiter.signalTermination()
+        }
+        do {
+            try process.run()
+        } catch {
+            process.terminationHandler = nil
+            throw error
+        }
 
         let inputHandle = stdinPipe.fileHandleForWriting
+        let outputHandle = stdoutPipe.fileHandleForReading
+        let stdoutRead = Task.detached { @Sendable () -> Data in
+            outputHandle.readDataToEndOfFile()
+        }
+        var stdinClosed = false
+        defer {
+            if !stdinClosed {
+                inputHandle.closeFile()
+            }
+            if process.isRunning {
+                process.terminate()
+            }
+        }
         func writeLine(_ msg: String) {
             if let data = (msg + "\n").data(using: .utf8) {
                 inputHandle.write(data)
@@ -195,9 +254,10 @@ public enum McpOneShot {
         // signal end-of-input so it exits cleanly.
         try await Task.sleep(nanoseconds: 500_000_000)
         inputHandle.closeFile()
+        stdinClosed = true
 
-        let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        await terminationWaiter.waitForTermination()
+        let outputData = await stdoutRead.value
 
         // Notification: one frame in, zero frames out. The drain above still
         // ran so the subprocess processed the frame before stdin closed.
