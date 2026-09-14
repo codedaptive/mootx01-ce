@@ -2295,7 +2295,11 @@ struct FirstPartyLaneSeparationTests {
     ///   4. Cancels the task — triggers the stop-flag + shutdown(2)+close(2) sequence.
     ///   5. Asserts `serve(withFD:)` returns within 2 seconds (cooperative shutdown
     ///      must not race, deadlock, or take longer than a bounded window).
-    ///   6. Asserts the fd is closed: a write to the closed fd fails with EBADF.
+    ///   6. Asserts the fd is closed: `getsockname` on the fd fails for any reason (the fd
+    ///      is closed, or its number was recycled to a non-socket), returns an unrelated
+    ///      socket (recycled, therefore ours was closed), or returns a port that differs
+    ///      from the bound port (recycled again).  Only a successful `getsockname` that
+    ///      returns the same port as we bound is an F6 violation.
     ///
     /// The 2-second deadline is generous (typical shutdown is < 10 ms on an idle
     /// socket) but allows for heavily loaded CI runners.  A 2-second overrun is a
@@ -2312,8 +2316,29 @@ struct FirstPartyLaneSeparationTests {
             sseConcurrencyGate: ConcurrencyGate(maxConcurrent: 2, maxQueued: 0)
         )
 
-        // Bind the listen socket.
-        let (fd, _) = try server.bind()
+        // Bind the listen socket.  Capture the port so we can use it later for
+        // fd-identity verification: after serve(withFD:) returns the fd must not still
+        // name our listening socket (F6 guarantee).
+        let (fd, boundPort) = try server.bind()
+
+        // Pin the socket family at bind time.  The identity assertion near the end
+        // of this test (the #expect on addr.sin_family / observedPort) is disarmed,
+        // not broken, if the listener ever switches to AF_INET6: the left conjunct
+        // `addr.sin_family != sa_family_t(AF_INET)` becomes permanently true and the
+        // assertion passes regardless of whether close(fd) ran.  A family change
+        // caught here stops the test immediately rather than letting it silently
+        // succeed without exercising the close guarantee.
+        var bindAddr = sockaddr_in()
+        var bindAddrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bindFamilyResult = withUnsafeMutablePointer(to: &bindAddr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(fd, sa, &bindAddrLen)
+            }
+        }
+        try #require(
+            bindFamilyResult == 0 && bindAddr.sin_family == sa_family_t(AF_INET),
+            "listener is not AF_INET at bind time; the end-of-test fd-identity assertion would be permanently satisfied and would stop testing anything"
+        )
 
         // Launch serve(withFD:) in a detached Task.  Detached so the test's own
         // cancellation context does not propagate here inadvertently.
@@ -2366,26 +2391,58 @@ struct FirstPartyLaneSeparationTests {
         try #require(winner == .served,
                      "serve(withFD:) did not return within the 2 second deadline; the deadline task won the race")
 
-        // If serve(withFD:) returns correctly, the fd is now closed.
-        // Writing to a closed fd returns EBADF; success here means the fd leaked.
-        let dummyByte = [UInt8(0x00)]
-        // Capture errno immediately adjacent to the write syscall.  Any call
-        // inserted between write(2) and the errno read — including the Swift Testing
-        // runtime entered by #expect — may issue syscalls that clobber the
-        // thread-local errno value before we can inspect it.
-        var capturedErrno: Int32 = 0
-        let writeResult = dummyByte.withUnsafeBytes { ptr -> Int in
-            let result = write(fd, ptr.baseAddress!, 1)
-            capturedErrno = errno
-            return result
+        // F6 identity check: verify the fd does NOT still name our listening socket.
+        //
+        // write(2) cannot answer this question.  Once close(fd) frees the fd NUMBER,
+        // any other test that creates a socket (there are 16 such call sites across
+        // this file and HTTPTransportHardeningTests.swift, and the suites run in
+        // parallel) can be handed that same number.  write(2) to a fresh unconnected
+        // TCP socket fails with ENOTCONN — the identical result a live but unconnected
+        // listening socket gives — so an errno probe cannot tell "our fd was never
+        // closed" from "our fd number now belongs to someone else".
+        //
+        // getsockname(2) answers it, because it reports IDENTITY rather than a failure
+        // mode.  Against the port captured at bind() time:
+        //   • fails, any errno   → the fd number does not name a live socket, so our
+        //                          descriptor was released — F6 satisfied.
+        //   • port != boundPort  → the number was recycled to a different socket, which
+        //                          can only happen after our close — F6 satisfied.
+        //   • port == boundPort  → the fd still names OUR listening socket — F6
+        //                          violated.  This is the only failing case.
+        //
+        // The decision rests on the return value alone, so no errno is read and nothing
+        // here depends on errno surviving a call into the Swift Testing runtime.
+        var addr = sockaddr_in()
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let gsnResult = withUnsafeMutablePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(fd, sa, &addrLen)
+            }
         }
-        // EBADF == fd is closed.  Any other errno or a successful write (>= 0)
-        // means the fd was NOT closed — the shutdown guarantee was violated.
-        #expect(writeResult == -1, "serve(withFD:) must close the fd before returning (F6)")
-        if writeResult == -1 {
-            #expect(capturedErrno == EBADF,
-                    "expected EBADF after serve(withFD:) returned, got errno \(capturedErrno)")
+
+        if gsnResult == 0 {
+            // getsockname succeeded: the fd number is live.  Check whether it still
+            // names our socket.  If the port matches boundPort the fd was NOT closed —
+            // that is the F6 violation.
+            let observedPort = UInt16(bigEndian: addr.sin_port)
+            // The listener is AF_INET because POSIXSocket.listenLoopbackTCP creates an
+            // AF_INET socket and binds a sockaddr_in
+            // (packages/libs/LoopbackHTTP/Sources/LoopbackHTTP/POSIXSocket.swift:44,51),
+            // so a non-AF_INET result at this fd number means the number was recycled.
+            // The bind-time #require above pins this assumption: if the family ever
+            // changes the test fails there, keeping this assertion honest.
+            #expect(
+                addr.sin_family != sa_family_t(AF_INET) || observedPort != boundPort,
+                """
+                F6 violated: serve(withFD:) returned but the fd still names our \
+                listening socket (port \(observedPort) == bound port \(boundPort)); \
+                close(fd) did not complete before serve(withFD:) returned
+                """
+            )
         }
+        // gsnResult == -1: getsockname failed, so the fd number does not name a live
+        // socket and our descriptor was released.  F6 is satisfied — no assertion
+        // needed, and the specific errno would not change that conclusion.
     }
 
     @Test("The legacy view reproduces LoopbackHTTP's field handling")
