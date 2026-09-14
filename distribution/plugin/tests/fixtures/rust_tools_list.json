@@ -1,5 +1,5 @@
 {
-  "binary": "/Users/bob/devlop/mootx01-ee-taggate/cargo-target/debug/mootx01",
+  "binary": "rust port, debug build",
   "count": 80,
   "names": [
     "moot_confirm_memory",
