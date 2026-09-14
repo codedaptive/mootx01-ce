@@ -548,10 +548,7 @@ impl Dispatcher {
         // Surface admission: decode the typed v2 request before frozen policy
         // is evaluated.  The decoder receives the transform-phase output so a
         // pre-decode hook can strip a key the strict decoder rejects.
-        // A name absent from the v2 catalog is rejected here (METHOD_NOT_FOUND
-        // below) — `dispatch::route_tool` is never reached from this handler;
-        // it is a v1 test-helper path called directly by the integration suites,
-        // not by the running server.
+        // A name absent from the v2 catalog is rejected here with METHOD_NOT_FOUND.
         if let Some(request) = self.surface.decode(name, &effective_args)? {
             // Stable typed effect drives posture before the request clock or
             // any session/estate state changes.

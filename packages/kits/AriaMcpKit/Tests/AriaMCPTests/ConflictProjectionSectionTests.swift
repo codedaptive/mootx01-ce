@@ -73,13 +73,14 @@ struct ConflictProjectionSectionTests {
     /// `AriaV2LensLower.lensContradiction`, which returns JSON-structured
     /// data in `structuredContent.data` with compact text
     /// "Found N tunnels and M fact groups." — it never calls
-    /// `RecipeTools.renderConflictProjection`, so the text-format strings
+    /// the retired text projection, so the text-format strings
     /// (`proven:`, `PROVEN`, `rule:`, `coordinate:`, `reasons:`) are absent
-    /// from `content[0].text`. The legacy text path (LensTools.swift) is
-    /// bypassed. Awaiting catalog decision on whether the typed proving
+    /// from `content[0].text`. The structured v2 response is authoritative;
+    /// this disabled text-format pin has no selected-surface contract.
+    /// Awaiting catalog decision on whether the typed proving
     /// section should be added to the v2 lower response. Do not delete;
     /// do not weaken to pass.
-    @Test(.disabled("BLOCKED: v2 lensContradiction lower returns JSON-only compact text; renderConflictProjection text format not present in content[0].text. Legacy text path bypassed. Awaiting catalog decision. Do not delete; do not weaken to pass."))
+    @Test(.disabled("BLOCKED: v2 lensContradiction returns structured data; this retired text-format pin has no selected-surface contract."))
     func lensAppendsFullTypedSection() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher(owner: "cps-normal")
         try await plantClaim(kit, handle, content: "Claim one.",
