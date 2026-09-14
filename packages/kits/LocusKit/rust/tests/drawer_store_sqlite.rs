@@ -479,6 +479,7 @@ fn expunge_gated_tombstones_zeros_content_sets_bit_26() {
             Some("GDPR"),
             NOW + 500,
             true,
+            AdjectiveSensitivity::Secret,
         )
         .unwrap();
     let after = store
@@ -533,6 +534,7 @@ fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
             Some("lineage conformance"),
             NOW + 200,
             true,
+            AdjectiveSensitivity::Secret,
         )
         .unwrap();
 
@@ -629,7 +631,7 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
     // byte-identical: no content write, no state write, no
     // representation clear.
     store
-        .expunge_gated(&d2.id, "test", None, NOW + 300, true)
+        .expunge_gated(&d2.id, "test", None, NOW + 300, true, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // D2 itself is scrubbed and tombstoned as before.
@@ -709,7 +711,7 @@ fn expunge_outcome_reports_refused_siblings() {
     store.add_drawer(&d2, NOW + 200).unwrap();
 
     let outcome = store
-        .expunge_gated(&d2.id, "test", None, NOW + 300, true)
+        .expunge_gated(&d2.id, "test", None, NOW + 300, true, AdjectiveSensitivity::Secret)
         .unwrap();
     assert_eq!(
         outcome.refused_sibling_ids,
@@ -735,7 +737,7 @@ fn expunge_outcome_empty_for_clean_lineage() {
     store.add_drawer(&d2, NOW + 100).unwrap();
 
     let outcome = store
-        .expunge_gated(&d2.id, "test", None, NOW + 200, true)
+        .expunge_gated(&d2.id, "test", None, NOW + 200, true, AdjectiveSensitivity::Secret)
         .unwrap();
     assert!(
         outcome.refused_sibling_ids.is_empty(),
@@ -805,7 +807,7 @@ fn attacker_lineage_join_cannot_scrub_accepted_row() {
 
     // Expunging the attacker's own row walks the shared lineage.
     estate
-        .expunge(&attacker_row.id, "attacker-initiated expunge", true, NOW + 300, true)
+        .expunge(&attacker_row.id, "attacker-initiated expunge", true, NOW + 300, true, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // The attacker's row is gone…
@@ -1703,12 +1705,12 @@ fn tombstoned_rows_without_expunge_audit_sql_join_returns_only_orphans() {
 
     // Expunge A with audit sealed (normal expunge path — not an orphan).
     store
-        .expunge_gated(id_a, "alice", None, NOW + 10, true)
+        .expunge_gated(id_a, "alice", None, NOW + 10, true, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // Expunge B with audit NOT sealed (crash-window simulation — is an orphan).
     store
-        .expunge_gated(id_b, "alice", None, NOW + 20, false)
+        .expunge_gated(id_b, "alice", None, NOW + 20, false, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // tombstoned_rows_without_expunge_audit must return exactly [B].
@@ -1770,8 +1772,8 @@ fn tombstoned_rows_without_expunge_audit_all_sealed_returns_empty() {
     store.add_drawer(&sample_drawer(id_y, "w", "k", "cy"), NOW).unwrap();
 
     // Both expunged with audit sealed — neither is an orphan.
-    store.expunge_gated(id_x, "alice", None, NOW + 1, true).unwrap();
-    store.expunge_gated(id_y, "alice", None, NOW + 2, true).unwrap();
+    store.expunge_gated(id_x, "alice", None, NOW + 1, true, AdjectiveSensitivity::Secret).unwrap();
+    store.expunge_gated(id_y, "alice", None, NOW + 2, true, AdjectiveSensitivity::Secret).unwrap();
 
     let orphans = store
         .tombstoned_rows_without_expunge_audit()

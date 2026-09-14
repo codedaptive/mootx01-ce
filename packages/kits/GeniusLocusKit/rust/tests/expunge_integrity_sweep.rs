@@ -29,6 +29,7 @@ use std::sync::Arc;
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::{EstateCoordinator, ExpungeIntegritySweepResult};
 use locus_kit::{
+    adjectives::AdjectiveSensitivity,
     drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::OwnerCredentials,
 };
@@ -99,7 +100,7 @@ fn seed_crash_window(
     // unsealed (the GLK coordinator path). We immediately discard the event
     // to simulate a crash before the seal call.
     let _unsealed = estate
-        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false)
+        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false, AdjectiveSensitivity::Secret)
         .expect("estate expunge (no seal) for crash-window seed");
 
     drawer.id
@@ -131,7 +132,7 @@ fn s1_sweep_remediates_crash_window_row_with_corpus() {
     // Tombstone the row WITHOUT sealing any audit (crash-window simulation).
     let estate = coord.estate_for(&h).expect("estate");
     let _unsealed = estate
-        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false)
+        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false, AdjectiveSensitivity::Secret)
         .expect("estate expunge no seal");
 
     // Verify pre-condition: no tombstone or expungeOrphan audit event yet.
@@ -342,7 +343,7 @@ fn s4_sweep_remediates_orphaned_distillation_lane_entry() {
     // The VectorStore lane entry survives.
     let estate = coord.estate_for(&h).expect("estate for crash-window");
     let _unsealed = estate
-        .expunge(&drawer.id, "crash-window-sim-s4", true, NOW2, false)
+        .expunge(&drawer.id, "crash-window-sim-s4", true, NOW2, false, AdjectiveSensitivity::Secret)
         .expect("estate expunge (no seal) for crash-window seed");
 
     // Lane entry must STILL exist after the crash-window (step 2 never ran).
