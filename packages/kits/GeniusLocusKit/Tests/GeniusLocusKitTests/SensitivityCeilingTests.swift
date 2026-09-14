@@ -215,4 +215,101 @@ struct SensitivityCeilingTests {
             "state must remain .active, not .withdrawn; got \(String(describing: factAfter?.state))"
         )
     }
+
+    // MARK: - P3: sibling above ceiling survives byte-identical through the lineage cascade
+
+    /// The GLK erase verb passes .elevated as the sensitivity ceiling to the
+    /// lineage cascade. A sibling whose tier exceeds .elevated is refused:
+    /// left byte-identical (content verbatim, state unchanged, both bitmaps
+    /// unchanged, tombstonedAt nil) and its id recorded in refusedSiblingIDs.
+    /// The target, which is at or below the ceiling, is tombstoned normally.
+    ///
+    /// Two fixture values pinned so a reader can see which branch runs:
+    ///   Target  id: targetID   tier: .normal  (raw 0 ≤ ceiling raw 16 — admitted)
+    ///   Sibling id: siblingID  tier: .restricted (raw 32 > ceiling raw 16 — refused)
+    @Test
+    func expungeSiblingAboveCeilingIsRefusedByteIdentical() async throws {
+        let (kit, handle) = try await openOneEstate()
+
+        // Seed the target: a .normal drawer the erase verb admits.
+        // The GLK step 0.5 ceiling check allows .normal (raw 0) through
+        // because it is at or below .elevated (raw 16).
+        let targetFrame = CaptureFrame(
+            content: "normal-tier target that the erase verb admits — raw sensitivity 0",
+            channel: .typed,
+            room: "ceiling-sibling-tests",
+            latticeAnchor: .udc("001"),
+            addedBy: "sensitivity-ceiling-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        let targetDrawer = try await kit.capture(handle, targetFrame)
+        let targetID = targetDrawer.id
+
+        // Seed the sibling: a .restricted drawer in the SAME lineage.
+        // Sensitivity raw 32 > ceiling raw 16, so the cascade must refuse it
+        // and leave it byte-identical. The lineageID ties it to the target.
+        var siblingFrame = CaptureFrame(
+            content: "restricted-tier sibling that must survive the cascade byte-identical — raw sensitivity 32",
+            channel: .typed,
+            room: "ceiling-sibling-tests",
+            latticeAnchor: .udc("002"),
+            addedBy: "sensitivity-ceiling-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        siblingFrame.sensitivity = .restricted
+        siblingFrame.lineageID = targetDrawer.lineageID
+        let siblingDrawer = try await kit.capture(handle, siblingFrame)
+        let siblingID = siblingDrawer.id
+
+        // Snapshot the sibling's bitmaps before the erase so we can
+        // prove byte-identity after (matching the assertion model in
+        // LocusKitTests/ExpungeTests.swift:547–573).
+        let sibContentBefore = siblingDrawer.content
+        let sibAdjBefore = siblingDrawer.adjectiveBitmap
+        let sibOpBefore = siblingDrawer.operationalBitmap
+
+        // Call the GLK erase verb on the .normal target. The verb must
+        // succeed for the target and refuse the .restricted sibling.
+        let outcome = try await kit.expunge(
+            handle,
+            ExpungeFrame(rowID: targetID, reason: "ceiling-sibling-probe", confirmation: true),
+            now: testNow
+        )
+
+        let estate = try await kit.estate(for: handle)
+        let allAfter = try await estate.allDrawers()
+
+        // The .normal target must be tombstoned.
+        let targetAfter = allAfter.first { $0.id == targetID }
+        #expect(targetAfter?.state == .tombstoned,
+                "the .normal target (raw 0 ≤ ceiling raw 16) must be tombstoned after expunge")
+
+        // The .restricted sibling must survive byte-identical.
+        let sibAfter = allAfter.first { $0.id == siblingID }
+        #expect(sibAfter != nil,
+                "the .restricted sibling (\(siblingID)) must still exist after the expunge")
+        #expect(
+            sibAfter?.content == sibContentBefore,
+            "sibling content must be byte-identical; got '\(sibAfter?.content ?? "<nil>")'"
+        )
+        #expect(
+            sibAfter?.adjectiveBitmap == sibAdjBefore,
+            "sibling adjectiveBitmap must be unchanged (ceiling refusal is write-free)"
+        )
+        #expect(
+            sibAfter?.operationalBitmap == sibOpBefore,
+            "sibling operationalBitmap must be unchanged (ceiling refusal is write-free)"
+        )
+        #expect(
+            sibAfter?.tombstonedAt == nil,
+            "sibling tombstonedAt must remain nil — it was not erased"
+        )
+
+        // The sibling must appear in refusedSiblingIDs so the partial
+        // expunge is detectable to the caller (SPEC B-8b, MXE-FA).
+        #expect(
+            outcome.refusedSiblingIDs.contains(siblingID),
+            "the .restricted sibling's id must appear in refusedSiblingIDs; got \(outcome.refusedSiblingIDs)"
+        )
+    }
 }
