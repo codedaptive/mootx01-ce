@@ -105,12 +105,7 @@ substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust" }
 # product graph via aria-mcp; naming it directly keeps the commands plain
 # and removable (same rationale as persistence-kit above).
 corpus-kit-providers = { path = "../../../packages/kits/CorpusKit/rust-providers" }
-# adornment-lib: AdornmentMinterDescriptor and StoredAdornment value types
-# used by run_adornment_store_migration to register legacy minter rows and
-# move drawers.adornment text to the normalized adornments table
-# (ADORN-STORE-02 Part C, schema v17). No layering inversion: adornment-lib
 # is upstream of locus-kit in the dependency graph.
-adornment-lib = { path = "../../../packages/libs/AdornmentLib/rust" }
 
 # unicode-normalization: NFC normalization for the review engine's normalize_subject.
 # Required for F9 parity: Swift uses precomposedStringWithCanonicalMapping (NFC) to
