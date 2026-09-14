@@ -17,6 +17,7 @@ path = "src/lib.rs"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = { version = "1" }
 uuid        = { version = "1", features = ["v4"] }
+unicode-segmentation = "=1.13.3"
 # SHA-256 for the ARIA-layer drift-detection sidecar manifest
 # (Vault drift and candidate handling decision b). Already in the lock file as a transitive
 # dep; adding as direct dep so the version is explicit and stable.
