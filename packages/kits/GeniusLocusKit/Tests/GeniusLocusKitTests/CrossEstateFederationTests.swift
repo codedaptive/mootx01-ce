@@ -402,6 +402,27 @@ struct CrossEstateFederationTests {
             "contentLevel=16 must exclude restricted rows (rawValue=32 > 16)")
     }
 
+    @Test
+    func federatedWithheldCountIncludesOnlyGrantAuthorizedCandidates() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-fed-withheld")
+        let requester = try await openEstate(in: kit, owner: owner)
+        let source = try await openEstate(in: kit, owner: owner)
+        _ = try await kit.issueGrant(source, grantOptions(to: requester, contentLevel: 48))
+
+        let normal = try await captureWithSensitivity(
+            into: source, tag: "withheld-normal", sensitivity: .normal, kit: kit)
+        let restricted = try await captureWithSensitivity(
+            into: source, tag: "withheld-restricted", sensitivity: .restricted, kit: kit)
+
+        let result = try await kit.federatedRecall(
+            unconfirmedFrame, from: source, requestedBy: requester)
+        #expect(result.drawers.map(\.id).contains(normal.id))
+        #expect(!result.drawers.map(\.id).contains(restricted.id))
+        #expect(result.withheldBySensitivity == 1,
+            "only the authorized source's restricted primary row is counted")
+    }
+
     // MARK: - GRANT-SCOPE-P1 — scope subtree enforcement (tests 10–14)
 
     // MARK: - 9. Unrestricted grant (contentLevel=48) admits all sensitivities (GRANT_BOUNDARY_001)

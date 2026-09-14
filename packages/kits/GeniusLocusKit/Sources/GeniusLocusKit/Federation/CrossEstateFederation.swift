@@ -440,11 +440,46 @@ public extension GeniusLocusKit {
             drawers = drawers.filter { $0.id == uuid.uuidString }
         }
 
+        // Count only source-estate candidates this grant may disclose. This
+        // applies the same content and scope gates to the persisted candidate
+        // set before LocusKit's public evaluator compares the caller's default
+        // sensitivity ceiling. A count therefore cannot disclose rows outside
+        // this authorized source/scope.
+        var authorizedCandidates = try await sourceEstate.allDrawers()
+        authorizedCandidates = authorizedCandidates.filter {
+            $0.adjectiveSensitivity.rawValue <= contentMax
+        }
+        switch authorizingGrant.scope {
+        case .wholeEstate:
+            break
+        case .wing(let name):
+            let nodeNames = try await sourceEstate.resolveNodeNames(
+                parentNodeIds: Array(Set(authorizedCandidates.map(\.parentNodeId))))
+            authorizedCandidates = authorizedCandidates.filter {
+                nodeNames[$0.parentNodeId]?.wing == name
+            }
+        case .room(let name):
+            let nodeNames = try await sourceEstate.resolveNodeNames(
+                parentNodeIds: Array(Set(authorizedCandidates.map(\.parentNodeId))))
+            authorizedCandidates = authorizedCandidates.filter {
+                nodeNames[$0.parentNodeId]?.room == name
+            }
+        case .latticeSubtree(let udcCode):
+            authorizedCandidates = authorizedCandidates.filter {
+                $0.udcCode == udcCode || $0.udcCode.hasPrefix(udcCode + ".")
+            }
+        case .singleRow(let uuid):
+            authorizedCandidates = authorizedCandidates.filter { $0.id == uuid.uuidString }
+        }
+        let withheldBySensitivity = await sensitivityWithheldCount(
+            for: frame, handle: source, candidates: authorizedCandidates)
+
         Self.federationLog.debug(
             "federatedRecall source=\(source.estateUUID, privacy: .public) requester=\(requester.estateUUID, privacy: .public) grant=\(authorizingGrant.id, privacy: .public) rows=\(drawers.count, privacy: .public)"
         )
         return FederatedRecallResult(
             drawers: drawers,
+            withheldBySensitivity: withheldBySensitivity,
             grant: authorizingGrant,
             sourceHandle: source,
             requesterHandle: requester

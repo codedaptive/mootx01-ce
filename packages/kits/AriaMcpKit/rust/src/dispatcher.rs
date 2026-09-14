@@ -428,6 +428,7 @@ impl Dispatcher {
     }
 
     fn tools_call(&self, params: Option<&JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
+        let _withheld_call = crate::v2::report_withheld::CallGuard::new();
         let obj = params.and_then(|p| p.as_object()).ok_or_else(|| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,
@@ -818,6 +819,102 @@ mod frozen_command_tests {
             0,
             "frozen v2 mutation refusal must not advance the session counter"
         );
+    }
+}
+
+#[cfg(test)]
+mod partial_cue_frame_tests {
+    use super::*;
+    use locus_kit::{
+        adjectives::AdjectiveSensitivity,
+        drawer_operational::CaptureChannel,
+        estate_types::LatticeAnchor,
+        frames::CaptureFrame,
+        provenance::Sensitivity,
+    };
+
+    fn call(dispatcher: &Dispatcher, arguments: serde_json::Value) -> serde_json::Value {
+        let request = JSONRPCRequest::decode(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "moot_lens_partial_cue", "arguments": arguments}
+        }))
+        .expect("request");
+        serde_json::to_value(dispatcher.handle(&request)).expect("response")
+    }
+
+    fn capture(
+        dispatcher: &Dispatcher,
+        content: &str,
+        udc: &str,
+        adjective: AdjectiveSensitivity,
+    ) -> String {
+        let mut frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            "partial-cue-frame-test",
+            LatticeAnchor::udc(udc),
+            "aria-mcp-tests",
+            "default",
+        );
+        frame.subject = Some(format!("{content} subject"));
+        frame.sensitivity = adjective;
+        frame.provenance_sensitivity = Sensitivity::Normal;
+        dispatcher
+            .registry
+            .default
+            .coord
+            .lock()
+            .expect("lock")
+            .capture(
+                &dispatcher.registry.default.handle,
+                frame,
+                crate::dispatch::wall_now(),
+            )
+            .expect("capture")
+            .id
+    }
+
+    #[test]
+    fn partial_cue_uses_caller_frame_for_recipe_and_hydration() {
+        let dispatcher = Dispatcher::new(
+            EstateRegistry::new_inmemory_with(crate::estate_registry::EstateOpening::TRANSIENT),
+            "ARIA_MCP_Rust",
+            "test",
+            "test-serial",
+            None,
+        )
+        .with_posture(EstatePosture::Live);
+        let anchor = capture(&dispatcher, "partial-cue frame anchor", "004", AdjectiveSensitivity::Normal);
+        let peer = capture(&dispatcher, "partial-cue restricted peer", "530", AdjectiveSensitivity::Restricted);
+        let arguments = serde_json::json!({
+            "anchor_memory_id": anchor,
+            "mode": "feelsLike",
+            "limit": 5,
+        });
+        let locked = call(&dispatcher, arguments.clone());
+        let locked_rows = locked["result"]["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("rows");
+        assert!(!locked_rows.iter().any(|row| row["id"]
+            .as_str()
+            .is_some_and(|id| id.eq_ignore_ascii_case(&peer))));
+        dispatcher.sensitivity_ledger.grant_restricted(crate::dispatch::wall_now());
+        let granted = call(&dispatcher, arguments);
+        let rows = granted["result"]["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("rows");
+        let row = rows
+            .iter()
+            .find(|row| {
+                row["id"]
+                    .as_str()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(&peer))
+            })
+            .expect("restricted peer admitted and hydrated");
+        assert_eq!(row["subject"].as_str(), Some("partial-cue restricted peer subject"));
+        assert!(row.get("bestSpan").is_some());
     }
 }
 
