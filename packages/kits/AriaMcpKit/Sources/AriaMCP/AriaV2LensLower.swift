@@ -273,9 +273,54 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             var factRows: [JSONValue] = []
             factRows.reserveCapacity(conflictingGroups.count)
             for (key, conflictingFacts) in conflictingGroups {
+                // The primary sort key rounds filedAt to the nearest millisecond.
+                // .rounded() (Swift's .toNearestOrAwayFromZero rule) reproduces
+                // what ISO8601DateFormatter with .withFractionalSeconds emits and
+                // reads back: the formatter rounds fractional seconds to 3 decimal
+                // places, so a Date that passes through SQLite storage loses its
+                // sub-millisecond residue via rounding, not via floor. For the
+                // in-memory path (InMemoryStorage), the raw Date is retained at
+                // full precision; this expression normalises both paths to the
+                // same persisted millisecond value.
+                //
+                // Why not .rounded(.down) (floor)?  floor(-1000.4) is -1001, but
+                // the formatter writes the fractional-seconds part of -1.0004 s as
+                // 0.9996, which it rounds UP to 1.000, carrying into the next
+                // calendar second. The round-trip therefore yields -1000 ms, not
+                // -1001. Floor diverges from the persisted value whenever the
+                // residue MEASURED AS A FRACTION OF THE ISO SECOND is half a
+                // millisecond or more — that is the quantity the formatter rounds.
+                // Name the frame, because it is not the frame of the expression
+                // below: -1.0004 s has a 0.4 ms residue in signed epoch
+                // milliseconds, under half, and floor diverges there anyway. The
+                // pre-epoch carry is one instance of the condition, not the whole
+                // of it; at a negative instant floor diverges for any nonzero
+                // residue at all.
+                //
+                // No narrowing conversion is used, so no input value can trap.
+                // Two facts whose rounded-millisecond keys are equal — because
+                // their filedAt values round to the same millisecond, or because
+                // they were stored identically — fall through to the UTF-8
+                // byte-order tie-break. Comparing the resulting Doubles with ==
+                // and < is exact: the values are integral after .rounded(), and a
+                // Double represents integers exactly to 2^53 (~9.0e15 ms), well
+                // beyond the persistence layer's round-trip bounds of
+                // -62135596800000 and 253402300799999.
+                //
+                // The secondary key uses UTF-8 byte order (lexicographicallyPrecedes
+                // over .utf8 views) to match the Rust port's String::cmp exactly.
+                // Do not simplify to `<`, which is Unicode-canonical and diverges
+                // from the Rust port on any non-ASCII object text.
+                let sortedFacts = conflictingFacts.sorted { lhs, rhs in
+                    let lhsMs = (lhs.filedAt.timeIntervalSince1970 * 1000).rounded()
+                    let rhsMs = (rhs.filedAt.timeIntervalSince1970 * 1000).rounded()
+                    return lhsMs == rhsMs
+                        ? lhs.object.utf8.lexicographicallyPrecedes(rhs.object.utf8)
+                        : lhsMs < rhsMs
+                }
                 var seen = Set<String>()
                 var objects: [JSONValue] = []
-                for fact in conflictingFacts where seen.insert(fact.object.lowercased()).inserted {
+                for fact in sortedFacts where seen.insert(fact.object.lowercased()).inserted {
                     objects.append(.string(fact.object))
                 }
                 factRows.append(.object([

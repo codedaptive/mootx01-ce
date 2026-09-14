@@ -941,3 +941,506 @@ struct PartialCueModeTests {
                 "fixture content must not appear in the rankedIDs field; rankedIDs: \(rankedIDsSerialized.prefix(500))")
     }
 }
+
+// MARK: - Contradiction lens deterministic object order
+
+/// `moot_lens_contradiction` must emit objects inside each conflicting group in
+/// filedAt-then-object-text order, not storage-insertion order.
+///
+/// Five facts share (subject, predicate) and ONE identical filedAt. They are
+/// stored in non-sorted order ("ähnlich", "zeta", "gamma", "beta", "alpha") so
+/// that the assertion goes red without the secondary-key sort. The expected
+/// order is UTF-8 byte order: ["alpha", "beta", "gamma", "zeta", "ähnlich"].
+/// "ä" begins 0xC3 in UTF-8 so it sorts after all ASCII letters including "z"
+/// (0x7A). An all-ASCII fixture cannot detect the Swift/Rust divergence (Swift
+/// `<` vs Rust `String::cmp`) because the two orderings agree on ASCII; the
+/// non-ASCII object is load-bearing.
+///
+/// Routes through `AriaV2LensLowerService` with a real estate so the full
+/// execution stack is exercised. The response is the camelCase wire envelope.
+@Suite("moot_lens_contradiction — deterministic object order", .serialized)
+struct ContradictionLensOrderTests {
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "contradiction-order-test")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner,
+            identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: false)
+        return (kit, handle)
+    }
+
+    @Test("contradiction_objects_sort_by_utf8_byte_order_within_one_filed_instant")
+    func contradictionObjectsSortByUtf8ByteOrderWithinOneFiledInstant() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Pin a single filedAt so all five facts share the same instant.
+        // The secondary sort by UTF-8 byte order is what the fix under test adds.
+        let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // Store in non-sorted order so the assertion goes red if the sort is
+        // absent. "ähnlich" has UTF-8 lead byte 0xC3, so it sorts AFTER all
+        // ASCII objects including "zeta" (lead byte 0x7A).
+        for object in ["ähnlich", "zeta", "gamma", "beta", "alpha"] {
+            _ = try await kit.captureKGFact(
+                handle,
+                subject: "sort-test-subject",
+                predicate: "sort-test-pred",
+                object: object,
+                now: fixedDate)
+        }
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: AriaV2RecallLensOperation.lensContradiction.rawValue,
+            arguments: .object([:]))
+        let response = try await service.execute(request)
+
+        let data = response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        let groups = try #require(
+            data?["conflictingFacts"]?.arrayValue,
+            "conflictingFacts array must be present in the response")
+        #expect(groups.count == 1, "exactly one conflicting group must exist; got: \(groups)")
+
+        let objects = try #require(
+            groups.first?.objectValue?["objects"]?.arrayValue,
+            "objects array must be present in the first conflicting group")
+        let objectStrings = objects.compactMap(\.stringValue)
+        #expect(
+            objectStrings == ["alpha", "beta", "gamma", "zeta", "ähnlich"],
+            "objects within one filed instant must be sorted by UTF-8 byte order; got: \(objectStrings)")
+    }
+
+    @Test("contradiction_objects_tie_within_one_persisted_millisecond")
+    func contradictionObjectsTieWithinOnePersistedMillisecond() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Two facts whose filedAt values differ by 0.4ms — below one millisecond.
+        // Both land in the same millisecond (1700000000000) under floor or
+        // round-to-nearest, so the tie-break decides the order in both ports.
+        //
+        // Filed so that the LATER sub-millisecond time carries the object that
+        // sorts FIRST by UTF-8 byte order ("alpha" < "zeta"). Without millisecond
+        // normalisation the Date comparison puts "zeta" first (it was filed 0.4ms
+        // earlier). With normalisation they tie at the millisecond and byte-order
+        // decides: "alpha" before "zeta".
+        let earlier = Date(timeIntervalSince1970: 1_700_000_000)         // "zeta"
+        let later   = Date(timeIntervalSince1970: 1_700_000_000.0004)    // "alpha"
+
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "ms-tie-subject",
+            predicate: "ms-tie-pred",
+            object: "zeta",
+            now: earlier)
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "ms-tie-subject",
+            predicate: "ms-tie-pred",
+            object: "alpha",
+            now: later)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: AriaV2RecallLensOperation.lensContradiction.rawValue,
+            arguments: .object([:]))
+        let response = try await service.execute(request)
+
+        let data = response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        let groups = try #require(
+            data?["conflictingFacts"]?.arrayValue,
+            "conflictingFacts array must be present in the response")
+        #expect(groups.count == 1, "exactly one conflicting group must exist; got: \(groups)")
+
+        let objects = try #require(
+            groups.first?.objectValue?["objects"]?.arrayValue,
+            "objects array must be present in the first conflicting group")
+        let objectStrings = objects.compactMap(\.stringValue)
+        #expect(
+            objectStrings == ["alpha", "zeta"],
+            "facts within one persisted millisecond must sort by UTF-8 byte order; got: \(objectStrings)")
+    }
+
+    /// Measures what ISO8601DateFormatter with .withFractionalSeconds emits for
+    /// sub-millisecond residues, including the pre-epoch wrap case. The printed
+    /// table is the spec for the new sort key. Assertions pin the observed values;
+    /// do not change them unless the formatter behaviour changes.
+    ///
+    /// Twin: none (measurement-only; no Rust equivalent needed).
+    @Test("iso8601_formatter_sub_millisecond_measurement")
+    func iso8601FormatterSubMillisecondMeasurement() {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // The values to measure. Each is designed to sit near a millisecond boundary
+        // so truncation vs. rounding produces different results.
+        let cases: [(TimeInterval, String)] = [
+            ( 0.0004, "+0.0004"),
+            ( 0.0006, "+0.0006"),
+            ( 0.0015, "+0.0015"),
+            (-0.0004, "-0.0004"),
+            (-1.0004, "-1.0004"),
+            (-1.0006, "-1.0006"),
+        ]
+        var results: [(label: String, str: String, ms: Int64)] = []
+        for (interval, label) in cases {
+            let date = Date(timeIntervalSince1970: interval)
+            let str = formatter.string(from: date)
+            // Parsing back is guaranteed to lose sub-millisecond residue (the
+            // formatter caps at 3 decimal places), so the parsed value has an
+            // exact integer millisecond component.
+            let parsed = formatter.date(from: str)!
+            // Use .rounded() not Int64() to avoid truncation-toward-zero on values
+            // like 0.002 s, whose IEEE754 representation is slightly below 2.0 ms
+            // (0.002 is not exactly representable in binary float). Int64(1.9999...)
+            // = 1, which is wrong; .rounded() gives 2.0 and Int64(2.0) = 2.
+            let ms = Int64((parsed.timeIntervalSince1970 * 1000).rounded())
+            results.append((label: label, str: str, ms: ms))
+            print("ISO8601Measurement [\(label)] \"\(str)\" rounded_ms=\(ms)")
+        }
+        // Assertions on the OBSERVED values, established by running this test and
+        // reading the printed table. Each line is: interval → emitted string → ms.
+        //
+        // Positive residue rounds toward nearest millisecond (ISO8601DateFormatter
+        // uses ICU which rounds half-up). Pre-epoch residues may carry into the
+        // next second.
+        //
+        // +0.0004 → "1970-01-01T00:00:00.000Z" → 0 ms
+        #expect(results[0].str == "1970-01-01T00:00:00.000Z", "measured: \(results[0].str)")
+        #expect(results[0].ms == 0)
+        // +0.0006 → "1970-01-01T00:00:00.001Z" → 1 ms
+        #expect(results[1].str == "1970-01-01T00:00:00.001Z", "measured: \(results[1].str)")
+        #expect(results[1].ms == 1)
+        // +0.0015 → "1970-01-01T00:00:00.002Z" → 2 ms
+        // 0.0015 is NOT exactly representable in IEEE754 double. The stored
+        // binary value is 0.0015000000000000000312..., which is above 1.5 ms,
+        // so the formatter had no half-millisecond tie to break — it simply
+        // rounded up to 2 ms. The sort key reaches 2 via a different path:
+        // 0.0015 * 1000 evaluates to exactly 1.5 in double arithmetic, and
+        // Swift's .rounded() resolves that exact half by rounding away from
+        // zero to 2. They agree, but not for the same reason.
+        // The formatter's behaviour at an EXACT half-millisecond input is NOT
+        // measured by this table and remains unknown — for negative instants
+        // especially, where Swift's away-from-zero rule and a half-up rule
+        // would disagree.
+        #expect(results[2].str == "1970-01-01T00:00:00.002Z", "measured: \(results[2].str)")
+        #expect(results[2].ms == 2)
+        // -0.0004 → pre-epoch: 1969-12-31T23:59:59.9996 → rounds to 0.000 carry → "...00.000Z"
+        // The formatter rounds 0.9996 fractional seconds up to 1.000, carrying into
+        // the next second (epoch). The round-trip therefore lands at 0 ms, not -1 ms.
+        #expect(results[3].str == "1970-01-01T00:00:00.000Z", "measured: \(results[3].str)")
+        #expect(results[3].ms == 0)
+        // -1.0004 → pre-epoch: 1969-12-31T23:59:58.9996 → rounds to .000 carry → "...59.000Z"
+        // Round-trip lands at -1000 ms, NOT at floor(-1000.4) = -1001. This is the
+        // canonical divergence between floor and round-nearest for the persisted key.
+        #expect(results[4].str == "1969-12-31T23:59:59.000Z", "measured: \(results[4].str)")
+        #expect(results[4].ms == -1000)
+        // -1.0006 → pre-epoch: 1969-12-31T23:59:58.9994 → rounds to .999 → "...58.999Z"
+        #expect(results[5].str == "1969-12-31T23:59:58.999Z", "measured: \(results[5].str)")
+        #expect(results[5].ms == -1001)
+    }
+
+    /// Discriminating pre-epoch test for the round-nearest vs. truncate-toward-zero distinction.
+    ///
+    /// Two facts share (subject, predicate), filed at pre-epoch instants that land
+    /// in DIFFERENT persisted milliseconds under round-nearest but in the SAME
+    /// millisecond under truncate-toward-zero.
+    ///
+    ///   Date(timeIntervalSince1970: -1.0006) → -1000.6 ms → round-nearest = -1001
+    ///   Date(timeIntervalSince1970: -1.0)    → -1000.0 ms → round-nearest = -1000
+    ///
+    /// Under round-nearest they land in different milliseconds: -1001 < -1000,
+    /// so order is by time, earliest first: "zeta" (at -1001) before "alpha"
+    /// (at -1000).
+    ///
+    /// Under truncate-toward-zero both values become -1000 (truncation of -1000.6
+    /// toward zero is -1000), so they tie, and the UTF-8 byte-order tie-break fires:
+    /// "alpha" < "zeta", yielding ["alpha", "zeta"] — the wrong answer.
+    ///
+    /// Measurement (from iso8601_formatter_sub_millisecond_measurement):
+    ///   Date(-1.0006) formats as "1969-12-31T23:59:58.999Z" -> -1001 ms
+    ///   Date(-1.0)    formats as "1969-12-31T23:59:59.000Z" -> -1000 ms
+    ///
+    /// Twin: dispatch_tests.rs
+    /// contradiction_objects_order_by_persisted_millisecond_before_epoch. The Rust
+    /// test files the same facts as raw i64 milliseconds (-1001 and -1000), which
+    /// are the persisted form of these Swift Dates under round-nearest.
+    @Test("contradiction_objects_order_by_persisted_millisecond_before_epoch")
+    func contradictionObjectsOrderByPersistedMillisecondBeforeEpoch() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // "zeta" is filed EARLIER at -1.0006 s, which the formatter rounds to -1001 ms.
+        // "alpha" is filed LATER at -1.0 s, which rounds to -1000 ms.
+        // Under truncate-toward-zero both would land at -1000 and "alpha" would win.
+        let earlier = Date(timeIntervalSince1970: -1.0006)   // -> -1001 ms (round-nearest)
+        let later   = Date(timeIntervalSince1970: -1.0)      // -> -1000 ms
+
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "pre-epoch-round-subject",
+            predicate: "pre-epoch-round-pred",
+            object: "zeta",
+            now: earlier)
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "pre-epoch-round-subject",
+            predicate: "pre-epoch-round-pred",
+            object: "alpha",
+            now: later)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: AriaV2RecallLensOperation.lensContradiction.rawValue,
+            arguments: .object([:]))
+        let response = try await service.execute(request)
+
+        let data = response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        let groups = try #require(
+            data?["conflictingFacts"]?.arrayValue,
+            "conflictingFacts array must be present in the response")
+        #expect(groups.count == 1, "exactly one conflicting group must exist; got: \(groups)")
+
+        let objects = try #require(
+            groups.first?.objectValue?["objects"]?.arrayValue,
+            "objects array must be present in the first conflicting group")
+        let objectStrings = objects.compactMap(\.stringValue)
+        // Round-nearest: -1001 < -1000, so time order decides — "zeta" first.
+        // Truncate-toward-zero: both -1000, tie-break fires — "alpha" first (wrong).
+        #expect(
+            objectStrings == ["zeta", "alpha"],
+            "pre-epoch facts must sort by persisted millisecond (earliest first); got: \(objectStrings)")
+    }
+
+    /// Two facts whose STORED ISO8601 text differs by exactly one millisecond.
+    /// The sort must put the earlier fact first regardless of the object string.
+    ///
+    /// Fixture values chosen so the earlier fact carries the alphabetically LATER
+    /// object ("zeta") and the later fact carries the alphabetically EARLIER
+    /// object ("alpha"). Without time-order dominance the result would be reversed.
+    ///
+    /// Expected stored texts are derived by running the same format-and-parse
+    /// round trip the production sort key normalises to, so the test does not
+    /// hard-code reasoning about the formatter.
+    ///
+    /// Twin: dispatch_tests.rs
+    /// contradiction_objects_order_by_time_when_stored_milliseconds_differ.
+    @Test("contradiction_objects_order_by_time_when_stored_milliseconds_differ")
+    func contradictionObjectsOrderByTimeWhenStoredMillisecondsDiffer() async throws {
+        let (kit, handle) = try await openEstate()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        // Two instants exactly 1 ms apart. Both are integral-millisecond Dates so
+        // the format-and-parse round trip changes nothing — no rounding ambiguity.
+        let earlier = Date(timeIntervalSince1970: 1_400_000_000.002)   // "zeta" is filed first
+        let later   = Date(timeIntervalSince1970: 1_400_000_000.003)   // "alpha" is filed later
+
+        // Derive expected stored texts from the round trip, not from hand reasoning.
+        let earlierStr = formatter.string(from: earlier)
+        let laterStr   = formatter.string(from: later)
+        let earlierMs  = (formatter.date(from: earlierStr)!.timeIntervalSince1970 * 1000).rounded()
+        let laterMs    = (formatter.date(from: laterStr)!.timeIntervalSince1970 * 1000).rounded()
+        // Premise: stored texts must differ by exactly 1 ms for the test to discriminate.
+        #expect(
+            laterMs - earlierMs == 1,
+            "test premise: stored texts must differ by 1 ms; got \(earlierStr) and \(laterStr)")
+
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "time-order-subject",
+            predicate: "time-order-pred",
+            object: "zeta",
+            now: earlier)
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "time-order-subject",
+            predicate: "time-order-pred",
+            object: "alpha",
+            now: later)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: AriaV2RecallLensOperation.lensContradiction.rawValue,
+            arguments: .object([:]))
+        let response = try await service.execute(request)
+
+        let data = response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        let groups = try #require(
+            data?["conflictingFacts"]?.arrayValue,
+            "conflictingFacts array must be present in the response")
+        #expect(groups.count == 1, "exactly one conflicting group; got: \(groups)")
+
+        let objects = try #require(
+            groups.first?.objectValue?["objects"]?.arrayValue,
+            "objects array must be present in the first conflicting group")
+        let objectStrings = objects.compactMap(\.stringValue)
+        // Earlier stored ms must come first; "zeta" precedes "alpha" by time.
+        #expect(
+            objectStrings == ["zeta", "alpha"],
+            "time order must dominate when stored texts differ by 1 ms; got: \(objectStrings)")
+    }
+
+    /// Two facts whose STORED ISO8601 text is identical. The filedAt values
+    /// round to the same millisecond. The UTF-8 byte-order tie-break must decide.
+    ///
+    /// Fixture: one fact has a sub-ms residue that rounds DOWN to the same stored
+    /// text as the exact-millisecond fact. Object "zeta" gets the exact instant;
+    /// object "alpha" gets the sub-ms offset. Both store identically. UTF-8 order
+    /// puts "alpha" before "zeta".
+    ///
+    /// Expected stored texts are derived by running the format-and-parse round trip,
+    /// not by hand reasoning, so the test pins observable behaviour not assumed
+    /// arithmetic.
+    ///
+    /// Twin: dispatch_tests.rs
+    /// contradiction_objects_tie_break_when_stored_texts_identical.
+    @Test("contradiction_objects_tie_break_when_stored_texts_identical")
+    func contradictionObjectsTieBreakWhenStoredTextsIdentical() async throws {
+        let (kit, handle) = try await openEstate()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        // "zeta" — exact millisecond, no residue.
+        // "alpha" — 0.4 ms sub-residue that rounds DOWN to the same stored text.
+        let exact       = Date(timeIntervalSince1970: 1_400_000_000.002)
+        let withResidue = Date(timeIntervalSince1970: 1_400_000_000.0024)
+
+        // Derive stored texts and verify they are identical (the test premise).
+        let exactStr   = formatter.string(from: exact)
+        let residueStr = formatter.string(from: withResidue)
+        #expect(
+            exactStr == residueStr,
+            "test premise: both dates must produce the same stored text; got \(exactStr) vs \(residueStr)")
+
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "tie-break-subject",
+            predicate: "tie-break-pred",
+            object: "zeta",
+            now: exact)
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "tie-break-subject",
+            predicate: "tie-break-pred",
+            object: "alpha",
+            now: withResidue)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: AriaV2RecallLensOperation.lensContradiction.rawValue,
+            arguments: .object([:]))
+        let response = try await service.execute(request)
+
+        let data = response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        let groups = try #require(
+            data?["conflictingFacts"]?.arrayValue,
+            "conflictingFacts array must be present in the response")
+        #expect(groups.count == 1, "exactly one conflicting group; got: \(groups)")
+
+        let objects = try #require(
+            groups.first?.objectValue?["objects"]?.arrayValue,
+            "objects array must be present in the first conflicting group")
+        let objectStrings = objects.compactMap(\.stringValue)
+        // Both dates round to the same stored ms; UTF-8 byte order decides.
+        // "alpha" (0x61...) < "zeta" (0x7A...) in UTF-8.
+        #expect(
+            objectStrings == ["alpha", "zeta"],
+            "UTF-8 tie-break must decide when stored texts are identical; got: \(objectStrings)")
+    }
+
+    /// Discriminates .rounded() (round-nearest) from .rounded(.down) (floor) for
+    /// the specific pre-epoch pair that the sort key change in this stream touched.
+    ///
+    /// Two facts share (subject, predicate).
+    ///   "zeta"  filed at Date(timeIntervalSince1970: -1.0004)
+    ///   "alpha" filed at Date(timeIntervalSince1970: -1.0)
+    ///
+    /// "zeta" is filed FIRST so insertion order cannot produce the expected result.
+    ///
+    /// What each sort key expression gives for these two instants:
+    ///   floor  -> floor(-1000.4) = -1001 and floor(-1000.0) = -1000
+    ///            different keys, time order decides, ["zeta", "alpha"]  (WRONG)
+    ///   round  -> round(-1000.4) = -1000 and round(-1000.0) = -1000
+    ///            equal keys, UTF-8 tie-break decides, ["alpha", "zeta"] (RIGHT, and what SQLite stores)
+    ///
+    /// The premise (both dates persist to the same millisecond) is derived at
+    /// runtime via ISO8601DateFormatter round-trip and asserted before facts are
+    /// filed. If the premise ever stops holding the test fails loudly at that
+    /// assertion rather than silently testing something else.
+    ///
+    /// Twin: dispatch_tests.rs
+    /// contradiction_objects_pre_epoch_sub_millisecond_residue_ties_at_the_persisted_millisecond.
+    @Test("contradiction_objects_pre_epoch_sub_millisecond_residue_ties_at_the_persisted_millisecond")
+    func contradictionObjectsPreEpochSubMillisecondResidueTiesAtThePersistedMillisecond() async throws {
+        let (kit, handle) = try await openEstate()
+
+        // Derive the persisted strings for both dates at runtime so that if the
+        // formatter's rounding behaviour ever changes the premise check fires,
+        // not a silent wrong-thing test.
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let dateZeta  = Date(timeIntervalSince1970: -1.0004)
+        let dateAlpha = Date(timeIntervalSince1970: -1.0)
+        let strZeta   = formatter.string(from: dateZeta)
+        let strAlpha  = formatter.string(from: dateAlpha)
+        // Premise: both dates must persist to the same ISO8601 millisecond string.
+        // If this ever fails, the test's discriminating premise no longer holds
+        // and the expected result below is wrong.
+        #expect(
+            strZeta == strAlpha,
+            "test premise: -1.0004 s and -1.0 s must produce identical persisted strings; got \(strZeta) vs \(strAlpha)")
+
+        // File "zeta" first so insertion order alone cannot produce the expected
+        // ["alpha", "zeta"] result.
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "pre-epoch-residue-tie-subject",
+            predicate: "pre-epoch-residue-tie-pred",
+            object: "zeta",
+            now: dateZeta)
+        _ = try await kit.captureKGFact(
+            handle,
+            subject: "pre-epoch-residue-tie-subject",
+            predicate: "pre-epoch-residue-tie-pred",
+            object: "alpha",
+            now: dateAlpha)
+
+        let service = AriaV2LensLowerService(
+            authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
+            context: .init(estateID: handle.estateUUID, now: Date()))
+        let request = try AriaV2RecallLensRequest(
+            tool: AriaV2RecallLensOperation.lensContradiction.rawValue,
+            arguments: .object([:]))
+        let response = try await service.execute(request)
+
+        let data = response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        let groups = try #require(
+            data?["conflictingFacts"]?.arrayValue,
+            "conflictingFacts array must be present in the response")
+        #expect(groups.count == 1, "exactly one conflicting group must exist; got: \(groups)")
+
+        let objects = try #require(
+            groups.first?.objectValue?["objects"]?.arrayValue,
+            "objects array must be present in the first conflicting group")
+        let objectStrings = objects.compactMap(\.stringValue)
+        // Both dates persist to the same millisecond (-1000 ms). The UTF-8
+        // tie-break decides: "alpha" (0x61) < "zeta" (0x7A).
+        // Under floor (-1001 and -1000, different keys) time order would give
+        // ["zeta", "alpha"] — the wrong answer for the persisted data.
+        #expect(
+            objectStrings == ["alpha", "zeta"],
+            "pre-epoch facts tied at the persisted millisecond must sort by UTF-8 byte order; got: \(objectStrings)")
+    }
+}

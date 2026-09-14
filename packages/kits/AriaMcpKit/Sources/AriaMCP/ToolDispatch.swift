@@ -1692,11 +1692,10 @@ extension ToolDispatcher {
             )
         }
         let trimmedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Unicode SCALARS, the unit the Rust twin counts (`subject.chars().count()`
-        // in interface_tools.rs) and the unit both moot-bridge ports cut on. A
-        // grapheme cluster can carry several scalars, so counting Characters
-        // here would accept a subject the Rust server refuses and the two ports
-        // would disagree on the same input.
+        // This is the v1 `runFileMemory` path. It counts Unicode scalars, not
+        // grapheme clusters. The v2 surface (ToolDispatcher.dispatch) and both
+        // ports count grapheme clusters for the same contract. The v1 count
+        // here is not reached by the shipped v2 dispatch.
         let subjectLength = trimmedSubject.unicodeScalars.count
         guard subjectLength > 0, subjectLength <= DrawerStore.subjectLengthContract else {
             // Return as an isError result rather than throwing a JSON-RPC protocol error.
