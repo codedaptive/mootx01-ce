@@ -30,6 +30,7 @@ genius-locus-kit-migrations = { path = "../../GeniusLocusKit/rust-migrations", f
 locus-kit        = { path = "../../LocusKit/rust" }
 neuron-kit       = { path = "../../NeuronKit/rust" }
 substrate-ml     = { path = "../../../libs/SubstrateML/rust" }
+context-distill-lib = { path = "../../../libs/ContextDistillLib/rust" }
 # substrate-types: direct dep for Fingerprint256 (used in moot_lens_moment
 # and moot_lens_rhythm dispatch arms that call DrawerStore::fingerprints_captured_in
 # and DrawerStore::fingerprint_bit_series). Permitted per
