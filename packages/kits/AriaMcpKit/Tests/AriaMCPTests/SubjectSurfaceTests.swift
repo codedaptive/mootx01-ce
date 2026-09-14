@@ -71,11 +71,62 @@ struct SubjectSurfaceTests {
 
     // MARK: - 1. Boundary requirement
 
-    /// The 120 of the subject contract is 120 Unicode SCALARS, the unit the
-    /// Rust twin counts and both moot-bridge ports cut on. A non-ASCII case is
-    /// what tells the rules apart: 70 clusters of "e" + U+0301 is 70
-    /// Characters — under the limit by that count — and 140 scalars, over it.
-    /// Twin of the Rust `subject_length_counts_scalars_not_graphemes`.
+    /// The drawer subject contract is 120 grapheme clusters. Swift's `String.count`
+    /// returns grapheme clusters, so the v2 `set_subject` path is correct.
+    /// Twin of the Rust `subject_length_counts_grapheme_clusters_not_scalars`.
+    @Test func subjectLengthCountsGraphemeClustersNotScalars() async throws {
+        // A string of 120 grapheme clusters each composed of two Unicode scalars.
+        // Under the grapheme-cluster rule this string is at the limit (120 == 120).
+        // Under the scalar rule it exceeded the limit (240 > 120).
+        // An ASCII fixture proves nothing: it is 120 under both rules.
+        let subject = String(repeating: "e\u{0301}", count: 120)
+        #expect(subject.count == 120)
+        #expect(subject.unicodeScalars.count == 240)
+
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "subject-grapheme-cluster"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let id = try await captureWithoutSubject(
+            kit: kit, handle: handle, content: "cluster contract test", room: "subject-tests")
+
+        // 120 clusters must be accepted.
+        let updated = try await dispatcher.dispatch(
+            name: "moot_update_memory",
+            arguments: .object([
+                "memory_id": .string(id),
+                "mutation": .string("set_subject"),
+                "subject": .string(subject),
+            ]))
+        #expect(!isError(updated),
+            "120 grapheme clusters must be accepted; got: \(text(of: updated))")
+
+        // The subject round-trips back byte-identical.
+        let fetched = try await dispatcher.dispatch(
+            name: "moot_memory_get",
+            arguments: .object(["memory_id": .string(id)]))
+        #expect(!isError(fetched), "memory_get must succeed after set_subject")
+        #expect("\(fetched)".contains(subject),
+            "subject must round-trip byte-identical through moot_memory_get")
+
+        // 121 grapheme clusters must be refused by throwing.
+        // A set_subject length violation is thrown as a JSONRPCError from
+        // AriaV2UpdateMemoryRequest.subject(_:) — it is not a return-path
+        // isError result. The thrown message names the length contract.
+        let oversize = String(repeating: "e\u{0301}", count: 121)
+        await #expect {
+            try await dispatcher.dispatch(
+                name: "moot_update_memory",
+                arguments: .object([
+                    "memory_id": .string(id),
+                    "mutation": .string("set_subject"),
+                    "subject": .string(oversize),
+                ]))
+        } throws: { error in
+            guard let rpcError = error as? JSONRPCError else { return false }
+            return rpcError.message.contains("length contract")
+        }
+    }
 
     /// BLOCKED: v2 routes moot_file_memory through AriaV2ArgumentDecoder, which
     /// throws "Missing required argument 'subject'." (no "NEXT AI" instructive

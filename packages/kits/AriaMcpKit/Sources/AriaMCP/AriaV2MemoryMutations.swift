@@ -661,7 +661,11 @@ fileprivate extension AriaV2UpdateMemoryRequest {
     }
 
     static func subject(_ value: String) throws -> String {
-        guard value.unicodeScalars.count <= DrawerStore.subjectLengthContract else {
+        // The subject contract is 120 grapheme clusters. Swift's String.count returns
+        // grapheme clusters, so value.count is the correct measure here. The Rust port
+        // counts the same unit through locus_kit::drawer_store::subject_length.
+        // DrawerStore.subjectLengthContract is 120 grapheme clusters in both ports.
+        guard value.count <= DrawerStore.subjectLengthContract else {
             throw AriaV2InvalidArgument(path: "subject", message: "Argument 'subject' exceeds the subject length contract.").jsonRPCError
         }
         let result = try nonEmpty(value, path: "subject")

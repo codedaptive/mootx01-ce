@@ -1,4 +1,8 @@
 import Foundation
+import GeniusLocusKit
+import LocusKit
+import PersistenceKit
+import PersistenceKitInMemory
 import Testing
 @testable import AriaMCP
 
@@ -190,6 +194,90 @@ struct AriaV2MemoryOperationsTests {
 
     private func record(_ id: UUID, content: String = "Content", authorized: Bool = true) -> AriaV2MemoryRecord {
         AriaV2MemoryRecord(memoryID: id, subject: "Subject", content: content, wing: "Agentic Memory", room: "Planning", filedAt: now, eventTime: now, lineageID: id, provenance: "mcp", isAuthorized: authorized)
+    }
+
+    /// Injects a record with a 600-character subject via `FakeMemoryBackend` and
+    /// asserts that the compact operation truncates both `subject` and `context`
+    /// to the 512-scalar compact form and that they are identical.
+    ///
+    /// Uses the fake backend rather than filing through `moot_file_memory` so the
+    /// test bypasses `DrawerStore.subjectLengthContract` (120 chars), which would
+    /// otherwise reject any subject longer than 120 chars.  The test directly
+    /// exercises `AriaV2MemoryOperations.compact`, the production site that applies
+    /// `compactText` to both fields.
+    @Test func compact_row_subject_and_context_share_the_512_scalar_form() async throws {
+        // 600-character subject cycling through the alphabet: a wrong slice yields a
+        // visibly wrong string, unlike a run of identical characters.
+        let base = "abcdefghijklmnopqrstuvwxyz"
+        let longSubject = String(repeating: base, count: 23) + "ab"  // 23 × 26 + 2 = 600 chars
+
+        // Build a record with the long subject and context directly — no filing gate.
+        // The real estate backend populates record.context from the drawer subject;
+        // the fake must do the same so compact() wires both fields.
+        let longRecord = AriaV2MemoryRecord(
+            memoryID: firstID,
+            subject: longSubject,
+            content: "Content",
+            wing: "Agentic Memory",
+            room: "Planning",
+            filedAt: now,
+            eventTime: now,
+            lineageID: firstID,
+            provenance: "mcp",
+            context: longSubject,
+            isAuthorized: true
+        )
+        let backend = FakeMemoryBackend(records: [longRecord])
+        let operations = service(backend: backend)
+        let response = try await operations.search(arguments: .object(["query": .string("compact-512-form")]))
+
+        let rows = try #require(
+            response.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "search must return a results array")
+        let first = try #require(rows.first?.objectValue, "search must return at least one row")
+
+        let subject = try #require(first["subject"]?.stringValue, "row must carry a subject field")
+        let context = try #require(first["context"]?.stringValue, "row must carry a context field")
+        let compact = AriaV2Envelope.compactText(longSubject)
+
+        #expect(subject == context,
+                "subject and context must be identical in the compact search row")
+        #expect(subject == compact,
+                "subject must equal the 512-scalar compact form of the filed subject")
+        #expect(subject.unicodeScalars.count == 512,
+                "compact form must be exactly 512 scalars, not the raw 600-char subject")
+    }
+
+    /// Drives `moot_memory_search` through `ToolDispatcher` with a real in-memory
+    /// estate so the full search path — including `record(for:authorized:tunnels:)` —
+    /// is exercised end-to-end. Asserts that the compact search row carries the
+    /// drawer's subject in its `context` field.
+    @Test func search_row_context_carries_the_filed_subject() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: "v2b-context-search")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner,
+                                        identityKeyStore: InMemoryEstateIdentityKeyStore())
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let subject = "the drawer subject that context must carry"
+        _ = try await dispatcher.dispatch(name: "moot_file_memory", arguments: .object([
+            "content": .string(subject),
+            "subject": .string(subject),
+            "location": .string("context-field-tests"),
+        ]))
+
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object([
+            "query": .string(subject),
+        ]))
+        let rows = try #require(
+            result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "search must return a results array")
+        let first = try #require(rows.first?.objectValue, "search must return at least one row")
+        #expect(
+            first["context"]?.stringValue == subject,
+            "compact search row must carry the drawer subject in the context field; got: \(String(describing: first["context"]))")
     }
 }
 

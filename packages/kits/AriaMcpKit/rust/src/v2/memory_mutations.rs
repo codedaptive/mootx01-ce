@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use genius_locus_kit::{EstateCoordinator, EstateHandle};
 use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
-    drawer_store::SUBJECT_LENGTH_CONTRACT,
+    drawer_store::{subject_length, SUBJECT_LENGTH_CONTRACT},
     frames::{MutationKind, TunnelCaptureFrame},
     tunnel_operational::{TunnelKind, TunnelLifecycle},
 };
@@ -208,12 +208,12 @@ fn decode_update_mutation(
     }
     match value {
         "set_subject" => match subject {
-            Some(raw) if raw.chars().count() <= SUBJECT_LENGTH_CONTRACT && !raw.trim().is_empty() => {
+            Some(raw) if subject_length(raw) <= SUBJECT_LENGTH_CONTRACT && !raw.trim().is_empty() => {
                 Ok(V2UpdateMutation::SetSubject(raw.trim().to_owned()))
             }
             _ => Err(V2InvalidArgument::new(
                 "$.subject",
-                "is required and must contain 1 to 120 Unicode scalars before trimming for set_subject",
+                "is required and must contain 1 to 120 grapheme clusters before trimming for set_subject",
             )),
         },
         "correct_sensitivity" => match sensitivity {
