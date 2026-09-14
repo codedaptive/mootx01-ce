@@ -77,8 +77,11 @@ public enum PermissionsWriter {
     /// Every namespace prefix a tool name must be written under.
     public static let allPrefixes = [mcpPrefix, pluginMcpPrefix]
 
-    /// Tool names retired from the installer authorization inventory. A stale
-    /// server projection must not cause the installer to grant or refresh them.
+    /// Tool names retired from the installer authorization inventory. This is a
+    /// defensive floor applied to whatever tool list is injected at the call site
+    /// (both production call sites inject the in-process linked projection, which
+    /// does not carry a retired name today). The filter guards against a future
+    /// regression where a retired name re-enters the projection by mistake.
     public static let retiredToolNames: Set<String> = [
         "moot_file_packet",
         "moot_packet_get",
@@ -141,7 +144,7 @@ public enum PermissionsWriter {
         "moot_fact_search", "moot_fact_timeline",
         "moot_connection_search", "moot_connection_map",
         "moot_estate_map", "moot_read_journal",
-        // Grant-authorized federated read (v2 name: moot_federated_recall replaces moot_federated_search).
+        // Grant-authorized federated read.
         "moot_federated_recall",
         // Surface help: capability discovery, always a pure read.
         "moot_help",

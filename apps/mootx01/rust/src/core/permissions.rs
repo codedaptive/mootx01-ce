@@ -40,15 +40,57 @@ const PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_mootx01__";
 /// Every namespace prefix a tool name must be written under.
 const ALL_PREFIXES: [&str; 2] = [PREFIX, PLUGIN_PREFIX];
 
-/// `mcp__mootx01__<name>` for every tool the linked server exposes (direct
-/// namespace only — used by `grant`, the allow-all opt-in).
+/// Tool names retired from the installer authorization inventory. This is a
+/// defensive floor applied to whatever tool list is built from the linked server.
+/// The linked projection does not carry a retired name today; the filter guards
+/// against a future regression where a retired name re-enters the projection by
+/// mistake. Mirrors Swift `PermissionsWriter.retiredToolNames`.
+const RETIRED_TOOL_NAMES: &[&str] = &[
+    "moot_file_packet",
+    "moot_packet_get",
+    "moot_packet_list",
+    "moot_packet_lineage",
+];
+
+/// Single predicate: returns true for any name that is not in RETIRED_TOOL_NAMES.
+/// Both adapters below call this so the rule lives in one place.
+fn is_authorized_name(name: &str) -> bool {
+    !RETIRED_TOOL_NAMES.contains(&name)
+}
+
+/// Filter `names` to those not in `RETIRED_TOOL_NAMES`. Borrowed form for tests.
+fn authorized_names<'a>(names: &[&'a str]) -> Vec<&'a str> {
+    names
+        .iter()
+        .copied()
+        .filter(|n| is_authorized_name(n))
+        .collect()
+}
+
+/// Filter `names` to those not in `RETIRED_TOOL_NAMES`. Owned form used by
+/// grant, grant_tiered, and migrate_tiers so the filter is applied uniformly
+/// on every path, matching Swift's three-site coverage of authorizedToolNames.
+fn authorized_names_owned(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|n| is_authorized_name(n.as_str()))
+        .collect()
+}
+
+/// `mcp__mootx01__<name>` for every authorized tool the linked server exposes
+/// (direct namespace only — used by `grant`, the allow-all opt-in). Retired
+/// tool names are filtered out as a defensive floor; the linked projection does
+/// not carry them today, but the filter guards against future regressions.
 pub fn permission_entries() -> Vec<String> {
     let list = aria_mcp::tool_list::build_tool_list();
     list.as_array()
         .map(|tools| {
-            tools
+            let names: Vec<&str> = tools
                 .iter()
                 .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                .collect();
+            authorized_names(&names)
+                .iter()
                 .map(|n| format!("{PREFIX}{n}"))
                 .collect()
         })
@@ -92,7 +134,7 @@ const READ_TOOLS: &[&str] = &[
     "moot_fact_search", "moot_fact_timeline",
     "moot_connection_search", "moot_connection_map",
     "moot_estate_map", "moot_read_journal",
-    // Grant-authorized federated read (v2 name: moot_federated_recall replaces moot_federated_search).
+    // Grant-authorized federated read.
     "moot_federated_recall",
     // Surface help: capability discovery, always a pure read.
     "moot_help",
@@ -176,7 +218,7 @@ pub fn grant(settings_path: &Path) -> Result<usize, MergeError> {
         .collect();
     let mut added = 0;
     let list = aria_mcp::tool_list::build_tool_list();
-    let names: Vec<String> = list
+    let raw_names: Vec<String> = list
         .as_array()
         .map(|tools| {
             tools
@@ -186,6 +228,10 @@ pub fn grant(settings_path: &Path) -> Result<usize, MergeError> {
                 .collect()
         })
         .unwrap_or_default();
+    // Defensive floor: retired tool names must not be granted even if the
+    // linked projection somehow re-introduces them (mirrors Swift's
+    // authorizedToolNames call in permissionEntries).
+    let names = authorized_names_owned(raw_names);
     for name in &names {
         for prefix in ALL_PREFIXES {
             let entry = format!("{prefix}{name}");
@@ -313,7 +359,7 @@ pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), Merge
     }
 
     let list = aria_mcp::tool_list::build_tool_list();
-    let names: Vec<String> = list
+    let raw_names: Vec<String> = list
         .as_array()
         .map(|tools| {
             tools
@@ -323,6 +369,8 @@ pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), Merge
                 .collect()
         })
         .unwrap_or_default();
+    // Defensive floor: mirrors Swift authorizedToolNames in mergeTiered.
+    let names = authorized_names_owned(raw_names);
 
     let mut added = (0usize, 0usize, 0usize);
     for name in names {
@@ -407,7 +455,7 @@ pub fn migrate_tiers(settings_path: &Path) -> Result<usize, MergeError> {
     }
 
     let list = aria_mcp::tool_list::build_tool_list();
-    let names: Vec<String> = list
+    let raw_names: Vec<String> = list
         .as_array()
         .map(|tools| {
             tools
@@ -417,6 +465,8 @@ pub fn migrate_tiers(settings_path: &Path) -> Result<usize, MergeError> {
                 .collect()
         })
         .unwrap_or_default();
+    // Defensive floor: mirrors Swift authorizedToolNames in migrateTiers.
+    let names = authorized_names_owned(raw_names);
 
     let mut moved = 0;
     for name in &names {
@@ -571,6 +621,185 @@ mod tests {
         assert!(entries.len() >= 50, "expected the full tool surface, got {}", entries.len());
         assert!(entries.iter().all(|e| e.starts_with(PREFIX)));
         assert!(entries.iter().any(|e| e == "mcp__mootx01__moot_memory_search"));
+    }
+
+    // ------------------------------------------------------------------
+    // Finding F: retired names are filtered (mirrors Swift retiredToolNames)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn authorized_names_filters_retired_and_keeps_ordinary() {
+        // A retired name fed to authorized_names must not appear in the output,
+        // while an ordinary name in the same call must survive. Both halves are
+        // asserted so the test cannot pass by returning an empty list.
+        let retired = "moot_file_packet";
+        let ordinary = "moot_memory_get";
+        let result = authorized_names(&[retired, ordinary]);
+        assert!(
+            !result.contains(&retired),
+            "retired name {retired} must be filtered by authorized_names"
+        );
+        assert!(
+            result.contains(&ordinary),
+            "ordinary name {ordinary} must be kept by authorized_names"
+        );
+    }
+
+    #[test]
+    fn permission_entries_does_not_contain_retired_names() {
+        // Absence check over the live projection: the shipped permission set
+        // must name no retired operation under any prefix. This is not a gate
+        // on the filter itself — it asserts the end state, not the mechanism.
+        // The test that gates the filter (retired-name-in / absent-out) is
+        // `authorized_names_owned_filters_retired_and_keeps_ordinary`.
+        let entries = permission_entries();
+        for retired in RETIRED_TOOL_NAMES {
+            for prefix in ALL_PREFIXES {
+                let banned = format!("{prefix}{retired}");
+                assert!(
+                    !entries.contains(&banned),
+                    "permission_entries must not emit retired tool {retired} under {prefix}"
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Finding G: retired names filtered on the tiered-writer paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn grant_tiered_does_not_emit_retired_names() {
+        // Absence check over the tiered-write output: grant_tiered (the default
+        // install path, mirroring Swift mergeTiered) must not emit any retired
+        // name in any tier under either prefix. This is not a gate on the filter
+        // itself — it asserts the end state of the live projection, not the
+        // mechanism. The test that gates the filter (retired-name-in / absent-out)
+        // is `authorized_names_owned_filters_retired_and_keeps_ordinary`.
+        //
+        // grant_tiered is the default install path (mirrors Swift mergeTiered).
+        // Its output must not contain any retired name under either prefix,
+        // while ordinary names still land in their classifier-assigned tiers.
+        let dir = tmp("grant-tiered-retired");
+        let p = dir.join("settings.json");
+        grant_tiered(&p).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        for tier_key in ["allow", "ask", "deny"] {
+            let list = v["permissions"][tier_key].as_array().cloned().unwrap_or_default();
+            for retired in RETIRED_TOOL_NAMES {
+                for prefix in ALL_PREFIXES {
+                    let banned = format!("{prefix}{retired}");
+                    assert!(
+                        !list.contains(&serde_json::Value::String(banned.clone())),
+                        "grant_tiered must not emit {banned} in {tier_key}"
+                    );
+                }
+            }
+        }
+        // Ordinary name must still land somewhere.
+        let ordinary = "moot_memory_get";
+        let all_entries: Vec<String> = ["allow", "ask", "deny"]
+            .iter()
+            .flat_map(|k| {
+                v["permissions"][k]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|e| e.as_str().map(String::from))
+            })
+            .collect();
+        assert!(
+            all_entries.iter().any(|e| e.contains(ordinary)),
+            "ordinary tool {ordinary} must appear in some tier after grant_tiered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_tiers_does_not_write_retired_names() {
+        // migrate_tiers is the upgrade path (mirrors Swift migrateTiers).
+        // It must not ADD any retired name to any tier. Seed an ordinary tool
+        // in ask (the old all-ask default) so the function has real work to do;
+        // verify the retired name never appears in the output while the ordinary
+        // name is present in some tier after migration.
+        //
+        // Note: migrate_tiers calls authorized_names_owned, not authorized_names.
+        // This test is an absence check on a name that is never seeded — it
+        // confirms the function does not invent entries from build_tool_list()
+        // for retired names. The discriminating unit test for authorized_names_owned
+        // (retired-in/absent-out, ordinary-in/present-out) is
+        // `authorized_names_owned_filters_retired_and_keeps_ordinary` below.
+        let dir = tmp("migrate-tiers-retired");
+        let p = dir.join("settings.json");
+        let retired = "moot_file_packet";
+        let ordinary = "moot_memory_get";
+        // Seed with the ordinary tool fossilised in ask (old default) and no
+        // retired entries — the function processes names from build_tool_list(),
+        // so a retired name absent from the settings file is never added.
+        let seed = serde_json::json!({
+            "permissions": {
+                "ask": [
+                    format!("{PREFIX}{ordinary}"),
+                    format!("{PLUGIN_PREFIX}{ordinary}"),
+                ]
+            }
+        });
+        std::fs::write(&p, serde_json::to_string(&seed).unwrap()).unwrap();
+
+        migrate_tiers(&p).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let all_entries: Vec<String> = ["allow", "ask", "deny"]
+            .iter()
+            .flat_map(|k| {
+                v["permissions"][k]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|e| e.as_str().map(String::from))
+            })
+            .collect();
+
+        // Ordinary name must be present in some tier after migration (presence
+        // check; the specific tier is not asserted here).
+        assert!(
+            all_entries.iter().any(|e| e.contains(ordinary)),
+            "ordinary tool {ordinary} must be present after migrate_tiers"
+        );
+        // Retired name must not have been added to any tier under any prefix
+        // (absence check against a name that was never seeded).
+        for prefix in ALL_PREFIXES {
+            let banned = format!("{prefix}{retired}");
+            assert!(
+                !all_entries.contains(&banned),
+                "retired tool {retired} must not appear in any tier under {prefix} after migrate_tiers"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn authorized_names_owned_filters_retired_and_keeps_ordinary() {
+        // authorized_names_owned is the owned adapter called by grant,
+        // grant_tiered, and migrate_tiers. It must apply the same rule as
+        // authorized_names (the borrowed adapter). Both halves are asserted so
+        // the test cannot pass by returning an empty list.
+        let retired = "moot_file_packet".to_string();
+        let ordinary = "moot_memory_get".to_string();
+        let result = authorized_names_owned(vec![retired.clone(), ordinary.clone()]);
+        assert!(
+            !result.contains(&retired),
+            "retired name {retired} must be filtered by authorized_names_owned"
+        );
+        assert!(
+            result.contains(&ordinary),
+            "ordinary name {ordinary} must be kept by authorized_names_owned"
+        );
     }
 
     #[test]
