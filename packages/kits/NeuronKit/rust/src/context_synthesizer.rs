@@ -44,6 +44,12 @@ pub struct DrawerRowMeta {
     /// `drawer.isCurrentlyBelieved`; the Rust version accepts the
     /// pre-computed boolean.
     pub is_currently_believed: bool,
+    /// Provenance bitmap raw value (`Drawer.provenance`). The Swift engine
+    /// reads `LocusKit.Drawer.provenance` directly; the Rust engine accepts
+    /// it as parallel metadata. Used by `make_key_insights` to classify
+    /// provenance sensitivity (bits 30–35, KEYINSIGHTS-PROV = a ruling).
+    /// Default 0 classifies as admissible (normal, raw 0).
+    pub provenance: i64,
 }
 
 impl Default for DrawerRowMeta {
@@ -53,6 +59,8 @@ impl Default for DrawerRowMeta {
             wing: "(no wing)".to_string(),
             room: "(no room)".to_string(),
             is_currently_believed: true,
+            // 0 classifies as admissible (normal provenance sensitivity).
+            provenance: 0,
         }
     }
 }
@@ -93,7 +101,7 @@ pub fn synthesize(
     let success_rate = currently_believed_rate(rows, meta);
     let average_reward: f32 = 0.0; // No reward field on DrawerRow at v0.1 — see spec note.
     let recommendations = make_recommendations(&patterns);
-    let key_insights = make_key_insights(rows, max_key_insights.max(1));
+    let key_insights = make_key_insights(rows, meta, max_key_insights.max(1));
 
     ContextDocument {
         summary,
@@ -224,21 +232,46 @@ pub fn make_recommendations(patterns: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// First-line excerpts from up to `max_count` rows.
+/// First-line excerpts from up to `max_count` provenance-admissible rows.
 ///
-/// Returns the first line of `content` for each row. Adornment augmentation
-/// was removed in the Encoder Rerank Program (2026-09-05): adornments did
-/// not earn their cost and are now dark under the `miners` feature.
+/// Applies the take-then-filter algorithm (KEYINSIGHTS-PROV = a ruling):
+/// take `max_count` rows in stream order, THEN drop any whose provenance
+/// sensitivity classifies as non-admissible. Filtering before taking would
+/// promote rows below the cut and change output for admissible rows.
+///
+/// Provenance sensitivity lives in bits 30–35 of `DrawerRowMeta.provenance`
+/// (raw = (provenance >> 30) & 0x3f). Admissible raws: 0 (normal) and
+/// 16 (elevated). All other raws — 32 (restricted), 48 (secret), or any
+/// out-of-range value — contribute nothing (fail closed). Mirrors the
+/// mapping in AriaV2RecallLensPrivacy.classify (AriaMcpKit); NeuronKit
+/// cannot depend on AriaMcpKit so the extraction is repeated here.
+///
+/// A missing meta entry — a short or absent `meta` vector at index `i` —
+/// contributes nothing (fail closed). Only rows with an entry explicitly
+/// present in `meta` are evaluated for admissibility.
+///
+/// Adornment augmentation was removed in the Encoder Rerank Program
+/// (2026-09-05): adornments did not earn their cost and are now dark.
 ///
 /// Twin of `makeKeyInsights(rows:maxCount:)` in ContextSynthesizer.swift.
-pub fn make_key_insights(rows: &[DrawerRow], max_count: usize) -> Vec<String> {
+pub fn make_key_insights(rows: &[DrawerRow], meta: &[DrawerRowMeta], max_count: usize) -> Vec<String> {
     rows.iter()
+        .enumerate()
         .take(max_count)
-        .map(|row| {
-            // First line of content is the excerpt.
-            match row.content.find('\n') {
-                Some(idx) => row.content[..idx].to_string(),
-                None => row.content.clone(),
+        .filter_map(|(i, row)| {
+            // Missing meta entry: no meta for this row index means fail closed.
+            let m = meta.get(i)?;
+            // Provenance sensitivity classification (bits 30–35, fail closed).
+            let raw = (m.provenance >> 30) & 0x3f;
+            if raw == 0 || raw == 16 {
+                // Admissible: first line of content is the excerpt.
+                let excerpt = match row.content.find('\n') {
+                    Some(idx) => row.content[..idx].to_string(),
+                    None => row.content.clone(),
+                };
+                Some(excerpt)
+            } else {
+                None
             }
         })
         .collect()
@@ -303,6 +336,7 @@ mod tests {
             wing: wing.to_string(),
             room: room.to_string(),
             is_currently_believed: believed,
+            provenance: 0, // Default: normal provenance sensitivity (admissible).
         }
     }
 
@@ -399,12 +433,14 @@ mod tests {
             row("three\nthree body"),
             row("four — should not appear"),
         ];
+        // Meta is parallel and full-length; all rows have admissible provenance (0).
+        let m: Vec<DrawerRowMeta> = rows.iter().map(|_| meta("w", "r", true)).collect();
         let page = RecallPage {
             rows,
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], 3);
+        let doc = synthesize(&page, &m, 3);
         assert_eq!(doc.key_insights, vec!["line one", "single line", "three"]);
     }
 
@@ -425,24 +461,62 @@ mod tests {
         assert!((doc.success_rate - (2.0 / 3.0)).abs() < 1e-6);
     }
 
+    /// Gates the KEYINSIGHTS-PROV fail-closed rule in `make_key_insights`.
+    ///
+    /// When the meta vector is shorter than the row vector, `meta.get(i)?` returns
+    /// `None` for every row index with no corresponding entry, which propagates as
+    /// `filter_map` suppression — that row contributes no excerpt. Unknown provenance
+    /// means no excerpt; admissible provenance means one excerpt per row.
+    ///
+    /// This test would FAIL if line 263 were reverted to `meta_or_default(meta, i)`:
+    /// the default provenance value (0) classifies as admissible, so row 1 would
+    /// contribute a second excerpt and `key_insights` would have two elements.
     #[test]
-    fn key_insights_fallback_to_content_for_all_rows() {
-        // Adornment augmentation removed in Encoder Rerank Program (2026-09-05).
-        // The synthesizer always returns the first line of content per row.
+    fn key_insights_missing_meta_entry_contributes_nothing() {
         let rows = vec![
-            row("first line\nbody"),
-            row("single line"),
+            row("admitted excerpt\nbody text"),
+            row("suppressed content\nshould not appear"),
         ];
+        // Only one meta entry: row 0 is admissible (provenance 0), row 1 has none.
+        let m = vec![meta("w", "r", true)];
         let page = RecallPage {
             rows,
             page_index: 0,
             is_last: true,
         };
-        let doc = synthesize(&page, &[], 3);
+        // max_count of 3 ensures the cap does not limit the result to one element.
+        let doc = synthesize(&page, &m, 3);
+        assert_eq!(
+            doc.key_insights,
+            vec!["admitted excerpt"],
+            "row with no meta entry must not appear in key_insights (fail-closed)"
+        );
+        assert!(
+            !doc.key_insights.iter().any(|s| s.contains("suppressed content")),
+            "row 1 content must be absent from key_insights"
+        );
+    }
+
+    #[test]
+    fn key_insights_fallback_to_content_for_all_rows() {
+        // Adornment augmentation removed in Encoder Rerank Program (2026-09-05).
+        // First-line content is the excerpt for each admissible row.
+        let rows = vec![
+            row("first line\nbody"),
+            row("single line"),
+        ];
+        // Meta is parallel and full-length; all rows have admissible provenance (0).
+        let m: Vec<DrawerRowMeta> = rows.iter().map(|_| meta("w", "r", true)).collect();
+        let page = RecallPage {
+            rows,
+            page_index: 0,
+            is_last: true,
+        };
+        let doc = synthesize(&page, &m, 3);
         assert_eq!(
             doc.key_insights,
             vec!["first line", "single line"],
-            "rows always use first-line content extraction"
+            "admissible rows use first-line content extraction"
         );
     }
 }
