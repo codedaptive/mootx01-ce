@@ -1092,6 +1092,7 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
             })
     };
     exec(MIGRATIONS_TABLE)?;
+    normalize_legacy_migration_timestamps(conn)?;
     exec(AUDIT_TABLE)?;
     // Upgrade migration (#102): estates created before the reason column
     // need ALTER TABLE. CREATE TABLE IF NOT EXISTS does not add columns.
@@ -1121,7 +1122,7 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
             params_from_iter(vec![
                 SqlValue::Text(schema.kit_id.clone()),
                 SqlValue::Integer(version as i64),
-                SqlValue::Text(iso8601(0)),
+                SqlValue::Text(iso8601(chrono::Utc::now().timestamp_millis())),
             ]),
         )
         .map_err(|e| StorageError::BackendError {
@@ -1174,6 +1175,45 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
             existing.tables.retain(|t| !dropped.contains(&t.name));
         }
     }
+    Ok(())
+}
+
+/// Normalize migration-ledger values written before the Swift/Rust timestamp
+/// convergence. Version readers never decode `applied_at`, so an INTEGER
+/// epoch-millisecond value remains readable until schema application rewrites
+/// it as canonical TEXT. The Rust epoch sentinel carries no useful instant and
+/// is replaced with this migration's current timestamp. Both shapes disappear
+/// after one run, so later schema applications leave the value unchanged.
+fn normalize_legacy_migration_timestamps(conn: &rusqlite::Connection) -> StorageResult<()> {
+    conn.execute(
+        r#"UPDATE "_storagekit_migrations"
+           SET "applied_at" = CASE
+               WHEN typeof("applied_at") = 'integer'
+                   THEN strftime('%Y-%m-%dT%H:%M:%S',
+                       CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                            THEN "applied_at" / 1000 - 1
+                            ELSE "applied_at" / 1000
+                       END,
+                       'unixepoch'
+                   ) || printf('.%03dZ',
+                       CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                            THEN 1000 + "applied_at" % 1000
+                            ELSE "applied_at" % 1000
+                       END
+                   )
+               WHEN typeof("applied_at") = 'text'
+                   AND "applied_at" = '1970-01-01T00:00:00.000Z'
+                   THEN ?
+               ELSE "applied_at"
+           END
+           WHERE typeof("applied_at") = 'integer'
+              OR (typeof("applied_at") = 'text'
+                  AND "applied_at" = '1970-01-01T00:00:00.000Z')"#,
+        [iso8601(chrono::Utc::now().timestamp_millis())],
+    )
+    .map_err(|e| StorageError::BackendError {
+        underlying: format!("normalize migration timestamps: {e}"),
+    })?;
     Ok(())
 }
 
