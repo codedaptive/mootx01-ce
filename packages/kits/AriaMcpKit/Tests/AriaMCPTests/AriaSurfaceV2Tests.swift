@@ -471,12 +471,12 @@ struct AriaSurfaceV2Tests {
         // included here now that the fixture carries its typed outputSchema.
         //
         // The inputSchema-only loop below gates 5 further operations. Every
-        // fixture row carries an outputSchema, so that loop's existence is not
-        // about frozen-ness: moot_memory_search, moot_link_memories and
-        // moot_review_tunnel carry a placeholder fixture data schema,
-        // {"type":"object","additionalProperties":true}, which no side fixture
-        // patches and which does not match the live typed schema, so their
-        // outputSchemas are compared nowhere.
+        // fixture row now carries a live outputSchema; the split between the
+        // strict loop and the inputSchema-only loop is a historical test-partition
+        // boundary retained so both loops remain an independent check against the
+        // hand-written typed schemas in the side fixtures (aria_v2_output_schemas_*.json).
+        // The new snapshotGatesCatalogAgainstMission02Fixture test gates all 80
+        // operations verbatim against the fixture without side-fixture patching.
         //
         // description is read from ProjectedTool.description (the value the
         // server ships in tools/list, derived from the operation's help.description).
@@ -525,6 +525,89 @@ struct AriaSurfaceV2Tests {
             #expect(actual.inputSchema == expected["inputSchema"], "\(name) input schema")
             #expect(actual.description == expected["description"]?.stringValue, "\(name) description")
             let descriptor = try #require(registry.operation(named: name), "\(name) missing from registry")
+            #expect(descriptor.effect.rawValue == expected["effect"]?.stringValue, "\(name) effect")
+        }
+    }
+
+    @Test func snapshotGatesCatalogAgainstMission02Fixture() throws {
+        // Snapshot gate: compares every row in the mission02 fixture against the
+        // live Swift catalog on four fields — inputSchema, outputSchema, description,
+        // and effect — for all 80 operations.
+        //
+        // What this test proves:
+        //   On the Swift side the fixture was generated from the live Swift catalog
+        //   by FixtureRegenerator.swift, so this is a snapshot gate. It catches an
+        //   unintended catalog change between fixture regenerations; it does not
+        //   independently verify the schema, because both sides derive from the same
+        //   source.
+        //   On the Rust side (fixture_snapshot_gates_all_80_operations) the same
+        //   fixture carries Swift's values, making it a genuine port-parity gate.
+        //
+        // The outputSchema is compared verbatim from the fixture with no patching
+        // from the side fixtures (aria_v2_output_schemas_*.json). The loops in
+        // selectedDatasetCatalogMatchesFrozenMission02Schemas and
+        // selectedFiniteAndExclusiveInputsMatchFrozenMission02Schemas patch the
+        // outputSchema for the 48 names they cover; those two loops remain an
+        // independent check against a hand-written typed schema.
+        //
+        // Count gate: if the live catalog gains an 81st operation, the assertion
+        // that live tool count equals 80 will fail. Both name directions are checked:
+        // every fixture row must have a live tool, and every live tool must have a
+        // fixture row. A one-directional check would let a catalog addition pass.
+        let conformanceDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Conformance")
+        let fixtureData = try Data(contentsOf: conformanceDir.appendingPathComponent("aria_v2_mission02_vectors.json"))
+        let fixture = try JSONValue.parse(fixtureData)
+        let fixtureOps = try #require(
+            fixture.objectValue?["catalog"]?.objectValue?["operations"]?.arrayValue,
+            "fixture must contain catalog.operations array"
+        )
+        // Derive the name list from the fixture itself — sorted so a future catalog
+        // addition enters the loop with no hand edit.
+        let fixtureNames: [String] = fixtureOps
+            .compactMap { $0.objectValue?["name"]?.stringValue }
+            .sorted()
+        let fixtureByName: [String: [String: JSONValue]] = Dictionary(
+            uniqueKeysWithValues: fixtureNames.compactMap { name -> (String, [String: JSONValue])? in
+                guard let op = fixtureOps.first(where: { $0.objectValue?["name"]?.stringValue == name }),
+                      let dict = op.objectValue else { return nil }
+                return (name, dict)
+            }
+        )
+
+        let liveTools = ToolProjection.tools(environment: [:])
+        let registry = AriaV2SelectedCatalog.registry(environment: [:])
+        let liveNames = Set(liveTools.map(\.name))
+
+        // Count gates.
+        #expect(fixtureOps.count == 80, "fixture must contain exactly 80 operations; got \(fixtureOps.count)")
+        #expect(liveTools.count == 80, "live catalog must contain exactly 80 tools; got \(liveTools.count)")
+
+        // Bidirectional name coverage: every fixture row must have a live tool, and
+        // every live tool must have a fixture row.
+        for name in fixtureNames {
+            #expect(liveNames.contains(name), "fixture row \(name) has no live tool")
+        }
+        for name in liveNames {
+            #expect(fixtureByName[name] != nil, "live tool \(name) has no fixture row")
+        }
+
+        // Four-field comparison for every fixture row against live.
+        for name in fixtureNames {
+            guard let expected = fixtureByName[name] else { continue }
+            guard let actual = liveTools.first(where: { $0.name == name }) else {
+                Issue.record("\(name): live tool missing")
+                continue
+            }
+            #expect(actual.inputSchema == expected["inputSchema"], "\(name) inputSchema")
+            #expect(actual.outputSchema == expected["outputSchema"], "\(name) outputSchema")
+            #expect(actual.description == expected["description"]?.stringValue, "\(name) description")
+            guard let descriptor = registry.operation(named: name) else {
+                Issue.record("\(name): missing from registry")
+                continue
+            }
             #expect(descriptor.effect.rawValue == expected["effect"]?.stringValue, "\(name) effect")
         }
     }
