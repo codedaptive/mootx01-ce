@@ -3,28 +3,11 @@ use std::{
     sync::Mutex,
 };
 
-mod jsonrpc {
-    pub use aria_mcp::jsonrpc::*;
-}
-
-mod monitoring_control {
-    pub use aria_mcp::monitoring_control::*;
-}
-
-#[path = "../src/v2/codec.rs"]
-mod codec;
-#[path = "../src/v2/operation.rs"]
-mod operation;
-#[path = "../src/v2/render.rs"]
-mod render;
-#[path = "../src/v2/monitoring_set.rs"]
-mod monitoring_set;
-
 use aria_mcp::jsonrpc::JsonValue;
-use monitoring_control::MonitoringControl;
-use monitoring_set::{execute, V2MonitoringSetRequest, MONITORING_SET_TOOL};
-use operation::V2OperationEffect;
-use render::V2ResultMeta;
+use aria_mcp::monitoring_control::MonitoringControl;
+use aria_mcp::v2::monitoring_set::{execute, V2MonitoringSetRequest, MONITORING_SET_TOOL};
+use aria_mcp::v2::operation::V2OperationEffect;
+use aria_mcp::v2::render::V2ResultMeta;
 
 struct Probe {
     reads: Mutex<VecDeque<Option<bool>>>,
