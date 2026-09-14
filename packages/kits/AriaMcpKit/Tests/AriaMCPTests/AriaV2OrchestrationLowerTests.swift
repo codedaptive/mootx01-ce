@@ -174,4 +174,121 @@ struct AriaV2OrchestrationLowerTests {
         #expect(data.requesterEstateID == requester)
         #expect(data.grantID == grant)
     }
+
+    /// Drives `moot_synthesize` end-to-end and asserts that `subject` and `context`
+    /// in the compact synthesis row are truncated to exactly the 512-scalar compact form
+    /// and that they are identical.
+    ///
+    /// The subject is built from 120 grapheme clusters with varying numbers of combining
+    /// diacritical marks (4–7 scalars each, 660 scalars total).  The grapheme-cluster
+    /// count satisfies `DrawerStore.subjectLengthContract` (≤ 120), so the filing gate
+    /// passes.  The scalar count exceeds `AriaV2Envelope.compactTextScalarLimit` (512),
+    /// so `compactMemory(_:)` truncates both `subject` and `context` to the 512-scalar
+    /// prefix.  The test goes RED if either field is absent or untouched by truncation.
+    ///
+    /// Injection route: filed through `moot_file_memory` via `ToolDispatcher`.
+    /// `DrawerStore` accepts the subject because `.count` is grapheme-cluster count;
+    /// `compactText` truncates by scalar count, so the cap IS reachable.
+    @Test func compact_row_subject_and_context_share_the_512_scalar_form() async throws {
+        // Build 120 grapheme clusters with varying combining-mark counts so the total
+        // scalar count exceeds 512 while the grapheme-cluster count stays at 120.
+        // Four-cycle: 5, 6, 4, 7 scalars per cluster → 30 × (5+6+4+7) = 660 scalars.
+        // Non-uniform per-cluster counts make a wrong truncation slice visibly wrong.
+        let combiningSequences: [String] = [
+            "\u{0300}\u{0301}\u{0302}\u{0303}",                      // 4 combining → 5 scalars
+            "\u{0300}\u{0301}\u{0302}\u{0303}\u{0304}",              // 5 combining → 6 scalars
+            "\u{0300}\u{0301}\u{0302}",                              // 3 combining → 4 scalars
+            "\u{0300}\u{0301}\u{0302}\u{0303}\u{0304}\u{0305}",      // 6 combining → 7 scalars
+        ]
+        let bases = "abcdefghijklmnopqrstuvwxyz"
+        var subject = ""
+        for i in 0..<120 {
+            let baseIndex = bases.index(bases.startIndex, offsetBy: i % 26)
+            subject.append(bases[baseIndex])
+            subject += combiningSequences[i % combiningSequences.count]
+        }
+
+        // Pin the premise: if either property drifts, the test fails here rather than
+        // silently going vacuous (a wrong assertion about 512 scalars).
+        try #require(
+            subject.count <= 120,
+            "premise: subject must satisfy grapheme-cluster storage contract (\(subject.count) clusters)")
+        try #require(
+            subject.unicodeScalars.count > 512,
+            "premise: subject must exceed 512-scalar compact cap (\(subject.unicodeScalars.count) scalars)")
+
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: "v2b-compact-synthesis-512")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner,
+                                        identityKeyStore: InMemoryEstateIdentityKeyStore())
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // File through the production door.  The storage gate passes because
+        // DrawerStore.subjectLengthContract checks grapheme-cluster count (≤ 120).
+        _ = try await dispatcher.dispatch(name: "moot_file_memory", arguments: .object([
+            "content": .string("compact-synthesis-test-content"),
+            "subject": .string(subject),
+            "location": .string("compact-512-form-tests"),
+        ]))
+
+        let result = try await dispatcher.dispatch(name: "moot_synthesize", arguments: .object([
+            "filter": .string("unconfirmed"),
+        ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let rows = try #require(
+            obj["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "moot_synthesize must return a results array in structuredContent.data")
+        let first = try #require(rows.first?.objectValue, "synthesis must return at least one row")
+
+        let rowSubject = try #require(first["subject"]?.stringValue, "row must carry a subject field")
+        let rowContext = try #require(first["context"]?.stringValue, "row must carry a context field")
+        let compact = AriaV2Envelope.compactText(subject)
+
+        // All three assertions must hold together: same text, same as compactText output,
+        // and exactly 512 scalars.  Removing compactMemory's subject truncation turns
+        // the last assertion red (raw subject has 660 scalars, not 512).
+        #expect(rowSubject == rowContext,
+                "subject and context must be identical in the compact synthesis row")
+        #expect(rowSubject == compact,
+                "subject must equal AriaV2Envelope.compactText of the filed subject")
+        #expect(rowSubject.unicodeScalars.count == 512,
+                "compact form must be exactly 512 scalars; got \(rowSubject.unicodeScalars.count)")
+    }
+
+    /// Drives `moot_synthesize` through `ToolDispatcher` with a real in-memory
+    /// estate so the full synthesis path — including `compactMemory(_:)` and the
+    /// synthesize inline site — is exercised end-to-end. Asserts that the compact
+    /// synthesis row carries the drawer's subject in its `context` field.
+    @Test func synthesis_row_context_carries_the_filed_subject() async throws {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        let owner = OwnerCredentials(ownerIdentifier: "v2b-context-synthesis")
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner,
+                                        identityKeyStore: InMemoryEstateIdentityKeyStore())
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let subject = "the drawer subject that context must carry"
+        _ = try await dispatcher.dispatch(name: "moot_file_memory", arguments: .object([
+            "content": .string(subject),
+            "subject": .string(subject),
+            "location": .string("context-field-tests"),
+        ]))
+
+        let result = try await dispatcher.dispatch(name: "moot_synthesize", arguments: .object([
+            "filter": .string("unconfirmed"),
+        ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let rows = try #require(
+            obj["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue,
+            "moot_synthesize must return a results array in structuredContent.data")
+        let first = try #require(rows.first?.objectValue, "synthesis must return at least one row")
+        #expect(
+            first["context"]?.stringValue == subject,
+            "synthesis compact row must carry the drawer subject in the context field; got: \(String(describing: first["context"]))")
+    }
 }
