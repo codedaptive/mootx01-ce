@@ -63,7 +63,7 @@ enum AriaV2ChainPositions {
 /// Build the pre-decode (transform-phase) chain registration for one v2 call.
 ///
 /// Called per call from `ToolDispatcher.dispatch` before `AriaSurfaceDecoder.decode`.
-/// The registration carries ONLY a transform hook; no ingress or egress hooks are
+/// These registrations carry ONLY transform hooks; no ingress or egress hooks are
 /// present.
 ///
 /// The mode concern's transform hook performs two jobs, in order:
@@ -80,7 +80,8 @@ enum AriaV2ChainPositions {
 /// - Parameters:
 ///   - environment: The process-environment dictionary used to select the v2 catalog.
 ///   - modeSessionState: The per-session state actor.
-/// - Returns: One registration, concern name `"mode"`, transform hook only.
+/// The report_withheld transform follows mode and strips its call-local opt-in.
+/// - Returns: Transform-only registrations for mode and report_withheld.
 func ariaV2PreDecodeRegistrations(
     environment: [String: String],
     modeSessionState: ModeSessionState
@@ -138,7 +139,12 @@ func ariaV2PreDecodeRegistrations(
         AriaV2ChainRegistration(
             concernName: "mode",
             transform: (position: AriaV2ChainPositions.transformReserved, hook: transformHook)
-        )
+        ),
+        AriaV2ChainRegistration(concernName: "report_withheld", transform: (position: 2, hook: { _, arguments in
+            guard var args = arguments.objectValue else { return arguments }
+            await AriaV2Withheld.call?.configure(args.removeValue(forKey: "report_withheld"))
+            return .object(args)
+        }))
     ]
 }
 
@@ -149,9 +155,10 @@ func ariaV2PreDecodeRegistrations(
 /// Called per call because coaching's egress hook captures the decoded request
 /// and the session state, both of which vary per call.
 ///
-/// Two registrations are returned:
+/// Three registrations are returned:
 ///   - `"mode"`: ingress at position 5, egress at position 20.
 ///   - `"coaching"`: ingress at position 10, egress at position 10.
+///   - `"report_withheld"`: conditional metadata egress at position 30.
 ///
 /// **Ingress order** (5 before 10): the mode ingress reads `pendingDeclaration`
 /// and returns its `unknownHint` as per-concern state, before coaching at position 10
@@ -248,5 +255,8 @@ func ariaV2ProductionRegistrations(
             ingress: (position: AriaV2ChainPositions.ingressCoaching, hook: coachingIngress),
             egress: (position: AriaV2ChainPositions.egressCoaching, hook: coachingEgress)
         ),
+        AriaV2ChainRegistration(concernName: "report_withheld", egress: (position: 30, hook: .transform({ _, result, _ in
+            await AriaV2Withheld.egress(result)
+        }))),
     ]
 }

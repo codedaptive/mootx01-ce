@@ -487,7 +487,9 @@ pub(crate) fn execute(
             execute_knowledge_journal(request, registry, sensitivity_ledger, &meta, now_millis),
         SurfaceRequest::CognitionCatalog { operation, request } =>
             execute_cognition_catalog(operation, request, selected_surface, registry, &meta),
-        SurfaceRequest::Recall(request) => execute_recall(request, registry, &meta, now_millis),
+        SurfaceRequest::Recall(request) => execute_recall(
+            request, registry, &meta, now_millis,
+            sensitivity_ledger.ceiling_sensitivity(now_millis)),
         SurfaceRequest::Synthesize(request) => execute_synthesize(request, registry, &meta),
         SurfaceRequest::Dream(request) => execute_dream(request, registry, &meta, now_millis),
         SurfaceRequest::MigrationRun(request) => execute_migration_run(request, registry, &meta),
@@ -498,7 +500,9 @@ pub(crate) fn execute(
         SurfaceRequest::VaultLifecycle(request) =>
             execute_vault_lifecycle(request, registry, vault_ledger, &meta, now_millis),
         SurfaceRequest::TranscriptRecall(request) =>
-            crate::v2::transcript_recall::execute(request, registry, &meta, now_millis),
+            crate::v2::transcript_recall::execute(request, registry, &meta, now_millis,
+                sensitivity_ledger.ceiling_sensitivity(now_millis)
+                    .unwrap_or(locus_kit::adjectives::AdjectiveSensitivity::Elevated)),
         SurfaceRequest::MonitoringSet(request) => {
             let write_meta = packet_meta(&meta, crate::v2::operation::V2OperationEffect::Write);
             crate::v2::monitoring_set::execute(request, monitoring_control, &write_meta)
@@ -1869,7 +1873,7 @@ fn synthesis_json(data: crate::v2::orchestration::V2SynthesisData) -> serde_json
     value
 }
 
-fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry: &crate::estate_registry::EstateRegistry, meta: &crate::v2::render::V2ResultMeta, now_millis: i64) -> Result<serde_json::Value, JSONRPCError> {
+fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry: &crate::estate_registry::EstateRegistry, meta: &crate::v2::render::V2ResultMeta, now_millis: i64, maximum_sensitivity: Option<locus_kit::adjectives::AdjectiveSensitivity>) -> Result<serde_json::Value, JSONRPCError> {
     use crate::v2::recall_lens::{V2PreciseRecallFailure, V2RecallLensOperation};
     let tool = request.operation.tool_name();
     if request.estate_id.is_some_and(|id| id != selected_memory_list_estate_id(registry)) { return Ok(crate::v2::render::refusal(tool, &crate::v2::render::V2OperationalRefusal { code: "estate_unavailable".into(), message: "The requested estate is not available to this caller.".into(), retryable: false, recovery: None }, meta)); }
@@ -1900,6 +1904,10 @@ fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry
             | V2RecallLensOperation::LensComplexity
     ) {
         use crate::v2::recall_lens::{V2RecallLensError, V2RecallLensLower};
+        let mut authorization_frame = locus_kit::filter::RecallFrame::new(
+            maximum_sensitivity.map(locus_kit::filter::Filter::SensitivityAtMost)
+                .into_iter().collect());
+        authorization_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
         let admission = crate::v2::recall_lens::V2RecallLensAdmission {
             estate_id: selected_memory_list_estate_id(registry),
             estate_handle: registry.default.handle.clone(),
@@ -1909,6 +1917,7 @@ fn execute_recall(request: crate::v2::recall_lens::V2RecallLensRequest, registry
                 selected_memory_list_estate_id(registry).hyphenated(),
                 registry.server_identity,
             ),
+            authorization_frame,
             now_millis,
         };
         let lower = crate::v2::lens_lower::CoordinatorRecallLensLower::new(

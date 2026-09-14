@@ -1653,6 +1653,10 @@ pub struct GLKRecallResult {
     pub union_profile: Option<RecallUnionProfile>,
     /// Hits in the order the active lane and scoring returned them.
     pub hits: Vec<RecallHit>,
+    /// Primary rows excluded only by LocusKit's default-injected sensitivity
+    /// ceiling. An explicit sensitivity filter disables that default, so the
+    /// value is then zero. Excluded rows never leave LocusKit.
+    pub withheld_by_sensitivity: usize,
     /// Dense float lane (Lane D) status for this query.
     ///
     /// Non-None when the lane was dark (did not contribute hits), carrying the

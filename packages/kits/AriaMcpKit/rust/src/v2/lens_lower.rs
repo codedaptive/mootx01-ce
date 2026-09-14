@@ -125,12 +125,24 @@ fn structured_drawers_by_id(
     handle: &genius_locus_kit::handle::EstateHandle,
     ids: &[String],
 ) -> BTreeMap<String, DrawerFill> {
+    structured_drawers_by_id_in_frame(coord, handle, ids, &RecallFrame::new(vec![]))
+}
+
+/// Variant of `structured_drawers_by_id` that preserves the caller's frame.
+/// Partial-cue uses it after ranking so both its recipe admission and its
+/// dense-row hydration apply the same authorized predicate chain.
+fn structured_drawers_by_id_in_frame(
+    coord: &genius_locus_kit::coordinator::EstateCoordinator,
+    handle: &genius_locus_kit::handle::EstateHandle,
+    ids: &[String],
+    frame: &RecallFrame,
+) -> BTreeMap<String, DrawerFill> {
     if ids.is_empty() {
         return BTreeMap::new();
     }
     match coord.estate_for(handle) {
         Ok(locus_estate) => {
-            let mut frame = locus_kit::filter::RecallFrame::new(vec![]);
+            let mut frame = frame.clone();
             frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
             locus_estate
                 .get_drawers_matching_frame(ids, &frame)
@@ -201,6 +213,13 @@ impl CoordinatorRecallLensLower {
         // DrawerFill::Admissible, so every other verdict yields a row of id and
         // centrality alone (indistinguishability rule).
         let ids: Vec<String> = keystones.iter().map(|k| k.id.clone()).collect();
+        if super::report_withheld::enabled() {
+            let mut frame = RecallFrame::new(Vec::new());
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Structured;
+            let counted = coordinator.hydrate_with_sensitivity_count(&admission.estate_handle, &ids, &frame)
+                .map_err(|_| ())?;
+            super::report_withheld::record(counted.withheld_by_sensitivity);
+        }
         let structured = structured_drawers_by_id(&coordinator, &admission.estate_handle, &ids);
 
         Ok(result(
@@ -629,6 +648,9 @@ impl CoordinatorRecallLensLower {
     ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let mut frame = RecallFrame::new(Vec::new());
         frame.limit = positive_limit(request, "limit", RESULT_LIMIT)?;
+        // Synthesis and the companion share the full-hydration primary frame.
+        let mut counted_frame = frame.clone();
+        counted_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
         let output = run_trust_grounded_synthesis(
             &coordinator,
@@ -683,6 +705,7 @@ impl CoordinatorRecallLensLower {
                 ),
             ),
         ]));
+        super::report_withheld::recall(&coordinator, &admission.estate_handle, counted_frame, admission.now_millis)?;
         // Dense-row hydration for ranked IDs through both sensitivity gates.
         // An adjective-restricted drawer is absent from the map; a
         // provenance-restricted one is present carrying a non-Admissible
@@ -765,7 +788,7 @@ impl CoordinatorRecallLensLower {
         let matches = run_partial_cue_recall(
             &coordinator,
             &admission.estate_handle,
-            RecallFrame::new(Vec::new()),
+            admission.authorization_frame.clone(),
             &anchor_id,
             cue_mode,
             limit,
@@ -781,7 +804,10 @@ impl CoordinatorRecallLensLower {
         // bestSpan — which is what Swift's AriaV2RecallLensPrivacy.project
         // emits for the same drawer. An off-scale raw yields neither.
         let ids: Vec<String> = matches.iter().map(|m| m.id.clone()).collect();
-        let structured = structured_drawers_by_id(&coordinator, &admission.estate_handle, &ids);
+        super::report_withheld::recall(&coordinator, &admission.estate_handle,
+            admission.authorization_frame.clone(), admission.now_millis)?;
+        let structured = structured_drawers_by_id_in_frame(
+            &coordinator, &admission.estate_handle, &ids, &admission.authorization_frame);
 
         let estate = coordinator
             .estate_for(&admission.estate_handle)
@@ -2224,6 +2250,7 @@ mod tests {
             estate_handle,
             caller_binding: "test-caller".to_owned(),
             authorization_generation: "test-generation".to_owned(),
+            authorization_frame: RecallFrame::new(vec![]),
             now_millis: 1_700_000_000_000,
         };
         let request = V2RecallLensRequest {

@@ -201,6 +201,7 @@ public struct AriaV2GeniusLocusOrchestrationProvider: AriaV2OrchestrationProvide
                 : AriaV2OrchestrationLowerError.multipleAuthorizedFederationSources
         }
         let result = authorized[0]
+        await AriaV2Withheld.record(result.withheldBySensitivity)
         return .init(
             sourceEstateID: result.sourceHandle.estateUUID,
             requesterEstateID: result.requesterHandle.estateUUID,

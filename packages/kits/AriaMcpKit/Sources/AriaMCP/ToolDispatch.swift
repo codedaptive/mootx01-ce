@@ -632,6 +632,12 @@ public struct ToolDispatcher: Sendable {
     ///
     /// Dispatch: admit via v2 catalog → decode typed request → dispatchV2.
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
+        try await AriaV2Withheld.$call.withValue(AriaV2WithheldCall()) {
+            try await dispatchWithinCall(name: name, arguments: arguments)
+        }
+    }
+
+    private func dispatchWithinCall(name: String, arguments: JSONValue) async throws -> JSONValue {
         let decodedArguments = arguments.objectValue
         let args = decodedArguments ?? [:]
 

@@ -36,9 +36,22 @@ import SubstrateML
 public struct VagueRecallResult: Sendable {
     /// Hop-1 hits: vague items in lane-proximity order (distance ASC).
     public let vagueHits: [Drawer]
+    /// Hop-1 primary candidates excluded by vague recall's default elevated
+    /// sensitivity ceiling. Hydrated hop-2 constituents never contribute.
+    public let withheldBySensitivity: Int
     /// Hop-2 answer set: hydrated constituents, hit-order grouped, bounded
     /// by K per hit and M total (D12).
     public let constituents: [Drawer]
+
+    public init(
+        vagueHits: [Drawer],
+        withheldBySensitivity: Int = 0,
+        constituents: [Drawer]
+    ) {
+        self.vagueHits = vagueHits
+        self.withheldBySensitivity = withheldBySensitivity
+        self.constituents = constituents
+    }
 }
 
 extension GeniusLocusKit {
@@ -90,6 +103,13 @@ extension GeniusLocusKit {
         let byID = Dictionary(
             uniqueKeysWithValues: try await estate.getDrawers(ids: matchedIDs)
                 .map { ($0.id, $0) })
+        let primaryCandidates = matchedIDs.compactMap { byID[$0] }.filter {
+            $0.isVague && $0.state != .superseded
+        }
+        let withheldBySensitivity = await sensitivityWithheldCount(
+            for: RecallFrame(filterChain: [.unconfirmed]),
+            handle: handle,
+            candidates: primaryCandidates)
         // Preserve lane order (distance ASC per the oracle contract).
         // Active vague items only: a fold-in supersedes the prior version in
         // the same lineage, and its lane entry lingers until the maintenance
@@ -120,6 +140,7 @@ extension GeniusLocusKit {
 
         return VagueRecallResult(
             vagueHits: Array(vagueHits),
+            withheldBySensitivity: withheldBySensitivity,
             constituents: constituents)
     }
 }

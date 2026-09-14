@@ -187,7 +187,7 @@ struct SensitivityInheritanceConsolidationTests {
     // MARK: - VagueRecall hop-1 ceiling (§D.3)
 
     @Test("secret vague item is invisible to vagueRecall hop-1 (§D.3 ≤ elevated ceiling)")
-    func secretVagueInvisibleToVagueRecall() async throws {
+    func vagueWithheldCountExcludesPrimarySecretCandidate() async throws {
         let (kit, handle) = try await openEstate()
         let now = Date()
 
@@ -223,6 +223,8 @@ struct SensitivityInheritanceConsolidationTests {
         }
         #expect(!hasSecretConstituentViaHop1,
                 "hop-2 must not surface .secret constituents via a .secret vague item (hop-1 gates)")
+        #expect(result.withheldBySensitivity == 1,
+                "only the secret hop-1 vague candidate counts; constituents do not")
     }
 
     @Test("elevated vague item IS visible to vagueRecall hop-1")
@@ -332,4 +334,3 @@ struct SensitivityInheritanceConsolidationTests {
                 "sweep 2: repair prologue must be idempotent on a correctly-stamped estate")
     }
 }
-

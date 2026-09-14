@@ -12,6 +12,11 @@ public struct GLKRecallResult: Sendable {
     /// Hits in the order the active lane and scoring returned them.
     public let hits: [RecallHit]
 
+    /// Primary rows excluded only by LocusKit's default-injected sensitivity
+    /// ceiling. An explicit sensitivity filter disables the default, so its
+    /// value is then zero. The excluded rows never leave LocusKit.
+    public let withheldBySensitivity: Int
+
 #if MOOTX01_WHOLE_RECORD_DENSE
     /// Dense float lane (Lane D) status for this query. Non-nil when the lane
     /// was dark (did not contribute hits), carrying the observable reason as a
@@ -165,6 +170,7 @@ public struct GLKRecallResult: Sendable {
         plan: RecallPlan,
         unionProfile: RecallUnionProfile?,
         hits: [RecallHit],
+        withheldBySensitivity: Int = 0,
         denseLaneStatus: String? = nil,
         degradedStages: [String],
         laneRanks: [String: [String: Int]],
@@ -175,6 +181,7 @@ public struct GLKRecallResult: Sendable {
         self.plan = plan
         self.unionProfile = unionProfile
         self.hits = hits
+        self.withheldBySensitivity = withheldBySensitivity
         self.denseLaneStatus = denseLaneStatus
         self.degradedStages = degradedStages
         self.laneRanks = laneRanks
@@ -187,6 +194,7 @@ public struct GLKRecallResult: Sendable {
         plan: RecallPlan,
         unionProfile: RecallUnionProfile?,
         hits: [RecallHit],
+        withheldBySensitivity: Int = 0,
         degradedStages: [String],
         laneRanks: [String: [String: Int]],
         queryLatticeAnchor: QueryLatticeAnchor.Anchor?,
@@ -196,6 +204,7 @@ public struct GLKRecallResult: Sendable {
         self.plan = plan
         self.unionProfile = unionProfile
         self.hits = hits
+        self.withheldBySensitivity = withheldBySensitivity
         self.degradedStages = degradedStages
         self.laneRanks = laneRanks
         self.queryLatticeAnchor = queryLatticeAnchor
@@ -203,8 +212,9 @@ public struct GLKRecallResult: Sendable {
     }
 #endif
 
-    /// A copy of this result with `request`, `hits`, `degradedStages` and/or
-    /// `crossEncoder` replaced and every other field (including the
+    /// A copy of this result with `request`, `hits`, `degradedStages`,
+    /// `withheldBySensitivity` and/or `crossEncoder` replaced, with every other
+    /// field (including the
     /// WholeRecordDense lane status, when compiled) carried over. The
     /// director's filter, cross-encoder, trace-failure and degradation paths
     /// and the ARIA anchor-exclusion path derive results through this so no
@@ -213,12 +223,14 @@ public struct GLKRecallResult: Sendable {
         request: GLKRecallRequest? = nil,
         hits: [RecallHit]? = nil,
         degradedStages: [String]? = nil,
+        withheldBySensitivity: Int? = nil,
         crossEncoder: CrossEncoderReport?? = nil
     ) -> GLKRecallResult {
 #if MOOTX01_WHOLE_RECORD_DENSE
         GLKRecallResult(
             request: request ?? self.request, plan: plan, unionProfile: unionProfile,
             hits: hits ?? self.hits,
+            withheldBySensitivity: withheldBySensitivity ?? self.withheldBySensitivity,
             denseLaneStatus: denseLaneStatus,
             degradedStages: degradedStages ?? self.degradedStages,
             laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
@@ -227,6 +239,7 @@ public struct GLKRecallResult: Sendable {
         GLKRecallResult(
             request: request ?? self.request, plan: plan, unionProfile: unionProfile,
             hits: hits ?? self.hits,
+            withheldBySensitivity: withheldBySensitivity ?? self.withheldBySensitivity,
             degradedStages: degradedStages ?? self.degradedStages,
             laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
             crossEncoder: crossEncoder ?? self.crossEncoder)
