@@ -65,6 +65,64 @@ struct AriaV2ConnectedRecallParityTests {
         return values.compactMap(\.objectValue)
     }
 
+    private func anchorWingVector() throws -> [String: JSONValue] {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../Conformance/aria_v2_connected_recall_parity_vector.json")
+            .standardizedFileURL
+        guard let value = try JSONValue.parse(Data(contentsOf: url)).objectValue?["anchor_wing_independence_vector"]?.objectValue else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return value
+    }
+
+    /// Wing scopes the tunnel lookup only, never the anchor search.
+    /// A tunnel-less anchor outside the request wing must still appear in the control result.
+    @Test func connectedRecallReturnsTunnellessAnchorOutsideRequestWing() async throws {
+        let vec = try anchorWingVector()
+        let anchorSpec = try #require(vec["anchor"]?.objectValue)
+        let requestWing = try string(vec, "request_wing")
+        let query = try string(vec, "query")
+        let controlFilter = try string(vec, "control_filter")
+        let limit = try #require(vec["limit"]?.integerValue)
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+
+        // File the anchor in its own room; capture no tunnel so nothing bridges it into the request wing.
+        let anchor = try await fileMemory(
+            dispatcher,
+            content: try string(anchorSpec, "content"),
+            location: try string(anchorSpec, "location"),
+            exportability: anchorSpec["exportability"]?.stringValue)
+        let canonicalAnchor = anchor.lowercased()
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_connected",
+            arguments: .object([
+                "query": .string(query),
+                "wing": .string(requestWing),
+                "filter": .string(controlFilter),
+                "limit": .integer(limit),
+            ]))
+        let resultRows = try rows(result)
+        // Derive the expected set from the fixture so a change to expected.control_result_keys is caught.
+        let expectedSection = try #require(vec["expected"]?.objectValue)
+        func expectedIDs(_ key: String) throws -> Set<String> {
+            guard let values = expectedSection[key]?.arrayValue else { throw CocoaError(.fileReadCorruptFile) }
+            let keys = values.compactMap(\.stringValue)
+            guard keys.count == values.count else { throw CocoaError(.fileReadCorruptFile) }
+            return Set(try keys.map {
+                switch $0 {
+                case "anchor": return canonicalAnchor
+                default: throw CocoaError(.fileReadCorruptFile)
+                }
+            })
+        }
+        let controlIDs = resultRows.compactMap { $0["id"]?.stringValue?.lowercased() }
+        #expect(Set(controlIDs) == (try expectedIDs("control_result_keys")),
+                "folding the request wing into the anchor filter would exclude a tunnel-less anchor; got IDs: \(controlIDs)")
+    }
+
     @Test func sharedVectorKeepsAnchorWingIndependentAndWalkHydrationFiltered() async throws {
         let vector = try vector()
         let anchorSpec = try #require(vector["anchor"]?.objectValue)
