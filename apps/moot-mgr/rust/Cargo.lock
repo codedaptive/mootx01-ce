@@ -902,6 +902,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fact-extraction-kit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1334,6 +1342,7 @@ dependencies = [
  "corpus-kit-providers",
  "eidetic-lib",
  "engram-lib",
+ "fact-extraction-kit",
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",

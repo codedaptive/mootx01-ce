@@ -495,6 +495,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "corpus-kit-providers"
+version = "0.1.0"
+dependencies = [
+ "corpus-kit",
+ "eidetic-lib",
+ "engram-lib",
+ "lattice-lib",
+ "sha2 0.10.9",
+ "substrate-kernel",
+ "substrate-ml",
+ "substrate-types",
+ "synapsekit",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -856,6 +871,14 @@ name = "estate-encryption"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+]
+
+[[package]]
+name = "fact-extraction-kit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1288,11 +1311,14 @@ dependencies = [
  "context-distill-lib",
  "convergence-kit",
  "corpus-kit",
+ "corpus-kit-providers",
  "eidetic-lib",
  "engram-lib",
+ "fact-extraction-kit",
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",
+ "moot-product-identity",
  "persistence-kit",
  "queuekit",
  "serde",
@@ -1582,6 +1608,7 @@ dependencies = [
 name = "lattice-lib"
 version = "0.1.0"
 dependencies = [
+ "moot-product-identity",
  "serde",
  "serde_json",
  "substrate-kernel",
@@ -1650,7 +1677,6 @@ dependencies = [
 name = "locus-kit"
 version = "0.1.0"
 dependencies = [
- "adornment-lib",
  "base64 0.22.1",
  "ed25519-dalek",
  "intellectus-lib",
@@ -1792,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "moot-math-speedtest"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "genius-locus-kit",
@@ -1803,6 +1829,13 @@ dependencies = [
  "substrate-kernel",
  "substrate-ml",
  "substrate-types",
+]
+
+[[package]]
+name = "moot-product-identity"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -2836,6 +2869,7 @@ dependencies = [
 name = "substrate-ml"
 version = "1.0.0-skeleton"
 dependencies = [
+ "context-distill-lib",
  "intellectus-lib",
  "substrate-kernel",
  "substrate-types",
