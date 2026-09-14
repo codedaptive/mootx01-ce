@@ -17,6 +17,8 @@ LLM context tokens.
 - `moot_estate_ping` - check server and estate reachability.
 - `moot_estate_status` - inspect memory count, wings, facts, sync/status, and protocol hints.
 - `moot_estate_map` - browse structure and memory counts by location.
+- `moot_help` - discover callable operations or inspect one operation's contract. Use when an operation is absent, a required argument is unclear, or the server reports a compatibility error. With no arguments returns the available operations; `{"tool":"moot_memory_search"}` requests one operation's full contract.
+- `moot_monitoring_set` - configure daemon telemetry monitoring and confirm its effective state. Pass `{"enabled":true}` to turn on background signal collection.
 - `moot_read_journal` - resume recent agent continuity.
 - `moot_list_lenses` - discover available reasoning lenses and recipes.
 - `moot_list_recipes` - browse the full recipe catalog with descriptions and required capabilities.
@@ -24,10 +26,11 @@ LLM context tokens.
 ## Recall
 
 - `moot_memory_search` - ordinary memory recall; broad, high-recall search.
+- `moot_memory_recall_transcript` - find previous conversations containing the answer to a question, including earlier decisions and troubleshooting. Use when the user references a prior session or conversation.
 - `moot_recall_precise` - exact recall when names, numbers, paths, dates, versions, identifiers, or near-duplicates matter. Supports named reduction compositions for re-ranking.
 - `moot_recall_shaped` - shaped recall with fusion presets (balanced, precise, conceptual, broad, lexical, associative, consensus, temporal, structural, anti_redundant, and others). Use when the recall mode matters more than a specific query string.
-- `moot_recall_distilled` - dense recall from the distilled factoid layer. Returns compact factoids with confidence scores. Use after `moot_distill` has populated the distilled tier.
-- `moot_recollect` - recollect: fan-out from a distilled factoid to its source memories. Use when the user needs the full episodic detail behind a factoid.
+- `moot_recall_distilled` - dense recall from the distilled factoid layer. Returns compact factoids with confidence scores.
+- `moot_memory_get` - fetch one or more memories by id. Supports `depth`: `subject` (dense row only), `distilled` (dense row plus distilled text), `skim` (source-order distilled preview with a 512 UTF-8 byte target; intact groups may exceed it, and you fetch distilled or full for the remainder), or `full` (complete record including verbatim content).
 - `moot_fact_search` - structured entity/relation/fact lookup.
 - `moot_fact_timeline` - trace how structured facts changed over time.
 
@@ -46,6 +49,7 @@ LLM context tokens.
 - `moot_withdraw_memory` - soft-remove stale content from active circulation.
 - `moot_erase_memory` - permanent deletion only when explicitly required and confirmed.
 - `moot_retire_fact` - retire a stale or false structured fact.
+- `moot_propose_contradictions` - resolve explicitly selected contradiction candidates from a prior `moot_hunt_contradictions` analysis. Pass the `analysis_ref` and the `candidate_ids` to act on.
 
 ## Graph And Associations
 
@@ -74,7 +78,6 @@ LLM context tokens.
 
 ## Distillation And Maintenance
 
-- `moot_distill` - run one distillation sweep to populate on-row distilled representations of active memories. Idempotent; already-distilled items are skipped. Run periodically or after significant memory growth.
 - `moot_reindex` - recovery tool: backfill BM25 and vector indexes after an index loss or for estates created before encode-on-capture. Not needed after imports; they index themselves.
 - `moot_palace_import` - import a MemPalace directly into the estate (drawers, tunnels, KG triples). The import triggers its own indexing and dreaming; poll `moot_drain_status` to watch encoding settle.
 
@@ -93,10 +96,9 @@ LLM context tokens.
 
 ## Migration
 
-- `moot_run_migration` - benchmark migration plans against a corpus with the zero-silent-loss gate. Returns ranked survivors with branch ids.
-- `moot_confirm_migration` - promote the winning migration branch and discard losers. Requires explicit confirmation.
+- `moot_migration_run` - benchmark migration plans against a corpus with the zero-silent-loss gate. Returns ranked survivors with branch ids.
+- `moot_migration_confirm` - promote the winning migration branch and discard losers. Requires explicit confirmation.
 
 ## Federation
 
-- `moot_federated_search` - grant-authorized search across locally-open estates.
-
+- `moot_federated_recall` - grant-authorized recall across locally-open estates.

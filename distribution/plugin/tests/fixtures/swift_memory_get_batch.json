@@ -1,0 +1,1225 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Fetched 50 authorized memories.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "memories": [
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m203\nbody 203",
+            "distilled": "# m203\nbody 203",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "077230e6-6abd-49e6-881e-0bb809542be7"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:06Z",
+            "lineage_id": "3d4225f1-3dce-45e9-835a-bfebc42abcbb",
+            "memory_id": "077230e6-6abd-49e6-881e-0bb809542be7",
+            "placement": {
+              "room": "harness-import/bigslug/m203.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m203",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m201\nbody 201",
+            "distilled": "# m201\nbody 201",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "1b47e841-22ea-4940-8434-572772f1f9af"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:06Z",
+            "lineage_id": "f05eb54b-d6fc-42a8-85c1-e43d979857ef",
+            "memory_id": "1b47e841-22ea-4940-8434-572772f1f9af",
+            "placement": {
+              "room": "harness-import/bigslug/m201.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m201",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m196\nbody 196",
+            "distilled": "# m196\nbody 196",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "38497287-4ca7-4d57-bac1-cbd28c073b0a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "54311612-3709-4c1c-bf74-d26544e0f076",
+            "memory_id": "38497287-4ca7-4d57-bac1-cbd28c073b0a",
+            "placement": {
+              "room": "harness-import/bigslug/m196.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m196",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m182\nbody 182",
+            "distilled": "# m182\nbody 182",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3416ab76-e415-4664-aea2-97321a456e05"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "1ac77c9a-d5b1-4850-8e96-a8192ed3b4ba",
+            "memory_id": "3416ab76-e415-4664-aea2-97321a456e05",
+            "placement": {
+              "room": "harness-import/bigslug/m182.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m182",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m181\nbody 181",
+            "distilled": "# m181\nbody 181",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "08645602-9940-4d78-ae20-cc3f92d6c6f2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "c5f5d802-7da6-42e9-ad41-1af9d3b62bdb",
+            "memory_id": "08645602-9940-4d78-ae20-cc3f92d6c6f2",
+            "placement": {
+              "room": "harness-import/bigslug/m181.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m181",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m180\nbody 180",
+            "distilled": "# m180\nbody 180",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "1a4c5abd-61ed-4cf9-81fe-f5e0c84dc967"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "4de08d1c-1aab-489d-b6a4-427629f74319",
+            "memory_id": "1a4c5abd-61ed-4cf9-81fe-f5e0c84dc967",
+            "placement": {
+              "room": "harness-import/bigslug/m180.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m180",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m175\nbody 175",
+            "distilled": "# m175\nbody 175",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "37282e9c-6cad-421a-acc4-977c04d4b3fc"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "ab00b001-4c93-43e9-a854-63b73bdc86f4",
+            "memory_id": "37282e9c-6cad-421a-acc4-977c04d4b3fc",
+            "placement": {
+              "room": "harness-import/bigslug/m175.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m175",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m172\nbody 172",
+            "distilled": "# m172\nbody 172",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "13de4939-0bec-4732-864a-616447b08b8f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "2a0790c4-2b0d-40e0-be76-cb09757b5366",
+            "memory_id": "13de4939-0bec-4732-864a-616447b08b8f",
+            "placement": {
+              "room": "harness-import/bigslug/m172.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m172",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m171\nbody 171",
+            "distilled": "# m171\nbody 171",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "01047ee5-59cc-4171-ace7-f57a3c75c7e7"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "c46edccf-6814-466c-9ffe-8400b2079e3d",
+            "memory_id": "01047ee5-59cc-4171-ace7-f57a3c75c7e7",
+            "placement": {
+              "room": "harness-import/bigslug/m171.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m171",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m169\nbody 169",
+            "distilled": "# m169\nbody 169",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3c5761bc-7a61-4d02-8a15-0b138e41cbfc"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "9f1b47cc-617c-4aca-baf0-184f855bbc52",
+            "memory_id": "3c5761bc-7a61-4d02-8a15-0b138e41cbfc",
+            "placement": {
+              "room": "harness-import/bigslug/m169.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m169",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m165\nbody 165",
+            "distilled": "# m165\nbody 165",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "176aee09-ae46-4160-91ab-dc7d6395e795"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "12b53c2f-9b29-447e-a518-598525db0a02",
+            "memory_id": "176aee09-ae46-4160-91ab-dc7d6395e795",
+            "placement": {
+              "room": "harness-import/bigslug/m165.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m165",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m156\nbody 156",
+            "distilled": "# m156\nbody 156",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "2af9ca78-f498-476a-aecc-73f30541802d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "eff8f671-7257-44b5-b597-cdc839e12bd4",
+            "memory_id": "2af9ca78-f498-476a-aecc-73f30541802d",
+            "placement": {
+              "room": "harness-import/bigslug/m156.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m156",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m153\nbody 153",
+            "distilled": "# m153\nbody 153",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "2d3dd3ad-6ec1-4c9e-8c4c-d8376cd02d8b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "a56f5a35-4e0b-4e4d-8e41-02d2efeda4ae",
+            "memory_id": "2d3dd3ad-6ec1-4c9e-8c4c-d8376cd02d8b",
+            "placement": {
+              "room": "harness-import/bigslug/m153.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m153",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m151\nbody 151",
+            "distilled": "# m151\nbody 151",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "2c38a308-4531-4973-91f0-c5a93f4aa5ff"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "6e94b800-f374-4d4f-b858-c851591baadd",
+            "memory_id": "2c38a308-4531-4973-91f0-c5a93f4aa5ff",
+            "placement": {
+              "room": "harness-import/bigslug/m151.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m151",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m146\nbody 146",
+            "distilled": "# m146\nbody 146",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3172351f-1426-4cd2-abfb-905ea13843dc"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "77e1b192-2369-4ba1-b332-9a84b16ba78a",
+            "memory_id": "3172351f-1426-4cd2-abfb-905ea13843dc",
+            "placement": {
+              "room": "harness-import/bigslug/m146.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m146",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m144\nbody 144",
+            "distilled": "# m144\nbody 144",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "25f5df87-e0f0-4b2b-88d8-cc909c124ea0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "7fee2770-3d90-412a-82b7-4090cb864c35",
+            "memory_id": "25f5df87-e0f0-4b2b-88d8-cc909c124ea0",
+            "placement": {
+              "room": "harness-import/bigslug/m144.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m144",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m143\nbody 143",
+            "distilled": "# m143\nbody 143",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "37196a3f-6667-460f-8a76-69c56c3e5aaf"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "77cfbc14-0b34-4e29-8615-ecd874ef3e3e",
+            "memory_id": "37196a3f-6667-460f-8a76-69c56c3e5aaf",
+            "placement": {
+              "room": "harness-import/bigslug/m143.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m143",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m135\nbody 135",
+            "distilled": "# m135\nbody 135",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "20ed58c9-380f-43ec-8c6e-6597c50b9e90"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "e86bd8eb-5eb9-4acb-a427-52d2e60e6f6b",
+            "memory_id": "20ed58c9-380f-43ec-8c6e-6597c50b9e90",
+            "placement": {
+              "room": "harness-import/bigslug/m135.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m135",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m122\nbody 122",
+            "distilled": "# m122\nbody 122",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "450124f4-357b-4df2-9aa2-21debdb1b4a8"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "ae2d57d0-7d97-4198-856c-718b14fc09bb",
+            "memory_id": "450124f4-357b-4df2-9aa2-21debdb1b4a8",
+            "placement": {
+              "room": "harness-import/bigslug/m122.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m122",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m111\nbody 111",
+            "distilled": "# m111\nbody 111",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "1cfabdf1-c131-463b-913d-bc94a9f84782"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "10d720d9-8ec7-4e96-a319-028b1c69de84",
+            "memory_id": "1cfabdf1-c131-463b-913d-bc94a9f84782",
+            "placement": {
+              "room": "harness-import/bigslug/m111.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m111",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m107\nbody 107",
+            "distilled": "# m107\nbody 107",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "17c189ba-2ec9-4c72-be1c-677495ad271f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "1f9343c7-67cc-49ac-80f5-9ae69a4f8dd4",
+            "memory_id": "17c189ba-2ec9-4c72-be1c-677495ad271f",
+            "placement": {
+              "room": "harness-import/bigslug/m107.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m107",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m104\nbody 104",
+            "distilled": "# m104\nbody 104",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "35ef911f-8f93-4754-ae3d-0759913e620e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "b083b18e-8956-4392-94eb-5a8d242ee670",
+            "memory_id": "35ef911f-8f93-4754-ae3d-0759913e620e",
+            "placement": {
+              "room": "harness-import/bigslug/m104.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m104",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m099\nbody 099",
+            "distilled": "# m099\nbody 099",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "049a0fbf-829b-48df-9e00-4de538a9afc0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "7cb2be8e-1faa-468c-b06b-a0a2f8a7c09a",
+            "memory_id": "049a0fbf-829b-48df-9e00-4de538a9afc0",
+            "placement": {
+              "room": "harness-import/bigslug/m099.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m099",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m098\nbody 098",
+            "distilled": "# m098\nbody 098",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3851932a-7797-48b1-99c6-da65ac7dd9e5"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "a231f44e-7dbc-45cc-b3b9-936af12f7ceb",
+            "memory_id": "3851932a-7797-48b1-99c6-da65ac7dd9e5",
+            "placement": {
+              "room": "harness-import/bigslug/m098.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m098",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m097\nbody 097",
+            "distilled": "# m097\nbody 097",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "2307701a-f707-4f2c-a0b7-a88aeeb1c935"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "67e6b5ed-b254-480d-9bd9-f167a3365b56",
+            "memory_id": "2307701a-f707-4f2c-a0b7-a88aeeb1c935",
+            "placement": {
+              "room": "harness-import/bigslug/m097.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m097",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m094\nbody 094",
+            "distilled": "# m094\nbody 094",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "308911a7-2f5e-4e6a-9bca-1f901dbc1991"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "75ca7fea-3542-4ff9-99f3-2294772d326f",
+            "memory_id": "308911a7-2f5e-4e6a-9bca-1f901dbc1991",
+            "placement": {
+              "room": "harness-import/bigslug/m094.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m094",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m093\nbody 093",
+            "distilled": "# m093\nbody 093",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "20a4b77c-0c69-4d67-84be-f0741af5a944"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "1a80cdaf-f25c-412d-899e-450cc1abb81c",
+            "memory_id": "20a4b77c-0c69-4d67-84be-f0741af5a944",
+            "placement": {
+              "room": "harness-import/bigslug/m093.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m093",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m091\nbody 091",
+            "distilled": "# m091\nbody 091",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3b0b398c-575f-4643-ba7e-6c2f1378dc62"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "a6a7fa48-f118-49b9-a37d-e7ea4b6a5da8",
+            "memory_id": "3b0b398c-575f-4643-ba7e-6c2f1378dc62",
+            "placement": {
+              "room": "harness-import/bigslug/m091.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m091",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m086\nbody 086",
+            "distilled": "# m086\nbody 086",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3019ad6b-e532-4241-a297-3ddba59134a8"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:05Z",
+            "lineage_id": "59080fb1-d736-4398-a0e3-b1d4e82fa6f1",
+            "memory_id": "3019ad6b-e532-4241-a297-3ddba59134a8",
+            "placement": {
+              "room": "harness-import/bigslug/m086.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m086",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m080\nbody 080",
+            "distilled": "# m080\nbody 080",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "18477f36-6447-4609-b226-c73383beec71"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "b74371da-da24-4a4d-8823-9d204b499775",
+            "memory_id": "18477f36-6447-4609-b226-c73383beec71",
+            "placement": {
+              "room": "harness-import/bigslug/m080.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m080",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m077\nbody 077",
+            "distilled": "# m077\nbody 077",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "0d3a5619-a1b9-4c74-bec1-6ee58b095ee2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "8bdf700a-8a37-4468-a403-2491941596c9",
+            "memory_id": "0d3a5619-a1b9-4c74-bec1-6ee58b095ee2",
+            "placement": {
+              "room": "harness-import/bigslug/m077.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m077",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m076\nbody 076",
+            "distilled": "# m076\nbody 076",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "49d76817-58fc-4187-b420-a5fbe638e8d4"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "3dd9d3e7-c9f4-491d-a775-b1b6fa9530a7",
+            "memory_id": "49d76817-58fc-4187-b420-a5fbe638e8d4",
+            "placement": {
+              "room": "harness-import/bigslug/m076.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m076",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m074\nbody 074",
+            "distilled": "# m074\nbody 074",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "1d785723-51e8-465c-a918-cf5e1b33da24"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "ce9008d7-a598-485a-a0da-da380556ae25",
+            "memory_id": "1d785723-51e8-465c-a918-cf5e1b33da24",
+            "placement": {
+              "room": "harness-import/bigslug/m074.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m074",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m071\nbody 071",
+            "distilled": "# m071\nbody 071",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "1fe841bb-5c51-43bf-ad5a-08ddc6921dd3"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "981cb0a2-f4be-43a8-b47c-bf23279bf910",
+            "memory_id": "1fe841bb-5c51-43bf-ad5a-08ddc6921dd3",
+            "placement": {
+              "room": "harness-import/bigslug/m071.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m071",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m069\nbody 069",
+            "distilled": "# m069\nbody 069",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "143753e1-9785-4d16-9075-eb4378dc2745"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "83a2dcd2-503e-4545-b20e-5bbe7a678c2f",
+            "memory_id": "143753e1-9785-4d16-9075-eb4378dc2745",
+            "placement": {
+              "room": "harness-import/bigslug/m069.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m069",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m055\nbody 055",
+            "distilled": "# m055\nbody 055",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "16e74d5e-cba9-4d58-880e-1fa8b71bc3c2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "1de07562-d64d-4252-996c-6aa811b44bf6",
+            "memory_id": "16e74d5e-cba9-4d58-880e-1fa8b71bc3c2",
+            "placement": {
+              "room": "harness-import/bigslug/m055.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m055",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m053\nbody 053",
+            "distilled": "# m053\nbody 053",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "19c5a68d-616f-4ba3-949a-8138a3314719"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "2d2437bf-01ee-4f89-ab20-b8cd4f22afd5",
+            "memory_id": "19c5a68d-616f-4ba3-949a-8138a3314719",
+            "placement": {
+              "room": "harness-import/bigslug/m053.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m053",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m048\nbody 048",
+            "distilled": "# m048\nbody 048",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3262a2a4-9ab4-478c-9883-1a6a6fd6d67e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "e638503f-2751-421b-ab58-e9c8c0742a64",
+            "memory_id": "3262a2a4-9ab4-478c-9883-1a6a6fd6d67e",
+            "placement": {
+              "room": "harness-import/bigslug/m048.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m048",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m043\nbody 043",
+            "distilled": "# m043\nbody 043",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "0200f9d3-fcb2-43aa-bde5-6c083abff2c2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "0db50e3f-a18d-4eef-98be-3002ce825258",
+            "memory_id": "0200f9d3-fcb2-43aa-bde5-6c083abff2c2",
+            "placement": {
+              "room": "harness-import/bigslug/m043.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m043",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m038\nbody 038",
+            "distilled": "# m038\nbody 038",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "22a8bbd5-432a-4d7d-9579-9a73c5c3f934"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "5b2b5858-0891-4232-8522-9e316abf185c",
+            "memory_id": "22a8bbd5-432a-4d7d-9579-9a73c5c3f934",
+            "placement": {
+              "room": "harness-import/bigslug/m038.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m038",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m036\nbody 036",
+            "distilled": "# m036\nbody 036",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "205d44a8-8d84-46c4-8b79-999bb72c11da"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "7a56ffec-b0be-4bd2-bbe0-77b16ce29667",
+            "memory_id": "205d44a8-8d84-46c4-8b79-999bb72c11da",
+            "placement": {
+              "room": "harness-import/bigslug/m036.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m036",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m031\nbody 031",
+            "distilled": "# m031\nbody 031",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "00f1a743-643f-4311-a0ce-e9d29fac189c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "fd67fa25-ac6d-40b8-b507-4dc964e928ae",
+            "memory_id": "00f1a743-643f-4311-a0ce-e9d29fac189c",
+            "placement": {
+              "room": "harness-import/bigslug/m031.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m031",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m018\nbody 018",
+            "distilled": "# m018\nbody 018",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "27fc3a27-ed60-4e81-8990-7e3d7dc54538"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "6a666ae0-ed0b-45e0-a240-587e30d0d505",
+            "memory_id": "27fc3a27-ed60-4e81-8990-7e3d7dc54538",
+            "placement": {
+              "room": "harness-import/bigslug/m018.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m018",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m017\nbody 017",
+            "distilled": "# m017\nbody 017",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "2504ac59-2ad0-4225-a0e9-1089c0d58ec8"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "e0400e24-3d2f-4f11-a70b-8c074eca7298",
+            "memory_id": "2504ac59-2ad0-4225-a0e9-1089c0d58ec8",
+            "placement": {
+              "room": "harness-import/bigslug/m017.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m017",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m016\nbody 016",
+            "distilled": "# m016\nbody 016",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "1330cb85-f538-48f8-9cb4-3ad17f221531"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "fc0a1a8d-c315-47ac-9c8c-ca32c4f49503",
+            "memory_id": "1330cb85-f538-48f8-9cb4-3ad17f221531",
+            "placement": {
+              "room": "harness-import/bigslug/m016.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m016",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m013\nbody 013",
+            "distilled": "# m013\nbody 013",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "330379e1-b22c-409f-a309-d1f755d81cc9"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "ebb4dee0-80e7-43a9-ba67-2bd6b00c497e",
+            "memory_id": "330379e1-b22c-409f-a309-d1f755d81cc9",
+            "placement": {
+              "room": "harness-import/bigslug/m013.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m013",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m010\nbody 010",
+            "distilled": "# m010\nbody 010",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "3ee106d2-d4b5-44fc-b301-91ec6c53d6b9"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "172e00d4-7dcb-435f-bbeb-8d8badf095c4",
+            "memory_id": "3ee106d2-d4b5-44fc-b301-91ec6c53d6b9",
+            "placement": {
+              "room": "harness-import/bigslug/m010.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m010",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m007\nbody 007",
+            "distilled": "# m007\nbody 007",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "1c68e6e0-b5c7-4b44-b118-444598f2ae13"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "05e32443-bb74-4292-b6fe-285f165c2be8",
+            "memory_id": "1c68e6e0-b5c7-4b44-b118-444598f2ae13",
+            "placement": {
+              "room": "harness-import/bigslug/m007.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m007",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m005\nbody 005",
+            "distilled": "# m005\nbody 005",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "46056d97-8700-47da-aa2f-a9eb5f136f9b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "11df32c5-e914-4baf-a6df-dffdbd9d02bc",
+            "memory_id": "46056d97-8700-47da-aa2f-a9eb5f136f9b",
+            "placement": {
+              "room": "harness-import/bigslug/m005.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m005",
+            "trust": "verbatim"
+          },
+          {
+            "confirmation": "unconfirmed",
+            "content": "# m003\nbody 003",
+            "distilled": "# m003\nbody 003",
+            "event_time": "2026-09-01T00:00:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "451481ba-d135-4fb9-8e53-fa71fec9b91d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T23:40:04Z",
+            "lineage_id": "f12c755d-de19-4ca6-9f91-36f5305aafad",
+            "memory_id": "451481ba-d135-4fb9-8e53-fa71fec9b91d",
+            "placement": {
+              "room": "harness-import/bigslug/m003.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "m003",
+            "trust": "verbatim"
+          }
+        ]
+      },
+      "meta": {
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_get"
+    }
+  }
+}

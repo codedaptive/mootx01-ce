@@ -111,16 +111,19 @@ A working setup should show four behaviors:
 These adapters assume the MOOTx01 MCP surface exposes tools with these meanings:
 
 - estate health and status,
-- memory search and precise recall,
+- help and operation discovery,
+- memory search, precise recall, and transcript recall,
 - memory filing and updates,
 - memory confirmation, withdrawal, and erasure,
 - memory links and connection search,
 - fact filing and fact search,
 - journal read and write,
 - reasoning lenses and synthesis,
+- contradiction proposal and resolution,
 - dream or background consolidation,
+- monitoring configuration and status,
 - vault import, export, status, reconcile, and job checks,
-- federated search where available.
+- federated recall where available.
 
 If a harness namespaces MCP tools, use the matching namespaced tool.
 
@@ -131,19 +134,23 @@ These adapters assume the MOOTx01 MCP surface exposes these tool names:
 - `moot_estate_ping`
 - `moot_estate_status`
 - `moot_estate_map`
+- `moot_help`
+- `moot_monitoring_set`
 - `moot_read_journal`
 - `moot_write_journal`
 - `moot_memory_search`
+- `moot_memory_recall_transcript`
 - `moot_recall_precise`
 - `moot_recall_shaped`
 - `moot_recall_distilled`
-- `moot_recollect`
+- `moot_memory_get`
 - `moot_file_memory`
 - `moot_move_memory`
 - `moot_update_memory`
 - `moot_confirm_memory`
 - `moot_withdraw_memory`
 - `moot_erase_memory`
+- `moot_propose_contradictions`
 - `moot_link_memories`
 - `moot_connection_search`
 - `moot_connection_map`
@@ -154,18 +161,17 @@ These adapters assume the MOOTx01 MCP surface exposes these tool names:
 - `moot_list_lenses`
 - `moot_list_recipes`
 - `moot_synthesize`
-- `moot_distill`
 - `moot_dream`
 - `moot_reindex`
 - `moot_palace_import`
-- `moot_run_migration`
-- `moot_confirm_migration`
+- `moot_migration_run`
+- `moot_migration_confirm`
 - `moot_vault_import`
 - `moot_vault_export`
 - `moot_vault_status`
 - `moot_vault_reconcile`
 - `moot_vault_job`
-- `moot_federated_search`
+- `moot_federated_recall`
 
 If a harness namespaces MCP tools, preserve the intent and use the matching
 namespaced tool.

@@ -27,9 +27,14 @@
 //   LiveDaemonClient       — live JSON-RPC 2.0 over HTTP implementation
 //   DaemonError            — errors from daemon communication
 //   IngestResult           — per-file outcome from the ingest walker
+//   HarnessMemoryFrontMatter: front matter `metadata:` line inject / strip (pure);
+//                            carries moot_memory_id and moot_generated_index
 //   RestoreResult          — per-file outcome from restore on disable
-//   HarnessMemoryIngest    — ingest walker: file → confirm write → delete source
-//   HarnessMemoryRestore   — restore: estate → disk, mark estate records superseded
+//   HarnessMemoryIngest    : ingest walker: file → confirm write → delete source;
+//                            a restored file is matched to its estate row by id
+//   HarnessMemoryRestore   : restore: estate → disk, id carried in front matter,
+//                            estate rows left untouched; a marked MEMORY.md index
+//                            is generated per slug when no captured one exists
 //
 // Observability emit points (MXE-HM-2: ObserverSink wiring out of scope for
 // this mission; names reserved here so the follow-up wires without archaeology):
@@ -37,7 +42,7 @@
 //   harness.ingest.filed.count    — memories filed during ingest walker
 //   harness.ingest.removed.count  — source files removed after confirmed write
 //   harness.restore.count         — files written back to disk on disable
-//   harness.revive.count          — existing drawers revived unchanged on re-enable
+//   harness.ingest.matched.count: restored files whose row still holds the content (re-enable)
 //   harness.hook.fire.rate        — hook fire rate over time (teaching-decay curve)
 
 import Foundation
@@ -462,17 +467,16 @@ public protocol DaemonClient: Sendable {
     func fileMemory(location: String, content: String, subject: String, eventTime: Date, kind: String?) async throws -> Bool
 
     /// List estate memories whose location begins with `prefix`.
-    /// Returns active (non-superseded) AND superseded records; callers filter
-    /// by `isSuperseded` based on their use-case (ingest checks superseded for
-    /// revive; restore lists only active).
+    /// Returns active records only, complete across every server page. The
+    /// server never lists a superseded row, so `isSuperseded` is false on
+    /// every record this call returns.
     func listMemories(locationPrefix: String) async throws -> [HarnessMemoryRecord]
 
-    /// Apply a mutation to an existing estate record.
-    /// - Parameters:
-    ///   - id: the estate drawer ID.
-    ///   - mutation: one of `"supersede"` or `"revive"`.
-    ///   - note: human-readable rationale appended to the estate audit trail.
-    func updateMemory(id: String, mutation: String, note: String) async throws
+    /// Fetch one estate record by id.
+    /// Returns nil when the server reports the id unknown, which is also the
+    /// answer for a superseded row (the server hides superseded rows from
+    /// `moot_memory_get`). Throws on transport failure.
+    func getMemory(id: String) async throws -> HarnessMemoryRecord?
 
     /// Quick liveness check. Returns true if the daemon responded within the
     /// client's configured timeout; false on any network or timeout error.
@@ -483,10 +487,17 @@ public protocol DaemonClient: Sendable {
 public enum DaemonError: Error, Sendable {
     /// The HTTP response status code was not 200.
     case httpError(Int)
-    /// The response body could not be decoded as JSON-RPC 2.0.
+    /// The response body could not be decoded as JSON-RPC 2.0, or a tool
+    /// result lacked a field the contract requires (a list page without
+    /// `has_more`, a get without a parsable record).
     case parseError
-    /// The JSON-RPC response contained an error object.
-    case rpcError(String)
+    /// The daemon said no. Two frame shapes, one case, identical in Rust:
+    ///   - an ARIA v2 refusal: HTTP 200, no JSON-RPC error, `result.isError`
+    ///     true and `result.structuredContent.error` carrying the code
+    ///     (`code` is empty when the frame names none);
+    ///   - a top-level JSON-RPC `error` object: `code` is `"rpc_error"`.
+    /// A refusal is never an empty result; callers decide per code what to do.
+    case refused(code: String, message: String)
 }
 
 /// Live implementation of `DaemonClient` that POSTs JSON-RPC 2.0 requests
@@ -531,6 +542,13 @@ public struct LiveDaemonClient: DaemonClient {
         self.session = URLSession(configuration: config)
     }
 
+    /// Testing initializer — injects a custom URLSession (e.g. backed by a mock
+    /// URLProtocol). Not for production use; production code uses the port-based inits.
+    init(baseURL: URL, session: URLSession) {
+        self.baseURL = baseURL
+        self.session = session
+    }
+
     public func fileMemory(
         location: String,
         content: String,
@@ -549,18 +567,144 @@ public struct LiveDaemonClient: DaemonClient {
     }
 
     public func listMemories(locationPrefix: String) async throws -> [HarnessMemoryRecord] {
-        // moot_memory_list with a location_prefix filter to scope results.
-        // Parameter name inferred from the estate's query conventions.
-        let arguments: [String: Any] = ["location_prefix": locationPrefix]
-        guard let result = try await callTool("moot_memory_list", arguments: arguments) else {
-            return []
+        // moot_memory_list (ARIA v2): file memories are stored in the "Agentic Memory"
+        // wing regardless of their location prefix; `room` equals the full location
+        // string (not a sub-segment). Strip any leading slashes from the caller's
+        // prefix before matching so "/" and "" both return an empty list rather
+        // than trapping on an empty parts[0] subscript.
+        let normalized = locationPrefix.drop(while: { $0 == "/" })
+        let prefix = String(normalized)
+        guard !prefix.isEmpty else { return [] }
+
+        // For an exact file location (3+ path components, no trailing slash), supply
+        // the full location as the room filter so the server does the match.
+        // For a directory prefix (trailing slash), omit room and filter client-side.
+        let endsWithSlash = locationPrefix.hasSuffix("/")
+        let componentCount = prefix.split(separator: "/").count
+        // `limit` is the server maximum (1..200); larger wings page.
+        var baseArguments: [String: Any] = ["wing": "Agentic Memory", "limit": 200]
+        if !endsWithSlash && componentCount >= 3 {
+            baseArguments["room"] = prefix
         }
-        return parseMemoryRecords(from: result)
+
+        // Page through the wing. The server answers `has_more` and `next_cursor`;
+        // the next request carries that cursor. A `cursor_stale` or
+        // `cursor_expired` refusal means the inventory moved under the cursor:
+        // the ids collected so far are discarded and enumeration restarts from
+        // the first page, at most `maxRestarts` times. Any other refusal
+        // propagates. A cursor already seen fails the whole call with
+        // DaemonError.parseError, discarding every id collected so far, so a
+        // misbehaving server cannot spin this client forever.
+        let maxRestarts = 3
+        var restarts = 0
+        var ids: [String] = []
+        while true {
+            do {
+                ids = try await enumerateIds(baseArguments: baseArguments)
+                break
+            } catch DaemonError.refused(let code, _)
+                where (code == "cursor_stale" || code == "cursor_expired") && restarts < maxRestarts {
+                restarts += 1
+            }
+        }
+
+        // Client-side prefix filter for directory queries where room was omitted.
+        return try await fetchMemoryRecords(ids: ids).filter { $0.location.hasPrefix(prefix) }
     }
 
-    public func updateMemory(id: String, mutation: String, note: String) async throws {
-        let arguments: [String: Any] = ["id": id, "mutation": mutation, "note": note]
-        _ = try await callTool("moot_update_memory", arguments: arguments)
+    /// One full pass over `moot_memory_list` pages. Returns every distinct id
+    /// in server order. A page without `memories` or `has_more` is a parse
+    /// error, not an empty page; so is `has_more` true with no `next_cursor`
+    /// or with a cursor already used, because the rest of the wing is
+    /// unreachable and a partial answer would be reported as the whole wing.
+    private func enumerateIds(baseArguments: [String: Any]) async throws -> [String] {
+        var ids: [String] = []
+        var seenIds = Set<String>()
+        var seenCursors = Set<String>()
+        var cursor: String? = nil
+        while true {
+            var arguments = baseArguments
+            if let cursor { arguments["cursor"] = cursor }
+            guard let result = try await callTool("moot_memory_list", arguments: arguments),
+                  let data = dataObject(from: result),
+                  let array = data["memories"] as? [[String: Any]],
+                  let hasMore = data["has_more"] as? Bool else {
+                throw DaemonError.parseError
+            }
+            // Each list row has: memory_id, fetch, subject?, provenance?
+            // Location and content require the moot_memory_get follow-up.
+            for item in array {
+                guard let memoryId = item["memory_id"] as? String,
+                      seenIds.insert(memoryId).inserted else { continue }
+                ids.append(memoryId)
+            }
+            if !hasMore { break }
+            // has_more without a fresh cursor cannot be walked. Report it rather
+            // than return the pages read so far as the whole wing; the Rust twin
+            // (estate_list) answers the same frame with "malformed page".
+            guard let next = data["next_cursor"] as? String,
+                  seenCursors.insert(next).inserted else {
+                throw DaemonError.parseError
+            }
+            cursor = next
+        }
+        return ids
+    }
+
+    /// Fetch full records for `ids` via `moot_memory_get` in batches of 50
+    /// (the server's `memory_ids` ceiling), so `ceil(n / 50)` calls. The order
+    /// of the returned records follows the server's answer. A batch that
+    /// answers fewer records than it was asked for throws
+    /// `DaemonError.refused(code: "memory_not_found")` naming the missing ids;
+    /// no record is ever dropped silently.
+    private func fetchMemoryRecords(ids: [String]) async throws -> [HarnessMemoryRecord] {
+        let batchSize = 50
+        var records: [HarnessMemoryRecord] = []
+        var offset = 0
+        while offset < ids.count {
+            let chunk = Array(ids[offset..<min(offset + batchSize, ids.count)])
+            offset += batchSize
+            guard let result = try await callTool("moot_memory_get", arguments: ["memory_ids": chunk]),
+                  let data = dataObject(from: result),
+                  let memories = data["memories"] as? [[String: Any]] else {
+                throw DaemonError.parseError
+            }
+            var answered = Set<String>()
+            for item in memories {
+                if let record = parseMemoryRecord(item) {
+                    records.append(record)
+                    answered.insert(record.id)
+                }
+            }
+            let missing = chunk.filter { !answered.contains($0) }
+            guard missing.isEmpty else {
+                throw DaemonError.refused(
+                    code: "memory_not_found",
+                    message: "moot_memory_get answered \(answered.count) of \(chunk.count) ids; missing: \(missing.joined(separator: ","))"
+                )
+            }
+        }
+        return records
+    }
+
+    public func getMemory(id: String) async throws -> HarnessMemoryRecord? {
+        let result: Any?
+        do {
+            result = try await callTool("moot_memory_get", arguments: ["memory_id": id])
+        } catch DaemonError.refused(let code, _) where code == "memory_not_found" {
+            // The server refuses with `memory_not_found` for an unknown id and
+            // for a superseded row alike; both mean "no live row with this id".
+            // Every other refusal, and every transport error, propagates.
+            return nil
+        }
+        guard let result,
+              let data = dataObject(from: result),
+              let memories = data["memories"] as? [[String: Any]],
+              let item = memories.first,
+              let record = parseMemoryRecord(item) else {
+            throw DaemonError.parseError
+        }
+        return record
     }
 
     public func ping() async -> Bool {
@@ -592,33 +736,55 @@ public struct LiveDaemonClient: DaemonClient {
         }
         if let error = json["error"] {
             let msg = (error as? [String: Any])?["message"] as? String ?? String(describing: error)
-            throw DaemonError.rpcError(msg)
+            throw DaemonError.refused(code: "rpc_error", message: msg)
         }
-        return json["result"]
+        let result = json["result"]
+        // ARIA v2 refusal: HTTP 200, no JSON-RPC error, the tool result itself
+        // says no. `structuredContent.error` carries the code; `isError` is the
+        // MCP-level flag. Either one makes this a refusal, never a result.
+        if let obj = result as? [String: Any] {
+            let structured = obj["structuredContent"] as? [String: Any]
+            let refusal = structured?["error"] as? [String: Any]
+            if refusal != nil || (obj["isError"] as? Bool) == true {
+                let code = refusal?["code"] as? String ?? ""
+                let contentText = ((obj["content"] as? [[String: Any]])?.first?["text"] as? String)
+                let message = refusal?["message"] as? String ?? contentText ?? ""
+                throw DaemonError.refused(code: code, message: message)
+            }
+        }
+        return result
     }
 
-    private func parseMemoryRecords(from result: Any) -> [HarnessMemoryRecord] {
-        // Expected estate response shape: { "memories": [{ "id": "...",
-        // "location": "...", "content": "...", "event_time": "...",
-        // "superseded": bool }, ...] }
+    // MARK: - v2 envelope parsing
+
+    /// Unwrap `result.structuredContent.data` from a v2 tool result.
+    private func dataObject(from result: Any) -> [String: Any]? {
         guard let obj = result as? [String: Any],
-              let array = obj["memories"] as? [[String: Any]] else {
-            return []
+              let structured = obj["structuredContent"] as? [String: Any],
+              let data = structured["data"] as? [String: Any] else {
+            return nil
         }
-        return array.compactMap { item -> HarnessMemoryRecord? in
-            guard let id       = item["id"] as? String,
-                  let location = item["location"] as? String,
-                  let content  = item["content"] as? String,
-                  let timeStr  = item["event_time"] as? String,
-                  let eventTime = parseISO8601(timeStr) else {
-                return nil
-            }
-            return HarnessMemoryRecord(
-                id: id, location: location, content: content,
-                eventTime: eventTime,
-                isSuperseded: item["superseded"] as? Bool ?? false
-            )
+        return data
+    }
+
+    /// Parse one element of `moot_memory_get`'s `data.memories` into a record.
+    /// `placement.room` is the original location string; `state` is "active"
+    /// or "superseded" (absent defaults to active). Returns nil when any
+    /// required field is missing.
+    private func parseMemoryRecord(_ item: [String: Any]) -> HarnessMemoryRecord? {
+        guard let memoryId = item["memory_id"] as? String,
+              let placement = item["placement"] as? [String: Any],
+              let location = placement["room"] as? String,
+              let content = item["content"] as? String,
+              let timeStr = item["event_time"] as? String,
+              let eventTime = parseISO8601(timeStr) else {
+            return nil
         }
+        let isSuperseded = (item["state"] as? String) == "superseded"
+        return HarnessMemoryRecord(
+            id: memoryId, location: location, content: content,
+            eventTime: eventTime, isSuperseded: isSuperseded
+        )
     }
 
     // MARK: - Date helpers
@@ -693,6 +859,147 @@ public enum HarnessMemoryMatcher {
         """
 }
 
+// MARK: - Front matter (metadata line carrier)
+
+/// Byte-exact front matter carrier for one `<key>: <value>` line under the
+/// YAML `metadata:` mapping of a file on disk.
+///
+/// Two keys ride on it. Restore writes each file with a `moot_memory_id` line
+/// so a later re-enable can match the file to its row without listing
+/// superseded rows (the server never returns them). Restore marks the
+/// `MEMORY.md` index it generates with `moot_generated_index: true` so a later
+/// re-enable discards that index instead of filing it as a memory. Three
+/// cases, line-based, `\n` only, no regex and no YAML parser:
+///   1. Block present with a `metadata:` line: the key line goes directly
+///      after `metadata:` (Claude Code memory files have this shape).
+///   2. Block present without `metadata:`: `metadata:` plus the key line go
+///      directly before the closing fence.
+///   3. No block (MEMORY.md): a block of four lines is prepended, two fences
+///      around `metadata:` and the key line.
+/// `strip` is the exact byte inverse of `inject` for the same key. A shared
+/// vector pins both ports to identical bytes.
+public enum HarnessMemoryFrontMatter {
+
+    /// The front matter key that carries the estate memory id.
+    public static let key = "moot_memory_id"
+
+    /// The front matter key that marks a `MEMORY.md` index written by restore.
+    /// Its value is always `true`; ingest removes such a file without filing it.
+    public static let generatedIndexKey = "moot_generated_index"
+
+    private static let fenceLine = "---\n"
+    private static let fence = "---"
+    private static let metadataLine = "metadata:"
+
+    /// A carried line is a child of `metadata:`, so it carries the two-space indent.
+    private static func linePrefix(for key: String) -> String {
+        "  \(key): "
+    }
+
+    /// Return `content` with `moot_memory_id: <memoryId>` under `metadata:`.
+    /// Thin wrapper over `inject(_:key:value:)` for the memory id key.
+    public static func inject(_ content: String, memoryId: String) -> String {
+        inject(content, key: key, value: memoryId)
+    }
+
+    /// Split `content` into its `moot_memory_id` (if any) and the remaining body.
+    /// Thin wrapper over `strip(_:key:)` for the memory id key.
+    public static func strip(_ content: String) -> (memoryId: String?, body: String) {
+        let (value, body) = strip(content, key: key)
+        return (value, body)
+    }
+
+    /// Return `content` with `<key>: <value>` under `metadata:`.
+    ///
+    /// When `content` opens a front matter block (`---\n` first, and a later
+    /// line that is exactly `---`), the key line is inserted after an existing
+    /// `metadata:` line, or `metadata:` and the key line are inserted before the
+    /// closing fence. Otherwise a new block holding only `metadata:` and the
+    /// key line is prepended. Every other byte of `content` is preserved.
+    public static func inject(_ content: String, key: String, value: String) -> String {
+        let keyLine = linePrefix(for: key) + value
+        guard let (blockStart, closingStart) = blockBounds(of: content) else {
+            return fenceLine + metadataLine + "\n" + keyLine + "\n" + fenceLine + content
+        }
+        var lines = blockLines(content[blockStart..<closingStart])
+        if let index = lines.firstIndex(of: metadataLine) {
+            lines.insert(keyLine, at: index + 1)
+        } else {
+            lines.append(metadataLine)
+            lines.append(keyLine)
+        }
+        return fenceLine + joined(lines) + content[closingStart...]
+    }
+
+    /// Split `content` into the value of `<key>` (if any) and the remaining body.
+    ///
+    /// The first `  <key>: <value>` line inside a leading front matter block is
+    /// removed. A `metadata:` line directly above it is removed too when
+    /// nothing indented follows it any more. When the block is then empty both
+    /// fence lines are removed. The body is byte-identical to `content` apart
+    /// from those removals. Without the key line the result is `(nil, content)`.
+    public static func strip(_ content: String, key: String) -> (value: String?, body: String) {
+        let prefix = linePrefix(for: key)
+        guard let (blockStart, closingStart) = blockBounds(of: content) else {
+            return (nil, content)
+        }
+        var lines = blockLines(content[blockStart..<closingStart])
+        guard let index = lines.firstIndex(where: { $0.hasPrefix(prefix) }) else {
+            return (nil, content)
+        }
+        let value = lines[index].dropFirst(prefix.count)
+            .trimmingCharacters(in: .whitespaces)
+        lines.remove(at: index)
+        if index > 0, lines[index - 1] == metadataLine {
+            // `metadata:` stays only while it still has an indented child.
+            let childFollows = index < lines.count && lines[index].hasPrefix("  ")
+            if !childFollows { lines.remove(at: index - 1) }
+        }
+        if lines.isEmpty {
+            // Block held only our lines: drop both fence lines.
+            var bodyStart = content.index(closingStart, offsetBy: fence.count)
+            if bodyStart < content.endIndex, content[bodyStart] == "\n" {
+                bodyStart = content.index(after: bodyStart)
+            }
+            return (value, String(content[bodyStart...]))
+        }
+        return (value, fenceLine + joined(lines) + content[closingStart...])
+    }
+
+    // MARK: - Private helpers
+
+    /// `(blockStart, closingStart)` when `content` opens with `---\n` and a
+    /// later line is exactly `---`. `blockStart` is the index after the opening
+    /// fence line; `closingStart` is the index of the closing fence line.
+    private static func blockBounds(of content: String) -> (String.Index, String.Index)? {
+        guard content.hasPrefix(fenceLine) else { return nil }
+        let blockStart = content.index(content.startIndex, offsetBy: fenceLine.count)
+        var lineStart = blockStart
+        while lineStart < content.endIndex {
+            let lineEnd = content[lineStart...].firstIndex(of: "\n") ?? content.endIndex
+            if content[lineStart..<lineEnd] == fence { return (blockStart, lineStart) }
+            guard lineEnd < content.endIndex else { break }
+            lineStart = content.index(after: lineEnd)
+        }
+        return nil
+    }
+
+    /// The block's lines without their newlines. The block always ends with a
+    /// newline (the closing fence starts a line), so the trailing empty piece
+    /// from the split is dropped.
+    private static func blockLines(_ block: Substring) -> [String] {
+        guard !block.isEmpty else { return [] }
+        var lines = block.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        lines.removeLast()
+        return lines
+    }
+
+    /// Inverse of `blockLines`: every line followed by its newline.
+    private static func joined(_ lines: [String]) -> String {
+        lines.map { $0 + "\n" }.joined()
+    }
+}
+
 // MARK: - Ingest result
 
 /// Outcome of ingesting a single file from `~/.claude/projects/*/memory/`.
@@ -705,8 +1012,14 @@ public struct IngestResult: Sendable {
     public enum Outcome: Sendable {
         /// Posted to estate AND source file removed.
         case filed
-        /// Source file revived in estate (unchanged content, re-enable path).
-        case revived
+        /// The file's `moot_memory_id` row already holds this content: source
+        /// file removed, row untouched, nothing written to the estate.
+        case matched
+        /// A `MEMORY.md` written by `HarnessMemoryRestore` (marked
+        /// `moot_generated_index: true`, no memory id): source file removed,
+        /// nothing written to the estate. The index is a client artifact; the
+        /// estate is the inventory.
+        case discardedIndex
         /// Not ingested (reason given); source file untouched.
         case skipped(String)
         /// Estate write or source removal failed; source file untouched.
@@ -759,31 +1072,53 @@ public enum HarnessMemoryIngest {
     /// MOVE semantics (Bob's ruling, 2026-08-07): estate write → confirm →
     /// delete source. Source is NEVER deleted before a confirmed write.
     ///
-    /// Re-enable path: if `isReEnable` is true and a superseded drawer with the
-    /// same location already exists in the estate, the file's content is compared.
-    /// Unchanged → `mutation=revive` (no duplicate drawer).
-    /// Changed → file fresh (new drawer, current event_time).
+    /// A file written by `HarnessMemoryRestore` carries its estate id in
+    /// `moot_memory_id` front matter. The front matter is stripped first; the
+    /// estate only ever sees the body. When that id resolves to a live row at
+    /// this file's own location (`harness-import/<slug>/<name>` or
+    /// `harness/<slug>/<name>`):
+    ///   - body equals the row content → `.matched`: file removed, row untouched.
+    ///   - body differs → `.filed`: the old row is left untouched (harness
+    ///     memory never supersedes and never revives) and the new body is
+    ///     filed fresh at the row's location via a single `moot_file_memory`
+    ///     call, so the estate gains a second row for that (slug, filename)
+    ///     pair.
+    /// No id, an unknown id, or a row at another location also files the body
+    /// fresh, at `harness-import/<slug>/<name>`.
+    ///
+    /// A `MEMORY.md` (case-insensitive) with no memory id and the
+    /// `moot_generated_index: true` marker is the index restore generated for
+    /// the slug: it is removed and reported `.discardedIndex` with no estate
+    /// call, so a disable → enable cycle adds no row. A `MEMORY.md` with
+    /// neither marker (authored, first enable) is filed with kind `list`.
+    /// (observability: harness.ingest.matched.count, harness.ingest.filed.count, MXE-HM-2)
     ///
     /// - Parameters:
     ///   - fileURL: URL of the source file.
     ///   - projectSlug: the project directory name (used in the location hint).
-    ///   - isReEnable: true when enabling while already enabled (re-enable sweep).
     ///   - daemon: estate client; injected for testability.
     ///   - now: current time, passed as a parameter for determinism in tests.
     public static func ingestFile(
         _ fileURL: URL,
         projectSlug: String,
-        isReEnable: Bool = false,
         daemon: some DaemonClient,
         now: Date = Date()
     ) async -> IngestResult {
         let fileName = fileURL.lastPathComponent
+        func result(_ outcome: IngestResult.Outcome) -> IngestResult {
+            IngestResult(
+                filePath: fileURL.path, projectSlug: projectSlug, fileName: fileName,
+                outcome: outcome
+            )
+        }
 
         // Location hint format: harness-import/<slug>/<filename>
         // The exact hint IS the reconstruction key for restore on disable —
         // filename and slug are preserved verbatim so restore lands at the
-        // original path.
-        let location = "harness-import/\(projectSlug)/\(fileName)"
+        // original path. Rows born in the estate via the capture hook live at
+        // harness/<slug>/<filename> and restore to the same disk path.
+        let importLocation = "harness-import/\(projectSlug)/\(fileName)"
+        let capturedLocation = "harness/\(projectSlug)/\(fileName)"
         // MEMORY.md index files use kind=list so the estate grades them
         // differently from prose memories.
         let kind: String? = fileName.lowercased() == "memory.md" ? "list" : nil
@@ -794,86 +1129,120 @@ public enum HarnessMemoryIngest {
             let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
             mtime = attrs[.modificationDate] as? Date ?? now
         } catch {
-            return IngestResult(
-                filePath: fileURL.path, projectSlug: projectSlug, fileName: fileName,
-                outcome: .failed("Could not read mtime: \(error)")
-            )
+            return result(.failed("Could not read mtime: \(error)"))
         }
 
-        let content: String
+        let rawContent: String
         do {
-            content = try String(contentsOf: fileURL, encoding: .utf8)
+            rawContent = try String(contentsOf: fileURL, encoding: .utf8)
         } catch {
-            return IngestResult(
-                filePath: fileURL.path, projectSlug: projectSlug, fileName: fileName,
-                outcome: .failed("Could not read file: \(error)")
-            )
+            return result(.failed("Could not read file: \(error)"))
+        }
+        let (memoryId, body) = HarnessMemoryFrontMatter.strip(rawContent)
+
+        // Restore-generated index: a client artifact, never an estate row.
+        if memoryId == nil, kind == "list",
+           HarnessMemoryFrontMatter.strip(body, key: HarnessMemoryFrontMatter.generatedIndexKey).value == "true" {
+            removeSource(fileURL)
+            return result(.discardedIndex)
         }
 
-        // Re-enable path: check for an existing superseded drawer.
-        // (observability: harness.revive.count — MXE-HM-2)
-        if isReEnable {
+        // Restored file: match it to its row by id.
+        if let memoryId {
+            let existing: HarnessMemoryRecord?
             do {
-                let existing = try await daemon.listMemories(locationPrefix: location)
-                if let superseded = existing.first(where: {
-                    $0.location == location && $0.isSuperseded
-                }) {
-                    if superseded.content == content {
-                        // Content unchanged — revive instead of creating a duplicate.
-                        try await daemon.updateMemory(
-                            id: superseded.id,
-                            mutation: "revive",
-                            note: "re-enabled harness-memory; content unchanged"
-                        )
-                        try? FileManager.default.removeItem(at: fileURL)
-                        return IngestResult(
-                            filePath: fileURL.path, projectSlug: projectSlug,
-                            fileName: fileName, outcome: .revived
-                        )
-                    }
-                    // Content changed: fall through to file a fresh drawer.
-                }
+                existing = try await daemon.getMemory(id: memoryId)
             } catch {
-                // Non-fatal: log and fall through to fresh file.
-                log.warning("Re-enable drawer lookup failed for \(location, privacy: .public): \(error)")
+                // A transport failure leaves the question open; filing fresh here
+                // could duplicate a row the estate still holds.
+                return result(.failed("Estate lookup failed for \(memoryId): \(error)"))
+            }
+            if let row = existing,
+               row.location == importLocation || row.location == capturedLocation {
+                if row.content == body {
+                    removeSource(fileURL)
+                    return result(.matched)
+                }
+                // Content changed on disk: file the new body as a fresh memory
+                // at the same location. Harness memory never supersedes and
+                // never revives — the old row is left untouched, and the new
+                // content lands as its own row via a single moot_file_memory call.
+                if let reason = await fileBody(
+                    body, location: row.location, fileName: fileName,
+                    mtime: mtime, kind: kind, daemon: daemon
+                ) {
+                    return result(.failed(reason))
+                }
+                removeSource(fileURL)
+                return result(.filed)
             }
         }
 
         // File to estate — confirm — delete source.
         // (observability: harness.ingest.filed.count, harness.ingest.removed.count — MXE-HM-2)
-        let subject = extractSubject(from: content, fileName: fileName)
+        if let reason = await fileBody(
+            body, location: importLocation, fileName: fileName,
+            mtime: mtime, kind: kind, daemon: daemon
+        ) {
+            return result(.failed(reason))
+        }
+        removeSource(fileURL)
+        return result(.filed)
+    }
+
+    /// File `body` at `location`. Returns nil on a confirmed write, otherwise
+    /// the failure reason for the caller's `.failed` outcome.
+    private static func fileBody(
+        _ body: String,
+        location: String,
+        fileName: String,
+        mtime: Date,
+        kind: String?,
+        daemon: some DaemonClient
+    ) async -> String? {
+        let subject = extractSubject(from: body, fileName: fileName)
         do {
             let confirmed = try await daemon.fileMemory(
-                location: location, content: content, subject: subject, eventTime: mtime, kind: kind
+                location: location, content: body, subject: subject, eventTime: mtime, kind: kind
             )
-            guard confirmed else {
-                return IngestResult(
-                    filePath: fileURL.path, projectSlug: projectSlug, fileName: fileName,
-                    outcome: .failed("Estate write not confirmed")
-                )
-            }
+            return confirmed ? nil : "Estate write not confirmed"
         } catch {
-            return IngestResult(
-                filePath: fileURL.path, projectSlug: projectSlug, fileName: fileName,
-                outcome: .failed("Estate write failed: \(error)")
-            )
+            return "Estate write failed: \(error)"
         }
+    }
 
-        // Confirmed: remove source.
+    /// Remove the source file after the estate confirmed it holds the content.
+    /// A removal failure is logged, not reported: the estate write stands and
+    /// the stray file is swept on the next enable.
+    private static func removeSource(_ fileURL: URL) {
         do {
             try FileManager.default.removeItem(at: fileURL)
         } catch {
-            // Write confirmed but removal failed — log, return filed.
-            // The stray file will be swept on the next re-enable.
             log.warning(
-                "Source removal failed after confirmed estate write (\(fileURL.path, privacy: .public)): \(error)"
+                "Source removal failed after the estate confirmed the content (\(fileURL.path, privacy: .public)): \(error)"
             )
         }
+    }
 
-        return IngestResult(
-            filePath: fileURL.path, projectSlug: projectSlug, fileName: fileName,
-            outcome: .filed
-        )
+    /// One summary line over a set of ingest results, in the words and order
+    /// the Rust port prints per project: `filed N, matched N, discarded indexes N,
+    /// removed N, skipped N`. `filed` counts `.filed` (rows the estate gained),
+    /// `matched` counts `.matched` (nothing written), `removed` counts every
+    /// source file that left the disk (filed, matched, discarded), and
+    /// `skipped` counts `.skipped` and `.failed` (the file is still on disk).
+    /// A matched file never contributes to `filed`.
+    public static func summaryLine(_ results: [IngestResult]) -> String {
+        var filed = 0, matched = 0, discarded = 0, skipped = 0
+        for result in results {
+            switch result.outcome {
+            case .filed: filed += 1
+            case .matched: matched += 1
+            case .discardedIndex: discarded += 1
+            case .skipped, .failed: skipped += 1
+            }
+        }
+        let removed = filed + matched + discarded
+        return "filed \(filed), matched \(matched), discarded indexes \(discarded), removed \(removed), skipped \(skipped)"
     }
 
     /// Generate a subject line for estate filing from file content.
@@ -919,11 +1288,12 @@ public struct RestoreResult: Sendable {
     public let outcome: Outcome
 
     public enum Outcome: Sendable {
-        /// File written to disk; estate record marked superseded.
+        /// File written to disk with `moot_memory_id` front matter; the estate
+        /// row is left untouched.
         case restored
-        /// Not restored (reason given); source file untouched on disk.
+        /// Not restored (reason given); nothing written on disk.
         case skipped(String)
-        /// Write failed; source file untouched on disk.
+        /// Write failed; nothing written on disk.
         case failed(String)
     }
 }
@@ -936,91 +1306,119 @@ public struct RestoreResult: Sendable {
 ///   - `harness-import/<slug>/<name>` — memories originally on disk, moved in by ingest.
 ///   - `harness/<slug>/<name>` — memories born in the estate via the capture hook.
 ///
-/// For each restored file the estate record is marked `mutation=supersede` with
-/// note `"restored to harness <ISO8601>"`. Estate records are NEVER deleted.
+/// Every restored file carries its estate id as `moot_memory_id` front matter
+/// so a later re-enable matches the file to its row instead of filing a
+/// duplicate. Estate rows are left untouched: no mutation is applied and
+/// nothing is deleted.
 public enum HarnessMemoryRestore {
 
-    /// Restore all estate memories for `projectSlugs` back to disk.
+    /// Location prefixes whose rows restore to `~/.claude/projects/<slug>/memory/<name>`.
+    static let locationPrefixes: Set<String> = ["harness-import", "harness"]
+
+    /// Restore every active harness memory in the estate back to disk.
     ///
-    /// Refuses to overwrite an existing file (reports collision as `.skipped`).
-    /// After each confirmed file write, marks the estate record superseded.
-    /// Regenerates `MEMORY.md` unless a captured MEMORY.md drawer was restored.
+    /// Discovery is one `listMemories(locationPrefix: "harness")` query. When
+    /// that query throws (a refusal, a transport failure, a malformed page)
+    /// the result is exactly one `.failed` entry and nothing is written: a
+    /// refusal is a failure of the disable, never an empty wing. A row
+    /// is restored when its location has the exact shape `<prefix>/<slug>/<name>`
+    /// with a prefix in `locationPrefixes` and a slug and name that contain no
+    /// `..` and do not start with a dot. Rows are deduplicated by id and
+    /// superseded rows are skipped.
+    /// Refuses to overwrite an existing file (reports the collision as `.skipped`).
+    /// Generates a `MEMORY.md` per slug, marked `moot_generated_index: true`,
+    /// unless a captured MEMORY.md row was restored for that slug.
     ///
     /// - Parameters:
-    ///   - projectSlugs: slugs to restore (all if empty is passed, caller decides).
     ///   - homeDirectory: user's home directory.
     ///   - daemon: estate client; injected for testability.
-    ///   - now: current time for the supersede note timestamp.
     public static func restore(
-        projectSlugs: [String],
         homeDirectory: URL,
-        daemon: some DaemonClient,
-        now: Date
+        daemon: some DaemonClient
     ) async -> [RestoreResult] {
         let projectsURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: homeDirectory)
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime]
-        let nowStr = fmt.string(from: now)
-
         var results: [RestoreResult] = []
 
-        for slug in projectSlugs {
-            // Both location-hint classes for this project.
-            let prefixes = ["harness-import/\(slug)/", "harness/\(slug)/"]
-            for prefix in prefixes {
-                let records: [HarnessMemoryRecord]
-                do {
-                    records = try await daemon.listMemories(locationPrefix: prefix)
-                } catch {
+        let records: [HarnessMemoryRecord]
+        do {
+            records = try await daemon.listMemories(locationPrefix: "harness")
+        } catch {
+            results.append(RestoreResult(
+                location: "harness", filePath: "",
+                outcome: .failed("Estate enumeration failed: \(error)")
+            ))
+            return results
+        }
+
+        // Group restorable rows by slug, first occurrence of each id wins.
+        var seenIds = Set<String>()
+        var bySlug: [String: [(record: HarnessMemoryRecord, fileName: String)]] = [:]
+        for record in records where !record.isSuperseded {
+            guard seenIds.insert(record.id).inserted else { continue }
+            guard let target = restoreTarget(location: record.location) else {
+                // Only rows under our prefixes are worth reporting; anything
+                // else the "harness" prefix matched belongs to someone else.
+                let head = record.location.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
+                if locationPrefixes.contains(head) {
                     results.append(RestoreResult(
-                        location: prefix, filePath: "",
-                        outcome: .failed("List query failed: \(error)")
+                        location: record.location, filePath: "",
+                        outcome: .skipped("Cannot derive file path from location '\(record.location)'")
                     ))
-                    continue
                 }
-
-                for record in records where !record.isSuperseded {
-                    let fileResult = await restoreRecord(
-                        record, projectsURL: projectsURL, nowStr: nowStr, daemon: daemon
-                    )
-                    results.append(fileResult)
-                }
+                continue
             }
+            bySlug[target.slug, default: []].append((record, target.fileName))
+        }
 
-            // Regenerate MEMORY.md unless one was already restored verbatim.
+        for slug in bySlug.keys.sorted() {
+            var slugResults: [RestoreResult] = []
+            for entry in bySlug[slug] ?? [] {
+                slugResults.append(restoreRecord(
+                    entry.record, slug: slug, fileName: entry.fileName, projectsURL: projectsURL
+                ))
+            }
+            results.append(contentsOf: slugResults)
+
+            // Generate a marked MEMORY.md unless a captured one was restored verbatim.
             let memoryDirURL = projectsURL
                 .appendingPathComponent(slug, isDirectory: true)
                 .appendingPathComponent("memory", isDirectory: true)
             let memoryMDURL = memoryDirURL.appendingPathComponent("MEMORY.md")
             if FileManager.default.fileExists(atPath: memoryDirURL.path),
                !FileManager.default.fileExists(atPath: memoryMDURL.path) {
-                regenerateMemoryMD(at: memoryMDURL, results: results, slug: slug)
+                regenerateMemoryMD(at: memoryMDURL, results: slugResults, slug: slug)
             }
         }
 
         return results
     }
 
-    // MARK: - Private helpers
-
-    private static func restoreRecord(
-        _ record: HarnessMemoryRecord,
-        projectsURL: URL,
-        nowStr: String,
-        daemon: some DaemonClient
-    ) async -> RestoreResult {
-        // Derive file path from location hint.
-        // Shape: `harness-import/<slug>/<filename>` or `harness/<slug>/<filename>`.
-        let parts = record.location.split(separator: "/", maxSplits: 2)
-        guard parts.count == 3 else {
-            return RestoreResult(
-                location: record.location, filePath: "",
-                outcome: .skipped("Cannot derive file path from location '\(record.location)'")
-            )
-        }
+    /// Split a location into `(slug, fileName)` when it has the restorable
+    /// shape `<prefix>/<slug>/<name>`: exactly three components, a prefix in
+    /// `locationPrefixes`, and no traversal or hidden component. Returns nil
+    /// otherwise.
+    static func restoreTarget(location: String) -> (slug: String, fileName: String)? {
+        let parts = location.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 3, locationPrefixes.contains(String(parts[0])) else { return nil }
         let slug = String(parts[1])
         let fileName = String(parts[2])
+        guard !slug.isEmpty, !fileName.isEmpty,
+              !slug.hasPrefix("."), !fileName.hasPrefix("."),
+              !slug.contains(".."), !fileName.contains("..") else { return nil }
+        return (slug, fileName)
+    }
 
+    // MARK: - Private helpers
+
+    /// Write one row to `<projectsURL>/<slug>/memory/<fileName>` with its id in
+    /// front matter. Makes no estate call.
+    /// (observability: harness.restore.count, MXE-HM-2)
+    private static func restoreRecord(
+        _ record: HarnessMemoryRecord,
+        slug: String,
+        fileName: String,
+        projectsURL: URL
+    ) -> RestoreResult {
         let memoryDirURL = projectsURL
             .appendingPathComponent(slug, isDirectory: true)
             .appendingPathComponent("memory", isDirectory: true)
@@ -1034,31 +1432,16 @@ public enum HarnessMemoryRestore {
             )
         }
 
-        // Write the file.
+        let onDisk = HarnessMemoryFrontMatter.inject(record.content, memoryId: record.id)
         do {
             try FileManager.default.createDirectory(
                 at: memoryDirURL, withIntermediateDirectories: true
             )
-            try record.content.write(to: targetURL, atomically: true, encoding: .utf8)
+            try onDisk.write(to: targetURL, atomically: true, encoding: .utf8)
         } catch {
             return RestoreResult(
                 location: record.location, filePath: targetURL.path,
                 outcome: .failed("Write failed: \(error)")
-            )
-        }
-
-        // Supersede the estate record.
-        // (observability: harness.restore.count — MXE-HM-2)
-        do {
-            try await daemon.updateMemory(
-                id: record.id,
-                mutation: "supersede",
-                note: "restored to harness \(nowStr)"
-            )
-        } catch {
-            // Non-fatal: the file was written. Log and continue.
-            log.warning(
-                "Could not supersede estate record \(record.id, privacy: .public) after restore: \(error)"
             )
         }
 
@@ -1067,6 +1450,15 @@ public enum HarnessMemoryRestore {
         )
     }
 
+    /// Write a `MEMORY.md` index listing the files restored for one slug.
+    /// `results` must already be limited to that slug.
+    ///
+    /// Bytes are pinned in both ports: a front matter block holding only
+    /// `moot_generated_index: true`, then `# Memory Index`, a blank line, and
+    /// one `- [<name>](<name>)` line per restored file other than `MEMORY.md`,
+    /// sorted by file name in byte order. The marker lets a later re-enable
+    /// discard the file instead of filing it; the estate holds the inventory.
+    /// Nothing is written when no file was restored for the slug.
     private static func regenerateMemoryMD(
         at url: URL,
         results: [RestoreResult],
@@ -1076,10 +1468,15 @@ public enum HarnessMemoryRestore {
             guard case .restored = r.outcome else { return nil }
             let name = URL(fileURLWithPath: r.filePath).lastPathComponent
             guard name != "MEMORY.md" else { return nil }
-            return "- \(name)"
+            return name
         }
         guard !restoredNames.isEmpty else { return }
-        let index = "# Memory Index\n\n" + restoredNames.joined(separator: "\n") + "\n"
+        // Byte order, not locale order: the Rust port sorts the same way.
+        let sortedNames = restoredNames.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        let body = "# Memory Index\n\n" + sortedNames.map { "- [\($0)](\($0))\n" }.joined()
+        let index = HarnessMemoryFrontMatter.inject(
+            body, key: HarnessMemoryFrontMatter.generatedIndexKey, value: "true"
+        )
         try? index.write(to: url, atomically: true, encoding: .utf8)
     }
 }
