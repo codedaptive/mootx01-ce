@@ -17,9 +17,11 @@ use crate::{
     surfaced_recall_ledger::SurfacedRecallLedger,
 };
 
+use locus_kit::drawer_store::subject_length;
+
 use super::{
     codec::{canonical_uuid, optional_bool, optional_integer, optional_string, optional_uuid, required_string, strict_object, V2DecodeResult, V2InvalidArgument},
-    render::{refusal, success, V2OperationalRefusal, V2ResultMeta},
+    render::{compact_text, refusal, success, V2OperationalRefusal, V2ResultMeta},
 };
 
 pub const FILE_MEMORY_TOOL: &str = "moot_file_memory";
@@ -265,9 +267,9 @@ impl V2FileMemoryRequest {
         let object = strict_object(value, ["content", "subject", "location", "wing", "sensitivity", "exportability", "kind", "event_time", "impatient", "estate_id"])?;
         let content = nonempty(required_string(object, "content")?, "$.content")?.to_owned();
         let subject = nonempty(required_string(object, "subject")?.trim(), "$.subject")?.to_owned();
-        if subject.chars().count() > SUBJECT_LENGTH_CONTRACT {
+        if subject_length(&subject) > SUBJECT_LENGTH_CONTRACT {
             return Err(V2InvalidArgument::new("$.subject", "exceeds the subject length contract")
-                .correction("provide at most 120 Unicode scalar values"));
+                .correction("provide at most 120 grapheme clusters"));
         }
         let location = nonempty(required_string(object, "location")?, "$.location")?.to_owned();
         let sensitivity = optional_string(object, "sensitivity")?
@@ -621,11 +623,16 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
             result.rows.truncate(request.limit);
             for row in &mut result.rows {
                 row.fetch = fetch(row.memory_id);
+                // 512-scalar compact form is the frozen v2 contract; subject and context
+                // must carry identical text across both ports.
+                if let Some(subj) = &row.subject {
+                    row.subject = Some(compact_text(subj));
+                }
                 if let Some(ctx) = &row.context {
-                    row.context = Some(ctx.chars().take(512).collect());
+                    row.context = Some(compact_text(ctx));
                 }
                 if let Some(excerpt) = &row.excerpt {
-                    row.excerpt = Some(excerpt.chars().take(512).collect());
+                    row.excerpt = Some(compact_text(excerpt));
                 }
             }
             dependencies.surfaced_recall_ledger.record_surfaced(
