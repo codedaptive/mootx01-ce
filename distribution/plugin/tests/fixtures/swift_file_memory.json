@@ -1,0 +1,34 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Filed memory f6efe42b-92fb-40b8-a581-1418567defe2.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "fetch": {
+          "arguments": {
+            "memory_id": "f6efe42b-92fb-40b8-a581-1418567defe2"
+          },
+          "tool": "moot_memory_get"
+        },
+        "memory_id": "f6efe42b-92fb-40b8-a581-1418567defe2",
+        "placement": {
+          "room": "harness-import/testslug/notes.md",
+          "wing": "Agentic Memory"
+        }
+      },
+      "meta": {
+        "completeness": "incomplete",
+        "effect": "write"
+      },
+      "surface_version": "v2",
+      "tool": "moot_file_memory"
+    }
+  }
+}

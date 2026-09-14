@@ -42,6 +42,8 @@ Follow `next_cursor` while `has_more` is true, retaining the same scope. A stale
 
 For datasets, send predicates as JSON objects matching the advertised schema, never JSON encoded inside a string. For example, `"where":{"col":"status","op":"eq","val":"ready"}`, `"order_by":[{"col":"sequence","dir":"asc"}]`, and `"columns":["name","sequence"]` filter, sort and project actual columns. Use the advertised schema's comparisons and limits; consult help only if it leaves a required detail unresolved. Omitted optional fields are not evidence of empty values.
 
+Use `depth:"skim"` on `moot_memory_get` to preview a memory without fetching the full body: the response returns a source-order excerpt targeting 512 UTF-8 bytes of the distillate instead of `content`, `distilled`, or tunnels. The result carries a `skim` envelope with `complete` (true when no `distilled` text was omitted) and `budgetHonored` (false when an indivisible first group exceeded the byte target). The `savings` field is a 🌱 line estimating distillation savings versus omitted preview tokens. Fetch the same id at `distilled` or `full` depth when the preview is insufficient.
+
 ## Make authorized changes and recover accurately
 
 Use `moot_file_memory` for authorized durable capture and verify through its returned memory reference. Preserve an issued write identity if later verification fails; retrying capture can duplicate the write. Use journal writes when task continuity should be persisted within the authorized scope.
