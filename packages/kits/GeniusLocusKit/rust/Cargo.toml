@@ -11,6 +11,21 @@ publish = false
 name = "genius_locus_kit"
 path = "src/lib.rs"
 
+# scripts/moot-test reads [package.metadata.moot-test] test-features and passes
+# --features <list> to cargo test for this crate. A bare `cargo test` silently
+# skips the seven [[test]] entries below because they carry
+# required-features = ["test-seams"] — cargo does not build those binaries when
+# the feature is inactive and emits no warning; all 117 tests live in those
+# seven integration targets. The #[cfg(any(test, feature = "test-seams"))]
+# items in src are the seam methods those targets call, not tests; the `test`
+# arm means the crate's own unit-test harness already sees them, but an
+# integration binary does not inherit the library's `test` cfg — hence
+# required-features. The list here mirrors the [features].test-seams line and
+# the required-features declarations below, so the next person editing either
+# is already looking at the relevant neighbour.
+[package.metadata.moot-test]
+test-features = ["test-seams"]
+
 [dependencies]
 # R10 (2026-06-20): EideticLib provides the canonical cross-leg sentence
 # segmenter (eidetic_lib::segmenter::sentences). The distill_items_sweep
