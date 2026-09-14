@@ -320,7 +320,7 @@ struct SensitivityUnlockIntegrationTests {
         // fetches and audits the SAME row independently once per request.
         let getDrawer = try await seed(
             "v2-audit-get-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
-        for depth in ["subject", "distilled", "full"] {
+        for depth in ["subject", "distilled", "skim", "full"] {
             let result = try await dispatcher.dispatch(
                 name: "moot_memory_get",
                 arguments: .object(["memory_id": .string(getDrawer.id), "depth": .string(depth)]))
@@ -334,8 +334,8 @@ struct SensitivityUnlockIntegrationTests {
         #expect(searchEntries.count == 1,
             "one v2 moot_memory_search hit on a restricted row under grant must emit exactly one audit entry")
         #expect(searchEntries.first?.fieldPath == "restricted")
-        #expect(getEntries.count == 3,
-            "three v2 moot_memory_get depth calls on the same restricted row must each independently emit an audit entry")
+        #expect(getEntries.count == 4,
+            "four v2 moot_memory_get depth calls on the same restricted row must each independently emit an audit entry")
         for entry in getEntries {
             #expect(entry.fieldPath == "restricted")
         }
