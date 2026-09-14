@@ -66,8 +66,7 @@ extension ToolProjection {
 
 extension ToolDispatcher {
 
-    /// `now` is the dispatch-boundary instant (`InterfaceTools.dispatch`
-    /// threads the bench-clock value) and gates the sensitivity-grant floor
+    /// `now` is the dispatch-boundary instant and gates the sensitivity-grant floor
     /// on the content-bearing writes; the `Date()` default covers direct
     /// runner calls in tests, the same convention as `runFileMemory`.
     func runMemoryTool(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {

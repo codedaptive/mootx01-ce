@@ -238,6 +238,13 @@ impl<'a> SelectedOrchestrationLower<'a> {
         frame
     }
 
+    fn migration_full_frame() -> RecallFrame {
+        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        frame.hydration_level = HydrationLevel::Full;
+        frame.ordering = Ordering::ByCaptureTimeDesc;
+        frame
+    }
+
     /// Re-read each newly minted branch through NeuronKit's public benchmark
     /// lower engine.  The migration core retains overlap/MRR and the C-13
     /// decision but intentionally drops precision, novelty, and the evaluation
@@ -267,7 +274,7 @@ impl<'a> SelectedOrchestrationLower<'a> {
                 .into_iter()
                 .collect();
             let newly_minted = branch
-                .recall(now_millis)
+                .recall_with(Self::migration_full_frame(), now_millis)
                 .into_iter()
                 .filter(|drawer| new_ids.contains(&drawer.id))
                 .collect::<Vec<_>>();

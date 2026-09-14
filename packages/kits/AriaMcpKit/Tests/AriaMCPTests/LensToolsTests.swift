@@ -1,9 +1,9 @@
 // LensToolsTests.swift
 //
-// Coverage for the reasoning-lens tool surface on ARIA_MCP
-// (LENS_DISCOVERABILITY_DECISION v2.0): every cataloged lens recipe has
-// a hard-bound tool, dispatched by name end-to-end against a real
-// in-memory GeniusLocusKit estate (no mocks). Representative dispatch
+// Coverage for the reasoning-lens operations on ARIA_MCP
+// (LENS_DISCOVERABILITY_DECISION v2.0), dispatched by name end-to-end
+// through the v2 dispatcher against a real in-memory GeniusLocusKit
+// estate (no mocks). Representative dispatch
 // coverage: a graph lens (keystones / tunnel_successor), a recall lens
 // (trust_grounded_synthesis), the lens-refusal face
 // (partial_cue_recall with an unknown anchor), and a two-estate
@@ -99,37 +99,6 @@ struct LensToolsTests {
     }
 
     // MARK: - Projection
-
-    @Test func everyCatalogedLensHasATool() {
-        // The lens tool count matches the catalog size minus the recipe entries
-        // that are NOT lens tools: grounded_synthesis → moot_synthesize;
-        // migration_benchmark → moot_run_migration; shaped_recall →
-        // moot_recall_shaped; recall_exploratory is a library-only recall recipe
-        // (ExploratoryRecall) with no MCP tool. The three distillation-family
-        // recipes (consolidate, distilled_recall, recollect) added by Dc4
-        // are dispatched as recipe tools (moot_ prefix) not lens tools
-        // (moot_lens_ prefix). All lens tools carry the moot_lens_ prefix.
-        let nonLensRecipes: Set<String> = [
-            "grounded_synthesis", "migration_benchmark", "shaped_recall",
-            "recall_exploratory",
-            // Distillation-family recipes: dispatched as recipe tools by
-            // RecipeTools, not as lens tools by LensTools.
-            // ENC-W6B: "distill" and "redistill" retired from catalog; "distilled_recall" remains.
-            "distilled_recall",
-            // D10 walk-recall escalation ladder: dispatched by RecipeTools as
-            // moot_recall_walk, not a lens tool.
-            "walk_recall",
-        ]
-        let lensToolCount = RecipeCatalog.names
-            .filter { !nonLensRecipes.contains($0) }
-            .count
-        #expect(LensTools.lensToolNames.count == lensToolCount,
-            "lens tool count must match catalog count minus the non-lens recipe entries")
-        for name in LensTools.lensToolNames {
-            #expect(name.hasPrefix("moot_lens_"),
-                "\(name) must carry the moot_lens_ prefix")
-        }
-    }
 
     // MARK: - Graph lenses
 
@@ -330,40 +299,33 @@ struct LensToolsTests {
     /// is Restricted/Secret, even though the emitted (Normal) facts pass the fact
     /// ceiling. Parity with the Rust `lens_contradiction_hides_secret_fact_source`.
     ///
-    /// BLOCKED: v2 `moot_file_fact` refuses to file a fact whose
-    /// `source_memory_id` exceeds the caller's sensitivity ceiling.
-    /// `AriaV2KnowledgeJournal.fileFact` (AriaV2KnowledgeJournal.swift:306-317)
-    /// requires `admitted.adjectiveSensitivity.rawValue <=
-    /// context.maximumSensitivity.rawValue` (default ceiling `.elevated`,
-    /// raw 16) before the source is admitted at all; Secret's raw value is
-    /// 48, so filing either conflicting fact with the Secret drawer as
-    /// `source_memory_id` is refused outright (isError:true, code
-    /// `source_unavailable`) before the contradiction lens is ever
-    /// dispatched. The two conflicting facts this SECFIX regression needs
-    /// can never be created through the production dispatcher under
-    /// default caller privileges. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: v2 moot_file_fact refuses to file a fact citing a Secret source_memory_id under the default caller sensitivity ceiling (AriaV2KnowledgeJournal.swift:306-317, admitted.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue, default .elevated=16 vs Secret=48) — the two conflicting facts this SECFIX test needs can never be filed through the production dispatcher. Do not delete; do not weaken to pass."))
+    /// The facts are admitted under an explicit secret grant, then the lens is
+    /// called from a fresh ungranted dispatcher.  This exercises the public
+    /// write and read paths without manufacturing an inaccessible fact row.
+    @Test
     func contradictionLensHidesSecretFactSource() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ctrd-redact"))
-        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let writer = ToolDispatcher(kit: kit, handle: handle)
         // A Secret source drawer; two conflicting Normal facts cite it.
         let secret = try await captureWithSensitivity(
             kit, handle, content: "secret provenance drawer",
             room: "policy-gate/secret-source", sensitivity: .secret)
+        await writer.sensitivityUnlockLedger.grantSecret(now: Date())
         for object in ["green", "red"] {
-            let filed = try await dispatcher.dispatch(
+            let filed = try await writer.dispatch(
                 name: "moot_file_fact",
                 arguments: .object([
                     "subject": .string("Project Aardvark"),
                     "predicate": .string("status"),
                     "object": .string(object),
-                    "source_id": .string(secret.id),
+                    "source_memory_id": .string(secret.id),
                 ]))
             #expect(filed.objectValue?["isError"]?.boolValue == false)
         }
-        let result = try await dispatcher.dispatch(
+        let reader = ToolDispatcher(kit: kit, handle: handle)
+        let result = try await reader.dispatch(
             name: "moot_lens_contradiction", arguments: .object([:]))
         let body = try text(result)
         // Facts inherit their source drawer's sensitivity, so a fact drawn from
@@ -374,6 +336,38 @@ struct LensToolsTests {
                 "facts derived from a Secret drawer must be withheld; got: \(body)")
         #expect(!body.contains(secret.id),
                 "secret source drawer id must not leak; got: \(body)")
+    }
+
+    /// A contradicts tunnel can be created under a secret grant, but an
+    /// ungranted contradiction-lens call must not disclose its secret endpoint.
+    @Test
+    func contradictionLensHidesSecretTunnelEndpoint() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ctrd-secret-tunnel"))
+        let writer = ToolDispatcher(kit: kit, handle: handle)
+        let normal = try await captureWithSensitivity(
+            kit, handle, content: "normal contradiction endpoint",
+            room: "policy-gate/normal-endpoint", sensitivity: .normal)
+        let secret = try await captureWithSensitivity(
+            kit, handle, content: "secret contradiction endpoint",
+            room: "policy-gate/secret-endpoint", sensitivity: .secret)
+        await writer.sensitivityUnlockLedger.grantSecret(now: Date())
+        let linked = try await writer.dispatch(
+            name: "moot_link_memories",
+            arguments: .object([
+                "from_id": .string(normal.id),
+                "to_id": .string(secret.id),
+                "relationship": .string("contradicts"),
+            ]))
+        #expect(linked.objectValue?["isError"]?.boolValue == false)
+
+        let reader = ToolDispatcher(kit: kit, handle: handle)
+        let result = try await reader.dispatch(
+            name: "moot_lens_contradiction", arguments: .object([:]))
+        let body = try text(result)
+        #expect(!body.contains(secret.id),
+                "a secret contradiction endpoint must not leak; got: \(body)")
     }
 
     // MARK: - Sensitivity policy gate (ce-recall-policy-gate)

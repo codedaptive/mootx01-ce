@@ -127,21 +127,9 @@ struct VaultToolsTests {
         #expect(ToolProjection.vaultEnabled(environment: ["MOOTX01_VAULT": "off"]) == true)
     }
 
-    /// When vault is disabled (MOOTX01_VAULT=0 in the process env) and a
-    /// client hard-codes a vault tool name, the dispatch returns a clear error
-    /// rather than an opaque failure. This verifies the guard in
-    /// VaultTools.dispatch() fires for a real call (not a mock).
-    ///
-    /// Note: we cannot set MOOTX01_VAULT=0 in the process env at test time
-    /// (ProcessInfo.processInfo.environment is read-only). The test instead
-    /// verifies the guard fires by calling VaultTools.dispatch() with vault
-    /// disabled via the vaultEnabled(environment:) path. The dispatch guard
-    /// calls ToolProjection.vaultEnabled which reads the live process env;
-    /// since MOOTX01_VAULT is not "0" in the test process, the guard does
-    /// NOT fire in a normal test run. Integration-level dispatch-guard
-    /// coverage is provided by the Rust port's thread-local env test (which
-    /// CAN set env vars safely in isolation). The Swift guard is unit-tested
-    /// through the vaultEnabled(environment:) function directly above.
+    /// Vault admission is registry-owned: when vault is off its operations are
+    /// absent from the selected-v2 catalog. The pure environment predicate is
+    /// unit-tested here; public admission is covered by the selected surface tests.
     @Test func vaultOffToolListIsStableAcrossCallSites() {
         // Both the zero-arg overload (live env) and the env-injected overload
         // produce the same vault-on result in a test process where
@@ -196,6 +184,17 @@ struct VaultToolsTests {
         await #expect(throws: JSONRPCError.self) {
             _ = try await dispatcher.dispatch(
                 name: "moot_vault_status", arguments: .object([:]))
+        }
+    }
+
+    @Test func vaultJobWithoutIDIsRejected() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "v-job-noarg"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_vault_job", arguments: .object([:]))
         }
     }
 
@@ -1143,7 +1142,7 @@ struct VaultToolsTests {
         // Export a real note so we have a real vault with notes.
         try await capture(kit, handle, content: "Idempotency skip count test note.", room: "test")
         let exportResult = try await dispatcher.dispatch(
-            name: "moot_vault_export", arguments: args(["vaultPath": vault.path]))
+            name: "moot_vault_export", arguments: args(["vaultPath": vault.path, "scope": "believed"]))
         let exportJobID = try extractJobID(from: exportResult)
         _ = try await waitForJob(id: exportJobID, via: dispatcher)
 
@@ -1158,7 +1157,8 @@ struct VaultToolsTests {
         let firstJobID = try extractJobID(from: firstImport)
         let firstData = try await waitForJob(id: firstJobID, via: dispatcher2)
         let firstImportData = try #require(firstData["import"]?.objectValue)
-        #expect(firstImportData["drawers_written"]?.integerValue != nil, "first import must write drawers")
+        let firstWritten = try #require(firstImportData["drawers_written"]?.integerValue)
+        #expect(firstWritten > 0, "first import must write the exported note")
         // Skip counts must be present in output (even if zero on first import).
         #expect(firstImportData["drawers_skipped_unchanged"]?.integerValue != nil,
                 "vault_job result must include drawers_skipped_unchanged")
@@ -1173,9 +1173,10 @@ struct VaultToolsTests {
         let secondImportData = try #require(secondData["import"]?.objectValue)
         let secondSkippedUnchanged = try #require(secondImportData["drawers_skipped_unchanged"]?.integerValue)
         let secondDrawersWritten = try #require(secondImportData["drawers_written"]?.integerValue)
-        // The idempotent re-import should show skipped-unchanged > 0 (not all zeros).
-        #expect(secondSkippedUnchanged > 0 || secondDrawersWritten == 0,
-                "Re-import of unchanged vault must not show all-zero activity")
+        #expect(secondSkippedUnchanged > 0,
+                "Re-import of an unchanged vault must report a nonzero unchanged skip count")
+        #expect(secondDrawersWritten == 0,
+                "Re-import of an unchanged vault must not write a duplicate drawer")
     }
 
     // MARK: - Vault job cap atomicity (Finding 1 — TOCTOU fix)
@@ -1275,7 +1276,7 @@ struct VaultToolsTests {
     /// background `Task` completes the import (0 drawers), calls `complete()`,
     /// and releases the slot. No exhaustion occurs.
     ///
-    /// The slot-release-on-throw guard (the pre-Task catch in `runImport`) would
+/// The slot-release-on-throw guard in the selected-v2 import launch would
     /// fire if `hashAllNotes` threw — but for this case it does not throw because
     /// fix B skips the directory entry before attempting a read.
     @Test(.timeLimit(.minutes(3)))
@@ -1325,7 +1326,7 @@ struct VaultToolsTests {
 
     /// The vault import cap is enforced BEFORE the expensive preflight runs.
     /// With the register-first ordering, `checkAndRegister` is the FIRST
-    /// operation in `runImport` — a full cap rejects the (N+1)th call
+/// operation in the selected-v2 import launch — a full cap rejects the (N+1)th call
     /// immediately, before `hashAllNotes` enumerates any files.
     ///
     /// Verified at the registry level: pre-fill N slots, then attempt a
@@ -1367,7 +1368,7 @@ struct VaultToolsTests {
     }
 
     /// When `hashAllNotes` throws after the slot is acquired, the pre-Task
-    /// catch in `runImport` releases the slot via `fail()` so the throwing
+/// catch in the selected-v2 import launch releases the slot via `fail()` so the throwing
     /// preflight never permanently consumes cap capacity. A subsequent valid
     /// import must succeed.
     ///

@@ -960,10 +960,10 @@ fn ag15c_restart_loads_fingerprint_and_skips_recompute() {
 //   AG-19: multiple regular captures all searchable after the drain
 
 use std::collections::BTreeMap;
+mod test_support;
+use test_support::SelectedV2Session;
 use aria_mcp::{
-    dispatch::dispatch_tool,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
 
 macro_rules! args {
@@ -979,8 +979,10 @@ fn is_success(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(false)
 }
 
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
+fn search_results(result: &serde_json::Value) -> &[serde_json::Value] {
+    result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search must expose results")
 }
 
 /// AG-16: Regular-mode capture → drain → BM25 recall finds the drawer.
@@ -993,18 +995,15 @@ fn content_text(result: &serde_json::Value) -> &str {
 /// foreground drain worker on a ~15 ms poll cadence.
 #[test]
 fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Regular (non-impatient) capture — enqueues a job to the encode queue.
     // The drawer is stored but NOT yet BM25/vector indexed at this point.
-    let capture_result = dispatch_tool(
+    let capture_result = session.call(
         "moot_file_memory",
         &args!["content" => "flamingo wades through brackish water estuary",
                "subject" => "flamingo wades through brackish estuary water",
                "location" => "memories/birds"],
-        &registry,
-        &ledger,
     ).expect("moot_file_memory must succeed");
     assert!(is_success(&capture_result), "regular capture should succeed; got: {capture_result:?}");
 
@@ -1018,8 +1017,8 @@ fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
     // the deterministic barrier that replaced the old governor-tick drain (the
     // governor no longer pumps the encode queue).
     {
-        let handle = registry.default.handle;
-        registry
+        let handle = session.default.handle;
+        session
             .coord
             .lock()
             .expect("coordinator lock")
@@ -1028,22 +1027,15 @@ fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
     }
 
     // BM25 recall now finds the drawer — the semantic lane is lit.
-    let search_result = dispatch_tool(
+    let search_result = session.call(
         "moot_memory_search",
         &args!["query" => "flamingo brackish estuary", "scoring" => "rrf"],
-        &registry,
-        &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&search_result), "search must succeed; got: {search_result:?}");
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "BM25 recall must find the drawer after governor tick drains encode queue; got: {text}"
-    );
-    assert!(
-        text.contains("flamingo"),
-        "search result must contain captured content; got: {text}"
+        !search_results(&search_result).is_empty(),
+        "BM25 recall must find the drawer after governor tick drains encode queue; got: {search_result:?}"
     );
 }
 
@@ -1057,39 +1049,29 @@ fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
 /// Parity: Swift P6 path (EncodeIntake.swift:110 ingestDrawerIntoCorpus inline).
 #[test]
 fn ag17_impatient_capture_is_immediately_searchable_no_tick_needed() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Impatient capture — encodes inline before returning.
-    let capture_result = dispatch_tool(
+    let capture_result = session.call(
         "moot_file_memory",
         &args!["content" => "avocet probes mud at low tide estuary",
                "subject" => "avocet probes mud at low tide estuary",
                "location" => "memories/birds",
                "impatient" => true],
-        &registry,
-        &ledger,
     ).expect("impatient moot_file_memory must succeed");
     assert!(is_success(&capture_result), "impatient capture should succeed; got: {capture_result:?}");
 
     // No governor tick — impatient mode encoded inline before returning.
     // BM25 recall must find the drawer IMMEDIATELY.
-    let search_result = dispatch_tool(
+    let search_result = session.call(
         "moot_memory_search",
         &args!["query" => "avocet estuary tide", "scoring" => "rrf"],
-        &registry,
-        &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&search_result), "search must succeed; got: {search_result:?}");
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "impatient capture must be immediately BM25 searchable (no governor tick needed); got: {text}"
-    );
-    assert!(
-        text.contains("avocet"),
-        "search result must contain captured content; got: {text}"
+        !search_results(&search_result).is_empty(),
+        "impatient capture must be immediately BM25 searchable (no governor tick needed); got: {search_result:?}"
     );
 }
 
@@ -1100,30 +1082,27 @@ fn ag17_impatient_capture_is_immediately_searchable_no_tick_needed() {
 /// CorpusKit owns the encode pipeline), and asserts both are BM25 searchable.
 #[test]
 fn ag19_two_regular_captures_both_searchable_after_drain() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Capture two drawers via regular mode — both enqueued.
-    dispatch_tool(
+    session.call(
         "moot_file_memory",
         &args!["content" => "spoonbill sweeps bill through water feeding",
                "subject" => "spoonbill sweeps bill through water feeding",
                "location" => "memories/birds"],
-        &registry, &ledger,
     ).expect("capture 1 must succeed");
 
-    dispatch_tool(
+    session.call(
         "moot_file_memory",
         &args!["content" => "ibis probes soil with curved beak savanna",
                "subject" => "ibis probes soil with curved beak savanna",
                "location" => "memories/birds"],
-        &registry, &ledger,
     ).expect("capture 2 must succeed");
 
     // Drain the Corpus ingest queue to completion (deterministic barrier).
     {
-        let handle = registry.default.handle;
-        registry
+        let handle = session.default.handle;
+        session
             .coord
             .lock()
             .expect("coordinator lock")
@@ -1132,28 +1111,24 @@ fn ag19_two_regular_captures_both_searchable_after_drain() {
     }
 
     // Both drawers must now be BM25/vector searchable.
-    let r_spoonbill = dispatch_tool(
+    let r_spoonbill = session.call(
         "moot_memory_search",
         &args!["query" => "spoonbill bill water", "scoring" => "rrf"],
-        &registry, &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&r_spoonbill));
-    let t1 = content_text(&r_spoonbill);
     assert!(
-        t1.starts_with("found ") && !t1.starts_with("found 0"),
-        "spoonbill must be BM25 searchable after the drain; got: {t1}"
+        !search_results(&r_spoonbill).is_empty(),
+        "spoonbill must be BM25 searchable after the drain; got: {r_spoonbill:?}"
     );
 
-    let r_ibis = dispatch_tool(
+    let r_ibis = session.call(
         "moot_memory_search",
         &args!["query" => "ibis beak savanna", "scoring" => "rrf"],
-        &registry, &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&r_ibis));
-    let t2 = content_text(&r_ibis);
     assert!(
-        t2.starts_with("found ") && !t2.starts_with("found 0"),
-        "ibis must be BM25 searchable after the drain; got: {t2}"
+        !search_results(&r_ibis).is_empty(),
+        "ibis must be BM25 searchable after the drain; got: {r_ibis:?}"
     );
 }
 

@@ -523,8 +523,7 @@ struct HTTPServerTests {
     ///
     /// BLOCKED: v2 `moot_read_journal` uses `limit` (not `last_n`) as its argument key,
     /// and the v2 `AriaV2ReadJournalRequest` decoder REJECTS values above the 500
-    /// ceiling (throws invalidParams) rather than clamping them silently. The v1 path
-    /// used `runReadJournal` with `Self.clampLimit` which clamped; the v2 path uses
+    /// ceiling (throws invalidParams) rather than clamping them silently. The v2 path uses
     /// `AriaV2KnowledgeJournalRequest.limit()` which throws. The test's pinned assertion
     /// ("must not error") cannot be satisfied with either key name in v2. Awaiting
     /// catalog decision on whether v2 should clamp or reject over-ceiling limit values.
