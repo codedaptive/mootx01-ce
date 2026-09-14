@@ -833,6 +833,20 @@ public actor Estate {
         return FrameFilteredDrawers(admissible: admissible, loadedIDs: loadedIDs)
     }
 
+    /// Hydrate exactly these IDs and count only default-sensitivity exclusions.
+    /// Rejected rows and loaded-ID information remain inside LocusKit.
+    public func hydrateWithSensitivityCount(
+        ids: [String], matchingFrame frame: RecallFrame, hydrationLevel: HydrationLevel
+    ) async throws -> BitmapEvaluationResult {
+        let loadLevel: HydrationLevel = BitmapEvaluator.chainHasContentPredicate(frame.filterChain)
+            ? .full : hydrationLevel
+        let loaded = try await store.getDrawers(ids: ids, hydrationLevel: loadLevel)
+        let nodeNames = try await store.resolveNodeNames(
+            parentNodeIds: Array(Set(loaded.map(\.parentNodeId))))
+        return try await BitmapEvaluator.evaluateResult(
+            frame: frame, drawers: loaded, store: store, nodeNames: nodeNames)
+    }
+
     /// LATE BODY HYDRATION — read the full content blob for a specific id set.
     /// This is the dense-first hydration capability: the candidate pool is
     /// loaded body-free (`.structured`), selection runs on the dense signal,
