@@ -15,17 +15,8 @@ import Testing
 /// handler were swapped for a stub returning empty success; `isError == false`
 /// alone is never the only assertion.
 ///
-/// FINDING — RecipeTools names not in v2 catalog:
-///   `moot_run_migration` and `moot_confirm_migration` are registered in
-///   RecipeTools (RecipeTools.swift) but are NOT in AriaV2SelectedCatalog.
-///   Calling `dispatcher.dispatch(name: "moot_run_migration", …)` throws
-///   JSONRPCError.methodNotFound because `ToolProjection.admitsDispatch`
-///   returns false for names absent from the v2 catalog.
-///   The v2 catalog migration operations use `moot_migration_run` and
-///   `moot_migration_confirm` (AriaV2OrchestrationOperation raw values).
-///   The Rust port dispatches `moot_run_migration` through a separate
-///   RecipeTools path, not through the Swift v2 dispatcher.
-///   Tests below use the correct v2 catalog names.
+/// Migration coverage uses the selected v2 catalog names
+/// `moot_migration_run` and `moot_migration_confirm`.
 @Suite("ARIA v2 diagnostics and orchestration dispatch coverage", .serialized)
 struct AriaV2DiagnosticsDispatchCoverageTests {
 
@@ -168,12 +159,16 @@ struct AriaV2DiagnosticsDispatchCoverageTests {
 
         // Empty estate: no contradictions, but the handler still returns an
         // estate-specific analysis_ref and an empty candidates array.
+        let storeBefore = try await kit.topologyChangeSignature(for: handle)
         let result = try await dispatcher.dispatch(
             name: "moot_hunt_contradictions", arguments: .object([:]))
         #expect(result.objectValue?["isError"] == .bool(false))
         // A stub returning empty success would have no analysis_ref in data.
         let analysisRef = try #require(data(result)?["analysis_ref"]?.stringValue)
         #expect(!analysisRef.isEmpty)
+        let storeAfter = try await kit.topologyChangeSignature(for: handle)
+        #expect(storeAfter == storeBefore,
+                "moot_hunt_contradictions is read-only; store changed from \(storeBefore) to \(storeAfter)")
     }
 
     // MARK: - moot_review_tunnel
@@ -230,9 +225,6 @@ struct AriaV2DiagnosticsDispatchCoverageTests {
     /// catalog.  The tool name in structuredContent must match the operation name
     /// regardless of whether the migration itself succeeds or returns a refusal.
     ///
-    /// NOTE: The Rust port uses the RecipeTools name `moot_run_migration` for its
-    /// migration dispatch path.  The Swift v2 dispatcher uses `moot_migration_run`
-    /// (AriaV2OrchestrationOperation.runMigration.rawValue).
     @Test("moot_migration_run dispatch path is wired through the v2 catalog")
     func migrationRunDispatchIsWiredThroughV2Catalog() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
@@ -277,9 +269,6 @@ struct AriaV2DiagnosticsDispatchCoverageTests {
     /// without the required winner_branch_id argument.  The argument decoder must
     /// throw JSONRPCError before reaching the lower provider.
     ///
-    /// NOTE: The RecipeTools name `moot_confirm_migration` is NOT in the v2
-    /// catalog and would throw methodNotFound.  This test uses the v2 catalog
-    /// name `moot_migration_confirm`.
     @Test("moot_migration_confirm dispatch path rejects missing winner_branch_id with invalidParams")
     func migrationConfirmDispatchThrowsOnMissingRequiredArg() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()

@@ -30,11 +30,12 @@
 
 use std::collections::BTreeMap;
 
+mod test_support;
+use test_support::SelectedV2Session;
+
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
 
 // ---------------------------------------------------------------------------
@@ -50,12 +51,14 @@ macro_rules! args {
     }};
 }
 
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
-}
-
 fn is_success(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(false)
+}
+
+fn facts(result: &serde_json::Value) -> &[serde_json::Value] {
+    result["structuredContent"]["data"]["facts"]
+        .as_array()
+        .expect("selected-v2 fact search must expose facts")
 }
 
 // ---------------------------------------------------------------------------
@@ -71,32 +74,31 @@ fn fact_filed_with_mootx01_identity_gets_mootx01_added_by() {
     // Bare estate — no corpus needed for provenance tests.
     let mut registry = EstateRegistry::new_inmemory_bare();
     registry.server_identity = "mootx01".to_owned();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(registry);
 
     let file_args = args![
         "subject" => "Paris",
         "predicate" => "is_capital_of",
         "object" => "France",
     ];
-    let file_result = dispatch_tool("moot_file_fact", &file_args, &registry, &ledger)
+    let file_result = session.call("moot_file_fact", &file_args)
         .expect("moot_file_fact must not error");
     assert!(
         is_success(&file_result),
         "moot_file_fact must succeed; got: {file_result:?}"
     );
 
-    // Retrieve via moot_fact_search and inspect the addedBy= stamp.
-    let search_args = args!["query" => "Paris"];
-    let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
-        .expect("moot_fact_search must not error");
-    let text = content_text(&search_result);
+    let coord = session.coord.lock().expect("coordinator lock must not be poisoned");
+    let stored = coord
+        .recall_kg_facts(&session.default.handle)
+        .expect("fact store must be readable through its live seam");
     assert!(
-        text.contains("addedBy=mootx01"),
-        "fact filed via identity 'mootx01' must carry addedBy=mootx01; got: {text}"
+        stored.iter().any(|fact| fact.added_by == "mootx01"),
+        "fact filed via identity 'mootx01' must carry added_by=mootx01; got: {stored:?}"
     );
     assert!(
-        !text.contains("addedBy=aria-mcp-server"),
-        "mootx01-hosted registry must NOT stamp 'aria-mcp-server'; got: {text}"
+        stored.iter().all(|fact| fact.added_by != "aria-mcp-server"),
+        "mootx01-hosted registry must NOT stamp 'aria-mcp-server'; got: {stored:?}"
     );
 }
 
@@ -112,23 +114,23 @@ fn fact_filed_with_aria_mcp_identity_gets_aria_mcp_added_by() {
     // — sets it rather than relying on a default.
     let mut registry = EstateRegistry::new_inmemory_bare();
     registry.server_identity = "aria-mcp-server".to_owned();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(registry);
 
     let file_args = args![
         "subject" => "Berlin",
         "predicate" => "is_capital_of",
         "object" => "Germany",
     ];
-    dispatch_tool("moot_file_fact", &file_args, &registry, &ledger)
+    session.call("moot_file_fact", &file_args)
         .expect("moot_file_fact must not error");
 
-    let search_args = args!["query" => "Berlin"];
-    let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
-        .expect("moot_fact_search must not error");
-    let text = content_text(&search_result);
+    let coord = session.coord.lock().expect("coordinator lock must not be poisoned");
+    let stored = coord
+        .recall_kg_facts(&session.default.handle)
+        .expect("fact store must be readable through its live seam");
     assert!(
-        text.contains("addedBy=aria-mcp-server"),
-        "fact filed via identity 'aria-mcp-server' must carry addedBy=aria-mcp-server; got: {text}"
+        stored.iter().any(|fact| fact.added_by == "aria-mcp-server"),
+        "fact filed via identity 'aria-mcp-server' must carry added_by=aria-mcp-server; got: {stored:?}"
     );
 }
 
@@ -139,42 +141,20 @@ fn fact_filed_with_aria_mcp_identity_gets_aria_mcp_added_by() {
 ///
 /// Mirrors Swift test: explicitSourceIdNamingNoDrawerFailsTheWrite.
 #[test]
-fn explicit_source_id_naming_no_drawer_fails_the_write() {
-    let mut registry = EstateRegistry::new_inmemory_bare();
-    registry.server_identity = "mootx01".to_owned();
-    let ledger = SurfacedRecallLedger::new();
-
-    let file_args = args![
+fn explicit_missing_source_memory_id_writes_zero_facts() {
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    let result = session.call("moot_file_fact", &args![
         "subject" => "Tokyo",
         "predicate" => "is_capital_of",
         "object" => "Japan",
-        "source_id" => "external-agent",
-    ];
-    let file_result = dispatch_tool("moot_file_fact", &file_args, &registry, &ledger)
-        .expect("moot_file_fact must return a tool result");
-    assert!(
-        !is_success(&file_result),
-        "source_id naming no drawer must be rejected; got: {file_result:?}"
-    );
-    assert!(
-        content_text(&file_result).contains("names no drawer"),
-        "rejection must say why; got: {}",
-        content_text(&file_result)
-    );
-
-    // Nothing was filed, so the fact surface stays empty.
-    let search_args = args!["query" => "Tokyo"];
-    let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
-        .expect("moot_fact_search must not error");
-    let text = content_text(&search_result);
-    // The search header echoes the query verbatim; the fact ROW is what must
-    // be absent, so match on the predicate.
-    assert!(
-        !text.contains("is_capital_of"),
-        "a rejected write must leave no fact behind; got: {text}"
-    );
+        "source_memory_id" => "00000000-0000-0000-0000-000000000001",
+    ]).expect("selected-v2 fact filing must return an envelope");
+    assert_eq!(result["isError"], serde_json::json!(true),
+        "an explicit missing source must be refused: {result:?}");
+    let coord = session.coord.lock().unwrap();
+    assert!(coord.recall_kg_facts(&session.default.handle).unwrap().is_empty(),
+        "a missing source UUID must leave the durable fact store empty");
 }
-
 // ---------------------------------------------------------------------------
 // Bug D: Dark-lane hint in moot_fact_search
 // ---------------------------------------------------------------------------
@@ -185,24 +165,22 @@ fn explicit_source_id_naming_no_drawer_fails_the_write() {
 /// Mirrors Swift test: factSearchNoProvenanceHint_whenNoQuery.
 #[test]
 fn fact_search_no_provenance_hint_when_no_query() {
-    let registry = EstateRegistry::new_inmemory_bare();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
 
     let file_args = args![
         "subject" => "Rust",
         "predicate" => "created_by",
         "object" => "Graydon Hoare",
     ];
-    dispatch_tool("moot_file_fact", &file_args, &registry, &ledger)
+    session.call("moot_file_fact", &file_args)
         .expect("moot_file_fact must not error");
 
     // No query → list-all path → no provenance hint.
     let search_args = args![];
-    let search_result = dispatch_tool("moot_fact_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_fact_search", &search_args)
         .expect("moot_fact_search must not error");
-    let text = content_text(&search_result);
     assert!(
-        !text.contains("recall_provenance:"),
-        "moot_fact_search without a query must NOT emit recall_provenance:; got: {text}"
+        facts(&search_result).len() == 1,
+        "selected-v2 fact search without a query must return the filed fact; got: {search_result:?}"
     );
 }

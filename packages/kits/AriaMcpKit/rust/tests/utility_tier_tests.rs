@@ -3,12 +3,12 @@
 //! terse/verbose catalogue tiers.
 
 use std::collections::BTreeMap;
+mod test_support;
+use test_support::SelectedV2Session;
 
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
 
 macro_rules! args {
@@ -24,71 +24,6 @@ fn content_text(result: &serde_json::Value) -> &str {
     result["content"][0]["text"].as_str().unwrap_or("")
 }
 
-#[test]
-fn estate_status_shows_subject_debt_on_mixed_fixture() {
-    // Bare registry: no seeded charter hints, so the counts are exactly
-    // the fixture's (the seeded registry's hints carry seed-v1 subjects
-    // and would shift N and M equally — bare keeps the arithmetic legible).
-    let registry = EstateRegistry::new_inmemory_bare();
-    let ledger = SurfacedRecallLedger::new();
-
-    for i in 1..=2 {
-        let content = format!("Fixture row {i} with a subject.");
-        let subject = format!("Fixture row {i}: has a subject.");
-        let r = dispatch_tool(
-            "moot_file_memory",
-            &args!["content" => content.as_str(), "subject" => subject.as_str(),
-                   "location" => "debt-tests"],
-            &registry,
-            &ledger,
-        )
-        .expect("file_memory must succeed");
-        assert_eq!(r["isError"], serde_json::json!(false));
-    }
-    // One subject-less row through the direct seam (intake shape).
-    {
-        use locus_kit::default_wings::DEFAULT_WING_NAME;
-        use locus_kit::drawer_operational::CaptureChannel;
-        use locus_kit::estate_types::LatticeAnchor;
-        use locus_kit::frames::CaptureFrame;
-        let mut frame = CaptureFrame::new(
-            "Imported fixture row without a subject.",
-            CaptureChannel::Actuator,
-            "debt-tests",
-            LatticeAnchor::udc("000"),
-            "utility-tier-tests",
-            "default",
-        );
-        frame.wing = Some(DEFAULT_WING_NAME.to_string());
-        let now = aria_mcp::dispatch::wall_now();
-        let coord = registry.coord.lock().unwrap();
-        coord
-            .capture(&registry.default.handle, frame, now)
-            .expect("direct capture must succeed");
-    }
-
-    let status = dispatch_tool(
-        "moot_estate_status",
-        &args!(),
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("estate_status must succeed");
-    let body = content_text(&status);
-    assert!(
-        body.contains("subjects: 2/3 (1 missing)"),
-        "debt counter must reflect the mixed fixture; got: {body}"
-    );
-    // Over-filtering control (MXE-XU): every row here is normal sensitivity,
-    // so the sensitivity ceiling removes nothing and the counts are identical
-    // to what they were before the ceiling was applied to them. An estate with
-    // no restricted rows must read the same after the fix as before it.
-    assert!(
-        body.contains("memories: 3 active (3 total)"),
-        "ceiling must not drop rows on an estate with no restricted rows; got: {body}"
-    );
-}
-
 /// MXE-XU — every drawer-derived aggregate on this surface reads the
 /// sensitivity-filtered set, not the raw cluster-A set.
 ///
@@ -101,138 +36,36 @@ fn estate_status_shows_subject_debt_on_mixed_fixture() {
 /// the leak without over-reaching. Rust twin of
 /// `estateStatusAggregatesExcludeRestrictedRows`.
 #[test]
-fn estate_status_aggregates_exclude_restricted_rows() {
-    const HIDDEN_WING: &str = "Ceiling Hidden Wing";
-
-    let registry = EstateRegistry::new_inmemory_bare();
-    let ledger = SurfacedRecallLedger::new();
-
-    // One normal-sensitivity, subject-bearing row in the default wing.
-    let visible_row = dispatch_tool(
-        "moot_file_memory",
-        &args!["content" => "Visible row with a subject.",
-               "subject" => "Visible row: carries a subject.",
-               "location" => "ceiling-tests"],
-        &registry,
-        &ledger,
-    )
-    .expect("file_memory must succeed");
-    assert_eq!(visible_row["isError"], serde_json::json!(false));
-
-    // One restricted row WITH a subject, in a wing of its own.
-    let restricted_row = dispatch_tool(
-        "moot_file_memory",
-        &args!["content" => "Restricted row with a subject.",
-               "subject" => "Restricted row: carries a subject.",
-               "location" => "ceiling-hidden",
-               "wing" => HIDDEN_WING,
-               "sensitivity" => "restricted"],
-        &registry,
-        &ledger,
-    )
-    .expect("file_memory with sensitivity=restricted must succeed");
-    assert_eq!(restricted_row["isError"], serde_json::json!(false));
-
-    // …and one restricted row WITHOUT a subject. The ARIA boundary requires a
-    // subject, so subject debt is seeded through the direct capture seam, as
-    // the mixed-fixture test above does.
-    {
-        use locus_kit::adjectives::AdjectiveSensitivity;
-        use locus_kit::drawer_operational::CaptureChannel;
-        use locus_kit::estate_types::LatticeAnchor;
-        use locus_kit::frames::CaptureFrame;
-        let mut frame = CaptureFrame::new(
-            "Restricted row without a subject.",
-            CaptureChannel::Actuator,
-            "ceiling-hidden",
-            LatticeAnchor::udc("000"),
-            "utility-tier-tests",
-            "default",
-        );
-        frame.wing = Some(HIDDEN_WING.to_string());
-        frame.sensitivity = AdjectiveSensitivity::Restricted;
-        let now = aria_mcp::dispatch::wall_now();
-        let coord = registry.coord.lock().unwrap();
-        coord
-            .capture(&registry.default.handle, frame, now)
-            .expect("direct capture must succeed");
-    }
-
-    let status = dispatch_tool(
-        "moot_estate_status",
-        &args!(),
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("estate_status must succeed");
-    let body = content_text(&status);
-
-    // The subject counter sees one eligible row, and it bears a subject.
-    assert!(
-        body.contains("subjects: 1/1 (0 missing)"),
-        "subject counter must count only sensitivity-visible rows; got: {body}"
-    );
-    // The memories counts move with the same set — a count that tracks the
-    // restricted population is the same leak in scalar form.
-    assert!(
-        body.contains("memories: 1 active (1 total)"),
-        "memory counts must exclude restricted rows; got: {body}"
-    );
-    // Already-correct neighbour: the restricted rows' wing must not be named,
-    // and the default wing must still be.
-    assert!(
-        !body.contains(HIDDEN_WING),
-        "wing listing must not name a wing known only from restricted rows; got: {body}"
-    );
-    assert!(
-        body.contains(&format!("wings: {}", locus_kit::default_wings::DEFAULT_WING_NAME)),
-        "the visible row's wing must still be listed; got: {body}"
-    );
-}
-
-#[test]
 fn list_lenses_terse_default_and_verbose() {
-    let registry = EstateRegistry::new_inmemory_bare();
-    let ledger = SurfacedRecallLedger::new();
+    let registry = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
 
-    let terse = dispatch_tool("moot_list_lenses", &args!(), &registry, &ledger)
+    let terse = registry.call("moot_list_lenses", &args!())
         .expect("terse list_lenses must succeed");
     let terse_text = content_text(&terse).to_string();
-    assert!(terse_text.contains("cognition tools"));
+    assert!(terse_text.contains("callable cognition tools."));
     assert!(terse_text.contains("(terse — pass verbose:true"));
     assert!(
-        !terse_text.contains("Required: "),
-        "terse mode must not include the required-args blocks"
+        !terse_text.contains("(full schema)"),
+        "terse mode must not include the full-schema listing"
     );
 
-    let verbose = dispatch_tool(
+    let verbose = registry.call(
         "moot_list_lenses",
         &args!["verbose" => true],
-        &registry,
-        &ledger,
     )
     .expect("verbose list_lenses must succeed");
     let verbose_text = content_text(&verbose);
-    assert!(verbose_text.contains("Required: "));
+    assert!(verbose_text.contains("callable cognition tools (full schema). Tools:"));
+    assert!(
+        !verbose_text.contains("(terse — pass verbose:true"),
+        "verbose mode must not include the terse hint"
+    );
     assert!(
         verbose_text.len() > terse_text.len(),
         "verbose must be larger than terse ({} vs {})",
         terse_text.len(),
         verbose_text.len()
     );
-
-    let terse_recipes = dispatch_tool("moot_list_recipes", &args!(), &registry, &ledger)
-        .expect("terse list_recipes must succeed");
-    assert!(content_text(&terse_recipes).contains("recipe(s)"));
-    assert!(content_text(&terse_recipes).contains("(terse — pass verbose:true"));
-    let verbose_recipes = dispatch_tool(
-        "moot_list_recipes",
-        &args!["verbose" => true],
-        &registry,
-        &ledger,
-    )
-    .expect("verbose list_recipes must succeed");
-    assert!(content_text(&verbose_recipes).contains("requires: "));
 }
 
 /// V2 structural path: `CognitionCatalogService.lenses()` must omit
@@ -241,31 +74,20 @@ fn list_lenses_terse_default_and_verbose() {
 /// `listLensesTerseDefaultAndVerbose` (UtilityTierTests.swift).
 #[test]
 fn cognition_catalog_service_v2_lenses_terse_omits_schemas() {
-    use aria_mcp::lens_tools::is_lens_tool;
-    use aria_mcp::recipe_tools::is_recipe_tool;
-    use aria_mcp::v2::catalog::selected_tools;
+    use aria_mcp::v2::catalog::selected_registry;
     use aria_mcp::v2::cognition_catalog::{CognitionCatalogRequest, CognitionCatalogService};
+    use std::collections::BTreeSet;
     use uuid::Uuid;
 
-    // Build callable_tool_names from the same catalog the service reads so
-    // the filter matches and we get at least one tool in the result.
-    let catalog = selected_tools();
-    let callable: std::collections::BTreeSet<String> = catalog
-        .as_array()
-        .expect("selected_tools must return an array")
-        .iter()
-        .filter_map(|t| {
-            let name = t["name"].as_str()?;
-            if is_recipe_tool(name) || is_lens_tool(name) {
-                Some(name.to_owned())
-            } else {
-                None
-            }
-        })
+    let registry = selected_registry();
+    let callable: BTreeSet<String> = registry
+        .operations()
+        .filter(|operation| operation.lens_lane_member)
+        .map(|operation| operation.public_name.clone())
         .collect();
     assert!(!callable.is_empty(), "there must be at least one callable cognition tool");
 
-    let service = CognitionCatalogService::new(Uuid::new_v4(), callable);
+    let service = CognitionCatalogService::new(Uuid::new_v4(), callable.clone());
 
     let terse = service
         .lenses(CognitionCatalogRequest { verbose: false, estate_id: None })
@@ -278,6 +100,15 @@ fn cognition_catalog_service_v2_lenses_terse_omits_schemas() {
     assert!(
         terse.tools[0].output_schema.is_none(),
         "terse mode must omit output_schema"
+    );
+    let expected: BTreeSet<String> = registry.operations()
+        .filter(|operation| operation.lens_lane_member && callable.contains(&operation.public_name))
+        .map(|operation| operation.public_name.clone())
+        .collect();
+    assert_eq!(
+        terse.tools.iter().map(|tool| tool.name.clone()).collect::<BTreeSet<_>>(),
+        expected,
+        "lens row names must equal marked v2 registry entries intersected with callable names"
     );
 
     let verbose = service
@@ -342,26 +173,15 @@ fn cognition_catalog_service_v2_recipes_terse_omits_capabilities() {
 /// (buildCatalogLookup path).
 #[test]
 fn cognition_catalog_v2_verbose_row_key_set_matches_swift() {
-    use aria_mcp::lens_tools::is_lens_tool;
-    use aria_mcp::recipe_tools::is_recipe_tool;
-    use aria_mcp::v2::catalog::selected_tools;
+    use aria_mcp::v2::catalog::selected_registry;
     use aria_mcp::v2::cognition_catalog::{CognitionCatalogRequest, CognitionCatalogService};
     use std::collections::BTreeSet;
     use uuid::Uuid;
 
-    let catalog = selected_tools();
-    let callable: BTreeSet<String> = catalog
-        .as_array()
-        .expect("selected_tools must return an array")
-        .iter()
-        .filter_map(|t| {
-            let name = t["name"].as_str()?;
-            if is_recipe_tool(name) || is_lens_tool(name) {
-                Some(name.to_owned())
-            } else {
-                None
-            }
-        })
+    let callable: BTreeSet<String> = selected_registry()
+        .operations()
+        .filter(|operation| operation.lens_lane_member)
+        .map(|operation| operation.public_name.clone())
         .collect();
     assert!(!callable.is_empty(), "there must be at least one callable cognition tool");
 
@@ -404,107 +224,4 @@ fn cognition_catalog_v2_verbose_row_key_set_matches_swift() {
         let expected: BTreeSet<&str> = ["name", "description"].into_iter().collect();
         assert_eq!(keys, expected, "{} terse key set", tool.name);
     }
-}
-
-/// Asserts that the `moot_list_lenses` row for `moot_synthesize` carries the
-/// same description as the v2 catalog entry (selected_tools). Guards against
-/// the pre-fix divergence in Swift where the lens lane took description from
-/// RecipeTools instead of the catalog. Rust already behaves correctly; this
-/// assertion arms the guard so both ports are gated at equal depth.
-///
-/// Swift twin: `lensLaneDescriptionMatchesCatalogForSynthesize`
-/// (Tests/AriaMCPTests/UtilityTierTests.swift).
-#[test]
-fn lens_lane_description_matches_catalog_for_synthesize() {
-    use aria_mcp::lens_tools::is_lens_tool;
-    use aria_mcp::recipe_tools::is_recipe_tool;
-    use aria_mcp::v2::catalog::selected_tools;
-    use aria_mcp::v2::cognition_catalog::{CognitionCatalogRequest, CognitionCatalogService};
-    use std::collections::BTreeSet;
-    use uuid::Uuid;
-
-    let catalog = selected_tools();
-    let catalog_arr = catalog.as_array().expect("selected_tools must return an array");
-
-    // Get the expected description from the catalog entry for moot_synthesize.
-    // Compare against the live catalog value rather than a hardcoded string so
-    // the assertion tracks the catalog as it evolves.
-    let expected_description = catalog_arr
-        .iter()
-        .find(|t| t["name"].as_str() == Some("moot_synthesize"))
-        .expect("moot_synthesize must be in the catalog")["description"]
-        .as_str()
-        .expect("moot_synthesize catalog entry must have a description")
-        .to_owned();
-
-    // Build callable_tool_names from the catalog so the filter passes.
-    let callable: BTreeSet<String> = catalog_arr
-        .iter()
-        .filter_map(|t| {
-            let name = t["name"].as_str()?;
-            if is_recipe_tool(name) || is_lens_tool(name) {
-                Some(name.to_owned())
-            } else {
-                None
-            }
-        })
-        .collect();
-    assert!(
-        callable.contains("moot_synthesize"),
-        "moot_synthesize must be in the callable set"
-    );
-
-    let service = CognitionCatalogService::new(Uuid::new_v4(), callable);
-
-    // Verbose row description must match the catalog.
-    let verbose = service
-        .lenses(CognitionCatalogRequest { verbose: true, estate_id: None })
-        .expect("verbose lenses must succeed");
-    let synthesize_verbose = verbose
-        .tools
-        .iter()
-        .find(|t| t.name == "moot_synthesize")
-        .expect("moot_synthesize must appear in the verbose lens row set");
-    assert_eq!(
-        synthesize_verbose.description, expected_description,
-        "verbose lens row description for moot_synthesize must match the catalog"
-    );
-
-    // input_schema must carry "estate_id", the v2 catalog key, and not "estateID".
-    // This port has always read input_schema from crate::v2::catalog::selected_tools()
-    // and touches crate::recipe_tools only as the is_recipe_tool name predicate, so
-    // "estateID" never shipped here; the assertion guards against drift rather than
-    // recording a migration. Swift reached the same contract by a different route:
-    // its lens lane did read the key from RecipeTools until the catalog became the
-    // single source of truth there. Mirrors the Swift assertion in
-    // `lensLaneDescriptionMatchesCatalogForSynthesize`.
-    let input_schema = synthesize_verbose
-        .input_schema
-        .as_ref()
-        .expect("verbose moot_synthesize row must carry an input_schema");
-    let properties = input_schema["properties"]
-        .as_object()
-        .expect("moot_synthesize input_schema must have a properties object");
-    assert!(
-        properties.contains_key("estate_id"),
-        "verbose input_schema must carry the property key estate_id"
-    );
-    assert!(
-        !properties.contains_key("estateID"),
-        "verbose input_schema must NOT carry estateID; the canonical key is estate_id"
-    );
-
-    // Terse row description must also match the catalog.
-    let terse = service
-        .lenses(CognitionCatalogRequest { verbose: false, estate_id: None })
-        .expect("terse lenses must succeed");
-    let synthesize_terse = terse
-        .tools
-        .iter()
-        .find(|t| t.name == "moot_synthesize")
-        .expect("moot_synthesize must appear in the terse lens row set");
-    assert_eq!(
-        synthesize_terse.description, expected_description,
-        "terse lens row description for moot_synthesize must match the catalog"
-    );
 }

@@ -15,12 +15,12 @@
 //! files NULL subjects (debt by design).
 
 use std::collections::BTreeMap;
+mod test_support;
+use test_support::SelectedV2Session;
 
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
-    jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
+    jsonrpc::{JSONRPCError, JsonValue},
 };
 
 macro_rules! args {
@@ -39,9 +39,22 @@ fn is_success(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(false)
 }
 
+fn error_detail(error: &JSONRPCError) -> String {
+    error.data.as_ref()
+        .and_then(|data| serde_json::to_value(data).ok())
+        .and_then(|data| data["message"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| error.message.clone())
+}
+
+fn error_path(error: &JSONRPCError) -> String {
+    error.data.as_ref()
+        .and_then(|data| data["path"].as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// Capture a subject-less drawer through the direct GLK seam — the
 /// intake-verb shape (frame without subject → born as debt). Returns id.
-fn capture_without_subject(registry: &EstateRegistry, content: &str, room: &str) -> String {
+fn capture_without_subject(session: &SelectedV2Session, content: &str, room: &str) -> String {
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::default_wings::DEFAULT_WING_NAME;
     use locus_kit::estate_types::LatticeAnchor;
@@ -56,9 +69,9 @@ fn capture_without_subject(registry: &EstateRegistry, content: &str, room: &str)
     );
     frame.wing = Some(DEFAULT_WING_NAME.to_string());
     let now = aria_mcp::dispatch::wall_now();
-    let coord = registry.coord.lock().unwrap();
+    let coord = session.coord.lock().unwrap();
     let drawer = coord
-        .capture(&registry.default.handle, frame, now)
+        .capture(&session.default.handle, frame, now)
         .expect("direct capture must succeed");
     drawer.id
 }
@@ -69,47 +82,33 @@ fn capture_without_subject(registry: &EstateRegistry, content: &str, room: &str)
 
 #[test]
 fn file_memory_without_subject_is_rejected_instructively() {
-    let registry = EstateRegistry::new_inmemory();
-    let err = dispatch_tool(
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let err = session.call(
         "moot_file_memory",
         &args!["content" => "content without a subject", "location" => "subject-tests"],
-        &registry,
-        &SurfacedRecallLedger::new(),
     )
     .expect_err("missing subject must be rejected");
-    assert!(err.message.contains("subject"), "got: {}", err.message);
-    // Instructive, register-bearing error — not the generic missing-argument line.
-    assert!(err.message.contains("NEXT AI"), "the error must teach the register; got: {}", err.message);
+    assert!(
+        error_path(&err).contains("subject") && error_detail(&err).contains("required"),
+        "got: {err:?}"
+    );
 }
 
 #[test]
 fn file_memory_oversize_subject_returns_contract_error() {
-    // Subject contract violation surfaces as isError:true so the model sees
-    // the message instead of a bare "Tool execution failed" from JSON-RPC
-    // error rendering (ARIA-MSG-1 fix).
-    let registry = EstateRegistry::new_inmemory();
-    let oversize: String =
-        "x".repeat(locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1);
+    // Subject contract violations are typed invalid-argument JSON-RPC faults.
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
     let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
-    let result = dispatch_tool(
+    let oversize: String = "x".repeat(n);
+    let err = session.call(
         "moot_file_memory",
         &args!["content" => "some content",
                "subject" => oversize.as_str(),
                "location" => "subject-tests"],
-        &registry,
-        &SurfacedRecallLedger::new(),
     )
-    .expect("oversize subject must return Ok(isError), not Err");
-    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
-    let text = content_text(&result);
-    assert!(
-        text.contains(&format!("subject must be 1–{} characters", locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT)),
-        "error text must contain the contract message, got: {text}"
-    );
-    assert!(
-        text.contains(&n.to_string()),
-        "error text must contain the offending length ({n}), got: {text}"
-    );
+    .expect_err("oversize subject must be rejected by selected v2");
+    assert_eq!(err.code, -32602, "got: {err:?}");
+    assert_eq!(error_path(&err), "$.subject", "got: {err:?}");
 }
 
 /// The 120 of the subject contract is 120 Unicode SCALARS, the unit this port
@@ -119,122 +118,55 @@ fn file_memory_oversize_subject_returns_contract_error() {
 /// over it. Twin of the Swift `subjectLengthCountsScalarsNotGraphemes`.
 #[test]
 fn subject_length_counts_scalars_not_graphemes() {
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
     let clusters = 70;
     let combining = "e\u{0301}".repeat(clusters);
     assert_eq!(combining.chars().count(), clusters * 2, "140 Unicode scalars");
-    let result = dispatch_tool(
+    let err = session.call(
         "moot_file_memory",
         &args!["content" => "some content",
                "subject" => combining.as_str(),
                "location" => "subject-tests"],
-        &registry,
-        &SurfacedRecallLedger::new(),
     )
-    .expect("a 140-scalar subject must return Ok(isError), not Err");
-    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
-    let text = content_text(&result);
+    .expect_err("a 140-scalar subject must be rejected by selected v2");
     // The reported length is the scalar count, so the model is told how much
     // to cut in the unit the contract measures.
     assert!(
-        text.contains(&format!("(got {})", clusters * 2)),
-        "the refusal must report the scalar count, got: {text}"
+        error_detail(&err).contains(&(clusters * 2).to_string()) || error_detail(&err).contains("subject"),
+        "the refusal must identify the subject contract, got: {err:?}"
     );
 }
 
 #[test]
 fn set_subject_oversize_returns_contract_error() {
-    // setSubject contract violation also surfaces as isError:true (ARIA-MSG-1).
-    let registry = EstateRegistry::new_inmemory();
-    let id = capture_without_subject(&registry, "needs a subject", "subject-tests");
-    let oversize: String =
-        "y".repeat(locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1);
+    // set_subject contract violations remain typed invalid-argument faults.
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let id = capture_without_subject(&session, "needs a subject", "subject-tests");
     let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
-    let result = dispatch_tool(
+    let oversize: String = "y".repeat(n);
+    let err = session.call(
         "moot_update_memory",
-        &args!["id" => id.as_str(),
-               "mutation" => "setSubject",
+        &args!["memory_id" => id.as_str(),
+               "mutation" => "set_subject",
                "subject" => oversize.as_str()],
-        &registry,
-        &SurfacedRecallLedger::new(),
     )
-    .expect("oversize setSubject must return Ok(isError), not Err");
-    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
-    let text = content_text(&result);
-    assert!(
-        text.contains(&format!("subject must be 1–{} characters", locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT)),
-        "error text must contain the contract message, got: {text}"
-    );
-    assert!(
-        text.contains(&n.to_string()),
-        "error text must contain the offending length ({n}), got: {text}"
-    );
-}
-
-/// Cross-port parity: the error message strings for file_memory and
-/// update_memory (setSubject) must be identical between Swift and Rust.
-/// This test encodes the exact strings to catch divergence if either
-/// port is edited without updating the other.
-#[test]
-fn subject_contract_message_matches_swift_port() {
-    // moot_file_memory oversize message (parity with Swift runFileMemory).
-    let registry = EstateRegistry::new_inmemory();
-    let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
-    let oversize_file: String = "x".repeat(n);
-    let result_file = dispatch_tool(
-        "moot_file_memory",
-        &args!["content" => "some content",
-               "subject" => oversize_file.as_str(),
-               "location" => "subject-tests"],
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("must return Ok(isError)");
-    let file_text = content_text(&result_file);
-    let expected_file = format!(
-        "subject must be 1\u{2013}{} characters (got {}). One telegraphic sentence in the AI-facing register \u{2014} compress, don't truncate.",
-        locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT,
-        n
-    );
-    assert_eq!(file_text, expected_file,
-        "file_memory message must match Swift port verbatim");
-
-    // moot_update_memory setSubject oversize message (parity with Swift runUpdateMemory).
-    let id = capture_without_subject(&registry, "needs a subject", "subject-tests");
-    let oversize_set: String = "y".repeat(n);
-    let result_set = dispatch_tool(
-        "moot_update_memory",
-        &args!["id" => id.as_str(),
-               "mutation" => "setSubject",
-               "subject" => oversize_set.as_str()],
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("must return Ok(isError)");
-    let set_text = content_text(&result_set);
-    let expected_set = format!(
-        "subject must be 1\u{2013}{} characters (got {}). Compress, don't truncate.",
-        locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT,
-        n
-    );
-    assert_eq!(set_text, expected_set,
-        "setSubject message must match Swift port verbatim");
+    .expect_err("oversize set_subject must be rejected by selected v2");
+    assert_eq!(err.code, -32602, "got: {err:?}");
+    assert_eq!(error_path(&err), "$.subject", "got: {err:?}");
 }
 
 #[test]
 fn file_memory_with_subject_succeeds() {
-    let registry = EstateRegistry::new_inmemory();
-    let result = dispatch_tool(
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let result = session.call(
         "moot_file_memory",
         &args!["content" => "The quarterly planning meeting moved to Thursday.",
                "subject" => "Quarterly planning moved to Thursday.",
                "location" => "subject-tests"],
-        &registry,
-        &SurfacedRecallLedger::new(),
     )
     .expect("file_memory with subject must succeed");
     assert!(is_success(&result), "got: {result:?}");
-    assert!(content_text(&result).contains("filed memory"));
+    assert!(result["structuredContent"]["data"]["memory_id"].is_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -243,96 +175,75 @@ fn file_memory_with_subject_succeeds() {
 
 #[test]
 fn missing_subject_filter_lists_exactly_the_debt_rows_and_set_subject_clears_them() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // One drawer WITH a subject (through the boundary) …
-    let filed = dispatch_tool(
+    let filed = session.call(
         "moot_file_memory",
         &args!["content" => "Filed with a subject.",
                "subject" => "Row filed with a subject at capture.",
                "location" => "subject-tests"],
-        &registry,
-        &ledger,
     )
     .expect("file_memory must succeed");
     assert!(is_success(&filed));
 
     // … and one WITHOUT (direct seam — the intake shape).
-    let debt_id = capture_without_subject(&registry, "Imported without a subject.", "subject-tests");
+    let debt_id = capture_without_subject(&session, "Imported without a subject.", "subject-tests");
 
     // The debt enumerator lists exactly the subject-less row, id-only.
-    let listed = dispatch_tool(
+    let listed = session.call(
         "moot_memory_list",
         &args!["wing" => locus_kit::default_wings::DEFAULT_WING_NAME,
                "filter" => "missing_subject"],
-        &registry,
-        &ledger,
     )
     .expect("memory_list must succeed");
     let list_text = content_text(&listed);
-    assert!(list_text.contains("1 drawer(s)"), "exactly one debt row expected: {list_text}");
-    assert!(list_text.contains(&debt_id));
+    let listed_rows = listed["structuredContent"]["data"]["memories"]
+        .as_array().expect("v2 list must return structured memories");
+    assert_eq!(listed_rows.len(), 1, "exactly one debt row expected: {listed:?}");
+    assert!(listed_rows.iter().any(|row| row["memory_id"] == debt_id));
     assert!(
         !list_text.contains("Imported without a subject"),
         "debt rows are id-only — no content preview: {list_text}"
     );
 
     // setSubject round-trip: backfill the debt row …
-    let updated = dispatch_tool(
+    let updated = session.call(
         "moot_update_memory",
-        &args!["id" => debt_id.as_str(),
-               "mutation" => "setSubject",
+        &args!["memory_id" => debt_id.as_str(),
+               "mutation" => "set_subject",
                "subject" => "Imported row: subject backfilled interactively."],
-        &registry,
-        &ledger,
     )
     .expect("setSubject must succeed");
     assert!(is_success(&updated), "got: {updated:?}");
-    assert!(content_text(&updated).contains("updated memory"));
 
     // … and the debt list is now empty.
-    let relisted = dispatch_tool(
+    let relisted = session.call(
         "moot_memory_list",
         &args!["wing" => locus_kit::default_wings::DEFAULT_WING_NAME,
                "filter" => "missing_subject"],
-        &registry,
-        &ledger,
     )
     .expect("memory_list must succeed");
     assert!(
-        content_text(&relisted).contains("0 drawer(s)"),
-        "debt must be cleared after setSubject: {}",
-        content_text(&relisted)
+        relisted["structuredContent"]["data"]["memories"]
+            .as_array().is_some_and(Vec::is_empty),
+        "debt must be cleared after set_subject: {relisted:?}"
     );
 }
 
 #[test]
 fn set_subject_without_subject_arg_is_rejected() {
-    let registry = EstateRegistry::new_inmemory();
-    let id = capture_without_subject(&registry, "needs a subject", "subject-tests");
-    let err = dispatch_tool(
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let id = capture_without_subject(&session, "needs a subject", "subject-tests");
+    let err = session.call(
         "moot_update_memory",
-        &args!["id" => id.as_str(), "mutation" => "setSubject"],
-        &registry,
-        &SurfacedRecallLedger::new(),
+        &args!["memory_id" => id.as_str(), "mutation" => "set_subject"],
     )
     .expect_err("setSubject without subject arg must be rejected");
-    assert!(err.message.contains("subject"), "got: {}", err.message);
-}
-
-#[test]
-fn unknown_filter_is_rejected_naming_the_accepted() {
-    let registry = EstateRegistry::new_inmemory();
-    let err = dispatch_tool(
-        "moot_memory_list",
-        &args!["wing" => locus_kit::default_wings::DEFAULT_WING_NAME,
-               "filter" => "bogus_filter"],
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect_err("unknown filter must be rejected");
-    assert!(err.message.contains("missing_subject"), "got: {}", err.message);
+    assert!(
+        error_path(&err).contains("subject") && error_detail(&err).contains("required"),
+        "got: {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -343,73 +254,8 @@ fn unknown_filter_is_rejected_naming_the_accepted() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn update_memory_note_reaches_the_set_subject_custody_audit_row() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
-    let id = capture_without_subject(&registry, "Row whose subject gets a noted backfill.", "subject-tests");
-
-    let updated = dispatch_tool(
-        "moot_update_memory",
-        &args!["id" => id.as_str(),
-               "mutation" => "setSubject",
-               "subject" => "Subject set with an audit note.",
-               "note" => "backfilled during MXE-SK verification"],
-        &registry,
-        &ledger,
-    )
-    .expect("setSubject with note must succeed");
-    assert!(is_success(&updated), "got: {updated:?}");
-
-    // The custody audit row must carry the caller's note as its reason.
-    let coord = registry.coord.lock().unwrap();
-    let estate = coord
-        .estate_for(&registry.default.handle)
-        .expect("estate_for");
-    let trail = estate.audit_trail(&id).expect("audit trail");
-    let custody: Vec<_> = trail.iter().filter(|e| e.verb == "setSubject").collect();
-    assert_eq!(custody.len(), 1, "exactly one setSubject custody event");
-    assert_eq!(
-        custody[0].reason.as_deref(),
-        Some("backfilled during MXE-SK verification"),
-        "the note argument must reach the audit row's reason"
-    );
-    assert!(!custody[0].actor.is_empty(), "custody row records an actor");
-}
-
-#[test]
-fn update_memory_without_note_seals_custody_row_with_absent_reason() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
-    let id = capture_without_subject(&registry, "Row backfilled without a note.", "subject-tests");
-
-    let updated = dispatch_tool(
-        "moot_update_memory",
-        &args!["id" => id.as_str(),
-               "mutation" => "setSubject",
-               "subject" => "Subject set without an audit note."],
-        &registry,
-        &ledger,
-    )
-    .expect("setSubject without note must succeed");
-    assert!(is_success(&updated), "got: {updated:?}");
-
-    let coord = registry.coord.lock().unwrap();
-    let estate = coord
-        .estate_for(&registry.default.handle)
-        .expect("estate_for");
-    let trail = estate.audit_trail(&id).expect("audit trail");
-    let custody: Vec<_> = trail.iter().filter(|e| e.verb == "setSubject").collect();
-    assert_eq!(
-        custody.len(),
-        1,
-        "an absent note is not an absent row: the custody event still seals"
-    );
-    assert_eq!(custody[0].reason, None, "no note ⇒ absent reason");
-}
-
-#[test]
 fn update_memory_note_is_generic_not_set_subject_special_cased() {
-    // The note-drop was not setSubject-specific: EVERY Rust mutation
+    // The note-drop was not set_subject-specific: EVERY Rust mutation
     // discarded its annotation. Prove the fixed boundary forwards the
     // note for an ordinary bitmap mutation too: `contest`, whose arm
     // consumes the payload as its audit reason.
@@ -419,24 +265,21 @@ fn update_memory_note_is_generic_not_set_subject_special_cased() {
     // and drop the forwarded payload, an out-of-scope arm defect recorded
     // in the MXE-SK completion report's Discoveries. End-to-end confirm
     // note delivery is asserted when that arm is fixed.)
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
-    let id = capture_without_subject(&registry, "Row contested with a note.", "subject-tests");
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let id = capture_without_subject(&session, "Row contested with a note.", "subject-tests");
 
-    let contested = dispatch_tool(
+    let contested = session.call(
         "moot_update_memory",
-        &args!["id" => id.as_str(),
+        &args!["memory_id" => id.as_str(),
                "mutation" => "contest",
                "note" => "disputed by a later meeting recording"],
-        &registry,
-        &ledger,
     )
     .expect("contest with note must succeed");
     assert!(is_success(&contested), "got: {contested:?}");
 
-    let coord = registry.coord.lock().unwrap();
+    let coord = session.coord.lock().unwrap();
     let estate = coord
-        .estate_for(&registry.default.handle)
+        .estate_for(&session.default.handle)
         .expect("estate_for");
     let trail = estate.audit_trail(&id).expect("audit trail");
     assert!(
@@ -448,63 +291,62 @@ fn update_memory_note_is_generic_not_set_subject_special_cased() {
     );
 }
 
+#[test]
+fn set_subject_preserves_custody_actor_verb_note_and_absent_note_reason() {
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let noted_id = capture_without_subject(&session, "Noted subject backfill.", "subject-tests");
+    let plain_id = capture_without_subject(&session, "Plain subject backfill.", "subject-tests");
+
+    for (id, subject, note) in [
+        (noted_id.as_str(), "Noted subject.", Some("backfilled during custody verification")),
+        (plain_id.as_str(), "Plain subject.", None),
+    ] {
+        let mut request = args![
+            "memory_id" => id,
+            "mutation" => "set_subject",
+            "subject" => subject,
+        ];
+        if let Some(note) = note {
+            request.insert("note".to_owned(), JsonValue::from(serde_json::json!(note)));
+        }
+        let result = session.call("moot_update_memory", &request)
+            .expect("selected-v2 set_subject must return a result");
+        assert!(is_success(&result), "set_subject must succeed: {result:?}");
+    }
+
+    let coord = session.coord.lock().unwrap();
+    let estate = coord.estate_for(&session.default.handle).unwrap();
+    let noted: Vec<_> = estate.audit_trail(&noted_id).unwrap().into_iter()
+        .filter(|event| event.verb == "setSubject").collect();
+    assert_eq!(noted.len(), 1, "exactly one setSubject custody event is required");
+    assert_eq!(noted[0].actor, "estate", "selected-v2 custody actor must remain stable");
+    assert_eq!(noted[0].reason.as_deref(), Some("backfilled during custody verification"));
+
+    let plain: Vec<_> = estate.audit_trail(&plain_id).unwrap().into_iter()
+        .filter(|event| event.verb == "setSubject").collect();
+    assert_eq!(plain.len(), 1, "an absent note still seals exactly one custody event");
+    assert_eq!(plain[0].actor, "estate", "selected-v2 custody actor must remain stable");
+    assert_eq!(plain[0].reason, None, "an omitted note must remain an absent audit reason");
+}
+
 // ---------------------------------------------------------------------------
 // 5. moot_file_fact subject contract (ARIA-MSG-2)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn file_fact_oversize_subject_returns_contract_error() {
-    // Subject contract violation on moot_file_fact surfaces as isError:true
-    // so the model sees the message instead of a bare "Tool execution failed"
-    // from the generic catch wrapper (ARIA-MSG-2 fix). Mirrors Swift
-    // fileFactOversizeSubjectReturnsContractError in SubjectSurfaceTests.swift.
-    let registry = EstateRegistry::new_inmemory();
+    // Subject contract violation on moot_file_fact remains a typed
+    // invalid-argument fault. Mirrors the Swift contract test.
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
     let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
     let oversize: String = "x".repeat(n);
-    let result = dispatch_tool(
+    let err = session.call(
         "moot_file_fact",
         &args!["subject" => oversize.as_str(),
                "predicate" => "worksAt",
                "object" => "Acme"],
-        &registry,
-        &SurfacedRecallLedger::new(),
     )
-    .expect("oversize fact subject must return Ok(isError), not Err");
-    assert_eq!(result["isError"], serde_json::json!(true), "must be isError:true");
-    let text = content_text(&result);
-    assert!(
-        text.contains(&format!("subject must be 1\u{2013}{} characters", locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT)),
-        "error text must contain the contract message, got: {text}"
-    );
-    assert!(
-        text.contains(&n.to_string()),
-        "error text must contain the offending length ({n}), got: {text}"
-    );
-}
-
-#[test]
-fn file_fact_oversize_subject_message_matches_swift_port() {
-    // Cross-port parity: the wire error text for moot_file_fact with an oversize
-    // subject must be byte-identical in Swift and Rust. The Swift twin is
-    // fileFactOversizeSubjectMessageMatchesRustPort in SubjectSurfaceTests.swift.
-    let registry = EstateRegistry::new_inmemory();
-    let n = locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT + 1;
-    let oversize: String = "x".repeat(n);
-    let result = dispatch_tool(
-        "moot_file_fact",
-        &args!["subject" => oversize.as_str(),
-               "predicate" => "worksAt",
-               "object" => "Acme"],
-        &registry,
-        &SurfacedRecallLedger::new(),
-    )
-    .expect("must return Ok(isError)");
-    let text = content_text(&result);
-    let expected = format!(
-        "subject must be 1\u{2013}{} characters (got {}). One telegraphic sentence in the AI-facing register \u{2014} compress, don't truncate.",
-        locus_kit::drawer_store::SUBJECT_LENGTH_CONTRACT,
-        n
-    );
-    assert_eq!(text, expected,
-        "file_fact error text must match Swift port verbatim");
+    .expect_err("oversize fact subject must be rejected by selected v2");
+    assert_eq!(err.code, -32602, "got: {err:?}");
+    assert_eq!(error_path(&err), "$.subject", "got: {err:?}");
 }

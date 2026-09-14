@@ -176,6 +176,10 @@ struct AriaV2DataMobilityDirectTests {
         let parsed = try #require(UUID(uuidString: projected))
         #expect(projected == parsed.uuidString.lowercased())
         #expect(map.count == 1)
+        let estate = try await kit.estate(for: handle)
+        let persistedIDs = try await estate.allDrawers().map(\.id)
+        #expect(persistedIDs.contains { UUID(uuidString: $0) == parsed },
+                "the returned canonical id_map UUID must identify a persisted drawer")
     }
 
     @Test("JSON import refusal then corrected retry writes only the corrected seed")

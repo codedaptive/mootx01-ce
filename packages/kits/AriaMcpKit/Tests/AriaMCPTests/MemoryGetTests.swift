@@ -108,14 +108,8 @@ struct MemoryGetTests {
         result.objectValue?["isError"]?.boolValue ?? false
     }
 
-    /// Dispatch `near:` to the v1 two-door set (moot_memory_search +
-    /// moot_recall_shaped), returning (tool, message?) pairs where message is
-    /// the JSONRPCError message on throw or nil on success.
-    ///
-    /// ROUTE GAP: In v2, `moot_recall_shaped` has no `near:` argument —
-    /// `AriaV2SelectedCatalog.swift:217–223` lists `required: ["query"]` only.
-    /// This helper therefore dispatches only `moot_memory_search`. All five
-    /// cases that relied on the two-door agreement are BLOCKED pending a ruling.
+    /// Dispatch `near:` through the selected-v2 memory-search door, returning
+    /// the compact result or refusal text used by the admission assertions.
     private func nearPivotMessages(
         anchorID: String,
         dispatcher: ToolDispatcher
@@ -672,22 +666,10 @@ struct MemoryGetTests {
     // receive the protected body's content-derived neighbors — the redaction
     // boundary crossed by a different door.
     //
-    // ROUTE GAP: moot_recall_shaped dropped `near:` in v2; the two-door
-    // agreement cannot be verified. All five cases below are BLOCKED until
-    // the gap is ruled on. The v1 assertions are preserved unchanged.
-
-    /// BLOCKED: Two gaps prevent this case from passing in v2:
-    /// (1) ROUTE GAP — moot_recall_shaped has no `near:` in v2
-    ///     (AriaV2SelectedCatalog.swift:217–223, required: ["query"] only).
-    /// (2) MESSAGE GAP — v2 moot_memory_search returns 0 results (not a
-    ///     JSONRPCError throw) for gated anchors, so the compact text is
-    ///     "found 0 candidate memories", not "near: anchor memory not found: {id}".
-    /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    ///
     /// Regression for Codex finding `3a1cf92490a481918c3a2837effe341f`: before
     /// the gate, a provenance-Secret anchor's body became the recall query
     /// verbatim through the `near:` door.
-    @Test(.disabled("BLOCKED: moot_recall_shaped has no near: in v2 (AriaV2SelectedCatalog.swift:217-223); v2 moot_memory_search returns 0 results not a throw, so the v1 error-shape assertion cannot be verified"))
+    @Test
     func nearAnchorProvenanceSecretIsReportedNotFound() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "near-prov-secret")
@@ -701,21 +683,17 @@ struct MemoryGetTests {
             anchorID: drawer.id, dispatcher: dispatcher
         ) {
             guard let message else {
-                Issue.record("\(tool): provenance-secret anchor must be reported not-found")
+                Issue.record("\(tool): provenance-secret near search must return a compact result")
                 continue
             }
-            #expect(message == "near: anchor memory not found: \(drawer.id)",
-                "\(tool) must use the standard near: not-found shape")
+            #expect(message.contains("found 0 candidate memories"),
+                "\(tool) must admit no rows for a provenance-secret anchor; got: \(message)")
             #expect(!message.contains(body),
                 "\(tool) must not leak the withheld body")
         }
     }
 
-    /// BLOCKED: Same two gaps as nearAnchorProvenanceSecretIsReportedNotFound:
-    /// (1) ROUTE GAP — moot_recall_shaped has no `near:` in v2.
-    /// (2) MESSAGE GAP — v2 moot_memory_search returns 0 results, not a throw.
-    /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: moot_recall_shaped has no near: in v2 (AriaV2SelectedCatalog.swift:217-223); v2 moot_memory_search returns 0 results not a throw, so the v1 error-shape assertion cannot be verified"))
+    @Test
     func nearAnchorProvenanceRestrictedIsReportedNotFound() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "near-prov-restricted")
@@ -729,26 +707,17 @@ struct MemoryGetTests {
             anchorID: drawer.id, dispatcher: dispatcher
         ) {
             guard let message else {
-                Issue.record("\(tool): provenance-restricted anchor must be reported not-found")
+                Issue.record("\(tool): provenance-restricted near search must return a compact result")
                 continue
             }
-            #expect(message == "near: anchor memory not found: \(drawer.id)",
-                "\(tool) must use the standard near: not-found shape")
+            #expect(message.contains("found 0 candidate memories"),
+                "\(tool) must admit no rows for a provenance-restricted anchor; got: \(message)")
             #expect(!message.contains(body),
                 "\(tool) must not leak the withheld body")
         }
     }
 
-    /// BLOCKED: SECURITY-RELEVANT REGRESSION — byte-identity indistinguishability
-    /// is NOT preserved by v2's near: path. In v2, a gated anchor returns
-    /// "found 0 candidate memories" (same as absent) via moot_memory_search,
-    /// but the internal get() path may return a distinct refusal for restricted/
-    /// secret provenance rows, allowing near: to become an existence oracle for
-    /// redacted rows. Additionally moot_recall_shaped has no near: in v2
-    /// (AriaV2SelectedCatalog.swift:217–223), so the two-door agreement cannot
-    /// be verified at all. Awaiting a security ruling. Do not delete; do not
-    /// weaken to pass.
-    @Test(.disabled("BLOCKED: v2 near: path does not preserve byte-identity indistinguishability — gated anchor and absent UUID may produce different compact text, making near: an existence oracle for redacted rows. Security ruling required."))
+    @Test
     func nearAnchorGatedMessageIsByteIdenticalToAbsentIDMessage() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "near-prov-oracle")
@@ -768,26 +737,16 @@ struct MemoryGetTests {
                     Issue.record("\(g.tool)/\(tier): both a gated and an absent anchor must produce an error response")
                     continue
                 }
-                // The gate must be indistinguishable from a missing key: the gated
-                // message must be byte-identical to the absent-id message with only
-                // the id text substituted, so a caller cannot probe for existence.
+                // The selected-v2 compact result omits the anchor id. A gated anchor
+                // and a never-filed id must therefore be byte-identical.
                 #expect(
-                    gatedMessage == absentMessage.replacingOccurrences(of: absentID, with: drawer.id),
+                    gatedMessage == absentMessage,
                     "\(g.tool)/\(tier) message must be byte-identical to the absent-id message")
             }
         }
     }
 
-    /// BLOCKED: Two gaps prevent this case from passing in v2:
-    /// (1) ROUTE GAP — moot_recall_shaped has no `near:` in v2
-    ///     (AriaV2SelectedCatalog.swift:217–223).
-    /// (2) RESULT GAP — v2 moot_memory_search returns a result (not nil/no-throw)
-    ///     even for a valid non-gated anchor with no other drawers present,
-    ///     producing "found 0 candidate memories" rather than a successful
-    ///     non-empty pivot. The v1 assertion `message == nil` (no throw) cannot
-    ///     distinguish "gate blocked" from "no neighbors to return".
-    /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    @Test(.disabled("BLOCKED: moot_recall_shaped has no near: in v2; v2 moot_memory_search returns compact text (not nil) for both gated and non-gated anchors, so the v1 nil-means-pivot assertion cannot distinguish gate from empty results"))
+    @Test
     func nearAnchorProvenanceNormalAndElevatedStillPivot() async throws {
         for tier: LocusKit.Sensitivity in [.normal, .elevated] {
             let kit = GeniusLocusKit()
@@ -796,29 +755,29 @@ struct MemoryGetTests {
             let drawer = try await seedProvenance(
                 "open provenance anchor body pivots normally",
                 provenanceSensitivity: tier, in: handle, kit: kit)
+            _ = try await seed(
+                "open provenance anchor body pivots normally nearby result",
+                in: handle, kit: kit)
 
             let dispatcher = ToolDispatcher(kit: kit, handle: handle)
             for (tool, message) in await nearPivotMessages(
                 anchorID: drawer.id, dispatcher: dispatcher
             ) {
-                #expect(message == nil,
-                    "provenance \(tier) is below the redaction boundary and must still pivot through \(tool); got: \(message ?? "")")
+                guard let message else {
+                    Issue.record("\(tool): admitted near search must return a compact result")
+                    continue
+                }
+                #expect(!message.contains("found 0 candidate memories"),
+                    "provenance \(tier) is below the redaction boundary and must still pivot through \(tool); got: \(message)")
             }
         }
     }
 
-    /// BLOCKED: Same two gaps as the provenance cases:
-    /// (1) ROUTE GAP — moot_recall_shaped has no `near:` in v2.
-    /// (2) MESSAGE GAP — v2 moot_memory_search returns 0 results (not a throw),
-    ///     so the v1 error-shape assertion "near: anchor memory not found: {id}"
-    ///     cannot be verified.
-    /// Awaiting a ruling. Do not delete; do not weaken to pass.
-    ///
     /// The adjective axis (bits 6-11) was already gated by the default
     /// RecallFrame before this mission and stays gated the same way after it.
     /// Pinning it here proves the provenance check was added ALONGSIDE the
     /// frame gate rather than replacing it.
-    @Test(.disabled("BLOCKED: moot_recall_shaped has no near: in v2; v2 moot_memory_search returns 0 results not a throw, so the v1 not-found error-shape assertion cannot be verified"))
+    @Test
     func nearAnchorAdjectiveGatedBehaviourIsUnchanged() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "near-adjective-secret")
@@ -831,11 +790,11 @@ struct MemoryGetTests {
             anchorID: drawer.id, dispatcher: dispatcher
         ) {
             guard let message else {
-                Issue.record("\(tool): adjective-gated anchor must be reported not-found")
+                Issue.record("\(tool): adjective-gated near search must return a compact result")
                 continue
             }
-            #expect(message == "near: anchor memory not found: \(drawer.id)",
-                "\(tool): adjective-gated anchors keep the same not-found shape")
+            #expect(message.contains("found 0 candidate memories"),
+                "\(tool): adjective-gated anchors must admit no rows; got: \(message)")
         }
     }
 

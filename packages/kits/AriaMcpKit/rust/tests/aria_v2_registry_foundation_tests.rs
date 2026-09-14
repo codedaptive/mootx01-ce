@@ -33,6 +33,7 @@ fn descriptor() -> V2OperationDescriptor {
             intents: vec!["foundation".to_owned()],
             example: Some(json!({})),
         },
+        lens_lane_member: false,
         recipe_bindings: Vec::new(),
     }
 }
