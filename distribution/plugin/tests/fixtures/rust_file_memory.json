@@ -1,0 +1,36 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "filed memory",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "fetch": {
+          "arguments": {
+            "memory_id": "4fb9faba-58bb-4ec7-b717-368be26fde3f"
+          },
+          "tool": "moot_memory_get"
+        },
+        "memory_id": "4fb9faba-58bb-4ec7-b717-368be26fde3f",
+        "placement": {
+          "room": "harness-import/testslug/notes.md",
+          "wing": "Agentic Memory"
+        }
+      },
+      "meta": {
+        "build_id": "20260909190149/687717bd",
+        "capability_digest": "3fc57f13dfefe357fd8ee556b6e90bc60ededf1298f96e5582fdcb0d9fe0b8d8",
+        "completeness": "incomplete",
+        "effect": "write"
+      },
+      "surface_version": "v2",
+      "tool": "moot_file_memory"
+    }
+  }
+}

@@ -66,9 +66,9 @@ lexical, associative, consensus, temporal, structural, anti_redundant, and
 others).
 
 Use `moot_recall_distilled` when compact factoid answers are sufficient. The
-distilled tier is populated by `moot_distill`. Use
-`moot_recollect` to follow a factoid back to its full source memories when
-the user needs episodic detail.
+distilled tier is populated automatically as captures encode. To reach the
+full record behind a distilled result, call `moot_memory_get` with the `id`
+field from any `moot_recall_distilled` result row.
 
 Use recall before reasoning. Do not load unnecessary memories into context and
 ask yourself to sort them if MOOTx01 can rank them first.
@@ -193,12 +193,10 @@ and write a cycle diary.
 
 ## Distillation
 
-Use `moot_distill` to run one distillation sweep. This populates on-row
-distilled representations of eligible memories. Run periodically or after
-significant memory growth.
-
-Use `moot_recall_distilled` to search the distilled tier. Use
-`moot_recollect` to follow a factoid back to its source memories.
+Distillation runs automatically as captures encode; no manual sweep is
+needed. Use `moot_recall_distilled` to search the distilled tier. Each
+result row carries an `id`; pass it to `moot_memory_get` to retrieve the
+full record when the distilled summary is not enough.
 
 ## Reindexing
 
