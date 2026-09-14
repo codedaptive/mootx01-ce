@@ -192,6 +192,49 @@ struct EvaluatorTests {
             "restricted drawer must be absent from default recall (Private tier)")
     }
 
+    @Test("Sensitivity-withheld result reports only default-ceiling exclusions")
+    func sensitivityWithheldResult_countsOnlyDefaultCeilingExclusions() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("locuskit-withheld-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: path) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(path))
+        let filedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let drawers = [
+            Drawer(id: "normal", content: "normal", parentNodeId: "test-parent",
+                   addedBy: "test-agent", filedAt: filedAt, embeddingModelID: "test-v1",
+                   provenance: 0x40000),
+            Drawer(id: "elevated", content: "elevated", parentNodeId: "test-parent",
+                   addedBy: "test-agent", filedAt: filedAt, embeddingModelID: "test-v1",
+                   provenance: 0x40000,
+                   adjectiveBitmap: Int64(AdjectiveSensitivity.elevated.rawValue) << 6),
+            Drawer(id: "restricted", content: "restricted", parentNodeId: "test-parent",
+                   addedBy: "test-agent", filedAt: filedAt, embeddingModelID: "test-v1",
+                   provenance: 0x40000,
+                   adjectiveBitmap: Int64(AdjectiveSensitivity.restricted.rawValue) << 6),
+        ]
+
+        let normalFrame = try await BitmapEvaluator.evaluateResult(
+            frame: RecallFrame(filterChain: []), drawers: drawers, store: store
+        )
+        #expect(normalFrame.rows.count == 2)
+        #expect(normalFrame.withheldBySensitivity == 1)
+
+        let elevatedFrame = try await BitmapEvaluator.evaluateResult(
+            frame: RecallFrame(filterChain: [.sensitivityAtMost(.secret)]),
+            drawers: drawers,
+            store: store
+        )
+        #expect(elevatedFrame.rows.count == 3)
+        #expect(elevatedFrame.withheldBySensitivity == 0)
+
+        let explicitSensitivityFrame = try await BitmapEvaluator.evaluateResult(
+            frame: RecallFrame(filterChain: [.sensitivity(.restricted)]),
+            drawers: drawers,
+            store: store
+        )
+        #expect(explicitSensitivityFrame.withheldBySensitivity == 0)
+    }
+
     @Test(".sensitivityAtMost(.elevated) includes elevated drawer")
     func sensitivityAtMost_includesElevated() async throws {
         let estate = try await makeEstate()

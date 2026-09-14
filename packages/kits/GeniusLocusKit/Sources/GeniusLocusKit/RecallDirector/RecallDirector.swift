@@ -76,6 +76,8 @@ public extension GeniusLocusKit {
         // Resolve the estate up front. A stale handle surfaces here as
         // estateNotOpen before any plan work.
         let estate = try estate(for: handle)
+        let withheldBySensitivity = await sensitivityWithheldCount(
+            for: request.frame, handle: handle)
 
         // Compute the execution plan. frontierK bounds candidate retrieval:
         // min(max(limit * 4, 64), 256) ensures we pull enough candidates
@@ -236,7 +238,7 @@ public extension GeniusLocusKit {
         // `now` is Date() here — the allowed call site per the determinism rule
         // (Date() inside sub-engines is forbidden; the verb boundary is the
         // sanctioned entry point, identical to propose/associate).
-        var finalResult = result
+        var finalResult = result.replacing(withheldBySensitivity: withheldBySensitivity)
         if request.origin == .external {
             // One wall-clock instant for the trace rows and the dreaming
             // enqueue alike (the verb boundary is the sanctioned Date() site).
@@ -254,7 +256,7 @@ public extension GeniusLocusKit {
             // degradedStages as "recall.trace_write_failed" (same stage
             // vocabulary LocusKit's verb path uses).
             let budget = request.traceLimit ?? request.limit
-            let surfaced = result.hits.prefix(max(0, budget))
+            let surfaced = finalResult.hits.prefix(max(0, budget))
             if !surfaced.isEmpty {
                 let composition = request.composition
                     ?? "\(request.mode.rawValue)/\(request.scoring.rawValue)"
@@ -266,22 +268,50 @@ public extension GeniusLocusKit {
                         operationalBitmap: 0,
                         door: request.door,
                         composition: composition,
-                        laneRanks: RecallTraceItem.packLaneRanks(result.laneRanks[hit.id] ?? [:]))
+                        laneRanks: RecallTraceItem.packLaneRanks(finalResult.laneRanks[hit.id] ?? [:]))
                 }
                 do {
                     try await estate.insertRecallTraces(Array(items))
                 } catch {
                     Self.recallLog.error(
                         "RecallDirector: reward-cycle trace write failed: \(error, privacy: .public)")
-                    finalResult = result.replacing(
-                        degradedStages: result.degradedStages + ["recall.trace_write_failed"])
+                    finalResult = finalResult.replacing(
+                        degradedStages: finalResult.degradedStages + ["recall.trace_write_failed"])
                 }
             }
 
-            await enqueueDreamingItem(drawers: result.drawers, handle: handle, now: now)
+            await enqueueDreamingItem(drawers: finalResult.drawers, handle: handle, now: now)
         }
 
         return finalResult
+    }
+
+    /// Counts sensitivity-default exclusions over LocusKit's persisted candidate
+    /// set. Recall continues to use its established stream for rows, scoring, and
+    /// ordering; this companion evaluation only carries the count upward.
+    func sensitivityWithheldCount(
+        for frame: RecallFrame,
+        handle: EstateHandle,
+        candidates: [Drawer]? = nil
+    ) async -> Int {
+        do {
+            guard let storage = storages[handle] else { return 0 }
+            let store = try await DrawerStore(storage: storage)
+            let drawers: [Drawer]
+            if let candidates {
+                drawers = candidates
+            } else {
+                drawers = try await estate(for: handle).allDrawers()
+            }
+            let nodeNames = try await store.resolveNodeNames(
+                parentNodeIds: Array(Set(drawers.map(\.parentNodeId))))
+            let evaluation = try await BitmapEvaluator.evaluateResult(
+                frame: frame, drawers: drawers, store: store, nodeNames: nodeNames
+            )
+            return evaluation.withheldBySensitivity
+        } catch {
+            return 0
+        }
     }
 
     // MARK: - Late body hydration capability

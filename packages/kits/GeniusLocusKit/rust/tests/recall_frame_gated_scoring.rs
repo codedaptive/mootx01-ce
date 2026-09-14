@@ -151,6 +151,10 @@ fn a_restricted_drawer_absent_from_default_recall() {
         "admissible drawer MUST surface in recall; hits: {:?}",
         result.hits.iter().map(|hh| &hh.id).collect::<Vec<_>>()
     );
+    assert_eq!(
+        result.withheld_by_sensitivity, 1,
+        "the GLK result must carry the one default-ceiling exclusion"
+    );
 }
 
 // ---------------------------------------------------------------------------

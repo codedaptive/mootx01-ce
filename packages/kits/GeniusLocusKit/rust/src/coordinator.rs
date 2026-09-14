@@ -85,6 +85,7 @@ use persistence_kit::sqlite::SqliteStorage;
 use queuekit::{DrainLease, PersistenceKitBackend};
 use std::path::Path;
 use locus_kit::default_wings::DEFAULT_WINGS;
+use locus_kit::bitmap_evaluator::BitmapEvaluator;
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
 use locus_kit::drawer_operational::ContentKind;
@@ -284,12 +285,22 @@ pub enum FederatedReadRefusalReason {
 pub struct FederatedRecallResult {
     /// Filtered drawers from the source estate.
     pub drawers: Vec<Drawer>,
+    /// Primary source-estate rows excluded only by the caller's default
+    /// sensitivity ceiling after this grant's content and scope gates.
+    pub withheld_by_sensitivity: usize,
     /// The grant that authorized this read.
     pub grant: Grant,
     /// The estate whose content was read (the grantor).
     pub source_handle: EstateHandle,
     /// The estate that requested the read (the grantee named on `grant`).
     pub requester_handle: EstateHandle,
+}
+
+/// Admitted by-ID hydration rows and a sensitivity-only count; no rejected IDs.
+#[derive(Debug, Clone)]
+pub struct GLKHydrationResult {
+    pub drawers: Vec<Drawer>,
+    pub withheld_by_sensitivity: usize,
 }
 
 // MARK: - GLK_PROVISION_001 types
@@ -1224,6 +1235,9 @@ pub(crate) enum PairScorerSlot {
 /// The Swift twin carries the same note on its own declaration block.
 pub struct EstateCoordinator {
     registry: HashMap<EstateHandle, Estate>,
+    /// Per-estate stores retained for count-only bitmap evaluation. The scored
+    /// recall path keeps using Estate's stream for rows, scoring, and ordering.
+    pub(crate) recall_stores: HashMap<EstateHandle, Arc<dyn DrawerStore>>,
     pub(crate) branches: HashMap<crate::branches::BranchId, crate::branches::EstateBranch>,
     /// Per-estate grant stores. Parallel to `registry`.
     grant_stores: HashMap<EstateHandle, GrantStore>,
@@ -1574,6 +1588,7 @@ impl EstateCoordinator {
     pub fn new() -> Self {
         Self {
             registry: HashMap::new(),
+            recall_stores: HashMap::new(),
             branches: HashMap::new(),
             grant_stores: HashMap::new(),
             scope_vaults: HashMap::new(),
@@ -1992,6 +2007,7 @@ impl EstateCoordinator {
         // DrawerStore Arc. Used below for auto-registering the substrate
         // topology provider (node-tree integrity, NT-G1).
         let topology_storage = store.storage();
+        let recall_store = Arc::clone(&store);
         let estate = Estate::open_with_policy(store, owner, federate, frozen).map_err(|e| {
             GeniusLocusKitError::EstateOpenFailed { detail: format!("{e:?}") }
         })?;
@@ -2007,6 +2023,7 @@ impl EstateCoordinator {
             return Err(GeniusLocusKitError::DuplicateEstate { estate_uuid });
         }
         self.registry.insert(handle, estate);
+        self.recall_stores.insert(handle, recall_store);
         // Initialise durable grant store backed by an in-memory storage (the
         // default for `open`; callers that want SQLite-backed grant persistence
         // use `open_with_grant_storage` or `provision`). The schema is opened
@@ -2085,6 +2102,7 @@ impl EstateCoordinator {
                 estate_uuid: handle.estate_uuid,
             });
         }
+        self.recall_stores.remove(handle);
         self.grant_stores.remove(handle);
         self.scope_vaults.remove(handle);
         // CorpusKit owns the encode pipeline: cancel the Corpus's ingest drain
@@ -4463,6 +4481,17 @@ impl EstateCoordinator {
             .unwrap_or_default())
     }
 
+    /// Hydrate the exact candidate IDs through LocusKit's counted gate.
+    /// Only admitted drawers and the sensitivity-only count cross this API.
+    pub fn hydrate_with_sensitivity_count(
+        &self, handle: &EstateHandle, ids: &[String], frame: &RecallFrame,
+    ) -> Result<GLKHydrationResult, VerbDispatchError> {
+        let result = self.estate_for_verb(handle)?
+            .hydrate_with_sensitivity_count(ids, frame)
+            .map_err(|e| VerbDispatchError::from(remap("hydrate", "", e)))?;
+        Ok(GLKHydrationResult { drawers: result.rows, withheld_by_sensitivity: result.withheld_by_sensitivity })
+    }
+
     pub fn recall(
         &self,
         handle: &EstateHandle,
@@ -5890,6 +5919,7 @@ impl EstateCoordinator {
 
         let empty = VagueRecallResult {
             vague_hits: Vec::new(),
+            withheld_by_sensitivity: 0,
             constituents: Vec::new(),
         };
         let estate = self.estate_for_verb(handle)?;
@@ -5924,6 +5954,16 @@ impl EstateCoordinator {
             .map_err(|e| remap("vague_recall", "", e))?;
         let by_id: std::collections::BTreeMap<String, locus_kit::drawer::Drawer> =
             fetched.into_iter().map(|d| (d.id.clone(), d)).collect();
+        let primary_candidates: Vec<_> = matches.iter().filter_map(|m| by_id.get(&m.item_id))
+            .filter(|d| {
+                (d.operational_bitmap & DrawerFeatureFlags::IS_VAGUE) != 0
+                    && d.state() != State::Superseded
+            })
+            .cloned()
+            .collect();
+        let vague_frame = RecallFrame::new(vec![locus_kit::filter::Filter::Unconfirmed]);
+        let withheld_by_sensitivity = self.sensitivity_withheld_count_for_drawers(
+            handle, &vague_frame, &primary_candidates);
         // Lane order preserved; ACTIVE vague items only (a superseded fold-in
         // predecessor's lane entry lingers and must never surface).
         // Hop-1 sensitivity ceiling (§D.3): only vague items at ≤ .elevated
@@ -5972,6 +6012,7 @@ impl EstateCoordinator {
             .collect();
         Ok(VagueRecallResult {
             vague_hits,
+            withheld_by_sensitivity,
             constituents,
         })
     }
@@ -10300,6 +10341,48 @@ impl EstateCoordinator {
                 })?;
         }
 
+        // Evaluate only candidates this grant may disclose. This uses the
+        // source estate and caller frame, never another estate or rows outside
+        // the grant's content/scope boundary, before applying LocusKit's
+        // default sensitivity ceiling for the observable count.
+        let mut authorized_candidates = self
+            .recall_stores
+            .get(source)
+            .and_then(|store| store.all_drawers_bounded(None).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|drawer| drawer.adjective_sensitivity().raw_value() <= effective_content_level as i64)
+            .collect::<Vec<_>>();
+        let authorized_node_names = build_node_name_map(
+            self.node_stores.get(source), &authorized_candidates);
+        authorized_candidates = match &authorizing_grant.scope {
+            crate::grants::GrantScope::WholeEstate => authorized_candidates,
+            crate::grants::GrantScope::Wing(name) => authorized_candidates.into_iter().filter(|drawer| {
+                authorized_node_names.get(&drawer.parent_node_id)
+                    .map(|(wing, _)| wing == name)
+                    .unwrap_or(false)
+            }).collect(),
+            crate::grants::GrantScope::Room(name) => authorized_candidates.into_iter().filter(|drawer| {
+                authorized_node_names.get(&drawer.parent_node_id)
+                    .map(|(_, room)| room == name)
+                    .unwrap_or(false)
+            }).collect(),
+            crate::grants::GrantScope::LatticeSubtree { udc_code } => {
+                let prefix = format!("{udc_code}.");
+                authorized_candidates.into_iter().filter(|drawer| {
+                    &drawer.udc_code == udc_code || drawer.udc_code.starts_with(&prefix)
+                }).collect()
+            }
+            crate::grants::GrantScope::SingleRow(id) => {
+                let id = id.to_string().to_uppercase();
+                authorized_candidates.into_iter().filter(|drawer| {
+                    drawer.id.to_uppercase() == id
+                }).collect()
+            }
+        };
+        let withheld_by_sensitivity = self.sensitivity_withheld_count_for_drawers(
+            source, &frame, &authorized_candidates);
+
         // 7. Read the source estate using the provided recall frame.
         // Borrow estate immutably after releasing the mutable grant_stores borrow.
         let source_estate = self.registry.get(source).ok_or(GeniusLocusKitError::EstateNotOpen {
@@ -10358,6 +10441,7 @@ impl EstateCoordinator {
 
         Ok(FederatedRecallResult {
             drawers,
+            withheld_by_sensitivity,
             grant: authorizing_grant,
             source_handle: source.clone(),
             requester_handle: requested_by.clone(),
@@ -11161,6 +11245,7 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<GLKRecallResult, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
+        let withheld_by_sensitivity = self.sensitivity_withheld_count(handle, &request.frame);
         // Only the central External-origin writer below may persist traces.
         // Inner Locus frames are candidate acquisition, even when callers
         // supply a legacy trace budget (for example temporal recall).
@@ -11307,6 +11392,7 @@ impl EstateCoordinator {
                 plan: result.plan,
                 union_profile: result.union_profile,
                 hits: admissible,
+                withheld_by_sensitivity: result.withheld_by_sensitivity,
                 #[cfg(feature = "whole-record-dense")]
                 dense_lane_status: result.dense_lane_status,
                 degraded_stages: result.degraded_stages,
@@ -11352,6 +11438,7 @@ impl EstateCoordinator {
                 plan: result.plan,
                 union_profile: result.union_profile,
                 hits,
+                withheld_by_sensitivity: result.withheld_by_sensitivity,
                 #[cfg(feature = "whole-record-dense")]
                 dense_lane_status: result.dense_lane_status,
                 degraded_stages,
@@ -11379,6 +11466,7 @@ impl EstateCoordinator {
         // so `enqueue_dreaming_item` stamps the HLC with it directly.
         // No SystemTime::now() inside this engine — determinism rule.
         let mut result = result;
+        result.withheld_by_sensitivity = withheld_by_sensitivity;
         if request.origin == RecallOrigin::External {
             // W2.5 Track R(a) — the reward-cycle trace write, re-homed here
             // from the inner locus frame so the traced rows are the hits the
@@ -11520,6 +11608,7 @@ impl EstateCoordinator {
             dense_lane_status: None,
             degraded_stages,
             hits,
+            withheld_by_sensitivity: 0,
             lane_ranks,
             // locusOnly compiles no sketch — the anchor derivation never runs.
             // Mirrors Swift RecallDirector.locusOnly path (GLKRecallResult.swift §M4).
@@ -14037,6 +14126,7 @@ impl EstateCoordinator {
             // DISTINGUISHABLE from "absent evidence" (empty Vec, no matching docs).
             degraded_stages,
             hits,
+            withheld_by_sensitivity: 0,
             lane_ranks,
             // M4: pre-computed anchor from the sketch compilation block above.
             // Callers must read from here; single-derivation doctrine enforced.
@@ -14289,11 +14379,37 @@ impl EstateCoordinator {
             // there is no throwing stage on the locus-ranked path.
             degraded_stages,
             hits,
+            withheld_by_sensitivity: 0,
             lane_ranks,
             // M4: pre-computed anchor — single derivation for this recall path.
             query_lattice_anchor,
             cross_encoder: None,
         })
+    }
+
+    /// Evaluates the persisted candidate set through LocusKit's public result
+    /// API solely to carry the default-ceiling exclusion count. A failed
+    /// companion evaluation leaves recall rows and scoring untouched and reports
+    /// the source-compatible zero default.
+    fn sensitivity_withheld_count(&self, handle: &EstateHandle, frame: &RecallFrame) -> usize {
+        let Some(store) = self.recall_stores.get(handle) else { return 0; };
+        let Ok(drawers) = store.all_drawers_bounded(None) else { return 0; };
+        self.sensitivity_withheld_count_for_drawers(handle, frame, &drawers)
+    }
+
+    fn sensitivity_withheld_count_for_drawers(
+        &self,
+        handle: &EstateHandle,
+        frame: &RecallFrame,
+        drawers: &[Drawer],
+    ) -> usize {
+        let Some(store) = self.recall_stores.get(handle) else { return 0; };
+        let node_names = build_node_name_map(self.node_stores.get(handle), &drawers)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        BitmapEvaluator::evaluate_result(frame, &drawers, store.as_ref(), &node_names)
+            .map(|result| result.withheld_by_sensitivity)
+            .unwrap_or(0)
     }
 }
 
