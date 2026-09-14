@@ -47,6 +47,11 @@ let package = Package(
         // target gains a dependency on this library. Recorded in the Blast Radius
         // Report for this mission (pk-replication, NET-NEW module addition).
         .library(name: "PersistenceKitReplication", targets: ["PersistenceKitReplication"]),
+        // Test-support: faulting Storage/RowStore decorator for fail-closed
+        // pre-read tests. Not imported by production targets; exported so
+        // GeniusLocusKit's test target can inject query faults without
+        // modifying the Storage implementations.
+        .library(name: "PersistenceKitTestSupport", targets: ["PersistenceKitTestSupport"]),
     ],
     dependencies: [
         .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
@@ -196,6 +201,15 @@ let package = Package(
             name: "PersistenceKitConformance",
             dependencies: ["PersistenceKit", "SubstrateTypes"],
             path: "Tests/PersistenceKitConformance"
+        ),
+        // Test-support target: faulting Storage/RowStore decorator.
+        // Placed beside PersistenceKitConformance (also a non-test target
+        // under Tests/) so GeniusLocusKit can import it as a library product
+        // without it being compiled into the production binary.
+        .target(
+            name: "PersistenceKitTestSupport",
+            dependencies: ["PersistenceKit"],
+            path: "Tests/PersistenceKitTestSupport"
         ),
         .testTarget(
             name: "PersistenceKitConformanceTests",

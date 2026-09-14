@@ -344,7 +344,7 @@ fn spread_fixture() -> (Estate, Arc<InMemoryDrawerStore>, String) {
     );
 
     estate
-        .expunge(&doomed.id, "fb fixture tombstone", true, NOW + 5, false)
+        .expunge(&doomed.id, "fb fixture tombstone", true, NOW + 5, false, AdjectiveSensitivity::Secret)
         .unwrap();
 
     (estate, store, doomed.id)
@@ -551,7 +551,7 @@ fn tombstoned_rows_stay_excluded_from_the_rebuilt_aggregate() {
     );
 
     estate
-        .expunge(&doomed.id, "fb tombstone exclusion", true, NOW + 2, false)
+        .expunge(&doomed.id, "fb tombstone exclusion", true, NOW + 2, false, AdjectiveSensitivity::Secret)
         .unwrap();
     store.rebuild_container_fingerprints(NOW + 100).unwrap();
 

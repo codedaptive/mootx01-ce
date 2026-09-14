@@ -218,20 +218,23 @@ pub const SUBJECT_PIPELINE_IMPORT_V1: &str = "import-v1";
 /// Result of a lineage-wide gated expunge (`expunge_gated`). Twin of
 /// Swift `DrawerStore.ExpungeOutcome`.
 ///
-/// `refused_sibling_ids` lists the lineage members whose
-/// `accepted → tombstoned` transition the audit gate refused (S-3:
-/// audit-grade rows survive intact), in walk order. A refused sibling
-/// was left byte-identical — content, state, audit trail, and
-/// erasure-ledger absence — so a non-empty list means the expunge was
-/// partial and the caller must not assume the whole lineage was erased.
+/// `refused_sibling_ids` lists lineage members that were not tombstoned,
+/// in walk order. A sibling is refused for one of two reasons: its
+/// sensitivity exceeds the `sensitivity_ceiling` (the ceiling check runs
+/// before gate admission — a ceiling-refused sibling never reaches the
+/// audit gate), or the audit gate refused `accepted → tombstoned` (S-3:
+/// audit-grade rows survive intact). A refused sibling was left
+/// byte-identical — content, state, audit trail, and erasure-ledger
+/// absence — so a non-empty list means the expunge was partial and the
+/// caller must not assume the whole lineage was erased.
 #[derive(Debug, Clone)]
 pub struct ExpungeOutcome {
     /// The target drawer's gate-produced audit event. When
     /// `seal_audit` was true it has already been appended; when false
     /// it is carried here for deferred sealing (§B-2a).
     pub event: substrate_lib::verbs::AuditEvent,
-    /// IDs of lineage siblings the gate refused to tombstone, in walk
-    /// order. Empty means the expunge covered the full lineage.
+    /// IDs of lineage siblings not tombstoned (ceiling- or gate-refused),
+    /// in walk order. Empty means the expunge covered the full lineage.
     pub refused_sibling_ids: Vec<String>,
 }
 
@@ -730,9 +733,12 @@ pub trait DrawerStore: Send + Sync {
     /// §10.5 storage-layer postconditions. Aggregates untouched per §9.5.1.
     /// The cross-kit RAG vector delete is GLK's orchestration responsibility.
     ///
-    /// A sibling the gate refuses (S-3: `accepted → tombstoned` is
-    /// forbidden — audit-grade rows survive intact) is left byte-identical:
-    /// no content write, no state write, no audit append, no erasure-ledger
+    /// Lineage siblings are filtered by two checks in order. First,
+    /// `sensitivity_ceiling`: a sibling whose sensitivity exceeds the ceiling
+    /// is refused without reaching the audit gate. Second, the gate's
+    /// transition table: `accepted → tombstoned` is refused (S-3 — audit-grade
+    /// rows survive intact). A refused sibling is left byte-identical: no
+    /// content write, no state write, no audit append, no erasure-ledger
     /// record. Refused ids are carried in the returned
     /// `ExpungeOutcome::refused_sibling_ids` so the caller can detect a
     /// partial expunge; the walk continues over the remaining members.
@@ -754,6 +760,7 @@ pub trait DrawerStore: Send + Sync {
         _reason: Option<&str>,
         _now: i64,
         _seal_audit: bool,
+        _sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<ExpungeOutcome, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "expunge_gated not implemented for this DrawerStore impl".to_string(),
@@ -2440,8 +2447,9 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<ExpungeOutcome, LocusKitError> {
-        self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+        self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit, sensitivity_ceiling)
     }
     fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
         self.as_ref().set_ssc_facts(drawer_id, facts)
