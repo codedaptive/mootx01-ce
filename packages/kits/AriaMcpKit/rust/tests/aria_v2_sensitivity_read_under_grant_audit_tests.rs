@@ -145,7 +145,7 @@ fn v2_search_and_get_emit_read_under_grant_audit_entries_on_the_real_estate_back
     assert!(contains_search_drawer(&after_search),
         "with a live grant the restricted row must appear in v2 search results");
 
-    for depth in ["subject", "distilled", "full"] {
+    for depth in ["subject", "distilled", "skim", "full"] {
         let after_get = run_memory_get(
             &arguments(json!({"memory_id": get_drawer_id.clone(), "depth": depth})),
             &deps,
@@ -173,8 +173,8 @@ fn v2_search_and_get_emit_read_under_grant_audit_entries_on_the_real_estate_back
         "one v2 moot_memory_search hit on a restricted row under grant must emit exactly one audit entry");
     assert_eq!(search_entries[0].field_path, "restricted");
 
-    assert_eq!(get_entries.len(), 3,
-        "three v2 moot_memory_get depth calls on the same restricted row must each independently emit an audit entry");
+    assert_eq!(get_entries.len(), 4,
+        "four v2 moot_memory_get depth calls on the same restricted row must each independently emit an audit entry");
     for entry in &get_entries {
         assert_eq!(entry.field_path, "restricted");
     }
