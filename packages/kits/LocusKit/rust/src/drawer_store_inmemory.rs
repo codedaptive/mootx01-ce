@@ -83,7 +83,7 @@ use crate::association::Association;
 use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
 use crate::node::Node;
 use crate::node_store::T_NODES;
-use crate::drawer_store::{DrawerStore, ENCODE_COMPLETE_VERB, ENCODE_WORKER_ACTOR, SUBJECT_LENGTH_CONTRACT};
+use crate::drawer_store::{subject_length, DrawerStore, ENCODE_COMPLETE_VERB, ENCODE_WORKER_ACTOR, SUBJECT_LENGTH_CONTRACT};
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
@@ -2877,8 +2877,9 @@ impl DrawerStore for DrawerStoreCore {
         // Length contract enforced at the storage boundary — the last
         // common gate under every producer (filing AI, backfill AI, model
         // rider), so no producer can quietly inflate contact-sheet rows.
-        // Character count (not bytes) to match Swift `String.count`.
-        let char_count = subject.chars().count();
+        // Grapheme-cluster count to match Swift's String.count (same unit,
+        // same bound on the same input in both ports).
+        let char_count = subject_length(subject);
         if char_count > SUBJECT_LENGTH_CONTRACT {
             return Err(LocusKitError::InvalidContent(format!(
                 "subject exceeds the {SUBJECT_LENGTH_CONTRACT}-character length contract \
