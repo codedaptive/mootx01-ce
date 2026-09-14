@@ -972,7 +972,11 @@ pub fn execute_connected_recall(
     if request.operation != V2RecallLensOperation::RecallConnected {
         return Err(V2PreciseRecallFailure::Unavailable);
     }
-    let drawers = recipe_drawers(coordinator, handle)?;
+    // `wing` controls only the tunnel side of ConnectedRecall.  The anchor
+    // search remains caller-filtered but estate-wide, exactly as the Swift v2
+    // authority does.  Folding wing into this filter would make an otherwise
+    // eligible anchor invisible before the graph walk starts.
+    let filter = recall_filter(request)?;
     let mut counted_frame = locus_kit::filter::RecallFrame::new(vec![scoped_filter(request)?]);
     counted_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
     counted_frame.limit = Some(request_positive_integer(request, "limit").unwrap_or(20).max(20));
@@ -983,22 +987,42 @@ pub fn execute_connected_recall(
         handle,
         recipe_query(request)?,
         request.optional_string("wing").unwrap_or(""),
-        scoped_filter(request)?,
+        filter.clone(),
         request_positive_integer(request, "limit").unwrap_or(20),
         now_millis,
     )
     .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
-    let results = matches
+
+    // Connected matches can include graph-walk endpoints.  Rehydrate the
+    // emitted prefix through the caller's complete RecallFrame rather than
+    // consulting all_drawers: this applies tombstone, sensitivity, and every
+    // explicit caller gate before any row body reaches the public v2 shape.
+    // The selected Swift and Rust v2 surfaces project only admitted rows.
+    let shown = &matches[..matches.len().min(50)];
+    let match_ids: Vec<String> = shown.iter().map(|matched| matched.id.clone()).collect();
+    let admitted = coordinator
+        .estate_for(handle)
+        .ok()
+        .and_then(|estate| {
+            let mut frame = locus_kit::filter::RecallFrame::new(vec![filter]);
+            frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+            estate
+                .get_drawers_matching_frame(&match_ids, &frame)
+                .ok()
+                .map(|found| found.admissible)
+        })
+        .unwrap_or_default();
+    let by_id: BTreeMap<&str, &locus_kit::drawer::Drawer> =
+        admitted.iter().map(|drawer| (drawer.id.as_str(), drawer)).collect();
+    let results = shown
         .iter()
         .filter_map(|matched| {
-            drawers.get(&matched.id).map(|drawer| {
-                recipe_row(
-                    drawer,
-                    Some(matched.room.clone()),
-                    None,
-                    Some(matched.source.clone()),
-                )
-            })
+            by_id.get(matched.id.as_str()).map(|drawer| recipe_row(
+                drawer,
+                Some(matched.room.clone()),
+                None,
+                Some(matched.source.clone()),
+            ))
         })
         .collect();
     Ok(V2RecipeRecallData {

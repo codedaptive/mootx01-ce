@@ -42,41 +42,22 @@ public struct AriaV2CognitionCatalogService: Sendable {
 
     public func lenses(_ request: AriaV2CognitionCatalogRequest) throws -> JSONValue {
         try validate(request)
-        let filteredTools = (RecipeTools.tools() + LensTools.tools())
-            .filter { callableToolNames.contains($0.name) }
-        // description, inputSchema, and outputSchema all come from the v2 catalog
-        // projection. RecipeTools and LensTools supply membership and iteration order
-        // only. The two lookups may see different environments: callableToolNames comes
-        // from the dispatcher-injected environment (via AriaV2SelectedCatalog.registry),
-        // while buildCatalogLookup() calls ToolProjection.tools() with no argument,
-        // which reads ProcessInfo.processInfo.environment. The only capability that
-        // differs between those two environments is vault; no vault-gated descriptor is
-        // a recipe or lens tool, so the intersection with filteredTools is identical
-        // under either environment.
-        //
-        // That reasoning covers the dispatcher caller (ToolDispatch.dispatchV2). The
-        // other caller, FirstPartyProviderExecutor.swift:226-229, supplies
-        // callableToolNames from FirstPartyProviderCatalog.registry, which is a
-        // separate hand-maintained descriptor list rather than a different environment
-        // of the same one. Its seven lens and recipe names all appear in
-        // AriaV2SelectedCatalog.descriptors today, so the intersection holds there too,
-        // but it holds because two hand-maintained lists agree and not by construction.
-        // The throw below is the backstop for both callers.
+        let filteredTools = AriaV2SelectedCatalog.descriptors
+            .filter { $0.isLensLaneMember && callableToolNames.contains($0.publicName) }
+            .sorted { $0.lensLaneOrder! < $1.lensLaneOrder! }
         let catalogByName = Self.buildCatalogLookup()
         if request.verbose {
             // Verbose: include input_schema and output_schema for each tool.
             // All three of description, input_schema, and output_schema come from
-            // the v2 catalog projection (ToolProjection), not from LensTools/RecipeTools
-            // instances. This aligns Swift with the Rust port, which already reads all
-            // fields from crate::v2::catalog::selected_tools().
+            // the v2 catalog projection (ToolProjection).
             let fullTools = try filteredTools.map { tool -> JSONValue in
-                guard let catalog = catalogByName[tool.name] else {
+                guard let catalog = catalogByName[tool.publicName] else {
                     throw JSONRPCError(
                         code: JSONRPCErrorCode.internalError,
-                        message: "Cognition catalog entry missing for lens/recipe tool \"\(tool.name)\"; registry may be out of sync.")
+                        message: "Cognition catalog entry missing for lens/recipe tool \"\(tool.publicName)\"; registry may be out of sync.")
                 }
                 var obj: [String: JSONValue] = [
-                    "name": .string(tool.name),
+                    "name": .string(tool.publicName),
                     "description": .string(catalog.description),
                     "input_schema": catalog.inputSchema,
                 ]
@@ -85,23 +66,22 @@ public struct AriaV2CognitionCatalogService: Sendable {
                 }
                 return .object(obj)
             }
-            let nameList = filteredTools.map(\.name).joined(separator: ", ")
+            let nameList = filteredTools.map(\.publicName).joined(separator: ", ")
             return envelope(
                 tool: Self.lensesToolName,
                 data: .object(["tools": .array(fullTools)]),
                 text: "Listed \(filteredTools.count) callable cognition tools (full schema). Tools: \(nameList)")
         } else {
             // Terse: name and description only. input_schema omitted.
-            // description comes from the v2 catalog projection, not from
-            // LensTools/RecipeTools instances.
+            // Description comes from the v2 catalog projection.
             let terseTools = try filteredTools.map { tool -> JSONValue in
-                guard let catalog = catalogByName[tool.name] else {
+                guard let catalog = catalogByName[tool.publicName] else {
                     throw JSONRPCError(
                         code: JSONRPCErrorCode.internalError,
-                        message: "Cognition catalog entry missing for lens/recipe tool \"\(tool.name)\"; registry may be out of sync.")
+                        message: "Cognition catalog entry missing for lens/recipe tool \"\(tool.publicName)\"; registry may be out of sync.")
                 }
                 return JSONValue.object([
-                    "name": .string(tool.name),
+                    "name": .string(tool.publicName),
                     "description": .string(catalog.description),
                 ])
             }
@@ -166,11 +146,7 @@ public struct AriaV2CognitionCatalogService: Sendable {
     /// Build a name→ProjectedTool lookup from the v2 catalog projection.
     /// `ToolProjection.tools()` returns projectedTools from the selected catalog,
     /// which carry the authoritative description, inputSchema, and outputSchema
-    /// per operation. All three fields are sourced from ToolProjection rather than
-    /// from LensTools/RecipeTools instances, keeping the lens lane in sync with the
-    /// tools/list surface (the v2 catalog is the single source of truth). The Rust
-    /// port already reads all fields from crate::v2::catalog::selected_tools();
-    /// this lookup aligns Swift.
+    /// per operation. This keeps the lens lane in sync with the tools/list surface.
     private static func buildCatalogLookup() -> [String: ProjectedTool] {
         Dictionary(
             ToolProjection.tools().map { ($0.name, $0) },

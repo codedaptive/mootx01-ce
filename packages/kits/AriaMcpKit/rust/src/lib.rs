@@ -16,7 +16,6 @@
 //!                     ├─► surface::SelectedSurface::decode (v2 admission + frozen gate)
 //!                     └─► surface::execute  ──► v2::{core_memory, estate_diagnostics, …}
 //!                                                 ├─► (80 ARIA v2 tools)
-//!                                                 └─► dispatch::dispatch_tool (v1 test helpers only)
 //! stdout (newline-delimited JSON responses)
 //! ```
 //!
@@ -66,7 +65,6 @@ pub mod interface_tools;
 pub mod recall_skim;
 pub mod jsonrpc;
 pub mod memory_adapter;
-pub mod lens_tools;
 pub mod recall_discrimination;
 // result_composer: the shared result composer for every ARIA MCP return shape
 // (ARIA_MCP_SPEC 2.0.0 § 8 composer invariant). All render functions are free

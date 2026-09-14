@@ -145,6 +145,7 @@ impl EstateStorageBackend {
 /// depending on the `RuntimeEstate` the host resolved from the estate catalog
 /// (`ServerConfig::for_estate`). Wire surface is identical for all three
 /// backends.
+#[derive(Clone)]
 pub struct EstateRegistry {
     /// The default estate — targeted when a tool call omits `estateID`.
     pub default: OpenEstate,

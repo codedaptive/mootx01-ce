@@ -85,6 +85,9 @@ pub struct V2OperationDescriptor {
     pub input_schema: Value,
     pub projection: V2ResultProjection,
     pub help: V2HelpMetadata,
+    /// Registry-only membership for the cognition lens lane. This is not
+    /// serialized into tools/list or included in the capability digest.
+    pub lens_lane_member: bool,
     /// Nonempty bindings are later included in the capability digest input.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recipe_bindings: Vec<String>,

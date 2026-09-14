@@ -402,14 +402,8 @@ struct ServerTests {
     /// (AriaV2EstateDiagnostics.swift:402) — the serial is carried only in
     /// `structuredContent.data.build_serial`
     /// (AriaV2EstateDiagnostics.swift:410-418, `AriaV2EstatePingData.json`).
-    /// `buildSerial` IS still threaded end to end (ToolDispatch.swift:713
-    /// passes it into `AriaV2EstateDiagnosticsContext`), so the behavior
-    /// converts — the assertion moves from text to the structured field
-    /// that now carries it. The dead legacy runner `runEstatePing`
-    /// (ToolDispatch.swift:3850, still containing the old "build \(serial)"
-    /// text) is unreachable from `ToolDispatcher.dispatch(name:arguments:)`:
-    /// its only caller, `InterfaceTools.dispatch`, has zero call sites in
-    /// Sources/.
+    /// `buildSerial` is threaded end to end into the structured field that
+    /// carries it.
     @Test func testEstatePingHonorsBuildSerialOverride() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-serial-tests")

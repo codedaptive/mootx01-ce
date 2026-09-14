@@ -8,6 +8,22 @@ enum AriaV2SelectedCatalog {
     static let coreCapability = AriaV2Capability(rawValue: "core")
     static let vaultCapability = AriaV2Capability(rawValue: "vault")
 
+    /// The v2 registry owns cognition-lens membership. Keep this private to
+    /// the registry so it cannot become a tools/list descriptor field.
+    private static let lensLaneToolNames: [String] = [
+        "moot_list_lenses", "moot_list_recipes", "moot_synthesize",
+        "moot_recall_precise", "moot_recall_temporal", "moot_recall_shaped",
+        "moot_recall_connected", "moot_dream", "moot_recall_distilled", "moot_recall_vague",
+        "moot_hunt_contradictions", "moot_recall_walk", "moot_lens_keystones",
+        "moot_lens_constellation", "moot_lens_free_association",
+        "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
+        "moot_lens_drift", "moot_lens_node_motion", "moot_lens_cohesion", "moot_lens_contradiction", "moot_lens_trust_synthesis",
+        "moot_lens_partial_cue", "moot_lens_anticipate", "moot_lens_successors",
+        "moot_lens_overlap", "moot_lens_divergence", "moot_lens_moment", "moot_lens_rhythm",
+        "moot_lens_precedence", "moot_lens_complexity", "moot_lens_associations", "moot_lens_concepts",
+        "moot_lens_apriori",
+    ]
+
     static func registry(environment: [String: String]) -> AriaV2EffectiveRegistry {
         var capabilities: Set<AriaV2Capability> = [coreCapability]
         if ToolProjection.vaultEnabled(environment: environment) {
@@ -1050,7 +1066,8 @@ enum AriaV2SelectedCatalog {
                 outputSchema: outputSchema(tool: name, effect: effect, dataSchema: dataSchema),
                 compactTextDescription: description
             ),
-            help: .init(description: description, intents: intents)
+            help: .init(description: description, intents: intents),
+            lensLaneOrder: lensLaneToolNames.firstIndex(of: name)
         )
     }
 

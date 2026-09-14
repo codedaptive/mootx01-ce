@@ -6,8 +6,7 @@ import LocusKit
 import NeuronKit
 
 /// The frozen Mission02 read-only recall and lens roster.  These requests are
-/// intentionally separate from RecipeTools/LensTools' v1 argument spelling;
-/// they are the admission boundary for a typed v2 implementation.
+/// the admission boundary for the typed v2 implementation.
 public enum AriaV2RecallLensOperation: String, Sendable, CaseIterable {
     case recallPrecise = "moot_recall_precise", recallTemporal = "moot_recall_temporal"
     case recallConnected = "moot_recall_connected", recallShaped = "moot_recall_shaped"
@@ -134,7 +133,7 @@ public struct AriaV2RecallLensRequest: Sendable, Equatable {
 }
 
 /// Direct lower-kit adapters return already-typed data.  They must never call
-/// RecipeTools/LensTools dispatch or parse a v1 renderer response.
+/// selected-v2 calls never parse a legacy renderer response.
 public protocol AriaV2RecallLensAuthority: Sendable {
     func execute(_ request: AriaV2RecallLensRequest) async throws -> AriaV2RecallLensOutcome
 }

@@ -67,38 +67,40 @@ struct WithdrawRecallDropDispatchTests {
 
         // Impatient file → inline corpus ingest, immediately searchable.
         let content = "withdraw target content marmalade quasar threnody"
-        let filed = try await dispatcher.runFileMemory([
-            "content": .string(content),
-            "subject": .string(String(content.prefix(120))),
-            "location": .string("lab"),
-            "impatient": .bool(true),
-        ])
-        let id = text(of: filed)
-            .split(separator: "\n").first
-            .map(String.init)?
-            .replacingOccurrences(of: "filed memory ", with: "") ?? ""
-        #expect(!id.isEmpty, "file_memory must return an id; got: \(text(of: filed))")
+        let filed = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: .object([
+                "content": .string(content),
+                "subject": .string(String(content.prefix(120))),
+                "location": .string("lab"),
+                "impatient": .bool(true),
+            ]))
+        let id = try #require(
+            filed.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["memory_id"]?.stringValue)
 
         // Precondition: the active memory is searchable.
-        let pre = try await dispatcher.runMemorySearch([
-            "query": .string("marmalade quasar threnody"),
-        ])
-        #expect(text(of: pre).contains(id),
-            "active memory must surface before withdrawal; got: \(text(of: pre))")
+        let pre = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object(["query": .string("marmalade quasar threnody")]))
+        let preRows = pre.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue ?? []
+        #expect(preRows.contains { $0.objectValue?["memory_id"] == .string(id) },
+            "active memory must surface before withdrawal; got: \(pre)")
 
         // Withdraw — soft-removes from active circulation (state → .withdrawn).
-        let withdrawn = try await dispatcher.runWithdrawMemory(["id": .string(id)])
-        #expect(text(of: withdrawn).contains("withdrew"),
-            "withdraw must succeed; got: \(text(of: withdrawn))")
+        let withdrawn = try await dispatcher.dispatch(
+            name: "moot_withdraw_memory",
+            arguments: .object(["memory_id": .string(id)]))
+        #expect(withdrawn.objectValue?["isError"] == .bool(false),
+            "withdraw must succeed; got: \(withdrawn)")
 
         // Default search must NOT surface the withdrawn memory: the BM25 candidate
         // is dropped by the frame-aware drawerIndex (it failed the implied
         // `.currentlyBelieve` filter). Assert the id is absent.
-        let post = try await dispatcher.runMemorySearch([
-            "query": .string("marmalade quasar threnody"),
-        ])
-        let postText = text(of: post)
-        #expect(!postText.contains(id),
-            "withdrawn memory must NOT appear in default search (frame-faithful drop); got: \(postText)")
+        let post = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object(["query": .string("marmalade quasar threnody")]))
+        let postRows = post.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["results"]?.arrayValue ?? []
+        #expect(!postRows.contains { $0.objectValue?["memory_id"] == .string(id) },
+            "withdrawn memory must NOT appear in default search (frame-faithful drop); got: \(post)")
     }
 }

@@ -12,7 +12,7 @@
 //!   DISPATCH SHAPE: Follows VaultTools/LensTools pattern — public module-level
 //!   is_dataset_tool(), dispatch(), and tools-schema helpers. Inserted in
 //!   dispatch.rs after vault tools and before recipe tools, matching Swift's
-//!   ToolDispatch.dispatch() insertion after VaultTools and before InterfaceTools.
+//!   selected-v2 surface decoding through the registry-owned data-mobility provider.
 //!
 //!   PROVENANCE: .interface — dataset tools are user-facing CRUD operations that
 //!   target a specific estate (they carry an optional estateID like all interface
@@ -111,8 +111,7 @@ pub fn is_dataset_tool(name: &str) -> bool {
 
 /// Run the named dataset tool against `registry`.
 ///
-/// Follows the same contract as `vault_tools::dispatch_vault` and
-/// `recipe_tools::dispatch`: out-of-band faults throw `JSONRPCError`;
+/// Follows the same contract as `vault_tools::dispatch_vault`: out-of-band faults throw `JSONRPCError`;
 /// substrate refusals return `error_result` (isError: true).
 pub fn dispatch(
     name: &str,

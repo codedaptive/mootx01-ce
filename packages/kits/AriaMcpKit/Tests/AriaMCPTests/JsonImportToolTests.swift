@@ -81,8 +81,8 @@ struct JsonImportToolTests {
         return content.count
     }
 
-    @Test("the id map is absent unless asked for, and null is invalid")
-    func idMapIsOptInAndNullRejected() async throws {
+    @Test("the id map is absent for omitted or false, and null is invalid")
+    func idMapOmittedFalseAndNullAreContractual() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
         let seed = """
@@ -98,6 +98,19 @@ struct JsonImportToolTests {
             arguments: .object(["path": .string(url.path)]))
         #expect(!isError(of: plain))
         #expect(blockCount(of: plain) == 1)
+
+        // Explicit false is identical to omission: accepted, with no id-map block.
+        let falseURL = try tempSeedFile(seed.replacingOccurrences(of: "\"m1\"", with: "\"m-false\""))
+        defer { try? FileManager.default.removeItem(at: falseURL) }
+        let explicitFalse = try await dispatcher.dispatch(
+            name: "moot_json_import",
+            arguments: .object([
+                "path": .string(falseURL.path),
+                "return_id_map": .bool(false),
+            ]))
+        #expect(!isError(of: explicitFalse))
+        #expect(blockCount(of: explicitFalse) == 1,
+                "return_id_map:false must not add an id-map content block")
 
         // Explicit null is rejected rather than read as "use the default".
         let url2 = try tempSeedFile(seed.replacingOccurrences(of: "\"m1\"", with: "\"m2\""))
