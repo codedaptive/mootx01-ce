@@ -25,6 +25,7 @@
 // persisted entity types only; this is not one.
 
 import Foundation
+import GeniusLocusKit
 
 // MARK: - DistilledSkim
 
@@ -71,6 +72,30 @@ public struct DistilledSkim: Sendable, Equatable, Codable {
 /// is absent from encoded output when `skim == nil`. Callers that decode
 /// this struct from JSON may safely omit the `skim` key and get `nil`.
 public struct DistilledSavings: Sendable, Equatable, Codable {
+    /// One opt-in boundary for text-pair accounting and the caller-facing line.
+    /// Pass only authorized, actually returned bodies. `skimmed` is the final
+    /// preview, not its fullText/continuation. Disabled calls do no counting.
+    public static func text(
+        original: String, reduced: String, enabled: Bool,
+        skimmed: String? = nil
+    ) -> String {
+        guard enabled else { return "" }
+        let originalCount = GeniusLocusKit.estimatedTokenCount(of: original)
+        let reducedCount = GeniusLocusKit.estimatedTokenCount(of: reduced)
+        let omitted = skimmed.map {
+            reducedCount - GeniusLocusKit.estimatedTokenCount(of: $0)
+        }
+        // A longer preview is not an omission. Describe the actual final text
+        // as a direct reduction/growth instead of inventing negative skim savings.
+        if let omitted, omitted < 0, let skimmed {
+            return measure(originalTokens: originalCount,
+                           distilledTokens: GeniusLocusKit.estimatedTokenCount(of: skimmed),
+                           skimOmittedTokens: nil).display
+        }
+        return measure(originalTokens: originalCount, distilledTokens: reducedCount,
+                       skimOmittedTokens: omitted).display
+    }
+
     /// Tokens sent to the caller: `distilledTokens - (skimOmittedTokens ?? 0)`.
     public let returnedTokens: Int64
     /// Sum of `originalTokenCount` over the emitted rows that carry a
