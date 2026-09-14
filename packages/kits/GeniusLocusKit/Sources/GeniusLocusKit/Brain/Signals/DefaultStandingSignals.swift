@@ -6,7 +6,7 @@ import SynapseKit
 /// spec §11.2 plus the contradiction scout (signal 10, the hunter's
 /// background half), consolidation sweep (signal 11), the
 /// anomaly-flag sweep (signal 12, P3a), and the span-encode drain
-/// (signal 13, ENCODER_RERANK_CONTRACT §10 — replaces adornment pass),
+/// (signal 13, ENCODER_RERANK_CONTRACT §10),
 /// and the harness-gated distilled-fact drain (signal 14).
 /// Signal 8's slot (the stored-distillation sweep) is empty: the distilled
 /// rendering is computed inline at read time, so nothing sweeps for it.
@@ -41,8 +41,8 @@ import SynapseKit
 /// `kit.anomalyFlagSweep(handle:now:)` and returns the count of
 /// drawers whose `isAnomalous` bit changed.
 ///
-/// Signal 13 (SpanEncodeSignal) replaces the former AdornmentPassSignal.
-/// Production callers supply a `spanEncodeCycle` closure that wraps
+/// Signal 13 (SpanEncodeSignal): production callers supply a `spanEncodeCycle`
+/// closure that wraps
 /// `kit.runSpanEncodeBatch(handle:encoder:store:now:)` with the estate,
 /// encoder, and vector store; the drain encodes unindexed drawers into
 /// int8 span vectors (contract §3) and sets bit 27 (spanIndexed) on success.
@@ -196,7 +196,7 @@ public extension GeniusLocusKit {
             // SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10, signal 13):
             // REM-ALPHA (30 s) drain that encodes drawers with bit 27 clear
             // into int8 span vectors (vectors_v6) and sets bit 27 (spanIndexed)
-            // on success. Replaces the hourly AdornmentPassSignal. The caller
+            // on success. The caller
             // wraps kit.runSpanEncodeBatch(handle:encoder:store:now:);
             // the default no-op is appropriate for test registration where
             // no live encoder is wired.
