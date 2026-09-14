@@ -202,12 +202,7 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
-        // AdornmentLib: dream-time adornment generation and certification.
-        // The AdornmentPass (GLK Brain standing signal 13) uses AdornmentLib's
-        // MOOT_MINT_CMD seam and AdornmentValidators to mint and certify
-        // adornment strings for drawer rows. Layering: AdornmentLib is BELOW
         // GeniusLocusKit (zero kit deps); no inversion. Per BRR Group 10.
-        .package(name: "AdornmentLib", path: "../../libs/AdornmentLib"),
         .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(path: "../../libs/MootProductIdentity"),
@@ -238,7 +233,6 @@ let package = Package(
         // EideticLib → LatticeLib (below GLK), no inversion.
         .package(name: "EideticLib", path: "../../libs/EideticLib"),
         // LatticeLib: QID/FDC taxonomy and word-class symbols are imported
-        // directly by the search/adornment implementation. A transitive path
         // through EideticLib is insufficient when GeniusLocusKit is linked as
         // a dynamic product by an Xcode application target.
         .package(name: "LatticeLib", path: "../../libs/LatticeLib"),
@@ -526,11 +520,7 @@ let package = Package(
                 // Keep it direct so dynamic application linkage exports the
                 // symbols instead of relying on EideticLib's transitive edge.
                 .product(name: "LatticeLib", package: "LatticeLib"),
-                // AdornmentLib: used by AdornmentPass (Brain standing signal 13)
-                // to invoke the MOOT_MINT_CMD seam and certify generated adornments
-                // via AdornmentValidators before writing to the drawer row.
                 // (BRR Group 10 — GLK Package.swift MUST_UPDATE)
-                .product(name: "AdornmentLib", package: "AdornmentLib"),
             ],
             path: "Sources/GeniusLocusKit",
             swiftSettings: [
