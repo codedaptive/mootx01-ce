@@ -860,6 +860,28 @@ class TestFixtureProvenance(unittest.TestCase):
             data = json.load(f)
         return data.get("result", data)["structuredContent"]["data"]
 
+    def test_fixtures_carry_no_absolute_home_paths(self):
+        """A capture records which build produced it. When that record is an
+        absolute path it names the capturing machine's home directory, which
+        discloses a private layout and tells a later reader nothing they can
+        use. These fixtures are published verbatim, and recapture rewrites the
+        provenance value every time, so the check belongs in the suite rather
+        than in a reviewer's eye. Replace the value with a build description
+        ("rust port, debug build") instead of deleting the key: provenance is
+        worth keeping, the path is not.
+        """
+        for name in sorted(os.listdir(_FIXTURES_DIR)):
+            if not name.endswith(".json"):
+                continue
+            with open(os.path.join(_FIXTURES_DIR, name), encoding="utf-8") as f:
+                content = f.read()
+            for prefix in ("/Users/", "/home/", "/root/"):
+                self.assertNotIn(
+                    prefix, content,
+                    f"{name}: carries an absolute home path starting {prefix!r}. "
+                    "Replace the capture's provenance value with a build "
+                    "description before committing.")
+
     def test_swift_fixture_present(self):
         self._assert_present("swift_tools_list.json")
 
