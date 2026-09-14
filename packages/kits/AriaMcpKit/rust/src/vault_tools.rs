@@ -332,8 +332,7 @@ const MANIFEST_RELATIVE_PATH: &str = ".moot/export-manifest.json";
 // Public dispatch entry point
 // ---------------------------------------------------------------------------
 
-/// Dispatch one of the five `moot_vault_*` tools. Called from
-/// `dispatch::dispatch_tool` when `name.starts_with("moot_vault_")`.
+/// Dispatch one of the five `moot_vault_*` tools for the legacy module boundary.
 ///
 /// Returns `Ok(serde_json::Value)` in all non-transport-fault cases — even
 /// substrate refusals surface as `isError: true` results, matching the Swift
@@ -350,7 +349,7 @@ pub fn dispatch_vault(
     ledger: &VaultJobLedger,
 ) -> Result<serde_json::Value, JSONRPCError> {
     // moot_vault_job only needs a job_id — vaultPath is not required.
-    // Mirrors Swift VaultTools.dispatch which branches on name == "moot_vault_job"
+    // Mirrors the selected v2 data-mobility job decoder.
     // before the vaultPath extraction block.
     if name == "moot_vault_job" {
         let job_id = args
@@ -398,7 +397,7 @@ pub fn dispatch_vault(
 // ---------------------------------------------------------------------------
 
 /// `moot_vault_export` — project the estate to the vault, then stamp the
-/// SHA-256 sidecar manifest. Mirrors Swift `VaultTools.runExport`.
+/// SHA-256 sidecar manifest. Used by the selected-v2 export provider.
 ///
 /// Steps:
 /// 1. Resolve the target estate.
@@ -582,7 +581,7 @@ fn parse_scope(
 
 /// `moot_vault_import` — import a Markdown vault into the estate via the
 /// capture seam. Idempotent per note's `stable_source_key`.
-/// Mirrors Swift `VaultTools.runImport`.
+/// Used by the selected-v2 import provider.
 ///
 /// The Rust backend is synchronous: the import completes before this function
 /// returns. A UUID job ID is assigned, the completed job is recorded in `ledger`,
@@ -816,7 +815,7 @@ fn render_import_launch(launch: &VaultJobLaunch) -> String {
 
 /// `moot_vault_status` — report whether the vault carries a manifest and,
 /// if so, its header. Pure filesystem read; mutates nothing.
-/// Mirrors Swift `VaultTools.runStatus`.
+/// Used by the selected-v2 status provider.
 pub fn vault_status_snapshot(vault_path: &Path) -> Result<VaultStatusSnapshot, String> {
     let manifest = read_manifest(vault_path)?;
     Ok(match manifest {
@@ -860,7 +859,7 @@ fn run_status(vault_path: &Path) -> Result<serde_json::Value, JSONRPCError> {
 /// Dry-run mode (`apply` absent or `false`): computes the selection via
 /// `VaultBridge::reconcile_selection` (one estate snapshot, no disk reads),
 /// reports the candidates and missing notes, writes nothing. Mirrors Swift
-/// `VaultTools.runReconcile`.
+/// selected-v2 reconcile provider.
 ///
 /// Apply mode (`apply=true`): actions the selection via
 /// `VaultBridge::import_vault_reconciling`, which returns the exact imported
@@ -870,7 +869,7 @@ fn run_status(vault_path: &Path) -> Result<serde_json::Value, JSONRPCError> {
 /// After the import, the manifest is re-stamped with the imported paths' hashes
 /// from the `current` scan so those entries become v2 certifications.
 /// Idempotent per note's `stable_source_key`. Deleted files are always reported
-/// only; no drawer is expunged. Mirrors Swift `VaultTools.runReconcile(apply:true)`.
+/// only; no drawer is expunged. Mirrors Swift `VaultTools.reconcileSnapshot(apply:true)`.
 fn run_reconcile(
     args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
     registry: &EstateRegistry,
@@ -885,7 +884,7 @@ fn run_reconcile(
     // Resolve estateID unconditionally — dry-run and apply both validate the
     // estate parameter so a malformed estateID errors before any manifest I/O.
     // Matches Swift, which calls resolveHandle(_:) at dispatch time before
-    // entering runReconcile. Previously this was inside the `if apply {}`
+        // entering selected-v2 reconciliation. Previously this was inside the `if apply {}`
     // block, so a bad estateID in dry-run was silently ignored and the default
     // estate used — diverging from Swift's behaviour (Defect B2-3 fix 1).
     let open = registry.resolve_direct(args)?;
@@ -1260,9 +1259,9 @@ pub fn vault_reconcile_snapshot(
 /// The Rust backend is synchronous: jobs are always in the "complete" state
 /// when recorded in the ledger. This handler returns a "complete" record for
 /// any known job ID, and the Swift-identical "unknown job_id" not-found shape
-/// for any unknown ID — matching Swift `VaultTools.runJob` field names exactly.
+/// for any unknown ID — matching the selected-v2 job field names exactly.
 ///
-/// Response shapes (must match Swift `VaultTools.runJob` output text):
+/// Response shapes use the selected-v2 typed job data:
 ///
 /// - Known import job (completed):
 ///   ```text

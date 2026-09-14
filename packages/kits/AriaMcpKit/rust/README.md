@@ -61,8 +61,8 @@ transliteration of the Swift code.
 |---|---|
 | `moot_list_recipes` | Enumerate catalog: name, version, description, required capabilities |
 | `moot_grounded_synthesis` | Hybrid-recall + synthesize into a grounded context document |
-| `moot_run_migration_benchmark` | Derive COW branches per plan, benchmark, rank survivors |
-| `moot_confirm_migration_promotion` | Promote a winning branch by id; discard losers (human-confirmed write) |
+| `moot_migration_run` | Derive COW branches per plan, benchmark, rank survivors |
+| `moot_migration_confirm` | Promote a winning branch by id; discard losers (human-confirmed write) |
 
 ### 14 reasoning-lens tools
 
@@ -166,7 +166,7 @@ CloudKit and live federation fan-out remain future work.
 
 ## Behavioral Facts
 
-**moot_confirm_migration_promotion is fully wired.** The confirm step dispatches
+**moot_migration_confirm is fully wired.** The confirm step dispatches
 `confirm_migration_promotion_by_id`, the id-addressed overload that works across
 the stateless run→confirm boundary. The server's in-memory coordinator retains all
 minted branches; the run result text carries the branch ids the caller needs.
@@ -184,9 +184,9 @@ stdin (newline-delimited JSON)
         └─► dispatcher::Dispatcher::handle
               ├─► initialize / ping / tools/list
               └─► tools/call
-                    └─► dispatch::dispatch_tool
-                          ├─► recipe_tools  (moot_list_recipes, moot_grounded_synthesis, …)
-                          ├─► lens_tools    (moot_keystones … moot_estate_divergence)
+                    └─► Dispatcher::handle
+                          ├─► selected v2 surface
+                          ├─► typed recall and orchestration lowers
                           └─► lexicon_tools (moot_capture_drawer, moot_drawer_recall,
                                              moot_capture_tunnel, moot_mutate_drawer,
                                              moot_withdraw_drawer, moot_expunge_drawer,

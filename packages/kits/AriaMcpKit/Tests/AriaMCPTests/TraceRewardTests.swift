@@ -257,6 +257,30 @@ struct TraceRewardTests {
         #expect(count == 0, "internal recall must write zero trace rows; got count=\(count)")
     }
 
+    /// The public dream route performs internal estate work only.  It must not
+    /// create externally-attributable recall traces while it scans candidates.
+    @Test func dreamDispatchWritesZeroRecallTraceRows() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle, dispatcher) = try await openSQLiteEstate(url: url)
+
+        _ = try await fileMemory(dispatcher, content: "dream trace alpha alignment", location: "dream/trace")
+        _ = try await fileMemory(dispatcher, content: "dream trace beta alignment", location: "dream/trace")
+        _ = try await fileMemory(dispatcher, content: "dream trace gamma alignment", location: "dream/trace")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-09-01T00:00:00Z"),
+                "associates": .string("all"),
+            ]))
+        #expect(result.objectValue?["isError"]?.boolValue == false)
+
+        let count = try await kit.countRecallTraces(handle)
+        #expect(count == 0,
+                "moot_dream must not write recall traces; got count=\(count)")
+    }
+
     // MARK: - Test 3: dereference after search triggers used bit
 
     /// After an external `moot_memory_search` surfaces a drawer, a subsequent

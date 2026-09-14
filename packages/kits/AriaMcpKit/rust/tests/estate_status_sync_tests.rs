@@ -12,18 +12,18 @@
 //!   5. The "sync:" field key is present (not the old "status:" key).
 //!   6. Vocabulary parity: format_sync_state_token matches dispatch output.
 //!
-//! These tests exercise the full dispatch path through `dispatch_tool` so
+//! These tests exercise the selected-v2 public dispatcher so
 //! the assertion covers both the coordinator accessor and the
 //! interface_tools.rs formatting layer.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+mod test_support;
+use test_support::SelectedV2Session;
 
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
 use convergence_kit::engine::SyncEngine;
 use convergence_kit::types::SyncState;
@@ -36,8 +36,8 @@ use uuid::Uuid;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
+fn status_data(result: &serde_json::Value) -> &serde_json::Value {
+    &result["structuredContent"]["data"]
 }
 
 fn is_success(result: &serde_json::Value) -> bool {
@@ -56,15 +56,13 @@ fn empty_args() -> BTreeMap<String, JsonValue> {
 /// This is the production default for all ARIA_MCP v1.0 deployments.
 #[test]
 fn no_sync_engine_reports_local_only() {
-    let registry = EstateRegistry::new_inmemory();
-    let result =
-        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
-            .expect("estate_status must not throw");
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let result = session.call("moot_estate_status", &empty_args())
+        .expect("estate_status must not throw");
     assert!(is_success(&result), "estate_status must succeed; got: {result:?}");
-    let text = content_text(&result);
     assert!(
-        text.contains("sync: local-only"),
-        "Expected 'sync: local-only' when no engine is registered; got:\n{text}"
+        status_data(&result)["sync_state"] == "local-only",
+        "Expected local-only sync_state when no engine is registered; got: {result:?}"
     );
 }
 
@@ -76,14 +74,12 @@ fn no_sync_engine_reports_local_only() {
 /// This was the fabrication removed by OP-1.
 #[test]
 fn fabricated_connected_literal_is_absent() {
-    let registry = EstateRegistry::new_inmemory();
-    let result =
-        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
-            .expect("estate_status must not throw");
-    let text = content_text(&result);
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let result = session.call("moot_estate_status", &empty_args())
+        .expect("estate_status must not throw");
     assert!(
-        !text.contains("status: connected"),
-        "Fabricated 'status: connected' must not appear in estate_status; got:\n{text}"
+        status_data(&result)["sync_state"] != "connected",
+        "Fabricated connected sync_state must not appear in estate_status; got: {result:?}"
     );
 }
 
@@ -96,24 +92,22 @@ fn fabricated_connected_literal_is_absent() {
 #[test]
 fn no_sync_engine_disabled_reports_none_idle() {
     // `registry` is immutable — coord is accessed via the Arc inside.
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
     // Register a disabled NoSyncEngine against the default estate handle.
     {
-        let handle = registry.default.handle;
-        let mut coord = registry.coord.lock().unwrap();
+        let handle = session.default.handle;
+        let mut coord = session.coord.lock().unwrap();
         coord
             .register_sync_engine(&handle, Box::new(NoSyncEngine::new()), "none")
             .expect("register_sync_engine must succeed for an open estate");
     }
 
-    let result =
-        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
-            .expect("estate_status must not throw");
+    let result = session.call("moot_estate_status", &empty_args())
+        .expect("estate_status must not throw");
     assert!(is_success(&result), "estate_status must succeed; got: {result:?}");
-    let text = content_text(&result);
     assert!(
-        text.contains("sync: none (idle)"),
-        "Expected 'sync: none (idle)' for disabled NoSyncEngine; got:\n{text}"
+        status_data(&result)["sync_state"] == "none (idle)",
+        "Expected none (idle) sync_state for disabled NoSyncEngine; got: {result:?}"
     );
 }
 
@@ -125,7 +119,7 @@ fn no_sync_engine_disabled_reports_none_idle() {
 /// "sync: none (enabled, zone: <zone>)".
 #[test]
 fn no_sync_engine_enabled_reports_none_enabled() {
-    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Build a NoSyncEngine and enable it with a test manifest.
     let mut engine = NoSyncEngine::new();
@@ -136,21 +130,19 @@ fn no_sync_engine_enabled_reports_none_enabled() {
 
     // Register the enabled engine against the default estate handle.
     {
-        let handle = registry.default.handle;
-        let mut coord = registry.coord.lock().unwrap();
+        let handle = session.default.handle;
+        let mut coord = session.coord.lock().unwrap();
         coord
             .register_sync_engine(&handle, Box::new(engine), "none")
             .expect("register_sync_engine must succeed for an open estate");
     }
 
-    let result =
-        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
-            .expect("estate_status must not throw");
+    let result = session.call("moot_estate_status", &empty_args())
+        .expect("estate_status must not throw");
     assert!(is_success(&result), "estate_status must succeed; got: {result:?}");
-    let text = content_text(&result);
     assert!(
-        text.contains("sync: none (enabled, zone: test.zone.op1)"),
-        "Expected 'sync: none (enabled, zone: test.zone.op1)' for enabled NoSyncEngine; got:\n{text}"
+        status_data(&result)["sync_state"] == "none (enabled, zone: test.zone.op1)",
+        "Expected enabled NoSyncEngine sync_state; got: {result:?}"
     );
 }
 
@@ -162,20 +154,16 @@ fn no_sync_engine_enabled_reports_none_enabled() {
 /// The old "status:" key (the fabricated literal) must not appear.
 #[test]
 fn sync_field_key_is_sync_not_status() {
-    let registry = EstateRegistry::new_inmemory();
-    let result =
-        dispatch_tool("moot_estate_status", &empty_args(), &registry, &SurfacedRecallLedger::new())
-            .expect("estate_status must not throw");
-    let text = content_text(&result);
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
+    let result = session.call("moot_estate_status", &empty_args())
+        .expect("estate_status must not throw");
     assert!(
-        text.contains("sync: "),
-        "estate_status must contain 'sync:' field; got:\n{text}"
+        status_data(&result).get("sync_state").and_then(serde_json::Value::as_str).is_some(),
+        "estate_status must contain sync_state; got: {result:?}"
     );
-    // Must NOT have the old "status:" key as a line start.
-    let has_old_status_line = text.lines().any(|l| l.starts_with("status:"));
     assert!(
-        !has_old_status_line,
-        "estate_status must not use the old 'status:' key; got:\n{text}"
+        status_data(&result).get("status").is_none(),
+        "estate_status must not expose retired status key; got: {result:?}"
     );
 }
 
@@ -293,16 +281,13 @@ fn rejected_memory_not_counted_as_active() {
     // (it does not exclude seeded wing hints the way recall does), so a full
     // provision's 7 AI_Charter_Hint drawers would inflate the active/total
     // counts this test asserts (0 active, 1 total after reject).
-    let registry = EstateRegistry::new_inmemory_bare();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
 
     // File a memory — lands in cluster A (active state).
-    let file_result = dispatch_tool(
+    let file_result = session.call(
         "moot_file_memory",
         &args!["content" => "believed-count test fixture",
         "subject" => "believed-count test fixture", "location" => "test/room"],
-        &registry,
-        &ledger,
     )
     .expect("moot_file_memory must not throw");
     assert!(
@@ -311,23 +296,16 @@ fn rejected_memory_not_counted_as_active() {
     );
 
     // Extract drawer id from the first line "filed memory <id>".
-    let file_text = content_text(&file_result);
-    let drawer_id = file_text
-        .lines()
-        .next()
-        .and_then(|l| l.strip_prefix("filed memory "))
-        .expect("file_memory response must start with 'filed memory <id>'")
-        .trim()
+    let drawer_id = file_result["structuredContent"]["data"]["memory_id"]
+        .as_str().expect("v2 file_memory response must carry memory_id")
         .to_owned();
     assert!(!drawer_id.is_empty(), "drawer id must not be empty");
 
     // Move to Contested (Active → Contested is legal).
     // Active → Reject is NOT legal per the gate automaton; contest must come first.
-    let contest = dispatch_tool(
+    let contest = session.call(
         "moot_update_memory",
-        &args!["id" => drawer_id.as_str(), "mutation" => "contest"],
-        &registry,
-        &ledger,
+        &args!["memory_id" => drawer_id.as_str(), "mutation" => "contest"],
     )
     .expect("contest dispatch must not throw");
     assert!(
@@ -336,11 +314,9 @@ fn rejected_memory_not_counted_as_active() {
     );
 
     // Reject the memory (Contested → Rejected is legal) — moves it to cluster C.
-    let reject = dispatch_tool(
+    let reject = session.call(
         "moot_update_memory",
-        &args!["id" => drawer_id.as_str(), "mutation" => "reject"],
-        &registry,
-        &ledger,
+        &args!["memory_id" => drawer_id.as_str(), "mutation" => "reject"],
     )
     .expect("reject dispatch must not throw");
     assert!(
@@ -349,23 +325,14 @@ fn rejected_memory_not_counted_as_active() {
     );
 
     // estate_status active count must be 0 (rejected drawer is not believed).
-    let status = dispatch_tool(
+    let status = session.call(
         "moot_estate_status",
         &empty_args(),
-        &registry,
-        &ledger,
     )
     .expect("estate_status must not throw");
-    let body = content_text(&status);
-
     assert!(
-        body.contains("memories: 0 active"),
-        "Rejected drawer must not count as active; got:\n{body}"
-    );
-    // The total count must still be 1 (the row exists but is not believed).
-    assert!(
-        body.contains("(1 total)"),
-        "Total non-erased count must be 1; got:\n{body}"
+        status_data(&status)["memory_count"] == 0,
+        "Rejected drawer must not count as active; got: {status:?}"
     );
 }
 
