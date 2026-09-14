@@ -72,10 +72,10 @@ pub fn run(
     // backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense
     // pooling convergence, span encode, vector reclaim) against the selected
     // estate, then exits. No network, no prompts; each step quiesces the
-    // daemon only when a live resident serves this estate. Ordering matches
-    // run_convergence: schema gate → correctness migration → projection
-    // backfill → VACUUM-backed reclaim → whole-record vacuum (the first
-    // estate open, so the 1.6 → 1.7 capsule runs and reports here) → ssc
+    // daemon only when a live resident serves this estate. This explicit
+    // estate-only path retains its own ordering: schema gate → correctness
+    // migration → projection backfill → VACUUM-backed reclaim → whole-record
+    // vacuum (the first estate open, so the 1.6 → 1.7 capsule runs and reports here) → ssc
     // facts → dense pooling convergence → span encode → vector reclaim.
     // A refused schema version stops the sequence (every later step would
     // open the schema and stamp it); otherwise all steps run even when
@@ -281,6 +281,7 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
         retire_legacy_encryption_opt_out(record);
         refresh_manifest(record);
         let _ = run_kg_fact_identity_backfill(record);
+        let _ = run_ssc_facts_backfill(record);
         let _ = run_search_projection_backfill(record);
         let _ = run_shared_content_reclaim_if_pending(record);
         let _ = run_whole_record_vacuum(record);
@@ -346,10 +347,16 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                         schema::SUPPORTED_UPGRADE_FLOOR,
                         schema::SCHEMA_VERSION
                     )),
-                    SchemaUpgradePath::Current => Ok(format!(
-                        "already at LocusKit schema {}",
-                        schema::SCHEMA_VERSION
-                    )),
+                    SchemaUpgradePath::Current => {
+                        // Schema application also converges legacy migration-ledger
+                        // timestamps. The raw version gate above remains the only
+                        // authority for schema acceptance before an open mutates.
+                        storage.open(&schema::schema()).map_err(|e| e.to_string())?;
+                        Ok(format!(
+                            "already at LocusKit schema {}",
+                            schema::SCHEMA_VERSION
+                        ))
+                    }
                     SchemaUpgradePath::Fresh => Ok(format!(
                         "no LocusKit ledger row; schema {} is created on the first open",
                         schema::SCHEMA_VERSION
@@ -1010,9 +1017,9 @@ fn run_vector_reclaim(record: &EstateRecord) -> bool {
 /// once (`EstateCoordinator::backfill_ssc_facts`) and, when it wrote
 /// anything, rebuilds every derived lane (`reindex_corpus`) so the
 /// supplement reaches the posting lists. A converged estate writes nothing
-/// and skips the rebuild. Runs after the schema upgrade and the
-/// shared-content reclaim, before the dense pooling convergence, so the
-/// rebuild happens once under the final schema. Twin of Swift
+/// and skips the rebuild. In the shared convergence sequence it runs after
+/// the kg_facts identity backfill and before search projection, so every later
+/// derived step sees the completed facts. Twin of Swift
 /// `UpgradeCommand.runSSCFactsBackfill`.
 ///
 /// Returns `true` on success or when there is nothing to write.
