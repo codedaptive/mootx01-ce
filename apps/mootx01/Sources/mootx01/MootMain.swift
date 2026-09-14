@@ -32,11 +32,6 @@
 
 import ArgumentParser
 import Foundation
-// MootCoreAIWorker is gated: adornments are dark (Encoder Rerank Program,
-// 2026-09-05). CoreAIMintWorkerCommand compiles only with MOOTX01_MINERS.
-#if MOOTX01_MINERS
-import MootCoreAIWorker
-#endif
 import MootInstallerCore
 
 @main
