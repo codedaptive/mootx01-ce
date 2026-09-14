@@ -26,6 +26,7 @@ use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::encoder_model_store::{EncoderModelRow, EncoderModelStore, Pooling};
 use locus_kit::{
+    adjectives::AdjectiveSensitivity,
     drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::LatticeAnchor, estate_types::OwnerCredentials, frames::CaptureFrame,
 };
@@ -283,7 +284,7 @@ fn l3_sweep_scrubs_encoder_lane_span_rows() {
     // Crash-window: tombstone WITHOUT sealing; step 2 never runs.
     let estate = coord.estate_for(&h).expect("estate");
     let _unsealed = estate
-        .expunge(&erase_id, "crash-window-sim-l3", true, NOW2, false)
+        .expunge(&erase_id, "crash-window-sim-l3", true, NOW2, false, AdjectiveSensitivity::Secret)
         .expect("estate expunge (no seal)");
     assert_eq!(span_count(&vs_ref, &erase_id), 2, "span rows survive the crash window");
 

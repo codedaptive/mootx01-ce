@@ -7422,9 +7422,15 @@ impl EstateCoordinator {
         // Step 1 — LocusKit storage expunge with deferred audit seal.
         // The full ExpungeOutcome comes back: the gate-produced AuditEvent
         // (held unsealed until step 2 confirms the cross-kit delete, §B-2a)
-        // plus the gate-refused sibling ids (SPEC B-8b).
+        // plus the ids of siblings left untouched — refused by the
+        // ceiling check (Elevated, checked first, never reaching the
+        // gate) or by the gate (SPEC B-8b).
+        // GLK-CEILING: the erase verb enforces the same .Elevated ceiling on
+        // siblings that step 0.5 enforces on the target. A caller who cannot
+        // read above Elevated must not be able to erase above it through the
+        // lineage cascade either.
         let storage_outcome = estate
-            .expunge(row_id, reason, confirmation, now, false)
+            .expunge(row_id, reason, confirmation, now, false, locus_kit::adjectives::AdjectiveSensitivity::Elevated)
             .map_err(|e| remap("expunge", &uuid_to_str(&handle.estate_uuid), e))?;
         let unsealed_event = storage_outcome.event;
         let refused_sibling_ids = storage_outcome.refused_sibling_ids;
@@ -17156,6 +17162,95 @@ mod tests {
         );
     }
 
+    // GLKC-1b: a .Restricted sibling in the same lineage as a .Normal target
+    // must survive the GLK expunge verb byte-identical — the sensitivity ceiling
+    // (.Elevated) that the erase verb passes to expunge_gated must block the
+    // lineage cascade from erasing any sibling whose tier exceeds that ceiling.
+    // The sibling's content, adjective_bitmap, operational_bitmap, and
+    // tombstoned_at must all be unchanged; the refused id is reported back in
+    // ExpungeVerbOutcome.refused_sibling_ids.
+    #[test]
+    fn expunge_sibling_above_ceiling_survives_byte_identical() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use uuid::Uuid;
+
+        let (coord, h) = open_one();
+        let lineage_id = Uuid::new_v4();
+
+        // Target: .Normal sensitivity — the expunge caller can read this.
+        let mut target_frame = cap_frame("normal-tier target — erase me");
+        target_frame.sensitivity = AdjectiveSensitivity::Normal;
+        target_frame.lineage_id = Some(lineage_id);
+        let target_stored = coord.capture(&h, target_frame, NOW).expect("capture target");
+        let target_id = target_stored.id.clone();
+
+        // Sibling: .Restricted sensitivity — above the GLK .Elevated ceiling.
+        let mut sibling_frame = cap_frame("restricted-tier sibling — must survive");
+        sibling_frame.sensitivity = AdjectiveSensitivity::Restricted;
+        sibling_frame.lineage_id = Some(lineage_id);
+        let sibling_stored = coord.capture(&h, sibling_frame, NOW + 1).expect("capture sibling");
+        let sibling_id = sibling_stored.id.clone();
+
+        // Snapshot the sibling state before the expunge.
+        let estate = coord.registry.get(&h).expect("estate in registry");
+        let drawers_before = estate.all_drawers().expect("all_drawers before");
+        let sib_before = drawers_before
+            .iter()
+            .find(|d| d.id == sibling_id)
+            .expect("sibling must exist before expunge");
+        let adj_before = sib_before.adjective_bitmap;
+        let ops_before = sib_before.operational_bitmap;
+        let content_before = sib_before.content.clone();
+
+        // Expunge the target. The GLK verb passes .Elevated ceiling →
+        // the .Restricted sibling must be refused.
+        let outcome = coord
+            .expunge(&h, &target_id, "security ceiling test", true, NOW + 2)
+            .expect("expunge must succeed for the .Normal target");
+
+        // The refused id must be reported.
+        assert!(
+            outcome.refused_sibling_ids.contains(&sibling_id),
+            "outcome.refused_sibling_ids must contain the .Restricted sibling"
+        );
+
+        // Target must be tombstoned.
+        let drawers_after = estate.all_drawers().expect("all_drawers after");
+        let target_after = drawers_after
+            .iter()
+            .find(|d| d.id == target_id)
+            .expect("target must still exist as a tombstone");
+        assert_eq!(
+            target_after.state(),
+            locus_kit::adjectives::State::Tombstoned,
+            "target must be tombstoned by the expunge"
+        );
+        assert_eq!(target_after.content, "", "target content must be scrubbed");
+
+        // Sibling must be byte-identical: no content write, no state write, no
+        // audit entry recorded, tombstoned_at must remain None.
+        let sib_after = drawers_after
+            .iter()
+            .find(|d| d.id == sibling_id)
+            .expect("sibling must still exist after refused expunge");
+        assert_eq!(
+            sib_after.content, content_before,
+            "refused sibling content must survive verbatim"
+        );
+        assert_eq!(
+            sib_after.adjective_bitmap, adj_before,
+            "refused sibling adjective_bitmap must be unchanged"
+        );
+        assert_eq!(
+            sib_after.operational_bitmap, ops_before,
+            "refused sibling operational_bitmap must be unchanged"
+        );
+        assert!(
+            sib_after.tombstoned_at.is_none(),
+            "refused sibling must not carry a tombstone timestamp"
+        );
+    }
+
     // GLKC-2: withdraw_kg_fact refuses a fact whose own adjective_sensitivity
     // is Restricted (inherited from its Restricted source drawer via
     // add_kg_fact's adjective-bitmap copy). Both the ceiling path and the
@@ -17223,6 +17318,172 @@ mod tests {
             fact_after.unwrap().state(),
             locus_kit::adjectives::State::Active,
             "state must remain Active, not Withdrawn"
+        );
+    }
+
+    // ── Fail-closed pre-read tests (ERASE_CEILING Phase B) ──────────────────
+    //
+    // These tests prove that a thrown read error in the pre-read step of
+    // `expunge` and `withdraw_kg_fact` surfaces as-is through `remap` (fail-
+    // closed), rather than being swallowed or conflated with the absent-row path.
+    //
+    // Mechanism: `FaultingStorage` (from persistence-kit's `test-support` module)
+    // wraps the real `InMemoryStorage` and injects `StorageError::BackendUnavailable`
+    // into `query` calls for the target table. `InMemoryDrawerStore::with_dyn_storage`
+    // (gated on `feature = "test-seams"`) accepts `Arc<dyn Storage>` so the
+    // faulting wrapper can be threaded through.
+
+    /// Open a fresh estate backed by a `FaultingStorage` that targets `target_table`.
+    ///
+    /// Returns the coordinator, estate handle, and the `FaultCell` the test holds
+    /// to arm/disarm the fault. The cell is disarmed at open time so setup writes
+    /// (capture, add_kg_fact) succeed normally.
+    #[cfg(feature = "test-seams")]
+    fn open_one_with_faulting_storage(
+        target_table: &str,
+    ) -> (EstateCoordinator, EstateHandle, persistence_kit::test_support::FaultCell) {
+        use persistence_kit::inmemory::InMemoryStorage;
+        use persistence_kit::test_support::{FaultCell, FaultingStorage};
+        use std::sync::Arc as StdArc;
+
+        let estate_id = uuid::Uuid::new_v4();
+        // Construct the real storage then immediately wrap it in the faulting
+        // decorator. The fault cell is disarmed: all open/migrate calls forward.
+        let inner: StdArc<dyn persistence_kit::storage::Storage> =
+            StdArc::new(InMemoryStorage::with_estate(estate_id));
+        let cell = FaultCell::for_table(target_table);
+        let faulting: StdArc<dyn persistence_kit::storage::Storage> =
+            StdArc::new(FaultingStorage::new(inner, cell.clone()));
+
+        let store: Arc<dyn DrawerStore> =
+            Arc::new(InMemoryDrawerStore::with_dyn_storage(faulting, NOW, None).unwrap());
+        let mut coord = EstateCoordinator::new();
+        let handle = coord.open(store, OwnerCredentials::new("owner"), 0, 100).expect("open");
+        (coord, handle, cell)
+    }
+
+    /// expunge: a storage read error in the pre-read step surfaces as
+    /// `VerbError::UnderlyingEstateFailure` and does not swallow the injected
+    /// error or conflate it with the absent-row path.
+    ///
+    /// Scenario:
+    ///   1. Seed a drawer (fault disarmed — writes succeed).
+    ///   2. Arm the fault on the "drawers" table.
+    ///   3. Call `expunge` — the pre-read queries "drawers" and throws.
+    ///   4. Assert: error shape is `UnderlyingEstateFailure`, reason names the
+    ///      injected string, reason does NOT contain the absent-row marker.
+    ///   5. Disarm, query directly — the drawer survives intact.
+    #[test]
+    #[cfg(feature = "test-seams")]
+    fn expunge_pre_read_storage_fault_closes_fail() {
+        let (coord, h, cell) = open_one_with_faulting_storage("drawers");
+
+        // Step 1 — seed a drawer; fault is disarmed so the insert succeeds.
+        let frame = cap_frame("drawer for expunge fail-closed pre-read test");
+        let stored = coord.capture(&h, frame, NOW).expect("capture");
+        let row_id = stored.id.clone();
+
+        // Step 2 — arm the fault.
+        cell.arm(persistence_kit::error::StorageError::BackendUnavailable {
+            reason: "INJECTED_FAULT".to_string(),
+        });
+
+        // Step 3 — call expunge; the pre-read queries "drawers" → fault fires.
+        let err = coord
+            .expunge(&h, &row_id, "fault-probe", true, NOW)
+            .expect_err("storage fault must propagate as an error");
+
+        // Step 4 — assert error identity.
+        match &err {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure { verb, reason }) => {
+                assert_eq!(verb, "expunge", "verb must be 'expunge'");
+                assert!(
+                    reason.contains("INJECTED_FAULT"),
+                    "reason must name the injected error, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("DrawerNotFound"),
+                    "fault error must not look like an absent-row error, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+
+        // Step 5 — disarm, verify the drawer survived unchanged.
+        cell.disarm();
+        let estate = coord.registry.get(&h).expect("estate in registry");
+        let drawers = estate.all_drawers().expect("all_drawers");
+        let drawer_after = drawers.iter().find(|d| d.id == row_id);
+        assert!(drawer_after.is_some(), "drawer must survive the fault-aborted expunge");
+        assert_ne!(
+            drawer_after.unwrap().state(),
+            locus_kit::adjectives::State::Tombstoned,
+            "drawer must not be tombstoned after fault-aborted expunge"
+        );
+    }
+
+    /// withdraw_kg_fact: a storage read error in the pre-read step surfaces as
+    /// `VerbError::UnderlyingEstateFailure` and does not swallow the injected
+    /// error or conflate it with the absent-fact path.
+    ///
+    /// Scenario:
+    ///   1. Seed a drawer and a KGFact (fault disarmed — writes succeed).
+    ///   2. Arm the fault on the "kg_facts" table.
+    ///   3. Call `withdraw_kg_fact` — the pre-read queries "kg_facts" and throws.
+    ///   4. Assert: error shape is `UnderlyingEstateFailure`, reason names the
+    ///      injected string, reason does NOT contain the absent-fact marker.
+    ///   5. Disarm, query directly — the fact survives active.
+    #[test]
+    #[cfg(feature = "test-seams")]
+    fn withdraw_kg_fact_pre_read_storage_fault_closes_fail() {
+        let (coord, h, cell) = open_one_with_faulting_storage("kg_facts");
+
+        // Step 1 — seed a drawer and a KGFact; fault is disarmed.
+        let frame = cap_frame("source drawer for withdraw_kg_fact fail-closed pre-read test");
+        let source = coord.capture(&h, frame, NOW).expect("capture source drawer");
+        let fact = coord
+            .add_kg_fact(&h, "PreReadSubject", "hasProperty", "PreReadObject", &source.id, NOW)
+            .expect("add_kg_fact");
+        let fact_id = fact.id.clone();
+
+        // Step 2 — arm the fault on kg_facts.
+        cell.arm(persistence_kit::error::StorageError::BackendUnavailable {
+            reason: "INJECTED_FAULT".to_string(),
+        });
+
+        // Step 3 — call withdraw_kg_fact; the pre-read queries "kg_facts" → fault fires.
+        let err = coord
+            .withdraw_kg_fact(&h, &fact_id, "fault-probe", None, NOW)
+            .expect_err("storage fault must propagate as an error");
+
+        // Step 4 — assert error identity.
+        match &err {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure { verb, reason }) => {
+                assert_eq!(verb, "withdraw_kg_fact", "verb must be 'withdraw_kg_fact'");
+                assert!(
+                    reason.contains("INJECTED_FAULT"),
+                    "reason must name the injected error, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("InvalidContent"),
+                    "fault error must not look like an absent-fact error, got: {reason}"
+                );
+            }
+            other => panic!("unexpected error shape: {other:?}"),
+        }
+
+        // Step 5 — disarm, verify the fact survived active.
+        cell.disarm();
+        let estate = coord.registry.get(&h).expect("estate in registry");
+        let all_facts = estate
+            .all_kg_facts_including_retired()
+            .expect("all_kg_facts_including_retired");
+        let fact_after = all_facts.iter().find(|f| f.id == fact_id);
+        assert!(fact_after.is_some(), "fact must survive the fault-aborted withdraw");
+        assert_eq!(
+            fact_after.unwrap().state(),
+            locus_kit::adjectives::State::Active,
+            "fact must remain Active after fault-aborted withdraw"
         );
     }
 }

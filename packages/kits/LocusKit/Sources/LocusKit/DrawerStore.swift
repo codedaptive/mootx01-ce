@@ -1306,22 +1306,23 @@ public actor DrawerStore {
 
     /// Result of a lineage-wide gated expunge (`expungeGated`).
     ///
-    /// `refusedSiblingIDs` lists the lineage members whose
-    /// `accepted → tombstoned` transition the `AuditGate` refused
-    /// (S-3: audit-grade rows survive intact), in walk order. A
-    /// refused sibling was left byte-identical — content, state,
-    /// audit trail, and erasure-ledger absence — so a non-empty list
-    /// means the expunge was partial and the caller must not assume
-    /// the whole lineage was erased.
+    /// `refusedSiblingIDs` lists lineage members that were not tombstoned,
+    /// in walk order. A sibling is refused for one of two reasons: its
+    /// sensitivity exceeds the `sensitivityCeiling` (the ceiling check runs
+    /// before gate admission — a ceiling-refused sibling never reaches
+    /// `AuditGate.admit`), or the gate's transition table refused
+    /// `accepted → tombstoned` (S-3: audit-grade rows survive intact). A
+    /// refused sibling was left byte-identical — content, state, audit trail,
+    /// and erasure-ledger absence — so a non-empty list means the expunge was
+    /// partial and the caller must not assume the whole lineage was erased.
     public struct ExpungeOutcome: Sendable {
         /// The target drawer's gate-produced audit event when
         /// `sealAudit` was false (returned for deferred sealing);
         /// nil when the event was sealed atomically inside the
         /// transaction.
         public let auditEvent: AuditEvent?
-        /// IDs of lineage siblings the gate refused to tombstone,
-        /// in walk order. Empty means the expunge covered the full
-        /// lineage.
+        /// IDs of lineage siblings not tombstoned (ceiling- or gate-refused),
+        /// in walk order. Empty means the expunge covered the full lineage.
         public let refusedSiblingIDs: [String]
     }
 
@@ -1334,14 +1335,15 @@ public actor DrawerStore {
     /// erasure ledger entry ensured but are not re-gated.
     ///
     /// Routes the target drawer through `AuditGate.admit` (the primary
-    /// audit event). Lineage siblings are gated individually. The
-    /// gate's transition table refuses `accepted → tombstoned` (S-3:
-    /// audit-grade rows survive intact), and a refused sibling is left
-    /// byte-identical — no content write, no state write, no audit
-    /// append, no erasure-ledger record. Refused sibling ids are
-    /// carried in `ExpungeOutcome.refusedSiblingIDs` so the caller can
-    /// detect a partial expunge; the walk continues over the remaining
-    /// members.
+    /// audit event). Lineage siblings are filtered by two checks in order.
+    /// First, `sensitivityCeiling`: a sibling whose sensitivity exceeds the
+    /// ceiling is refused without reaching `AuditGate.admit`. Second, the
+    /// gate's transition table: `accepted → tombstoned` is refused (S-3 —
+    /// audit-grade rows survive intact). A refused sibling is left
+    /// byte-identical — no content write, no state write, no audit append,
+    /// no erasure-ledger record. Refused sibling ids are carried in
+    /// `ExpungeOutcome.refusedSiblingIDs` so the caller can detect a partial
+    /// expunge; the walk continues over the remaining members.
     ///
     /// When `sealAudit` is `true` (default), the audit event for the
     /// target drawer is appended atomically inside the transaction and
@@ -1360,6 +1362,7 @@ public actor DrawerStore {
         reason: String? = nil,
         now: Date = Date(),
         sealAudit: Bool = true,
+        sensitivityCeiling: AdjectiveSensitivity = .secret,
         commitmentKey: [UInt8]? = nil,
         commitmentKeyVersion: Int = 0
     ) async throws -> ExpungeOutcome {
@@ -1373,10 +1376,12 @@ public actor DrawerStore {
         let vocab = vocabulary
 
         // Resolve the full lineage chain before entering the
-        // transaction. Every member is walked; members whose tombstone
-        // transition the gate admits are scrubbed, and accepted members
-        // (refused per S-3) are left untouched and reported in the
-        // outcome.
+        // transaction. Every sibling is walked. The ceiling check
+        // (.elevated) runs first; a sibling above the ceiling never
+        // reaches the gate. A sibling the ceiling admits is then
+        // evaluated by the gate: admitted siblings are scrubbed,
+        // gate-refused siblings (S-3) are left untouched. Both
+        // causes of refusal are reported in the outcome.
         let lineageIds = try await lineageChain(for: drawerId)
 
         // Pre-stamp HLC values for each sibling outside the Sendable
@@ -1526,10 +1531,12 @@ public actor DrawerStore {
 
             // ── Step 2: walk every lineage sibling ──
             // Siblings are predecessors (superseded versions) and any
-            // other members of the lineage chain. Already-tombstoned
-            // siblings have content re-zeroed as a defense-in-depth
-            // measure but are not re-gated. Siblings the gate refuses
-            // are left untouched and collected for the outcome.
+            // other members of the lineage chain. The ceiling check
+            // runs first; a sibling above the ceiling is left untouched
+            // without reaching the gate or the re-zero. Siblings the
+            // ceiling admits are evaluated by the gate: admitted
+            // siblings are scrubbed, gate-refused siblings are left
+            // untouched and collected for the outcome.
             var refused: [String] = []
             for (idx, siblingId) in siblingIds.enumerated() {
                 let sibRows = try await txn.rowStore.query(
@@ -1540,6 +1547,21 @@ public actor DrawerStore {
 
                 let sibBitmap = Self.int64(sibRow["adjectiveBitmap"])
                 let sibState = BitField.extractField(sibBitmap, shift: 0, width: 6)
+
+                // Sensitivity ceiling: a sibling whose tier exceeds the caller's ceiling
+                // is left byte-identical and recorded as refused. This matches the
+                // existing gate-refused accepted-row shape (S-3): no content write, no
+                // state write, no audit append, no erasure-ledger entry. The invariant
+                // (GLK-CEILING): a caller bounded at .elevated cannot erase rows above
+                // that tier through the lineage cascade, even when the cascade target is
+                // itself at or below the ceiling.
+                let sibTier = AdjectiveSensitivity(
+                    rawValue: Int(BitField.extractField(sibBitmap, shift: 6, width: 6))
+                ) ?? .normal
+                if sibTier.rawValue > sensitivityCeiling.rawValue {
+                    refused.append(siblingId)
+                    continue
+                }
 
                 if sibState == Int64(State.tombstoned.rawValue) {
                     // Already tombstoned — just ensure content is empty

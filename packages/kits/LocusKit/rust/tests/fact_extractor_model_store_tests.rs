@@ -1,3 +1,4 @@
+use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer::Drawer;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -100,7 +101,7 @@ fn activation_and_content_writes_maintain_bit_28_debt() {
 
     store.set_facts_extracted(ids[0]).unwrap();
     store
-        .expunge_gated(ids[0], "bilby", Some("derived fact erasure"), NOW + 1, true)
+        .expunge_gated(ids[0], "bilby", Some("derived fact erasure"), NOW + 1, true, AdjectiveSensitivity::Secret)
         .unwrap();
     assert!(
         !store
