@@ -7786,9 +7786,11 @@
           ],
           "properties": {
             "depth": {
+              "description": "skim returns a source-order distilled preview with a 512 UTF-8 byte target; intact groups may exceed it. Fetch distilled or full for the remainder.",
               "enum": [
                 "subject",
                 "distilled",
+                "skim",
                 "full"
               ],
               "type": "string"
@@ -7897,6 +7899,30 @@
                       },
                       "sensitivity": {
                         "type": "string"
+                      },
+                      "skim": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "budgetHonored": {
+                            "type": "boolean"
+                          },
+                          "complete": {
+                            "type": "boolean"
+                          },
+                          "savings": {
+                            "type": "string"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "text",
+                          "complete",
+                          "budgetHonored",
+                          "savings"
+                        ],
+                        "type": "object"
                       },
                       "state": {
                         "type": "string"
