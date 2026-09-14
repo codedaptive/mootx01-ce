@@ -535,8 +535,8 @@ struct StandingSignalsTests {
 
         // brain-layer governor ownership added TrainingSignal as signal 9; the contradiction
         // scout (hunter background half) is signal 10; P3a added AnomalySweepSignal
-        // as signal 12; ENCODER_RERANK_CONTRACT §10 added SpanEncodeSignal as signal 13
-        // (replaces the former AdornmentPassSignal). Signal 8's slot is empty: the
+        // as signal 12; ENCODER_RERANK_CONTRACT §10 added SpanEncodeSignal as signal 13.
+        // Signal 8's slot is empty: the
         // distilled rendering is computed inline at read time, so no sweep signal
         // exists for it. Distilled fact extraction is signal 14.
         // Any future addition must update this count and extend defaultStandingSignalNames.
@@ -583,9 +583,8 @@ struct StandingSignalsTests {
         // matching the temporal-causality-fold rhythm.
         #expect(TrainingSignal.defaultCadenceSeconds == 3_600,
             "training-daemon signal runs hourly")
-        // Updated by ENCODER_RERANK_CONTRACT §10: span-encode drain replaced the
-        // hourly adornment-minting pass. Cadence is REM-ALPHA (30 s) so fresh content
-        // is indexed before queries arrive.
+        // ENCODER_RERANK_CONTRACT §10: span-encode drain runs at REM-ALPHA (30 s)
+        // cadence so fresh content is indexed before queries arrive.
         #expect(SpanEncodeSignal.defaultCadenceSeconds == 30,
             "span-encode drain runs every 30 s (REM-ALPHA cadence, contract §10)")
         #expect(FactExtractionSignal.defaultCadenceSeconds == 300,
