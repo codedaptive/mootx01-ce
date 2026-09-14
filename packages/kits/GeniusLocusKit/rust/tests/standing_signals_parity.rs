@@ -137,7 +137,7 @@ fn default_signal_names_and_cadences_match_swift_reference() {
         "anomaly-flag-sweep runs hourly per architecture spec §11.18"
     );
 
-    // Signal 13 — span-encode drain (REM-ALPHA 30 s; replaces hourly adornment pass).
+    // Signal 13 — span-encode drain (REM-ALPHA 30 s).
     assert_eq!(SpanEncodeSignal::SIGNAL_NAME, "span-encode");
     assert_eq!(
         SpanEncodeSignal::DEFAULT_CADENCE_SECONDS, 30,
@@ -152,8 +152,8 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
     // Keep this compile-time roster synchronized with the production helper.
     // Signal 11 (consolidation-sweep) appended after training-daemon.
     // Signal 12 (anomaly-flag-sweep, P3a) appended after consolidation-sweep.
-    // Signal 13 (span-encode, ENCODER_RERANK_CONTRACT §10) replaces the former
-    // adornment-pass. REM-ALPHA (30 s) cadence; appended after anomaly-flag-sweep.
+    // Signal 13 (span-encode, ENCODER_RERANK_CONTRACT §10): REM-ALPHA (30 s)
+    // cadence; appended after anomaly-flag-sweep.
     let names = default_standing_signal_names();
     assert_eq!(
         names,
@@ -177,9 +177,9 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
 
 #[test]
 fn default_standing_signal_specs_returns_thirteen_specs_with_interval_triggers() {
-    // Twelve specs: signal 13 is SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10,
-    // REM-ALPHA 30 s drain; replaces the former AdornmentPassSignal); signal 8's
-    // slot is empty (the distilled rendering is computed inline at read time).
+    // Thirteen specs: signal 13 is SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10,
+    // REM-ALPHA 30 s drain); signal 8's slot is empty (the distilled rendering
+    // is computed inline at read time).
     // hunt_cycle, anomaly_cycle, and span_encode_cycle are None → no-op defaults.
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(store, "test-model", None, None, None, None, None);
@@ -468,8 +468,8 @@ fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
 
 #[test]
 fn registering_all_thirteen_default_specs_produces_thirteen_reports() {
-    // Twelve specs including signal 13 (SpanEncodeSignal, REM-ALPHA 30 s,
-    // ENCODER_RERANK_CONTRACT §10; replaces the former AdornmentPassSignal).
+    // Thirteen specs including signal 13 (SpanEncodeSignal, REM-ALPHA 30 s,
+    // ENCODER_RERANK_CONTRACT §10).
     // The "span-encode" name must appear in the report.
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
