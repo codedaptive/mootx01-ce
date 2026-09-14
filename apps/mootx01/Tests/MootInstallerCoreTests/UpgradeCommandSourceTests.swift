@@ -103,6 +103,29 @@ struct UpgradeCommandSourceTests {
         #expect(!branch.contains("download"))
     }
 
+    @Test("convergence runs SSC facts after identity before projection and a second run skips its rebuild")
+    func convergenceIncludesIdempotentSSCFactsBackfill() throws {
+        let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
+        let convergenceStart = try #require(source.range(of: "private func runConvergence")?.lowerBound)
+        let convergenceEnd = try #require(
+            source.range(of: "    // MARK: - MACD-2c2 daemon-bundle convergence", range: convergenceStart..<source.endIndex)?.lowerBound)
+        let convergence = source[convergenceStart..<convergenceEnd]
+        let identityAt = try #require(convergence.range(of: "await runKGFactIdentityBackfill(estate: estate, home: home)")?.lowerBound)
+        let factsAt = try #require(convergence.range(of: "await runSSCFactsBackfill(estate: estate, home: home)")?.lowerBound)
+        let projectionAt = try #require(convergence.range(of: "await runSearchProjectionBackfill(estate: estate, home: home)")?.lowerBound)
+        #expect(identityAt < factsAt && factsAt < projectionAt,
+                "convergence must run kg_facts identity -> SSC facts -> search projection")
+
+        let factsStart = try #require(source.range(of: "private func runSSCFactsBackfill")?.lowerBound)
+        let factsEnd = try #require(
+            source.range(of: "    private func runVectorReclaim", range: factsStart..<source.endIndex)?.lowerBound)
+        let facts = source[factsStart..<factsEnd]
+        #expect(facts.contains("if written > 0 {"),
+                "the first convergence run rebuilds derived lanes only when facts were written")
+        #expect(facts.contains("if written == 0 {"),
+                "the second convergence run must be an SSC-facts no-op")
+    }
+
     @Test("Each backfill function routes its daemon quiesce through ResidentDaemonQuiesce")
     func backfillFunctionsQuiesceThroughTheSharedHelper() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
@@ -195,6 +218,11 @@ struct UpgradeCommandSourceTests {
         }
         // The refusal names the version found and changes nothing.
         #expect(body.contains("nothing was changed"))
+        let current = try #require(body.range(of: "case .current:")?.lowerBound)
+        let currentOpen = try #require(body.range(
+            of: "storage.open(schema: LocusKitSchema.schema)", range: current..<body.endIndex)?.lowerBound)
+        #expect(current < currentOpen,
+                "a current estate must open its declared schema so upgrade converges the ledger")
         // No ladder walk of its own: one open of the declared schema is the hop.
         #expect(!body.contains("Migration(fromVersion"))
     }
