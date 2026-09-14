@@ -63,12 +63,16 @@ public struct AriaV2GeniusLocusTranscriptRecallBackend: AriaV2TranscriptRecallBa
                 code: JSONRPCErrorCode.invalidParams,
                 message: "The requested estate is not available to this caller.")
         }
-        return try await TranscriptRecall().run(
+        let output = try await TranscriptRecall().run(
             input: .init(
                 query: request.query,
                 filter: .sensitivityAtMost(context.maximumSensitivity)),
             estate: handle,
             kit: kit)
+        try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: .init(
+            filterChain: [.sensitivityAtMost(context.maximumSensitivity)],
+            hydrationLevel: .full, limit: 50, ordering: .byCaptureTimeDesc))
+        return output
     }
 }
 

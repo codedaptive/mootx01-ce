@@ -113,6 +113,15 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // (P6-secfix), so full hydration here keeps both ports on the same path.
             // The sensitivity gate still applies via BitmapEvaluator on the filterChain.
             let drawersByID: [String: Drawer]
+            if await AriaV2Withheld.enabled {
+                // Count only ranked topK endpoints presented to hydration. The
+                // Locus gate distinguishes sensitivity from every other predicate.
+                let counted = try await kit.hydrateWithSensitivityCount(handle,
+                    ids: ranked.map(\.id),
+                    frame: context.maximumSensitivity == nil ? RecallFrame(filterChain: []) : context.authorizationFrame,
+                    hydrationLevel: .full)
+                await AriaV2Withheld.record(counted.withheldBySensitivity)
+            }
             if context.maximumSensitivity != nil {
                 let admitted = try await estate.getDrawers(
                     ids: ranked.map(\.id), matchingFrame: context.authorizationFrame,
@@ -333,6 +342,9 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         case .lensTrustSynthesis:
             let output = try await TrustLens.run(
                 kit: kit, handle: handle, frame: frame(request, context: context))
+            var countedFrame = frame(request, context: context)
+            countedFrame.hydrationLevel = .full
+            try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: countedFrame)
             // Dense-row hydration through the sensitivity gate (empty filterChain).
             // Full hydration so drawer.content is populated for bestSpan computation;
             // structured hydration returns content == "" per Swift spec §7.3.
@@ -398,6 +410,7 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 // recall attempt is retried — an AnchorNotInRecalledSetError
                 // from envelope construction would be a distinct defect and
                 // must propagate, not trigger a second spelling attempt.
+                try await AriaV2Withheld.recall(kit: kit, handle: handle, frame: context.authorizationFrame)
                 return try await partialCueOutcome(matches, context: context)
             }
             throw latestAnchorError ?? AnchorNotInRecalledSetError(anchorID: canonicalAnchorID)

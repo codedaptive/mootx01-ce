@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use genius_locus_kit::EstateHandle;
-use locus_kit::filter::Filter;
+use locus_kit::filter::{Filter, RecallFrame};
 use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -104,12 +104,15 @@ impl V2RecallLensOperation {
 }
 
 /// The exact selected-estate proof consumed by a future direct adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct V2RecallLensAdmission {
     pub estate_id: Uuid,
     pub estate_handle: EstateHandle,
     pub caller_binding: String,
     pub authorization_generation: String,
+    /// The caller's already-authorized recall scope. Lower adapters retain
+    /// this frame instead of reconstructing an unscoped estate recall.
+    pub authorization_frame: RecallFrame,
     pub now_millis: i64,
 }
 
@@ -606,6 +609,12 @@ pub fn execute_precise_recall(
         None => base_filter,
     };
     let composition = request.optional_string("composition");
+    let mut counted_frame = locus_kit::filter::RecallFrame::new(vec![filter.clone()]);
+    counted_frame.hydration_level = locus_kit::filter::HydrationLevel::BitmapOnly;
+    counted_frame.limit = Some(pool.max(limit));
+    counted_frame.ordering = locus_kit::filter::Ordering::ByCaptureTimeDesc;
+    super::report_withheld::recall(coordinator, handle, counted_frame, now_millis)
+        .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
     if let Some(composition) = composition {
         if !neuron_kit::composition_grid::is_known(composition) {
             return Err(V2PreciseRecallFailure::Invalid(
@@ -964,6 +973,11 @@ pub fn execute_connected_recall(
         return Err(V2PreciseRecallFailure::Unavailable);
     }
     let drawers = recipe_drawers(coordinator, handle)?;
+    let mut counted_frame = locus_kit::filter::RecallFrame::new(vec![scoped_filter(request)?]);
+    counted_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+    counted_frame.limit = Some(request_positive_integer(request, "limit").unwrap_or(20).max(20));
+    super::report_withheld::recall(coordinator, handle, counted_frame, now_millis)
+        .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
     let matches = crate::recipe_tools::execute_connected_recall_typed(
         coordinator,
         handle,
@@ -1003,6 +1017,12 @@ pub fn execute_shaped_recall(
         return Err(V2PreciseRecallFailure::Unavailable);
     }
     let drawers = recipe_drawers(coordinator, handle)?;
+    let mut counted_frame = locus_kit::filter::RecallFrame::new(vec![scoped_filter(request)?]);
+    counted_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+    counted_frame.limit = Some(request_positive_integer(request, "limit").unwrap_or(20));
+    counted_frame.ordering = locus_kit::filter::Ordering::ByCaptureTimeDesc;
+    super::report_withheld::recall(coordinator, handle, counted_frame, now_millis)
+        .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
     let nodes = recipe_nodes(coordinator, handle, &drawers);
     let preset = request.optional_string("preset").unwrap_or("balanced");
     if !genius_locus_kit::recall::RecallShape::PRESET_NAMES.contains(&preset) {
@@ -1069,6 +1089,11 @@ pub fn execute_distilled_recall(
         request_positive_integer(request, "limit").unwrap_or(20),
     );
     input.filter = scoped_filter(request)?;
+    let mut counted_frame = locus_kit::filter::RecallFrame::new(vec![input.filter.clone()]);
+    counted_frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
+    counted_frame.limit = Some(request_positive_integer(request, "limit").unwrap_or(20));
+    super::report_withheld::recall(coordinator, handle, counted_frame, now_millis)
+        .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
     let output = crate::recipe_tools::execute_distilled_recall_typed(
         &input,
         coordinator,
@@ -1134,6 +1159,7 @@ pub fn execute_vague_recall(
         limit,
     )
     .map_err(|_| V2PreciseRecallFailure::Unavailable)?;
+    super::report_withheld::record(output.withheld_by_sensitivity);
     let results = output
         .vague_hits
         .iter()
