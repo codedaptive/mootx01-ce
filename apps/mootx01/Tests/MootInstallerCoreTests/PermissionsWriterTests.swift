@@ -57,6 +57,8 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_federated_recall") == .allow)
         #expect(PermissionsWriter.classify("moot_lens_keystones") == .allow, "every lens is a read")
         #expect(PermissionsWriter.classify("moot_lens_apriori") == .allow)
+        // Migration candidate evaluation: benchmarks plans and returns ranked survivors without writing the estate.
+        #expect(PermissionsWriter.classify("moot_migration_run") == .allow)
 
         // Additive-unconfirmed writes: create new content, alter nothing existing.
         #expect(PermissionsWriter.classify("moot_file_memory") == .allow)
@@ -70,8 +72,7 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_withdraw_memory") == .ask, "withdraw is reversible — ask, not deny")
         #expect(PermissionsWriter.classify("moot_confirm_memory") == .ask)
         #expect(PermissionsWriter.classify("moot_retire_fact") == .ask)
-        #expect(PermissionsWriter.classify("moot_confirm_migration") == .ask)
-        #expect(PermissionsWriter.classify("moot_run_migration") == .ask)
+        #expect(PermissionsWriter.classify("moot_migration_confirm") == .ask)
         #expect(PermissionsWriter.classify("moot_reindex") == .ask)
         #expect(PermissionsWriter.classify("moot_reclassify_fdc") == .ask)
         #expect(PermissionsWriter.classify("moot_dream") == .ask)
@@ -122,7 +123,7 @@ struct PermissionsWriterTests {
             "moot_erase_memory", "moot_estate_map", "moot_estate_ping", "moot_estate_status",
             "moot_fact_search", "moot_fact_timeline", "moot_federated_recall", "moot_file_fact",
             "moot_file_memory", "moot_hunt_contradictions",
-            // +1 (v2): moot_help — capability discovery, always a pure read.
+            // Capability discovery — always a pure read.
             "moot_help",
             "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations",
             "moot_lens_bias", "moot_lens_cohesion", "moot_lens_complexity", "moot_lens_concepts",
@@ -134,16 +135,16 @@ struct PermissionsWriterTests {
             "moot_json_import",
             "moot_link_memories", "moot_list_lenses", "moot_list_recipes", "moot_memory_get",
             "moot_memory_list", "moot_memory_search",
-            // +1 (v2): moot_memory_recall_transcript — reads session transcript, no estate writes.
+            // Reads session transcript; no estate writes.
             "moot_memory_recall_transcript",
-            // +1 (v2): moot_migration_run replaces moot_run_migration (v2 name) — read-only.
+            // Migration candidate evaluation: read-only, does not commit.
             "moot_migration_run",
             "moot_monitoring_status",
-            // +1 (v2): moot_monitoring_set — write path for daemon telemetry; Ask tier.
+            // Write path for daemon telemetry; Ask tier.
             "moot_monitoring_set",
             "moot_move_memory",
             "moot_palace_import",
-            // +1 (v2): moot_propose_contradictions replaces inline contradiction proposal.
+            // Proposes contradiction candidates for human review; Ask tier.
             "moot_propose_contradictions",
             "moot_read_journal", "moot_recall_connected", "moot_recall_distilled",
             "moot_recall_precise", "moot_recall_shaped", "moot_recall_temporal",
@@ -198,7 +199,7 @@ struct PermissionsWriterTests {
     /// installer and therefore not in the classification tables.
     @Test("every moot_ tool reachable under any flag combination is explicitly classified")
     func classificationCoversLiveProjectionUnderAllFlags() {
-        // Eight combinations: MOOTX01_VAULT × MOOTX01_MEMORY_TOOL × MOOTX01_MINT_TOOLS.
+        // Four combinations: MOOTX01_VAULT × MOOTX01_MEMORY_TOOL.
         let flagCombinations: [[String: String]] = {
             var combos: [[String: String]] = []
             for vault in ["1", "0"] {
@@ -238,6 +239,107 @@ struct PermissionsWriterTests {
         #expect(entries.contains("\(PermissionsWriter.mcpPrefix)moot_memory_get"))
         for tool in retired {
             #expect(!entries.contains("\(PermissionsWriter.mcpPrefix)\(tool)"))
+        }
+    }
+
+    @Test("retired WorkPacket tools are omitted from the mergeTiered default install path")
+    func retiredNameIsFilteredFromMergeTiered() throws {
+        // mergeTiered is the default install path (InstallCommand calls it).
+        // A retired name injected alongside a real name must not appear in
+        // any tier under either namespace prefix, while the ordinary name
+        // still lands in its classifier-assigned tier.
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        let retired = "moot_file_packet"  // retired in V2-PACKETS-RETIRE
+        let ordinary = "moot_memory_get"
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: [ordinary, retired])
+
+        let perms = try readPermissions(settingsURL)
+        let allEntries = Set(
+            ((perms["allow"] as? [String]) ?? [])
+            + ((perms["ask"] as? [String]) ?? [])
+            + ((perms["deny"] as? [String]) ?? [])
+        )
+
+        // The ordinary name lands in its tier (allow for a read tool), under both prefixes.
+        for prefix in PermissionsWriter.allPrefixes {
+            #expect(allEntries.contains("\(prefix)\(ordinary)"),
+                "ordinary tool \(ordinary) must appear in some tier under \(prefix)")
+        }
+        // The retired name must not appear under any prefix or in any tier.
+        for prefix in PermissionsWriter.allPrefixes {
+            #expect(!allEntries.contains("\(prefix)\(retired)"),
+                "retired tool \(retired) must not appear in any tier under \(prefix)")
+        }
+    }
+
+    @Test("retired WorkPacket tools are not written by the migrateTiers upgrade path")
+    func retiredNameIsFilteredFromMigrateTiers() throws {
+        // migrateTiers is the upgrade path (UpgradeCommand calls it).
+        // A retired name present in the settings file must not be moved by
+        // migration, while an ordinary name converges onto its correct tier.
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        let retired = "moot_packet_get"
+        let ordinary = "moot_memory_get"
+
+        // The retired name is seeded in `allow` rather than left absent because
+        // `migrateTiers` skips any name not already present in a tier — an absent
+        // entry is `mergeTiered`'s job, not migration's. Seeding the retired name in
+        // `allow` makes the assertion able to fail: without the retired-name filter,
+        // `classify` returns `.ask` for this untriaged name and `migrateTiers` would
+        // move it from `allow` to `ask`. With the filter, the name is excluded from
+        // the loop and stays in `allow`.
+        let seed: [String: Any] = [
+            "permissions": [
+                // Ordinary name in the old all-ask default so migration has work to do.
+                "ask": ["\(PermissionsWriter.mcpPrefix)\(ordinary)",
+                        "\(PermissionsWriter.pluginMcpPrefix)\(ordinary)"],
+                // Retired name already in allow — migration must leave it there.
+                "allow": ["\(PermissionsWriter.mcpPrefix)\(retired)",
+                          "\(PermissionsWriter.pluginMcpPrefix)\(retired)"],
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: seed).write(to: settingsURL)
+
+        // Pin the premise that makes the assertions below discriminating.
+        // migrateTiers classifies each name and moves it if its current tier
+        // differs from classify's result. classify returns .ask for any name
+        // not in readTools or additiveWriteTools (the untriaged default). If
+        // this ever changed and classify returned .allow for moot_packet_get,
+        // the retired name would already be at its target tier in the seed
+        // and migrateTiers would leave it there — the assertions below would
+        // pass with or without the retired-name filter.
+        #expect(PermissionsWriter.classify(retired) == .ask,
+            "moot_packet_get must return .ask from classify (untriaged default); a different return value would de-discriminate the retired-name assertions below")
+
+        _ = try PermissionsWriter.migrateTiers(at: settingsURL, toolNames: [ordinary, retired])
+
+        let perms = try readPermissions(settingsURL)
+        let allowSet = Set((perms["allow"] as? [String]) ?? [])
+        let askSet   = Set((perms["ask"]   as? [String]) ?? [])
+        let denySet  = Set((perms["deny"]  as? [String]) ?? [])
+
+        // The ordinary name must have been moved from ask to allow: it is a read tool
+        // and `classify` returns `.allow` for it.
+        for prefix in PermissionsWriter.allPrefixes {
+            #expect(allowSet.contains("\(prefix)\(ordinary)"),
+                "ordinary tool \(ordinary) must be in allow after migration under \(prefix)")
+        }
+        // The retired name must remain in allow and must not appear in ask or deny.
+        // If the filter were removed, `migrateTiers` would classify it as `.ask`
+        // (untriaged default) and move it there, failing both assertions below.
+        for prefix in PermissionsWriter.allPrefixes {
+            #expect(allowSet.contains("\(prefix)\(retired)"),
+                "retired tool \(retired) must remain in allow (not be moved) under \(prefix)")
+            #expect(!askSet.contains("\(prefix)\(retired)"),
+                "retired tool \(retired) must not appear in ask under \(prefix)")
+            #expect(!denySet.contains("\(prefix)\(retired)"),
+                "retired tool \(retired) must not appear in deny under \(prefix)")
         }
     }
 

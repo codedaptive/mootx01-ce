@@ -1,0 +1,2230 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Enumerated a complete current authorized memory inventory.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "has_more": true,
+        "memories": [
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "004a5579-4acc-484a-ae29-adb288f6f3af"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "004a5579-4acc-484a-ae29-adb288f6f3af",
+            "provenance": "user",
+            "subject": "m085"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "0373aab8-032b-4509-bc3c-d0c92802f24f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "0373aab8-032b-4509-bc3c-d0c92802f24f",
+            "provenance": "user",
+            "subject": "m186"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "03a69155-3420-4496-a3ed-b186a2f2c38f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "03a69155-3420-4496-a3ed-b186a2f2c38f",
+            "provenance": "user",
+            "subject": "m116"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "0408166a-916a-422e-a271-be4b4d711ee7"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "0408166a-916a-422e-a271-be4b4d711ee7",
+            "provenance": "user",
+            "subject": "m069"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "04d5ea96-1874-4dc2-8fed-98251026019b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "04d5ea96-1874-4dc2-8fed-98251026019b",
+            "provenance": "user",
+            "subject": "m048"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "04d8bc60-8f25-4d74-bf47-1694ee4b5c5d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "04d8bc60-8f25-4d74-bf47-1694ee4b5c5d",
+            "provenance": "user",
+            "subject": "m111"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "09640ad9-dab1-4d84-88f3-3d4346d7229a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "09640ad9-dab1-4d84-88f3-3d4346d7229a",
+            "provenance": "user",
+            "subject": "m169"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "0c900b03-5cb2-487c-9860-5dcba79332b5"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "0c900b03-5cb2-487c-9860-5dcba79332b5",
+            "provenance": "user",
+            "subject": "m159"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "0e0eeade-0621-4f4f-b71e-47b68e4f7a88"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "0e0eeade-0621-4f4f-b71e-47b68e4f7a88",
+            "provenance": "user",
+            "subject": "m103"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "0f4b1183-9257-44f9-9e7d-09e5d09c05e4"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "0f4b1183-9257-44f9-9e7d-09e5d09c05e4",
+            "provenance": "user",
+            "subject": "m019"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "0fa10a5d-7fcd-44df-b11a-dba02f4398e0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "0fa10a5d-7fcd-44df-b11a-dba02f4398e0",
+            "provenance": "user",
+            "subject": "m151"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "10a1e024-84ef-4a72-b4e4-bbd01570c42a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "10a1e024-84ef-4a72-b4e4-bbd01570c42a",
+            "provenance": "user",
+            "subject": "m123"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "136d06a2-4d0b-44b4-bbca-d043549f37be"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "136d06a2-4d0b-44b4-bbca-d043549f37be",
+            "provenance": "user",
+            "subject": "m153"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "14741b92-e6e1-497e-b41e-60e7390c80d7"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "14741b92-e6e1-497e-b41e-60e7390c80d7",
+            "provenance": "user",
+            "subject": "m175"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "15229547-7cae-45ea-8bf2-a8755ab3c213"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "15229547-7cae-45ea-8bf2-a8755ab3c213",
+            "provenance": "user",
+            "subject": "m179"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "164effdf-a716-43dc-95cf-98d4df03fbfa"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "164effdf-a716-43dc-95cf-98d4df03fbfa",
+            "provenance": "user",
+            "subject": "m185"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "175a4b9a-64b7-4622-a461-47c5a4e49e3c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "175a4b9a-64b7-4622-a461-47c5a4e49e3c",
+            "provenance": "user",
+            "subject": "m049"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "19a4c3ca-2716-491a-b58a-6f4f82ff99a9"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "19a4c3ca-2716-491a-b58a-6f4f82ff99a9",
+            "provenance": "user",
+            "subject": "m142"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "1ac6ba76-adad-40de-85db-86f9d3251002"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "1ac6ba76-adad-40de-85db-86f9d3251002",
+            "provenance": "user",
+            "subject": "m002"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "1db31c72-528f-43de-bd34-f2c99f52e734"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "1db31c72-528f-43de-bd34-f2c99f52e734",
+            "provenance": "user",
+            "subject": "m046"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "1ec64225-fe63-4829-8ac9-792bd6e42a3e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "1ec64225-fe63-4829-8ac9-792bd6e42a3e",
+            "provenance": "user",
+            "subject": "m066"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "1f78bea9-1bc2-4877-8e8d-932dbef98944"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "1f78bea9-1bc2-4877-8e8d-932dbef98944",
+            "provenance": "user",
+            "subject": "m095"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "236848fd-e71d-4e47-91d6-d4e718545961"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "236848fd-e71d-4e47-91d6-d4e718545961",
+            "provenance": "user",
+            "subject": "m097"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "237fad35-870e-431a-9fb4-71e937216fe1"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "237fad35-870e-431a-9fb4-71e937216fe1",
+            "provenance": "user",
+            "subject": "m003"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2456e1c6-9d14-4f20-8dd5-c4a379cee42f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2456e1c6-9d14-4f20-8dd5-c4a379cee42f",
+            "provenance": "user",
+            "subject": "m117"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "25b000ed-57b9-4b6c-b2aa-37a9cced8687"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "25b000ed-57b9-4b6c-b2aa-37a9cced8687",
+            "provenance": "user",
+            "subject": "m196"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "262e35d8-88fc-4252-a703-59c4255c3ef2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "262e35d8-88fc-4252-a703-59c4255c3ef2",
+            "provenance": "user",
+            "subject": "m198"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "267c50a5-bef0-4fe7-b7c2-6e2995d3dc7c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "267c50a5-bef0-4fe7-b7c2-6e2995d3dc7c",
+            "provenance": "user",
+            "subject": "m064"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "29258ee5-148c-4417-a0f6-9dc52b3055a7"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "29258ee5-148c-4417-a0f6-9dc52b3055a7",
+            "provenance": "user",
+            "subject": "m055"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "29ba28d8-6dad-44b6-8920-a213ddfb115f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "29ba28d8-6dad-44b6-8920-a213ddfb115f",
+            "provenance": "user",
+            "subject": "m037"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "29d2c6b7-dc8a-4a2e-99bb-433f193e382a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "29d2c6b7-dc8a-4a2e-99bb-433f193e382a",
+            "provenance": "user",
+            "subject": "m084"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2b4e8925-d16e-48df-918e-65bde3aa1c3b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2b4e8925-d16e-48df-918e-65bde3aa1c3b",
+            "provenance": "user",
+            "subject": "m202"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2b55a8ac-9024-4eb9-8e9b-db0859cd3ab0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2b55a8ac-9024-4eb9-8e9b-db0859cd3ab0",
+            "provenance": "user",
+            "subject": "m031"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2c47d501-4235-48cb-8d8b-5559b37e5f19"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2c47d501-4235-48cb-8d8b-5559b37e5f19",
+            "provenance": "user",
+            "subject": "m120"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2d6ac1a1-8570-45aa-8499-6f6e57ce0591"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2d6ac1a1-8570-45aa-8499-6f6e57ce0591",
+            "provenance": "user",
+            "subject": "m139"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2da69a6a-0084-417f-b8ff-bc23f59b1e4b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2da69a6a-0084-417f-b8ff-bc23f59b1e4b",
+            "provenance": "user",
+            "subject": "m162"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2df0c38f-f71d-43fd-ab15-ee3d173e902d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2df0c38f-f71d-43fd-ab15-ee3d173e902d",
+            "provenance": "user",
+            "subject": "m204"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "2f44ca21-5e50-4a27-a458-08d4498adcd2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "2f44ca21-5e50-4a27-a458-08d4498adcd2",
+            "provenance": "user",
+            "subject": "m173"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "302a12bd-baed-416f-b1dc-0e28094ba210"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "302a12bd-baed-416f-b1dc-0e28094ba210",
+            "provenance": "user",
+            "subject": "m081"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "307703a4-67dd-4f8b-a251-249500772298"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "307703a4-67dd-4f8b-a251-249500772298",
+            "provenance": "user",
+            "subject": "m010"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "34a73c6d-5b55-452b-b7f4-c34c8a286933"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "34a73c6d-5b55-452b-b7f4-c34c8a286933",
+            "provenance": "user",
+            "subject": "m192"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "359a8a83-5651-46d0-b653-5e88dde692bd"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "359a8a83-5651-46d0-b653-5e88dde692bd",
+            "provenance": "user",
+            "subject": "m024"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "37ae2316-8696-4e50-9a15-495515e25363"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "37ae2316-8696-4e50-9a15-495515e25363",
+            "provenance": "user",
+            "subject": "m092"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "37d72db1-10de-46c6-a5f1-e67543992c22"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "37d72db1-10de-46c6-a5f1-e67543992c22",
+            "provenance": "user",
+            "subject": "m194"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3a3fb794-d9c6-4170-a917-7e29c0b81f30"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3a3fb794-d9c6-4170-a917-7e29c0b81f30",
+            "provenance": "user",
+            "subject": "m152"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3a74c042-4f2d-43ce-9811-6f2a5256c68d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3a74c042-4f2d-43ce-9811-6f2a5256c68d",
+            "provenance": "user",
+            "subject": "m187"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3a8a3d54-2af5-4b38-bac5-a6106fc313bb"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3a8a3d54-2af5-4b38-bac5-a6106fc313bb",
+            "provenance": "user",
+            "subject": "m073"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3aa1029d-2b25-400f-ad8b-67bb4c4e2b52"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3aa1029d-2b25-400f-ad8b-67bb4c4e2b52",
+            "provenance": "user",
+            "subject": "m015"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3b25df1d-c152-4b0d-b202-acf3396f7ee7"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3b25df1d-c152-4b0d-b202-acf3396f7ee7",
+            "provenance": "user",
+            "subject": "m106"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3bca0ded-dbfb-45f8-96be-ee16b2728a45"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3bca0ded-dbfb-45f8-96be-ee16b2728a45",
+            "provenance": "user",
+            "subject": "m005"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3c4834de-424a-4de8-bd91-4db1021041be"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3c4834de-424a-4de8-bd91-4db1021041be",
+            "provenance": "user",
+            "subject": "m168"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "3e333947-ba8a-4634-a1ae-a26a20063de3"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "3e333947-ba8a-4634-a1ae-a26a20063de3",
+            "provenance": "user",
+            "subject": "m032"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "40701f30-dc3b-48b2-a9c6-f924383f5529"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "40701f30-dc3b-48b2-a9c6-f924383f5529",
+            "provenance": "user",
+            "subject": "m045"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "436e9ff6-b0c3-4d68-8dce-9e258649e84b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "436e9ff6-b0c3-4d68-8dce-9e258649e84b",
+            "provenance": "user",
+            "subject": "m093"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "43b3d96d-cfcc-4d24-9555-b00b239a4309"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "43b3d96d-cfcc-4d24-9555-b00b239a4309",
+            "provenance": "user",
+            "subject": "m065"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "4409c4b3-8d25-4f06-9768-593c34242bed"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "4409c4b3-8d25-4f06-9768-593c34242bed",
+            "provenance": "user",
+            "subject": "m140"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "46b471d0-99ad-43aa-9ea3-baf58abe74ab"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "46b471d0-99ad-43aa-9ea3-baf58abe74ab",
+            "provenance": "user",
+            "subject": "m029"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "4742a510-d0bf-4f8e-89f0-704152e44b90"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "4742a510-d0bf-4f8e-89f0-704152e44b90",
+            "provenance": "user",
+            "subject": "m001"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "47df2cc6-6984-49cc-b4cb-bfd39bfc579f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "47df2cc6-6984-49cc-b4cb-bfd39bfc579f",
+            "provenance": "user",
+            "subject": "m039"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "4bf1de64-9fbf-4da9-b0f6-f739392776fc"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "4bf1de64-9fbf-4da9-b0f6-f739392776fc",
+            "provenance": "user",
+            "subject": "m201"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "4d31c0b3-5960-497a-9657-f0130dda902c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "4d31c0b3-5960-497a-9657-f0130dda902c",
+            "provenance": "user",
+            "subject": "m122"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "4ed40a2d-150d-439f-a057-0a05d47971e2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "4ed40a2d-150d-439f-a057-0a05d47971e2",
+            "provenance": "user",
+            "subject": "m148"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "4fb9faba-58bb-4ec7-b717-368be26fde3f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "4fb9faba-58bb-4ec7-b717-368be26fde3f",
+            "provenance": "user",
+            "subject": "notes for testslug"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "502b10bd-8415-470b-8ab7-17a9e350e9f0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "502b10bd-8415-470b-8ab7-17a9e350e9f0",
+            "provenance": "user",
+            "subject": "m137"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "532af0b0-6d1e-4981-ae46-6b25d418b2b1"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "532af0b0-6d1e-4981-ae46-6b25d418b2b1",
+            "provenance": "user",
+            "subject": "m094"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "53880175-167d-4739-a76d-56bd22c88c0b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "53880175-167d-4739-a76d-56bd22c88c0b",
+            "provenance": "user",
+            "subject": "m020"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "54241504-0001-44ab-ada5-65bd562f710b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "54241504-0001-44ab-ada5-65bd562f710b",
+            "provenance": "user",
+            "subject": "m080"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "56e403e8-c046-4fa9-9af8-31ca77129060"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "56e403e8-c046-4fa9-9af8-31ca77129060",
+            "provenance": "user",
+            "subject": "m176"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "56e9c3dc-e5e6-475d-aecf-d1a86379909a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "56e9c3dc-e5e6-475d-aecf-d1a86379909a",
+            "provenance": "user",
+            "subject": "m059"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "5b53dfaf-b6c2-4265-83b6-699ebec21440"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "5b53dfaf-b6c2-4265-83b6-699ebec21440",
+            "provenance": "user",
+            "subject": "m053"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "5ba2a5cd-b8c8-4028-b60d-0d36cdb380b0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "5ba2a5cd-b8c8-4028-b60d-0d36cdb380b0",
+            "provenance": "user",
+            "subject": "m090"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "5bd132e7-1094-47d6-8fe3-58bbdad678f4"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "5bd132e7-1094-47d6-8fe3-58bbdad678f4",
+            "provenance": "user",
+            "subject": "m181"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "5d364f4c-fb4a-4434-8d1c-d99b9eee5d6e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "5d364f4c-fb4a-4434-8d1c-d99b9eee5d6e",
+            "provenance": "user",
+            "subject": "m052"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "5d4ff95c-8345-421a-9114-eb485ce61f05"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "5d4ff95c-8345-421a-9114-eb485ce61f05",
+            "provenance": "user",
+            "subject": "m026"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "5d848923-1b9f-422c-bb5b-764470bb19b0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "5d848923-1b9f-422c-bb5b-764470bb19b0",
+            "provenance": "user",
+            "subject": "m125"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "5dd4c5db-7218-4cc6-b3e7-96be21dc657f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "5dd4c5db-7218-4cc6-b3e7-96be21dc657f",
+            "provenance": "user",
+            "subject": "m087"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "60229e50-c64c-40c6-9777-6d510a8349d4"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "60229e50-c64c-40c6-9777-6d510a8349d4",
+            "provenance": "user",
+            "subject": "m188"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "614d03ad-a688-4f73-b75e-8c1ff6f0d0ba"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "614d03ad-a688-4f73-b75e-8c1ff6f0d0ba",
+            "provenance": "user",
+            "subject": "m146"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "62684781-06f5-4710-a311-74ecb7a17b5d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "62684781-06f5-4710-a311-74ecb7a17b5d",
+            "provenance": "user",
+            "subject": "m000"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "664c22ab-4bd5-4a78-86be-c9215c2baaa5"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "664c22ab-4bd5-4a78-86be-c9215c2baaa5",
+            "provenance": "user",
+            "subject": "m072"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "66659553-47e0-41b8-9ef6-1df4b5c97def"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "66659553-47e0-41b8-9ef6-1df4b5c97def",
+            "provenance": "user",
+            "subject": "m036"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6725dbda-6447-456c-b890-0fbbc6687080"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6725dbda-6447-456c-b890-0fbbc6687080",
+            "provenance": "user",
+            "subject": "m034"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "67770071-7c13-4d51-bfb6-1045c08cf4ee"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "67770071-7c13-4d51-bfb6-1045c08cf4ee",
+            "provenance": "user",
+            "subject": "m167"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "68229f26-4ba9-4676-bb5d-2d12b519e94d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "68229f26-4ba9-4676-bb5d-2d12b519e94d",
+            "provenance": "user",
+            "subject": "m086"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6b606481-9a16-4822-a7e8-acb447e7ceea"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6b606481-9a16-4822-a7e8-acb447e7ceea",
+            "provenance": "user",
+            "subject": "m027"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6b693ae0-27d7-404a-9181-6b1f43ef19f6"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6b693ae0-27d7-404a-9181-6b1f43ef19f6",
+            "provenance": "user",
+            "subject": "m189"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6c7e6ef5-54c4-4b68-83c6-74c968d86701"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6c7e6ef5-54c4-4b68-83c6-74c968d86701",
+            "provenance": "user",
+            "subject": "m158"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6d164793-3ad6-4a73-a640-401402010d34"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6d164793-3ad6-4a73-a640-401402010d34",
+            "provenance": "user",
+            "subject": "m165"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6d67c060-d51a-4d73-b468-a7acea39001a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6d67c060-d51a-4d73-b468-a7acea39001a",
+            "provenance": "user",
+            "subject": "m006"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6e9a4a66-b601-4341-b3d7-08ec7c260baf"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6e9a4a66-b601-4341-b3d7-08ec7c260baf",
+            "provenance": "user",
+            "subject": "m060"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "6ed42f91-d366-4ab2-bc28-c33de6b22ebf"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "6ed42f91-d366-4ab2-bc28-c33de6b22ebf",
+            "provenance": "user",
+            "subject": "m180"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "719763b6-b944-4c3f-8d76-91ba86dbc413"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "719763b6-b944-4c3f-8d76-91ba86dbc413",
+            "provenance": "user",
+            "subject": "m183"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "71e386a0-9e5f-4175-a615-9a90ade4b87d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "71e386a0-9e5f-4175-a615-9a90ade4b87d",
+            "provenance": "user",
+            "subject": "m017"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "72e67da5-fc08-424c-908f-f63a0e81daa5"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "72e67da5-fc08-424c-908f-f63a0e81daa5",
+            "provenance": "user",
+            "subject": "m102"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "756e7cef-1bf5-4a14-bde7-745d54df63b5"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "756e7cef-1bf5-4a14-bde7-745d54df63b5",
+            "provenance": "user",
+            "subject": "m136"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "75891abf-b7bd-469d-bfc6-5d807c70756a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "75891abf-b7bd-469d-bfc6-5d807c70756a",
+            "provenance": "user",
+            "subject": "m135"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "769b90cd-f461-4bf8-8187-6a497250bbca"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "769b90cd-f461-4bf8-8187-6a497250bbca",
+            "provenance": "user",
+            "subject": "m012"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "77fd31a5-1348-4f0c-b5db-214f9aa3d9f3"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "77fd31a5-1348-4f0c-b5db-214f9aa3d9f3",
+            "provenance": "user",
+            "subject": "m040"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "78b35bbd-7219-49e7-830d-3a01e3d1f6f8"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "78b35bbd-7219-49e7-830d-3a01e3d1f6f8",
+            "provenance": "user",
+            "subject": "m134"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "7908f6ed-cc93-4acc-b8ea-f93cb3c8bf4f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "7908f6ed-cc93-4acc-b8ea-f93cb3c8bf4f",
+            "provenance": "user",
+            "subject": "m099"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "794ccc36-192b-4055-977a-696bf0612637"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "794ccc36-192b-4055-977a-696bf0612637",
+            "provenance": "user",
+            "subject": "m141"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "7a8aa532-2577-43d2-866f-775307382653"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "7a8aa532-2577-43d2-866f-775307382653",
+            "provenance": "user",
+            "subject": "m133"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "7b9fd62e-7dcd-4fba-8a12-6a452d2d27d2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "7b9fd62e-7dcd-4fba-8a12-6a452d2d27d2",
+            "provenance": "user",
+            "subject": "m145"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "7cc37335-95fa-4dbb-a810-b149db0fe438"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "7cc37335-95fa-4dbb-a810-b149db0fe438",
+            "provenance": "user",
+            "subject": "m154"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "7d8f5947-65c2-482f-a027-6f3b347075f2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "7d8f5947-65c2-482f-a027-6f3b347075f2",
+            "provenance": "user",
+            "subject": "m068"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "7e1b2398-2f52-49cf-9cfc-ad034d1e7337"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "7e1b2398-2f52-49cf-9cfc-ad034d1e7337",
+            "provenance": "user",
+            "subject": "m014"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "7fdd38ce-9699-4a58-8718-c14840fd95ff"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "7fdd38ce-9699-4a58-8718-c14840fd95ff",
+            "provenance": "user",
+            "subject": "m022"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "800c0f90-ae76-4780-90c9-53b9c053be52"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "800c0f90-ae76-4780-90c9-53b9c053be52",
+            "provenance": "user",
+            "subject": "m054"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "80951693-5458-4b70-8291-547020747d8f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "80951693-5458-4b70-8291-547020747d8f",
+            "provenance": "user",
+            "subject": "m105"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "81c1b16a-104a-4b07-b3b9-f5be4c76bcbd"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "81c1b16a-104a-4b07-b3b9-f5be4c76bcbd",
+            "provenance": "user",
+            "subject": "m058"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8202ee07-9a19-4c95-992d-edc90a360d17"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8202ee07-9a19-4c95-992d-edc90a360d17",
+            "provenance": "user",
+            "subject": "m184"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "82bda7b7-d108-4a57-879e-52cf9f8af1b1"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "82bda7b7-d108-4a57-879e-52cf9f8af1b1",
+            "provenance": "user",
+            "subject": "m083"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "83ce0fb6-45d2-44b4-b182-2a83a0fdb29c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "83ce0fb6-45d2-44b4-b182-2a83a0fdb29c",
+            "provenance": "user",
+            "subject": "m124"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "83fc7b61-c775-490a-9559-2e8bffe4b018"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "83fc7b61-c775-490a-9559-2e8bffe4b018",
+            "provenance": "user",
+            "subject": "m051"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "864839f9-bcc5-4799-8053-c1c808281cf2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "864839f9-bcc5-4799-8053-c1c808281cf2",
+            "provenance": "user",
+            "subject": "MEMORY.md index for testslug"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "89789587-6a88-40fa-bffc-6f4869f4949b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "89789587-6a88-40fa-bffc-6f4869f4949b",
+            "provenance": "user",
+            "subject": "m041"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8989843a-9514-4918-8113-ab5a6067ba89"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8989843a-9514-4918-8113-ab5a6067ba89",
+            "provenance": "user",
+            "subject": "m182"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8a85037d-1617-40b2-bde2-382f5e79fb24"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8a85037d-1617-40b2-bde2-382f5e79fb24",
+            "provenance": "user",
+            "subject": "m114"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8b60b608-ed11-4524-b69e-158febe3cb35"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8b60b608-ed11-4524-b69e-158febe3cb35",
+            "provenance": "user",
+            "subject": "m156"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8c7bdc20-61e6-4541-91a5-b94fd2e639a6"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8c7bdc20-61e6-4541-91a5-b94fd2e639a6",
+            "provenance": "user",
+            "subject": "m138"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8ca9c5e2-a713-4f36-8a28-21c0c945dc6e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8ca9c5e2-a713-4f36-8a28-21c0c945dc6e",
+            "provenance": "user",
+            "subject": "m033"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8d700b96-6852-4280-8eee-0ab0f933879f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8d700b96-6852-4280-8eee-0ab0f933879f",
+            "provenance": "user",
+            "subject": "m174"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8de8746c-970c-4269-bce7-f7978e6cf192"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8de8746c-970c-4269-bce7-f7978e6cf192",
+            "provenance": "user",
+            "subject": "m107"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8e8255e2-af0b-4837-93d2-65ef400d4794"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8e8255e2-af0b-4837-93d2-65ef400d4794",
+            "provenance": "user",
+            "subject": "m110"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8ef0a75c-5eb1-4e9d-95a3-56965f5d0a59"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8ef0a75c-5eb1-4e9d-95a3-56965f5d0a59",
+            "provenance": "user",
+            "subject": "m170"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "8f1e3b77-042a-44ea-97f0-b957d2cdf641"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "8f1e3b77-042a-44ea-97f0-b957d2cdf641",
+            "provenance": "user",
+            "subject": "m132"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "90078fe6-cb03-4a64-9d40-e8942ded6243"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "90078fe6-cb03-4a64-9d40-e8942ded6243",
+            "provenance": "user",
+            "subject": "m089"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "90b46e58-3a44-488e-8911-91eb38a8d41d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "90b46e58-3a44-488e-8911-91eb38a8d41d",
+            "provenance": "user",
+            "subject": "m115"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "9135b264-d6ad-4530-8fa1-a104cc2b8b86"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "9135b264-d6ad-4530-8fa1-a104cc2b8b86",
+            "provenance": "user",
+            "subject": "m091"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "91b67152-a347-4e80-a471-cf205102e056"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "91b67152-a347-4e80-a471-cf205102e056",
+            "provenance": "user",
+            "subject": "m028"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "945c2312-ef99-4b64-958e-1e54337152ee"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "945c2312-ef99-4b64-958e-1e54337152ee",
+            "provenance": "user",
+            "subject": "m009"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "9576af0d-c582-4d33-bcbe-1665f96d563f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "9576af0d-c582-4d33-bcbe-1665f96d563f",
+            "provenance": "user",
+            "subject": "m161"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "979a0d90-d13c-4e98-9725-561880c6ded2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "979a0d90-d13c-4e98-9725-561880c6ded2",
+            "provenance": "user",
+            "subject": "m047"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "97b86ad5-4dde-469d-b982-670456a07f05"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "97b86ad5-4dde-469d-b982-670456a07f05",
+            "provenance": "user",
+            "subject": "m190"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "9c07a882-6efc-40a4-bda0-341950273cbd"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "9c07a882-6efc-40a4-bda0-341950273cbd",
+            "provenance": "user",
+            "subject": "m098"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "9ed14b9b-9332-4b08-b546-70afb949750e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "9ed14b9b-9332-4b08-b546-70afb949750e",
+            "provenance": "user",
+            "subject": "m197"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "9f523517-2a02-48c3-b420-cdeaaf921f01"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "9f523517-2a02-48c3-b420-cdeaaf921f01",
+            "provenance": "user",
+            "subject": "m030"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a1dd3d68-46f7-4c82-abbf-19516578ee9b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a1dd3d68-46f7-4c82-abbf-19516578ee9b",
+            "provenance": "user",
+            "subject": "m128"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a27d0516-2367-4eda-b421-63b384f22160"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a27d0516-2367-4eda-b421-63b384f22160",
+            "provenance": "user",
+            "subject": "m129"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a2cb93ab-d059-42ff-9619-465d5d891f6d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a2cb93ab-d059-42ff-9619-465d5d891f6d",
+            "provenance": "user",
+            "subject": "m126"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a3a1870c-72b2-4e07-b757-6b6206bf87b6"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a3a1870c-72b2-4e07-b757-6b6206bf87b6",
+            "provenance": "user",
+            "subject": "m172"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a4ece4a9-c0b5-476b-970b-971cd0e59d86"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a4ece4a9-c0b5-476b-970b-971cd0e59d86",
+            "provenance": "user",
+            "subject": "m113"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a50e8467-f86e-4566-965d-0fa3453abd9d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a50e8467-f86e-4566-965d-0fa3453abd9d",
+            "provenance": "user",
+            "subject": "m088"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a63a71fe-dbd3-4c8d-8625-67e87e251ba2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a63a71fe-dbd3-4c8d-8625-67e87e251ba2",
+            "provenance": "user",
+            "subject": "m166"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a6733665-e1ed-49df-9271-97199067c9fa"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a6733665-e1ed-49df-9271-97199067c9fa",
+            "provenance": "user",
+            "subject": "m035"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "a869a7cb-ada5-4dda-87b8-f1dee3158e7e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "a869a7cb-ada5-4dda-87b8-f1dee3158e7e",
+            "provenance": "user",
+            "subject": "m130"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "aa9e1fc6-d109-48df-a8ee-98d4c6ce1c6a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "aa9e1fc6-d109-48df-a8ee-98d4c6ce1c6a",
+            "provenance": "user",
+            "subject": "m121"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "aaa58a60-473b-4a9d-9214-e001cd3f1ccf"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "aaa58a60-473b-4a9d-9214-e001cd3f1ccf",
+            "provenance": "user",
+            "subject": "m082"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ac32148c-b36c-4382-879e-6df14348739b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ac32148c-b36c-4382-879e-6df14348739b",
+            "provenance": "user",
+            "subject": "m109"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ac9aa650-bec7-4da5-b1da-f3a76f271643"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ac9aa650-bec7-4da5-b1da-f3a76f271643",
+            "provenance": "user",
+            "subject": "m157"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ae4fb180-f513-483c-9c26-5dfe9be0508c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ae4fb180-f513-483c-9c26-5dfe9be0508c",
+            "provenance": "user",
+            "subject": "m008"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ae553d67-7a1f-49b3-9fc3-11affb146e1b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ae553d67-7a1f-49b3-9fc3-11affb146e1b",
+            "provenance": "user",
+            "subject": "m079"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "af77eb70-4f5b-49c7-9a8e-94e16569f328"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "af77eb70-4f5b-49c7-9a8e-94e16569f328",
+            "provenance": "user",
+            "subject": "m044"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "afd89766-873e-4721-8735-5eb697ba3724"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "afd89766-873e-4721-8735-5eb697ba3724",
+            "provenance": "user",
+            "subject": "m193"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "b1b171e4-787f-4bfe-a082-d5e453cdc278"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "b1b171e4-787f-4bfe-a082-d5e453cdc278",
+            "provenance": "user",
+            "subject": "m004"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "b381833f-b49e-4edb-8ed7-5c751f2d5091"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "b381833f-b49e-4edb-8ed7-5c751f2d5091",
+            "provenance": "user",
+            "subject": "m021"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "b432f8b1-b590-4588-92d8-a8621e40cc99"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "b432f8b1-b590-4588-92d8-a8621e40cc99",
+            "provenance": "user",
+            "subject": "m074"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "b671ea07-98c0-4d9a-99b1-163fbee8ce4f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "b671ea07-98c0-4d9a-99b1-163fbee8ce4f",
+            "provenance": "user",
+            "subject": "m023"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "b8012b61-14c1-48d0-b949-5e0aad8c3959"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "b8012b61-14c1-48d0-b949-5e0aad8c3959",
+            "provenance": "user",
+            "subject": "m071"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "b9897e26-4d5c-4879-a91c-a320df6f8af1"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "b9897e26-4d5c-4879-a91c-a320df6f8af1",
+            "provenance": "user",
+            "subject": "m199"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ba569c16-1e76-4277-b4f6-0c2448a488fb"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ba569c16-1e76-4277-b4f6-0c2448a488fb",
+            "provenance": "user",
+            "subject": "m155"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "bc10b586-b7cc-4d46-aaee-b1338c8c5e28"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "bc10b586-b7cc-4d46-aaee-b1338c8c5e28",
+            "provenance": "user",
+            "subject": "m078"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "bda39bff-10b2-4bfb-93b4-b47e800db043"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "bda39bff-10b2-4bfb-93b4-b47e800db043",
+            "provenance": "user",
+            "subject": "m077"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "c378f169-ce51-439f-8714-5aa9d0e65823"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "c378f169-ce51-439f-8714-5aa9d0e65823",
+            "provenance": "user",
+            "subject": "m076"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "c5a75c97-58dd-449a-a417-b7e83db8bc1a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "c5a75c97-58dd-449a-a417-b7e83db8bc1a",
+            "provenance": "user",
+            "subject": "m119"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "c64ab5e7-8fb4-4f88-8f6d-96f251d20084"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "c64ab5e7-8fb4-4f88-8f6d-96f251d20084",
+            "provenance": "user",
+            "subject": "m101"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "c8e83122-700a-4698-b5ad-6c7ac6a15427"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "c8e83122-700a-4698-b5ad-6c7ac6a15427",
+            "provenance": "user",
+            "subject": "m057"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "c975171e-291c-49a9-b043-e636ff9ad11e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "c975171e-291c-49a9-b043-e636ff9ad11e",
+            "provenance": "user",
+            "subject": "m147"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "cdbf172b-30b1-43f8-8f70-93aa408d60d9"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "cdbf172b-30b1-43f8-8f70-93aa408d60d9",
+            "provenance": "user",
+            "subject": "m067"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "cf5d1e56-bb74-4750-a6b4-0e104ccf848f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "cf5d1e56-bb74-4750-a6b4-0e104ccf848f",
+            "provenance": "user",
+            "subject": "m100"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d0a4f7bc-c64f-4af3-8c14-e3c4a107d0b2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d0a4f7bc-c64f-4af3-8c14-e3c4a107d0b2",
+            "provenance": "user",
+            "subject": "m150"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d0c29db6-d487-43e7-95e5-d1cce5b0119c"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d0c29db6-d487-43e7-95e5-d1cce5b0119c",
+            "provenance": "user",
+            "subject": "m042"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d3c52176-86db-4039-a5e9-692e5bdd7b54"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d3c52176-86db-4039-a5e9-692e5bdd7b54",
+            "provenance": "user",
+            "subject": "m177"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d526d116-cdc7-4f76-8623-123930c31140"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d526d116-cdc7-4f76-8623-123930c31140",
+            "provenance": "user",
+            "subject": "m016"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d5b2e9fa-2cac-492f-828f-0fb54bf7122b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d5b2e9fa-2cac-492f-828f-0fb54bf7122b",
+            "provenance": "user",
+            "subject": "m108"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d65a6b30-2d4f-4145-8df6-f8042b452c5b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d65a6b30-2d4f-4145-8df6-f8042b452c5b",
+            "provenance": "user",
+            "subject": "m127"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d8c67388-34bf-496e-a158-02a0eadf6aa0"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d8c67388-34bf-496e-a158-02a0eadf6aa0",
+            "provenance": "user",
+            "subject": "m050"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "d8e55f92-0bfe-475a-8c65-41a9e582052a"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "d8e55f92-0bfe-475a-8c65-41a9e582052a",
+            "provenance": "user",
+            "subject": "m131"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "dcf1f850-723c-4fbe-ae97-a82bf205bddc"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "dcf1f850-723c-4fbe-ae97-a82bf205bddc",
+            "provenance": "user",
+            "subject": "m112"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "dda4f534-fca3-4fb3-a90b-e5eaf47488d4"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "dda4f534-fca3-4fb3-a90b-e5eaf47488d4",
+            "provenance": "user",
+            "subject": "m195"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "de02cb1a-86a0-4222-83e7-c4c9362b7330"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "de02cb1a-86a0-4222-83e7-c4c9362b7330",
+            "provenance": "user",
+            "subject": "m144"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "deba18ec-f58f-4620-bf16-a984e31c2848"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "deba18ec-f58f-4620-bf16-a984e31c2848",
+            "provenance": "user",
+            "subject": "m149"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "dff2dbb5-f595-412c-932b-d07486fbd1e2"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "dff2dbb5-f595-412c-932b-d07486fbd1e2",
+            "provenance": "user",
+            "subject": "m203"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "e080b186-5714-44e5-bdae-b5e54f764c8f"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "e080b186-5714-44e5-bdae-b5e54f764c8f",
+            "provenance": "user",
+            "subject": "m013"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "e1410cd8-8a4a-4f70-b593-152585718aed"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "e1410cd8-8a4a-4f70-b593-152585718aed",
+            "provenance": "user",
+            "subject": "m164"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "e368a474-8ae9-4990-bfe5-4cd55c10f561"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "e368a474-8ae9-4990-bfe5-4cd55c10f561",
+            "provenance": "user",
+            "subject": "m043"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "e6e4fbb5-0f61-4898-8c08-fc8fb99eda12"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "e6e4fbb5-0f61-4898-8c08-fc8fb99eda12",
+            "provenance": "user",
+            "subject": "m007"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "e8c18c28-4afd-4dcb-ac6a-078fd23fc300"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "e8c18c28-4afd-4dcb-ac6a-078fd23fc300",
+            "provenance": "user",
+            "subject": "m171"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "e8c38cb2-b11a-4408-891c-cc5cefb6ab95"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "e8c38cb2-b11a-4408-891c-cc5cefb6ab95",
+            "provenance": "user",
+            "subject": "m118"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ea2d6177-3e34-46d5-a8f5-e1cde74d90a7"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ea2d6177-3e34-46d5-a8f5-e1cde74d90a7",
+            "provenance": "user",
+            "subject": "m200"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ea3a361f-5e55-40d9-8650-c1a2c39645ad"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ea3a361f-5e55-40d9-8650-c1a2c39645ad",
+            "provenance": "user",
+            "subject": "m018"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "eaa0049f-7b04-4d8e-913a-1f97e25d2985"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "eaa0049f-7b04-4d8e-913a-1f97e25d2985",
+            "provenance": "user",
+            "subject": "m062"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "eb38118f-844c-4736-9efb-8db99107e9a5"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "eb38118f-844c-4736-9efb-8db99107e9a5",
+            "provenance": "user",
+            "subject": "m025"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "eb4100aa-b2f3-433c-b1d5-f2f5d3ae749d"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "eb4100aa-b2f3-433c-b1d5-f2f5d3ae749d",
+            "provenance": "user",
+            "subject": "m163"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ec501762-d4fe-46cf-93ac-3a3c44ad5436"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ec501762-d4fe-46cf-93ac-3a3c44ad5436",
+            "provenance": "user",
+            "subject": "m063"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ede44af0-f282-4f0e-8bf3-30f91d3941da"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ede44af0-f282-4f0e-8bf3-30f91d3941da",
+            "provenance": "user",
+            "subject": "m143"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ee1254d5-d208-4148-9c39-ce7bed886a19"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ee1254d5-d208-4148-9c39-ce7bed886a19",
+            "provenance": "user",
+            "subject": "m178"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "ee3adcf5-58bd-4622-9f8c-5ad6a18c3671"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "ee3adcf5-58bd-4622-9f8c-5ad6a18c3671",
+            "provenance": "user",
+            "subject": "m070"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "f1e87e17-1e06-4374-8a5f-1bdddd512e51"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "f1e87e17-1e06-4374-8a5f-1bdddd512e51",
+            "provenance": "user",
+            "subject": "m011"
+          },
+          {
+            "fetch": {
+              "arguments": {
+                "memory_id": "f22e75dc-4045-423d-86a4-1821c002a05e"
+              },
+              "tool": "moot_memory_get"
+            },
+            "memory_id": "f22e75dc-4045-423d-86a4-1821c002a05e",
+            "provenance": "user",
+            "subject": "m061"
+          }
+        ],
+        "next_cursor": "2a4a2331-6471-4f5c-ae1d-8a5e1503b5be",
+        "revision": "4f955cea209f14500bca68f18d9ba3975abc0a72af5c36ed262e5a03cf9cc103"
+      },
+      "meta": {
+        "build_id": "20260909190149/687717bd",
+        "capability_digest": "3fc57f13dfefe357fd8ee556b6e90bc60ededf1298f96e5582fdcb0d9fe0b8d8",
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_list"
+    }
+  }
+}

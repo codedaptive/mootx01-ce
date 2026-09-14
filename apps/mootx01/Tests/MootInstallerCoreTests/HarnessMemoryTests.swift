@@ -9,11 +9,19 @@
 //   HarnessMemoryHook     — script content, install/remove
 //   HarnessMemoryMatcher  — path matching, slug/filename extraction
 //   HarnessMemoryIngest   — mtime round-trip, move-after-confirm, failure-leaves-rest,
-//                           opt-in respected, re-enable revive path
-//   HarnessMemoryRestore  — collision refusal, supersede note, round-trip with ingest
+//                           opt-in respected, re-enable match by moot_memory_id or file
+//                           fresh on changed content (never supersedes, never revives),
+//                           restore-generated MEMORY.md discarded without filing
+//   HarnessMemoryRestore  : collision refusal, rows left untouched, id in front matter,
+//                           generated index bytes (pinned in both ports), round-trip with ingest
+//   HarnessMemoryFrontMatter: the shared inject / strip vector (pinned in both ports),
+//                           a second key beside moot_memory_id
+//   LiveDaemonClient      : v2 envelope, paging, batch get, refusal frames, through
+//                           QueuedResponseProtocol (no network)
 //
 // All tests use sandbox directories; no real ~/.claude or ~/.mootx01 paths are touched.
 // The daemon is mocked via MockDaemonClient — tests do not require a live daemon.
+// One env-gated suite (MOOT_HARNESS_LIVE_PORT) round-trips against a running daemon.
 
 import Testing
 import Foundation
@@ -27,7 +35,7 @@ final class MockDaemonClient: DaemonClient, @unchecked Sendable {
     // Recorded calls
     var filedMemories: [(location: String, content: String, subject: String, eventTime: Date, kind: String?)] = []
     var listedPrefixes: [String] = []
-    var updatedMemories: [(id: String, mutation: String, note: String)] = []
+    var gottenIds: [String] = []
     var pingCount = 0
 
     // Preset responses
@@ -36,6 +44,9 @@ final class MockDaemonClient: DaemonClient, @unchecked Sendable {
     var fileMemoryError: Error? = nil
     var listMemoriesResult: [HarnessMemoryRecord] = []
     var listMemoriesError: Error? = nil
+    /// Records answered by `getMemory(id:)`; an id absent here answers nil (unknown).
+    var getMemoryResult: [String: HarnessMemoryRecord] = [:]
+    var getMemoryError: Error? = nil
 
     func ping() async -> Bool {
         pingCount += 1
@@ -56,8 +67,10 @@ final class MockDaemonClient: DaemonClient, @unchecked Sendable {
         return listMemoriesResult.filter { $0.location.hasPrefix(locationPrefix) }
     }
 
-    func updateMemory(id: String, mutation: String, note: String) async throws {
-        updatedMemories.append((id: id, mutation: mutation, note: note))
+    func getMemory(id: String) async throws -> HarnessMemoryRecord? {
+        if let err = getMemoryError { throw err }
+        gottenIds.append(id)
+        return getMemoryResult[id]
     }
 }
 
@@ -72,6 +85,28 @@ private func makeSandboxDir(tag: String = "harness-memory-test") throws -> URL {
 
 private func cleanupSandbox(_ url: URL) {
     try? FileManager.default.removeItem(at: url)
+}
+
+/// A Claude Code memory file as the harness writes it: a YAML block with
+/// name, description and a `metadata:` mapping, then the body.
+private let kMemoryFileBody = "---\nname: bob-viewport\ndescription: \"wide\"\nmetadata:\n  node_type: memory\n  type: user\n  originSessionId: ca2fd6e7\n---\nbody\n"
+
+/// The same file after an edit on disk (body changed, block intact).
+private let kMemoryFileBodyChanged = "---\nname: bob-viewport\ndescription: \"wide\"\nmetadata:\n  node_type: memory\n  type: user\n  originSessionId: ca2fd6e7\n---\nbody, revised\n"
+
+/// A MEMORY.md index has no front matter block.
+private let kMemoryIndexBody = "# Memory Index\n"
+
+/// The front matter block restore puts on the MEMORY.md it generates.
+private let kGeneratedIndexPrefix = "---\nmetadata:\n  moot_generated_index: true\n---\n"
+
+private func makeRecord(
+    id: String, location: String, content: String, isSuperseded: Bool = false
+) -> HarnessMemoryRecord {
+    HarnessMemoryRecord(
+        id: id, location: location, content: content,
+        eventTime: Date(timeIntervalSinceReferenceDate: 0), isSuperseded: isSuperseded
+    )
 }
 
 // MARK: - HarnessMemorySettings tests
@@ -686,74 +721,255 @@ struct HarnessMemoryIngestTests {
         #expect(!(daemon.filedMemories.first?.subject.isEmpty ?? true), "MEMORY.md ingest must carry a non-empty subject")
     }
 
-    @Test("re-enable path: unchanged content revives superseded drawer, no duplicate")
-    func reEnableReviveUnchanged() async throws {
+    @Test("ingestFile: an authored MEMORY.md (no id, no generated marker) is filed with kind=list")
+    func ingestFileAuthoredIndexFiles() async throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
         let home = dir.appendingPathComponent("home")
-        let content = "My memory"
-        try makeProjectFixture(slug: "proj", files: [("notes.md", content)], home: home)
+        // Authored by hand with its own front matter; neither carrier key present.
+        let authored = "---\nname: index\nmetadata:\n  type: list\n---\n# Memory Index\n\n- [a.md](a.md)\n"
+        try makeProjectFixture(slug: "proj", files: [("MEMORY.md", authored)], home: home)
 
         let fileURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
-            .appendingPathComponent("proj/memory/notes.md")
+            .appendingPathComponent("proj/memory/MEMORY.md")
         let daemon = MockDaemonClient()
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon, now: Date())
 
-        // Pre-seed the mock with a superseded drawer at the same location.
-        let existingRecord = HarnessMemoryRecord(
-            id: "drawer-123",
-            location: "harness-import/proj/notes.md",
-            content: content,  // Same content — revive path.
-            eventTime: Date(timeIntervalSinceReferenceDate: 0),
-            isSuperseded: true
-        )
-        daemon.listMemoriesResult = [existingRecord]
-
-        let result = await HarnessMemoryIngest.ingestFile(
-            fileURL, projectSlug: "proj", isReEnable: true, daemon: daemon, now: Date()
-        )
-        guard case .revived = result.outcome else {
-            Issue.record("Expected .revived, got \(result.outcome)")
-            return
+        guard case .filed = result.outcome else {
+            Issue.record("Expected .filed, got \(result.outcome)"); return
         }
-        // Revive mutation applied, no new file posted.
-        #expect(daemon.filedMemories.isEmpty, "unchanged content must not post a new drawer")
-        #expect(daemon.updatedMemories.count == 1)
-        #expect(daemon.updatedMemories[0].mutation == "revive")
+        #expect(daemon.filedMemories.count == 1)
+        #expect(daemon.filedMemories.first?.kind == "list")
+        #expect(daemon.filedMemories.first?.content == authored, "authored bytes reach the estate unchanged")
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path))
     }
 
-    @Test("re-enable path: changed content files a fresh drawer")
-    func reEnableFreshOnChange() async throws {
+    // MARK: Re-enable: restored files carry their estate id in front matter
+
+    private func makeRestoredFile(
+        slug: String, name: String, body: String, memoryId: String, home: URL
+    ) throws -> URL {
+        let onDisk = HarnessMemoryFrontMatter.inject(body, memoryId: memoryId)
+        try makeProjectFixture(slug: slug, files: [(name, onDisk)], home: home)
+        return HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+            .appendingPathComponent("\(slug)/memory/\(name)")
+    }
+
+    @Test("re-enable: unchanged content matches its row, file removed, no estate write")
+    func reEnableMatchedUnchanged() async throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
         let home = dir.appendingPathComponent("home")
-        let newContent = "Updated memory"
-        try makeProjectFixture(slug: "proj", files: [("notes.md", newContent)], home: home)
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "notes.md", body: kMemoryFileBody, memoryId: "id-1", home: home
+        )
+        let daemon = MockDaemonClient()
+        daemon.getMemoryResult["id-1"] = makeRecord(
+            id: "id-1", location: "harness-import/proj/notes.md", content: kMemoryFileBody
+        )
 
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .matched = result.outcome else {
+            Issue.record("Expected .matched, got \(result.outcome)"); return
+        }
+        #expect(daemon.gottenIds == ["id-1"])
+        #expect(daemon.filedMemories.isEmpty, "a matched row is never re-filed")
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path), "matched file is removed")
+    }
+
+    @Test("summary line: two matched files print as matched, never as filed, with zero filings")
+    func summaryLineMatchedIsNotFiled() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let daemon = MockDaemonClient()
+        var results: [IngestResult] = []
+        for (id, name) in [("id-a", "a.md"), ("id-b", "b.md")] {
+            let fileURL = try makeRestoredFile(slug: "proj", name: name, body: kMemoryFileBody, memoryId: id, home: home)
+            daemon.getMemoryResult[id] = makeRecord(id: id, location: "harness-import/proj/\(name)", content: kMemoryFileBody)
+            results.append(await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon))
+        }
+        // The Rust port prints exactly this line for the same two inputs.
+        #expect(HarnessMemoryIngest.summaryLine(results) == "filed 0, matched 2, discarded indexes 0, removed 2, skipped 0")
+        #expect(daemon.filedMemories.isEmpty, "zero moot_file_memory calls back the printed word")
+    }
+
+    @Test("re-enable: changed content files fresh at the row's location; the old row is left untouched")
+    func reEnableFilesFreshOnChange() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "notes.md", body: kMemoryFileBodyChanged, memoryId: "id-2", home: home
+        )
+        let daemon = MockDaemonClient()
+        daemon.getMemoryResult["id-2"] = makeRecord(
+            id: "id-2", location: "harness-import/proj/notes.md", content: kMemoryFileBody
+        )
+
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .filed = result.outcome else {
+            Issue.record("Expected .filed, got \(result.outcome)"); return
+        }
+        #expect(daemon.filedMemories.count == 1, "exactly one moot_file_memory call, no mutation call of any kind")
+        #expect(daemon.filedMemories.first?.location == "harness-import/proj/notes.md")
+        #expect(daemon.filedMemories.first?.content == kMemoryFileBodyChanged,
+                "the filed content is the stripped body, without moot_memory_id")
+        #expect(!(daemon.filedMemories.first?.content.contains("moot_memory_id") ?? true))
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    @Test("re-enable: a failed filing on changed content leaves the file on disk and touches no row")
+    func reEnableFilingFailsLeavesFile() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "notes.md", body: kMemoryFileBodyChanged, memoryId: "id-3", home: home
+        )
+        let daemon = MockDaemonClient()
+        daemon.getMemoryResult["id-3"] = makeRecord(
+            id: "id-3", location: "harness-import/proj/notes.md", content: kMemoryFileBody
+        )
+        daemon.fileMemoryError = URLError(.networkConnectionLost)
+
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .failed = result.outcome else {
+            Issue.record("Expected .failed, got \(result.outcome)"); return
+        }
+        #expect(daemon.filedMemories.isEmpty, "the failed call never confirmed a write")
+        #expect(FileManager.default.fileExists(atPath: fileURL.path), "file stays for the next sweep")
+    }
+
+    @Test("re-enable: unknown id files the stripped body fresh")
+    func reEnableUnknownIdFilesFresh() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "notes.md", body: kMemoryFileBody, memoryId: "id-4", home: home
+        )
+        let daemon = MockDaemonClient()   // no row for id-4: getMemory answers nil
+
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .filed = result.outcome else {
+            Issue.record("Expected .filed, got \(result.outcome)"); return
+        }
+        #expect(daemon.gottenIds == ["id-4"])
+        #expect(daemon.filedMemories.count == 1)
+        #expect(daemon.filedMemories.first?.location == "harness-import/proj/notes.md")
+        #expect(daemon.filedMemories.first?.content == kMemoryFileBody)
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    @Test("ingest: a file without moot_memory_id files unchanged and never asks the estate")
+    func noFrontMatterIdFilesFresh() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        try makeProjectFixture(slug: "proj", files: [("notes.md", kMemoryFileBody)], home: home)
         let fileURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
             .appendingPathComponent("proj/memory/notes.md")
         let daemon = MockDaemonClient()
 
-        // Superseded drawer with OLD content.
-        let existingRecord = HarnessMemoryRecord(
-            id: "drawer-456",
-            location: "harness-import/proj/notes.md",
-            content: "Old memory",   // Different — must file fresh.
-            eventTime: Date(timeIntervalSinceReferenceDate: 0),
-            isSuperseded: true
-        )
-        daemon.listMemoriesResult = [existingRecord]
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
 
-        let result = await HarnessMemoryIngest.ingestFile(
-            fileURL, projectSlug: "proj", isReEnable: true, daemon: daemon, now: Date()
-        )
         guard case .filed = result.outcome else {
-            Issue.record("Expected .filed, got \(result.outcome)")
-            return
+            Issue.record("Expected .filed, got \(result.outcome)"); return
         }
-        // A new drawer must have been posted.
+        #expect(daemon.gottenIds.isEmpty, "no id, no lookup")
         #expect(daemon.filedMemories.count == 1)
-        #expect(daemon.filedMemories[0].content == newContent)
-        #expect(!daemon.filedMemories[0].subject.isEmpty, "re-enable fresh-file must carry a non-empty subject")
+        #expect(daemon.filedMemories.first?.content == kMemoryFileBody, "content filed byte-identical")
+    }
+
+    @Test("re-enable: a row at another location does not match; the body files fresh")
+    func reEnableRowElsewhereFilesFresh() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "notes.md", body: kMemoryFileBody, memoryId: "id-6", home: home
+        )
+        let daemon = MockDaemonClient()
+        daemon.getMemoryResult["id-6"] = makeRecord(
+            id: "id-6", location: "harness-import/other-project/notes.md", content: kMemoryFileBody
+        )
+
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .filed = result.outcome else {
+            Issue.record("Expected .filed, got \(result.outcome)"); return
+        }
+        #expect(daemon.filedMemories.first?.location == "harness-import/proj/notes.md")
+    }
+
+    @Test("re-enable: a hook-captured row (harness/<slug>/<name>) matches too")
+    func reEnableCapturedRowMatches() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "captured.md", body: kMemoryFileBody, memoryId: "id-7", home: home
+        )
+        let daemon = MockDaemonClient()
+        daemon.getMemoryResult["id-7"] = makeRecord(
+            id: "id-7", location: "harness/proj/captured.md", content: kMemoryFileBody
+        )
+
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .matched = result.outcome else {
+            Issue.record("Expected .matched, got \(result.outcome)"); return
+        }
+        #expect(daemon.filedMemories.isEmpty)
+    }
+
+    @Test("re-enable: a changed hook-captured row files fresh at the row's own harness/ location")
+    func reEnableCapturedRowChangedFilesInPlace() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "note.md", body: kMemoryFileBodyChanged, memoryId: "id-9", home: home
+        )
+        let daemon = MockDaemonClient()
+        daemon.getMemoryResult["id-9"] = makeRecord(
+            id: "id-9", location: "harness/proj/note.md", content: kMemoryFileBody
+        )
+
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .filed = result.outcome else {
+            Issue.record("Expected .filed, got \(result.outcome)"); return
+        }
+        #expect(daemon.filedMemories.count == 1, "exactly one moot_file_memory call, no mutation call of any kind")
+        #expect(daemon.filedMemories[0].location == "harness/proj/note.md", "a harness/ row stays a harness/ row")
+        #expect(daemon.filedMemories[0].content == kMemoryFileBodyChanged)
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    @Test("re-enable: a failed lookup leaves the file and files nothing (no duplicate risk)")
+    func reEnableLookupFailureLeavesFile() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fileURL = try makeRestoredFile(
+            slug: "proj", name: "notes.md", body: kMemoryFileBody, memoryId: "id-8", home: home
+        )
+        let daemon = MockDaemonClient()
+        daemon.getMemoryError = URLError(.networkConnectionLost)
+
+        let result = await HarnessMemoryIngest.ingestFile(fileURL, projectSlug: "proj", daemon: daemon)
+
+        guard case .failed = result.outcome else {
+            Issue.record("Expected .failed, got \(result.outcome)"); return
+        }
+        #expect(daemon.filedMemories.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: fileURL.path))
     }
 }
 
@@ -762,46 +978,34 @@ struct HarnessMemoryIngestTests {
 @Suite("HarnessMemoryRestore")
 struct HarnessMemoryRestoreTests {
 
-    @Test("restore writes file to disk and marks estate record superseded")
+    private func restoredResults(_ results: [RestoreResult]) -> [RestoreResult] {
+        results.filter { if case .restored = $0.outcome { return true }; return false }
+    }
+
+    @Test("restore writes the file with moot_memory_id front matter and leaves the row untouched")
     func restoreWritesFile() async throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
         let home = dir.appendingPathComponent("home")
 
         let daemon = MockDaemonClient()
-        let record = HarnessMemoryRecord(
-            id: "dr-1",
-            location: "harness-import/my-project/notes.md",
-            content: "Restored content",
-            eventTime: Date(),
-            isSuperseded: false
-        )
-        daemon.listMemoriesResult = [record]
+        daemon.listMemoriesResult = [
+            makeRecord(id: "dr-1", location: "harness-import/my-project/notes.md", content: kMemoryFileBody)
+        ]
 
-        let now = Date()
-        let results = await HarnessMemoryRestore.restore(
-            projectSlugs: ["my-project"],
-            homeDirectory: home,
-            daemon: daemon,
-            now: now
-        )
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: daemon)
 
-        // File written.
         let expectedPath = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
             .appendingPathComponent("my-project/memory/notes.md").path
         #expect(FileManager.default.fileExists(atPath: expectedPath))
         let written = try String(contentsOfFile: expectedPath, encoding: .utf8)
-        #expect(written == "Restored content")
+        #expect(written == HarnessMemoryFrontMatter.inject(kMemoryFileBody, memoryId: "dr-1"))
+        let stripped = HarnessMemoryFrontMatter.strip(written)
+        #expect(stripped.memoryId == "dr-1")
+        #expect(stripped.body == kMemoryFileBody)
 
-        // Estate record superseded.
-        #expect(daemon.updatedMemories.count == 1)
-        #expect(daemon.updatedMemories[0].mutation == "supersede")
-        #expect(daemon.updatedMemories[0].note.contains("restored to harness"))
-
-        // Result reported.
-        #expect(results.count >= 1)
-        let restored = results.first { if case .restored = $0.outcome { return true }; return false }
-        #expect(restored != nil)
+        #expect(daemon.listedPrefixes == ["harness"], "one discovery query covers both location classes")
+        #expect(restoredResults(results).count == 1)
     }
 
     @Test("restore refuses to overwrite an existing file (collision refusal)")
@@ -821,21 +1025,11 @@ struct HarnessMemoryRestoreTests {
         )
 
         let daemon = MockDaemonClient()
-        let record = HarnessMemoryRecord(
-            id: "dr-2",
-            location: "harness-import/proj/notes.md",
-            content: "Estate content",
-            eventTime: Date(),
-            isSuperseded: false
-        )
-        daemon.listMemoriesResult = [record]
+        daemon.listMemoriesResult = [
+            makeRecord(id: "dr-2", location: "harness-import/proj/notes.md", content: kMemoryFileBody)
+        ]
 
-        let results = await HarnessMemoryRestore.restore(
-            projectSlugs: ["proj"],
-            homeDirectory: home,
-            daemon: daemon,
-            now: Date()
-        )
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: daemon)
 
         // File must not be overwritten.
         let path = memoryDir.appendingPathComponent("notes.md").path
@@ -849,7 +1043,7 @@ struct HarnessMemoryRestoreTests {
         #expect(skipped != nil)
     }
 
-    @Test("restore: harness/* (born-in-estate) memories are also restored")
+    @Test("restore: harness/* (born-in-estate) memories are also restored, with their id")
     func restoreHarnessBornMemories() async throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
@@ -857,91 +1051,304 @@ struct HarnessMemoryRestoreTests {
 
         let daemon = MockDaemonClient()
         // A memory born in the estate via the capture hook (location class harness/*).
-        let record = HarnessMemoryRecord(
-            id: "dr-3",
-            location: "harness/proj/captured.md",
-            content: "Captured content",
-            eventTime: Date(),
-            isSuperseded: false
-        )
-        daemon.listMemoriesResult = [record]
+        daemon.listMemoriesResult = [
+            makeRecord(id: "dr-3", location: "harness/proj/captured.md", content: kMemoryFileBody)
+        ]
 
-        let results = await HarnessMemoryRestore.restore(
-            projectSlugs: ["proj"],
-            homeDirectory: home,
-            daemon: daemon,
-            now: Date()
-        )
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: daemon)
 
         let expectedPath = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
             .appendingPathComponent("proj/memory/captured.md").path
-        #expect(FileManager.default.fileExists(atPath: expectedPath))
-        let restored = results.first { if case .restored = $0.outcome { return true }; return false }
-        #expect(restored != nil)
+        let written = try String(contentsOfFile: expectedPath, encoding: .utf8)
+        #expect(written == HarnessMemoryFrontMatter.inject(kMemoryFileBody, memoryId: "dr-3"))
+        #expect(restoredResults(results).count == 1)
     }
 
-    @Test("full round-trip: enable+ingest → disable+restore → byte-identical files")
+    @Test("restore dedupes by id, skips superseded rows, rejects traversal, ignores other prefixes")
+    func restoreFiltersDiscovery() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+
+        let daemon = MockDaemonClient()
+        daemon.listMemoriesResult = [
+            makeRecord(id: "dup", location: "harness-import/proj/a.md", content: "A"),
+            makeRecord(id: "dup", location: "harness-import/proj/a.md", content: "A"),
+            makeRecord(id: "old", location: "harness-import/proj/b.md", content: "B", isSuperseded: true),
+            makeRecord(id: "trav", location: "harness-import/../escape.md", content: "X"),
+            makeRecord(id: "hidden", location: "harness/proj/.secret.md", content: "X"),
+            makeRecord(id: "deep", location: "harness-import/proj/sub/c.md", content: "X"),
+            makeRecord(id: "other", location: "harness-other/proj/d.md", content: "X"),
+        ]
+
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: daemon)
+
+        let memoryDir = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+            .appendingPathComponent("proj/memory")
+        let onDisk = Set((try? FileManager.default.contentsOfDirectory(atPath: memoryDir.path)) ?? [])
+        #expect(onDisk == ["a.md", "MEMORY.md"], "one file plus the regenerated index; got \(onDisk)")
+        #expect(restoredResults(results).count == 1)
+        let skipped = results.filter { if case .skipped = $0.outcome { return true }; return false }
+        #expect(skipped.map(\.location).sorted() == [
+            "harness-import/../escape.md", "harness-import/proj/sub/c.md", "harness/proj/.secret.md",
+        ], "rows under our prefixes with an unrestorable shape are reported")
+        #expect(!results.contains { $0.location == "harness-other/proj/d.md" },
+                "rows under another prefix are not ours to report")
+        #expect(!FileManager.default.fileExists(
+            atPath: HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home).appendingPathComponent("escape.md").path))
+    }
+
+    @Test("restore: a failed enumeration is one .failed result and writes nothing")
+    func restoreEnumerationFailure() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+
+        let daemon = MockDaemonClient()
+        daemon.listMemoriesError = DaemonError.refused(code: "estate_unavailable", message: "closed")
+        daemon.listMemoriesResult = [
+            makeRecord(id: "dr-x", location: "harness-import/proj/notes.md", content: kMemoryFileBody)
+        ]
+
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: daemon)
+
+        #expect(results.count == 1)
+        guard case .failed(let reason) = results[0].outcome else {
+            Issue.record("Expected .failed, got \(results[0].outcome)"); return
+        }
+        #expect(reason.hasPrefix("Estate enumeration failed:"))
+        let projectsURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+        #expect(!FileManager.default.fileExists(atPath: projectsURL.path), "nothing written")
+    }
+
+    @Test("restore regenerates one MEMORY.md per slug listing only that slug's files")
+    func restoreMemoryIndexPerSlug() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+
+        let daemon = MockDaemonClient()
+        daemon.listMemoriesResult = [
+            makeRecord(id: "a1", location: "harness-import/alpha/one.md", content: "1"),
+            makeRecord(id: "b1", location: "harness-import/beta/two.md", content: "2"),
+            makeRecord(id: "b2", location: "harness/beta/three.md", content: "3"),
+        ]
+
+        _ = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: daemon)
+
+        let projectsURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+        let alphaIndex = try String(
+            contentsOf: projectsURL.appendingPathComponent("alpha/memory/MEMORY.md"), encoding: .utf8)
+        let betaIndex = try String(
+            contentsOf: projectsURL.appendingPathComponent("beta/memory/MEMORY.md"), encoding: .utf8)
+        #expect(alphaIndex == kGeneratedIndexPrefix + "# Memory Index\n\n- [one.md](one.md)\n")
+        // Names are sorted in byte order, not in the order the estate listed the rows.
+        #expect(betaIndex == kGeneratedIndexPrefix + "# Memory Index\n\n- [three.md](three.md)\n- [two.md](two.md)\n")
+    }
+
+    @Test("restore: generated MEMORY.md bytes are pinned (shared vector, both ports)")
+    func restoreGeneratedIndexBytes() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+
+        let daemon = MockDaemonClient()
+        daemon.listMemoriesResult = [
+            makeRecord(id: "id-b", location: "harness-import/slug/b.md", content: "B"),
+            makeRecord(id: "id-a", location: "harness-import/slug/a.md", content: "A"),
+        ]
+        _ = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: daemon)
+
+        let indexURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+            .appendingPathComponent("slug/memory/MEMORY.md")
+        let index = try String(contentsOf: indexURL, encoding: .utf8)
+        #expect(index == "---\nmetadata:\n  moot_generated_index: true\n---\n# Memory Index\n\n- [a.md](a.md)\n- [b.md](b.md)\n")
+        let marker = HarnessMemoryFrontMatter.strip(index, key: HarnessMemoryFrontMatter.generatedIndexKey)
+        #expect(marker.value == "true")
+        #expect(HarnessMemoryFrontMatter.strip(index).memoryId == nil, "a generated index carries no memory id")
+    }
+
+    @Test("restore then re-ingest: the generated MEMORY.md is discarded, both files match, nothing filed")
+    func restoreThenReIngestDiscardsGeneratedIndex() async throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+
+        let rows = [
+            makeRecord(id: "id-a", location: "harness-import/slug/a.md", content: "A"),
+            makeRecord(id: "id-b", location: "harness-import/slug/b.md", content: "B"),
+        ]
+        let restoreDaemon = MockDaemonClient()
+        restoreDaemon.listMemoriesResult = rows
+        _ = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: restoreDaemon)
+
+        let memoryDir = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+            .appendingPathComponent("slug/memory")
+        let names = try FileManager.default.contentsOfDirectory(atPath: memoryDir.path).sorted()
+        #expect(names == ["MEMORY.md", "a.md", "b.md"])
+        let index = try String(contentsOf: memoryDir.appendingPathComponent("MEMORY.md"), encoding: .utf8)
+        #expect(index == "---\nmetadata:\n  moot_generated_index: true\n---\n# Memory Index\n\n- [a.md](a.md)\n- [b.md](b.md)\n")
+
+        let reEnableDaemon = MockDaemonClient()
+        for row in rows { reEnableDaemon.getMemoryResult[row.id] = row }
+        var outcomes: [String] = []
+        for name in ["a.md", "b.md", "MEMORY.md"] {
+            let result = await HarnessMemoryIngest.ingestFile(
+                memoryDir.appendingPathComponent(name), projectSlug: "slug", daemon: reEnableDaemon)
+            switch result.outcome {
+            case .matched: outcomes.append("matched")
+            case .discardedIndex: outcomes.append("discardedIndex")
+            default: outcomes.append("\(result.outcome)")
+            }
+        }
+        #expect(outcomes == ["matched", "matched", "discardedIndex"])
+        #expect(reEnableDaemon.filedMemories.isEmpty, "a disable → enable cycle adds no estate row")
+        #expect(reEnableDaemon.gottenIds.sorted() == ["id-a", "id-b"], "the index makes no estate call")
+        let remaining = (try? FileManager.default.contentsOfDirectory(atPath: memoryDir.path)) ?? ["unreadable"]
+        #expect(remaining.isEmpty, "directory empty after re-ingest; got \(remaining)")
+    }
+
+    @Test("full round-trip: ingest → restore → ingest leaves every id in place, nothing re-filed")
     func fullRoundTrip() async throws {
         let dir = try makeSandboxDir()
         defer { cleanupSandbox(dir) }
         let home = dir.appendingPathComponent("home")
 
         let slug = "round-trip-project"
-        let originalContent = "This is my important memory."
         let mtime = Date(timeIntervalSinceReferenceDate: 700_000_000)
 
-        // Set up fixture.
+        // Set up fixture: a memory file plus the MEMORY.md index.
         let memoryDir = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
             .appendingPathComponent("\(slug)/memory")
         try FileManager.default.createDirectory(at: memoryDir, withIntermediateDirectories: true)
-        let srcURL = memoryDir.appendingPathComponent("important.md")
-        try originalContent.write(to: srcURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: srcURL.path)
+        let noteURL = memoryDir.appendingPathComponent("important.md")
+        let indexURL = memoryDir.appendingPathComponent("MEMORY.md")
+        try kMemoryFileBody.write(to: noteURL, atomically: true, encoding: .utf8)
+        try kMemoryIndexBody.write(to: indexURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: mtime], ofItemAtPath: noteURL.path)
 
         // Ingest phase — use a mock that records what was filed.
         let ingestDaemon = MockDaemonClient()
-        let ingestResult = await HarnessMemoryIngest.ingestFile(
-            srcURL, projectSlug: slug, daemon: ingestDaemon, now: Date()
-        )
-        guard case .filed = ingestResult.outcome else {
-            Issue.record("Ingest failed: \(ingestResult.outcome)"); return
+        for url in [noteURL, indexURL] {
+            let ingestResult = await HarnessMemoryIngest.ingestFile(url, projectSlug: slug, daemon: ingestDaemon)
+            guard case .filed = ingestResult.outcome else {
+                Issue.record("Ingest failed: \(ingestResult.outcome)"); return
+            }
+            #expect(!FileManager.default.fileExists(atPath: url.path))
         }
-        let filed = ingestDaemon.filedMemories[0]
-        #expect(abs(filed.eventTime.timeIntervalSince(mtime)) < 1.0,
-                "event_time must equal file mtime")
-        #expect(!filed.subject.isEmpty, "ingest round-trip must carry a non-empty subject")
+        #expect(ingestDaemon.filedMemories.count == 2)
+        let filedNote = ingestDaemon.filedMemories[0]
+        #expect(abs(filedNote.eventTime.timeIntervalSince(mtime)) < 1.0, "event_time must equal file mtime")
+        #expect(!filedNote.subject.isEmpty, "ingest round-trip must carry a non-empty subject")
+        #expect(ingestDaemon.filedMemories[1].kind == "list")
 
-        // Source removed.
-        #expect(!FileManager.default.fileExists(atPath: srcURL.path))
-
-        // Restore phase — mock returns the filed record.
+        // Restore phase: the mock returns the filed records with their estate ids.
         let restoreDaemon = MockDaemonClient()
-        let restoredRecord = HarnessMemoryRecord(
-            id: "dr-rtr",
-            location: filed.location,
-            content: filed.content,
-            eventTime: filed.eventTime,
-            isSuperseded: false
-        )
-        restoreDaemon.listMemoriesResult = [restoredRecord]
+        let rows = ingestDaemon.filedMemories.enumerated().map { index, filed in
+            makeRecord(id: "row-\(index)", location: filed.location, content: filed.content)
+        }
+        restoreDaemon.listMemoriesResult = rows
+        let restoreResults = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: restoreDaemon)
+        #expect(restoredResults(restoreResults).count == 2)
 
-        let restoreResults = await HarnessMemoryRestore.restore(
-            projectSlugs: [slug],
-            homeDirectory: home,
-            daemon: restoreDaemon,
-            now: Date()
-        )
+        // Files are back at their paths with the id in front matter and the body intact.
+        let restoredNote = try String(contentsOf: noteURL, encoding: .utf8)
+        #expect(restoredNote == HarnessMemoryFrontMatter.inject(kMemoryFileBody, memoryId: "row-0"))
+        let restoredIndex = try String(contentsOf: indexURL, encoding: .utf8)
+        #expect(restoredIndex == HarnessMemoryFrontMatter.inject(kMemoryIndexBody, memoryId: "row-1"))
 
-        // File must be back at the original path.
-        #expect(FileManager.default.fileExists(atPath: srcURL.path))
-        let restoredContent = try String(contentsOf: srcURL, encoding: .utf8)
-        #expect(restoredContent == originalContent, "restored file must be byte-identical")
+        // Re-enable: every file matches its row; nothing is filed or mutated.
+        let reEnableDaemon = MockDaemonClient()
+        for row in rows { reEnableDaemon.getMemoryResult[row.id] = row }
+        for url in [noteURL, indexURL] {
+            let again = await HarnessMemoryIngest.ingestFile(url, projectSlug: slug, daemon: reEnableDaemon)
+            guard case .matched = again.outcome else {
+                Issue.record("Expected .matched for \(url.lastPathComponent), got \(again.outcome)"); return
+            }
+            #expect(!FileManager.default.fileExists(atPath: url.path))
+        }
+        #expect(reEnableDaemon.gottenIds.sorted() == ["row-0", "row-1"])
+        #expect(reEnableDaemon.filedMemories.isEmpty, "ids unchanged: nothing re-filed")
+    }
+}
 
-        // Estate record superseded.
-        #expect(restoreDaemon.updatedMemories.count == 1)
-        #expect(restoreDaemon.updatedMemories[0].mutation == "supersede")
+// MARK: - HarnessMemoryFrontMatter tests (shared vector, pinned in both ports)
 
-        let _ = restoreResults // suppress unused warning; results checked via daemon state
+@Suite("HarnessMemoryFrontMatter")
+struct HarnessMemoryFrontMatterTests {
+
+    private let vector1 = kMemoryFileBody
+    private let vector2 = "---\nname: x\n---\nbody\n"
+    private let vector3 = "# Memory Index\n"
+
+    @Test("inject: block with metadata: gets the id line directly after metadata:")
+    func injectAfterMetadata() {
+        let out = HarnessMemoryFrontMatter.inject(vector1, memoryId: "abc")
+        #expect(out == "---\nname: bob-viewport\ndescription: \"wide\"\nmetadata:\n  moot_memory_id: abc\n  node_type: memory\n  type: user\n  originSessionId: ca2fd6e7\n---\nbody\n")
+        let lines = out.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        #expect(lines.filter { $0 == "---" }.count == 2, "exactly one front matter document")
+        #expect(lines.filter { $0 == "metadata:" }.count == 1)
+        let topKeys = lines[1..<8].filter { !$0.hasPrefix("  ") }.map { String($0.split(separator: ":")[0]) }
+        #expect(topKeys == ["name", "description", "metadata"])
+        let metadataKeys = lines[1..<8].filter { $0.hasPrefix("  ") }.map {
+            String($0.dropFirst(2).split(separator: ":")[0])
+        }
+        #expect(Set(metadataKeys) == ["moot_memory_id", "node_type", "type", "originSessionId"])
+        let stripped = HarnessMemoryFrontMatter.strip(out)
+        #expect(stripped.memoryId == "abc")
+        #expect(stripped.body == vector1)
+    }
+
+    @Test("inject: block without metadata: gains metadata: and the id line before the closing fence")
+    func injectBeforeClosingFence() {
+        let out = HarnessMemoryFrontMatter.inject(vector2, memoryId: "abc")
+        #expect(out == "---\nname: x\nmetadata:\n  moot_memory_id: abc\n---\nbody\n")
+        let stripped = HarnessMemoryFrontMatter.strip(out)
+        #expect(stripped.memoryId == "abc")
+        #expect(stripped.body == vector2)
+    }
+
+    @Test("inject: no block (MEMORY.md) gains a four-line block holding only the id")
+    func injectPrependsBlock() {
+        let out = HarnessMemoryFrontMatter.inject(vector3, memoryId: "abc")
+        #expect(out == "---\nmetadata:\n  moot_memory_id: abc\n---\n# Memory Index\n")
+        let stripped = HarnessMemoryFrontMatter.strip(out)
+        #expect(stripped.memoryId == "abc")
+        #expect(stripped.body == vector3)
+    }
+
+    @Test("strip: no id line leaves the content unchanged and answers nil")
+    func stripWithoutIdIsIdentity() {
+        for content in [vector1, vector2, vector3, "", "---\n", "---\nmetadata:\n---\n"] {
+            let stripped = HarnessMemoryFrontMatter.strip(content)
+            #expect(stripped.memoryId == nil)
+            #expect(stripped.body == content)
+        }
+    }
+
+    @Test("strip: id value is trimmed; a metadata: line keeps its other children")
+    func stripTrimsAndKeepsSiblings() {
+        let content = "---\nmetadata:\n  moot_memory_id:   spaced  \n  type: user\n---\nbody\n"
+        let stripped = HarnessMemoryFrontMatter.strip(content)
+        #expect(stripped.memoryId == "spaced")
+        #expect(stripped.body == "---\nmetadata:\n  type: user\n---\nbody\n")
+    }
+
+    @Test("inject / strip with a second key leaves an existing moot_memory_id line untouched")
+    func secondKeyRoundTripKeepsMemoryId() {
+        let withId = HarnessMemoryFrontMatter.inject(vector1, memoryId: "abc")
+        let out = HarnessMemoryFrontMatter.inject(
+            withId, key: HarnessMemoryFrontMatter.generatedIndexKey, value: "true")
+        #expect(out == "---\nname: bob-viewport\ndescription: \"wide\"\nmetadata:\n  moot_generated_index: true\n  moot_memory_id: abc\n  node_type: memory\n  type: user\n  originSessionId: ca2fd6e7\n---\nbody\n")
+
+        let marker = HarnessMemoryFrontMatter.strip(out, key: HarnessMemoryFrontMatter.generatedIndexKey)
+        #expect(marker.value == "true")
+        #expect(marker.body == withId, "stripping the second key is the byte inverse of injecting it")
+        #expect(HarnessMemoryFrontMatter.strip(out).memoryId == "abc")
+        #expect(HarnessMemoryFrontMatter.strip(marker.body).body == vector1)
+        let absent = HarnessMemoryFrontMatter.strip(withId, key: HarnessMemoryFrontMatter.generatedIndexKey)
+        #expect(absent.value == nil)
+        #expect(absent.body == withId)
     }
 }
 
@@ -1083,5 +1490,708 @@ struct ExtractSubjectTests {
         let content = "   leading and trailing spaces   "
         let result = HarnessMemoryIngest.extractSubject(from: content, fileName: "notes.md")
         #expect(result == "leading and trailing spaces")
+    }
+}
+
+// MARK: - LiveDaemonClient v2 parser tests
+
+/// Mock URLProtocol that returns a queue of pre-baked HTTP responses and
+/// records every JSON-RPC request body it receives.
+/// Used to drive LiveDaemonClient through the v2 envelope without a live daemon.
+final class QueuedResponseProtocol: URLProtocol, @unchecked Sendable {
+    /// Shared queue of (statusCode, body) pairs consumed in FIFO order.
+    nonisolated(unsafe) static var responseQueue: [(Int, Data)] = []
+    /// Every request body received since the last `enqueue`, decoded as JSON.
+    nonisolated(unsafe) static var recordedRequests: [[String: Any]] = []
+    static let lock = NSLock()
+
+    static func enqueue(_ pairs: [(Int, Data)]) {
+        lock.lock(); defer { lock.unlock() }
+        responseQueue = pairs
+        recordedRequests = []
+    }
+
+    /// Tool name of a recorded request (`params.name`).
+    static func toolName(of request: [String: Any]) -> String? {
+        (request["params"] as? [String: Any])?["name"] as? String
+    }
+
+    /// Tool arguments of a recorded request (`params.arguments`).
+    static func arguments(of request: [String: Any]) -> [String: Any] {
+        (request["params"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
+    }
+
+    /// Recorded requests for one tool, in order.
+    static func requests(for tool: String) -> [[String: Any]] {
+        lock.lock(); defer { lock.unlock() }
+        return recordedRequests.filter { toolName(of: $0) == tool }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    /// URLSession hands a URLProtocol the body as a stream, never as `httpBody`.
+    private static func body(of request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let bufferSize = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: bufferSize)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
+
+    override func startLoading() {
+        QueuedResponseProtocol.lock.lock()
+        if let body = QueuedResponseProtocol.body(of: request),
+           let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+            QueuedResponseProtocol.recordedRequests.append(json)
+        }
+        let pair: (Int, Data)?
+        if QueuedResponseProtocol.responseQueue.isEmpty {
+            pair = nil
+        } else {
+            pair = QueuedResponseProtocol.responseQueue.removeFirst()
+        }
+        QueuedResponseProtocol.lock.unlock()
+
+        let (code, body) = pair ?? (500, Data())
+        let resp = HTTPURLResponse(
+            url: request.url!, statusCode: code, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+/// Makes a URLSession wired to QueuedResponseProtocol so tests never hit a network.
+private func makeQueuedSession() -> URLSession {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [QueuedResponseProtocol.self]
+    config.timeoutIntervalForRequest = 5
+    return URLSession(configuration: config)
+}
+
+private func makeQueuedClient() -> LiveDaemonClient {
+    LiveDaemonClient(baseURL: URL(string: "http://localhost:9999")!, session: makeQueuedSession())
+}
+
+// MARK: Fixture frames recorded from the v2 binaries
+
+/// Bytes of a fixture under distribution/plugin/tests/fixtures/ (full JSON-RPC body).
+private func fixtureData(_ name: String) throws -> Data {
+    let url = URL(fileURLWithPath: #file)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("distribution/plugin/tests/fixtures/\(name)")
+    return try Data(contentsOf: url)
+}
+
+/// `result.structuredContent.data` of a fixture frame.
+private func fixtureDataObject(_ frame: Data) throws -> [String: Any] {
+    let json = try JSONSerialization.jsonObject(with: frame) as? [String: Any] ?? [:]
+    let result = json["result"] as? [String: Any] ?? [:]
+    let structured = result["structuredContent"] as? [String: Any] ?? [:]
+    return structured["data"] as? [String: Any] ?? [:]
+}
+
+/// `(memory_id, subject)` of every row on a list page.
+private func pageRows(_ frame: Data) throws -> [(id: String, subject: String)] {
+    let rows = try fixtureDataObject(frame)["memories"] as? [[String: Any]] ?? []
+    return rows.compactMap { row in
+        guard let id = row["memory_id"] as? String else { return nil }
+        return (id, row["subject"] as? String ?? id)
+    }
+}
+
+/// A `moot_memory_list` success frame for `rows` (v2 envelope shape).
+private func makeListFrame(rows: [[String: Any]], hasMore: Bool, nextCursor: String?) throws -> Data {
+    var data: [String: Any] = ["memories": rows, "has_more": hasMore, "revision": "r1"]
+    if let nextCursor { data["next_cursor"] = nextCursor }
+    let frame: [String: Any] = [
+        "jsonrpc": "2.0", "id": 1,
+        "result": [
+            "isError": false,
+            "structuredContent": ["surface_version": "v2", "tool": "moot_memory_list", "data": data, "meta": [:]],
+            "content": [["type": "text", "text": "Enumerated \(rows.count) memories."]],
+        ] as [String: Any],
+    ]
+    return try JSONSerialization.data(withJSONObject: frame)
+}
+
+/// A synthesized `moot_memory_get` success frame answering `rows` in order at
+/// `harness-import/bigslug/<subject>.md`. The recorded batch fixture holds 50
+/// records that do not align with the 50-id chunks of the page fixtures, so
+/// the paging tests synthesize every get body from the page ids.
+private func makeGetFrame(rows: [(id: String, subject: String)]) throws -> Data {
+    let memories: [[String: Any]] = rows.map { row in
+        [
+            "memory_id": row.id,
+            "placement": ["wing": "Agentic Memory", "room": "harness-import/bigslug/\(row.subject).md"],
+            "content": "# \(row.subject)\nbody \(row.subject)\n",
+            "event_time": "2026-09-01T00:00:00Z",
+            "state": "active",
+            "subject": row.subject,
+        ]
+    }
+    let frame: [String: Any] = [
+        "jsonrpc": "2.0", "id": 1,
+        "result": [
+            "isError": false,
+            "structuredContent": ["surface_version": "v2", "tool": "moot_memory_get", "data": ["memories": memories], "meta": [:]],
+            "content": [["type": "text", "text": "Fetched \(rows.count) memories."]],
+        ] as [String: Any],
+    ]
+    return try JSONSerialization.data(withJSONObject: frame)
+}
+
+/// Get frames for `rows` in chunks of 50, the client's batch size.
+private func makeGetFrames(rows: [(id: String, subject: String)]) throws -> [(Int, Data)] {
+    var frames: [(Int, Data)] = []
+    for offset in stride(from: 0, to: rows.count, by: 50) {
+        let chunk = Array(rows[offset..<min(offset + 50, rows.count)])
+        frames.append((200, try makeGetFrame(rows: chunk)))
+    }
+    return frames
+}
+
+/// The exact v2 refusal frame shape: HTTP 200, no JSON-RPC error, isError true.
+private func makeRefusalFrame(tool: String, code: String, message: String, retryable: Bool) -> Data {
+    """
+    {"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"\(message)"}],"structuredContent":{"surface_version":"v2","tool":"\(tool)","error":{"code":"\(code)","message":"\(message)","retryable":\(retryable)},"meta":{}}}}
+    """.data(using: .utf8)!
+}
+
+private let kCursorStaleFrame = """
+{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"The inventory changed; restart moot_memory_list without the cursor."}],"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","error":{"code":"cursor_stale","message":"The inventory changed; restart moot_memory_list without the cursor.","retryable":true},"meta":{}}}}
+""".data(using: .utf8)!
+
+private let kMemoryNotFoundFrame = makeRefusalFrame(
+    tool: "moot_memory_get", code: "memory_not_found", message: "memory not found", retryable: false)
+
+// v2 JSON-RPC response bodies used by the parser tests below.
+// These shapes match the fixtures captured from the v2 binaries at
+// distribution/plugin/tests/fixtures/swift_memory_list.json and swift_memory_get.json.
+private let kV2ListResponse = """
+{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"has_more":false,"memories":[{"memory_id":"test-id-1","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"test-id-1"}},"subject":"MEMORY.md index","provenance":"imported"}],"revision":"abc"}},"content":[{"type":"text","text":"Enumerated 1 memory."}]}}
+""".data(using: .utf8)!
+
+private let kV2GetResponse = """
+{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_get","data":{"memories":[{"memory_id":"test-id-1","placement":{"wing":"Agentic Memory","room":"harness-import/testslug/MEMORY.md"},"content":"# Memory Index for testslug","event_time":"2026-09-09T00:00:00Z","state":"active","subject":"MEMORY.md index"}]}},"content":[{"type":"text","text":"Retrieved memory."}]}}
+""".data(using: .utf8)!
+
+private let kV2GetResponseSuperseded = """
+{"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_get","data":{"memories":[{"memory_id":"test-id-sup","placement":{"wing":"Agentic Memory","room":"harness-import/testslug/notes.md"},"content":"# Old notes","event_time":"2026-09-09T00:00:00Z","state":"superseded","subject":"notes"}]}},"content":[{"type":"text","text":"Retrieved memory."}]}}
+""".data(using: .utf8)!
+
+@Suite(.serialized)
+struct LiveDaemonClientV2ParserTests {
+
+    /// Page fixtures: 200 rows with a cursor, then 7 rows, 207 distinct ids.
+    private func pageFixtures() throws -> (page1: Data, page2: Data, rows: [(id: String, subject: String)], cursor: String) {
+        let page1 = try fixtureData("swift_memory_list_page1.json")
+        let page2 = try fixtureData("swift_memory_list_page2.json")
+        let rows = try pageRows(page1) + pageRows(page2)
+        let cursor = try fixtureDataObject(page1)["next_cursor"] as? String ?? ""
+        return (page1, page2, rows, cursor)
+    }
+
+    @Test("listMemories reads v2 envelope: result.structuredContent.data.memories")
+    func listMemoriesReadsV2Envelope() async throws {
+        // Feed list response + get follow-up through the actual LiveDaemonClient parser.
+        // Proves the parser reads result.structuredContent.data.memories (not result.memories).
+        QueuedResponseProtocol.enqueue([
+            (200, kV2ListResponse),
+            (200, kV2GetResponse),
+        ])
+        let client = makeQueuedClient()
+        let records = try await client.listMemories(locationPrefix: "harness-import/testslug/MEMORY.md")
+        #expect(records.count == 1, "must return 1 record after get follow-up")
+        #expect(records[0].id == "test-id-1")
+        #expect(records[0].location == "harness-import/testslug/MEMORY.md", "location from placement.room")
+        #expect(records[0].content == "# Memory Index for testslug")
+        #expect(!records[0].isSuperseded)
+        let lists = QueuedResponseProtocol.requests(for: "moot_memory_list")
+        #expect(lists.count == 1)
+        let args = QueuedResponseProtocol.arguments(of: lists[0])
+        #expect(args["wing"] as? String == "Agentic Memory")
+        #expect(args["limit"] as? Int == 200)
+        #expect(args["room"] as? String == "harness-import/testslug/MEMORY.md", "exact file: room filter sent")
+    }
+
+    @Test("listMemories empty prefix returns empty without calling daemon")
+    func listMemoriesEmptyPrefixReturnsEmpty() async throws {
+        QueuedResponseProtocol.enqueue([])
+        let client = makeQueuedClient()
+        let records = try await client.listMemories(locationPrefix: "")
+        #expect(records.isEmpty, "empty prefix must return empty list")
+        #expect(QueuedResponseProtocol.recordedRequests.isEmpty)
+    }
+
+    @Test("listMemories leading slash normalized: same result as without slash")
+    func listMemoriesLeadingSlashNormalized() async throws {
+        QueuedResponseProtocol.enqueue([
+            (200, kV2ListResponse),
+            (200, kV2GetResponse),
+        ])
+        let client = makeQueuedClient()
+        // Leading slash must be stripped; prefix "harness-import/testslug/MEMORY.md" matches.
+        let records = try await client.listMemories(locationPrefix: "/harness-import/testslug/MEMORY.md")
+        #expect(records.count == 1, "leading slash must be stripped; result same as without slash")
+    }
+
+    @Test("listMemories state=superseded sets isSuperseded=true")
+    func listMemoriesSupersededFlag() async throws {
+        let listWithSup = """
+        {"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"has_more":false,"memories":[{"memory_id":"test-id-sup","fetch":{"tool":"moot_memory_get","arguments":{"memory_id":"test-id-sup"}},"subject":"notes","provenance":"imported"}],"revision":"abc"}},"content":[]}}
+        """.data(using: .utf8)!
+        QueuedResponseProtocol.enqueue([
+            (200, listWithSup),
+            (200, kV2GetResponseSuperseded),
+        ])
+        let client = makeQueuedClient()
+        let records = try await client.listMemories(locationPrefix: "harness-import/testslug/notes.md")
+        #expect(records.count == 1)
+        #expect(records[0].isSuperseded, "state=superseded must produce isSuperseded=true")
+    }
+
+    // MARK: Paging and batch get
+
+    @Test("listMemories pages with the server cursor and fetches records in chunks of 50")
+    func listMemoriesPagesAndBatches() async throws {
+        let fx = try pageFixtures()
+        #expect(fx.rows.count == 207)
+        QueuedResponseProtocol.enqueue([(200, fx.page1), (200, fx.page2)] + (try makeGetFrames(rows: fx.rows)))
+        let client = makeQueuedClient()
+
+        let records = try await client.listMemories(locationPrefix: "harness-import/")
+
+        #expect(records.count == 207)
+        #expect(records.map(\.id) == fx.rows.map(\.id), "records follow server order")
+        #expect(records.allSatisfy { $0.location.hasPrefix("harness-import/bigslug/") })
+
+        let lists = QueuedResponseProtocol.requests(for: "moot_memory_list")
+        #expect(lists.count == 2)
+        #expect(QueuedResponseProtocol.arguments(of: lists[0])["cursor"] == nil, "first page: no cursor")
+        #expect(QueuedResponseProtocol.arguments(of: lists[1])["cursor"] as? String == fx.cursor,
+                "second page sends page1's next_cursor")
+        #expect(QueuedResponseProtocol.arguments(of: lists[1])["room"] == nil, "directory prefix: no room filter")
+
+        let gets = QueuedResponseProtocol.requests(for: "moot_memory_get")
+        let sizes = gets.map { (QueuedResponseProtocol.arguments(of: $0)["memory_ids"] as? [String])?.count ?? -1 }
+        #expect(sizes == [50, 50, 50, 50, 7])
+    }
+
+    @Test("batch get: no request carries more than 50 ids and there are ceil(n/50) requests")
+    func batchGetChunking() async throws {
+        let fx = try pageFixtures()
+        QueuedResponseProtocol.enqueue([(200, fx.page1), (200, fx.page2)] + (try makeGetFrames(rows: fx.rows)))
+        let client = makeQueuedClient()
+
+        _ = try await client.listMemories(locationPrefix: "harness-import/")
+
+        let gets = QueuedResponseProtocol.requests(for: "moot_memory_get")
+        let n = fx.rows.count
+        #expect(gets.count == (n + 49) / 50)
+        var covered: [String] = []
+        for get in gets {
+            let ids = QueuedResponseProtocol.arguments(of: get)["memory_ids"] as? [String] ?? []
+            #expect(ids.count <= 50)
+            #expect(ids.count > 0)
+            #expect(Set(ids).count == ids.count, "no duplicate ids in a batch")
+            #expect(QueuedResponseProtocol.arguments(of: get)["memory_id"] == nil, "memory_ids and memory_id are exclusive")
+            covered += ids
+        }
+        #expect(covered == fx.rows.map(\.id), "every listed id is fetched exactly once, in order")
+    }
+
+    @Test("batch get consumes the recorded swift_memory_get_batch fixture (50 records)")
+    func batchGetConsumesBatchFixture() async throws {
+        let batch = try fixtureData("swift_memory_get_batch.json")
+        let batchRecords = try fixtureDataObject(batch)["memories"] as? [[String: Any]] ?? []
+        let ids = batchRecords.compactMap { $0["memory_id"] as? String }
+        #expect(ids.count == 50)
+        let rows: [[String: Any]] = ids.map { id in
+            ["memory_id": id, "fetch": ["tool": "moot_memory_get", "arguments": ["memory_id": id]]]
+        }
+        QueuedResponseProtocol.enqueue([
+            (200, try makeListFrame(rows: rows, hasMore: false, nextCursor: nil)),
+            (200, batch),
+        ])
+        let client = makeQueuedClient()
+
+        let records = try await client.listMemories(locationPrefix: "harness-import/bigslug/")
+
+        #expect(records.count == 50)
+        #expect(Set(records.map(\.id)) == Set(ids))
+        #expect(records.allSatisfy { $0.location.hasPrefix("harness-import/bigslug/") }, "placement.room is the location")
+        #expect(records.allSatisfy { !$0.isSuperseded && !$0.content.isEmpty })
+        let gets = QueuedResponseProtocol.requests(for: "moot_memory_get")
+        #expect(gets.count == 1)
+        #expect(QueuedResponseProtocol.arguments(of: gets[0])["memory_ids"] as? [String] == ids)
+    }
+
+    @Test("listMemories: swift_memory_list fixture with a partial get answer refuses, naming the missing id")
+    func listMemoriesFixturePartialGetRefuses() async throws {
+        // The recorded list page names two ids; the recorded get answers one of them.
+        // A batch that answers fewer records than asked is a refusal, never a short list.
+        let list = try fixtureData("swift_memory_list.json")
+        let get = try fixtureData("swift_memory_get.json")
+        let listed = try pageRows(list).map(\.id)
+        let answered = (try fixtureDataObject(get)["memories"] as? [[String: Any]] ?? [])
+            .compactMap { $0["memory_id"] as? String }
+        #expect(listed.count == 2 && answered.count == 1)
+        QueuedResponseProtocol.enqueue([(200, list), (200, get)])
+        let client = makeQueuedClient()
+
+        do {
+            _ = try await client.listMemories(locationPrefix: "harness-import/")
+            Issue.record("expected DaemonError.refused(memory_not_found)")
+        } catch DaemonError.refused(let code, let message) {
+            #expect(code == "memory_not_found")
+            let missing = listed.filter { !answered.contains($0) }
+            #expect(missing.count == 1)
+            #expect(message.contains(missing[0]), "the refusal names the missing id")
+        }
+        let gets = QueuedResponseProtocol.requests(for: "moot_memory_get")
+        #expect(QueuedResponseProtocol.arguments(of: gets[0])["memory_ids"] as? [String] == listed)
+    }
+
+    @Test("getMemory consumes the recorded swift_memory_get fixture")
+    func getMemoryConsumesFixture() async throws {
+        QueuedResponseProtocol.enqueue([(200, try fixtureData("swift_memory_get.json"))])
+        let client = makeQueuedClient()
+
+        let record = try await client.getMemory(id: "84de1bc0-ee45-4054-9eb8-f308d938172b")
+
+        #expect(record?.id == "84de1bc0-ee45-4054-9eb8-f308d938172b")
+        #expect(record?.location == "harness-import/testslug/notes.md", "placement.room is the location")
+        #expect(record?.content == "# Notes for testslug")
+        #expect(record?.isSuperseded == false)
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        #expect(record?.eventTime == fmt.date(from: "2026-09-09T00:01:00Z"))
+        let gets = QueuedResponseProtocol.requests(for: "moot_memory_get")
+        #expect(gets.count == 1)
+        #expect(QueuedResponseProtocol.arguments(of: gets[0])["memory_id"] as? String == "84de1bc0-ee45-4054-9eb8-f308d938172b")
+        #expect(QueuedResponseProtocol.arguments(of: gets[0])["memory_ids"] == nil)
+    }
+
+    // MARK: Refusal frames
+
+    @Test("getMemory: memory_not_found refusal answers nil; any other refusal throws")
+    func getMemoryRefusals() async throws {
+        QueuedResponseProtocol.enqueue([(200, kMemoryNotFoundFrame)])
+        let client = makeQueuedClient()
+        let missing = try await client.getMemory(id: "no-such-id")
+        #expect(missing == nil)
+
+        QueuedResponseProtocol.enqueue([(200, makeRefusalFrame(
+            tool: "moot_memory_get", code: "estate_unavailable", message: "estate closed", retryable: true))])
+        do {
+            _ = try await client.getMemory(id: "any-id")
+            Issue.record("expected DaemonError.refused(estate_unavailable)")
+        } catch DaemonError.refused(let code, let message) {
+            #expect(code == "estate_unavailable")
+            #expect(message == "estate closed")
+        }
+    }
+
+    @Test("getMemory: a top-level JSON-RPC error is a refusal with code rpc_error, not an unknown id")
+    func getMemoryRpcErrorThrows() async throws {
+        let body = """
+        {"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"memory not found"}}
+        """.data(using: .utf8)!
+        QueuedResponseProtocol.enqueue([(200, body)])
+        let client = makeQueuedClient()
+        do {
+            _ = try await client.getMemory(id: "x")
+            Issue.record("expected DaemonError.refused(rpc_error)")
+        } catch DaemonError.refused(let code, let message) {
+            #expect(code == "rpc_error")
+            #expect(message == "memory not found")
+        }
+    }
+
+    @Test("listMemories restarts without a cursor on cursor_stale, at most three times")
+    func listMemoriesRestartsOnStaleCursor() async throws {
+        let fx = try pageFixtures()
+        QueuedResponseProtocol.enqueue(
+            [(200, fx.page1), (200, kCursorStaleFrame), (200, fx.page1), (200, fx.page2)]
+            + (try makeGetFrames(rows: fx.rows)))
+        let client = makeQueuedClient()
+
+        let records = try await client.listMemories(locationPrefix: "harness-import/")
+
+        #expect(records.count == 207)
+        let lists = QueuedResponseProtocol.requests(for: "moot_memory_list").map { QueuedResponseProtocol.arguments(of: $0) }
+        #expect(lists.count == 4)
+        #expect(lists[0]["cursor"] == nil)
+        #expect(lists[1]["cursor"] as? String == fx.cursor)
+        #expect(lists[2]["cursor"] == nil, "restart after cursor_stale carries no cursor")
+        #expect(lists[3]["cursor"] as? String == fx.cursor)
+
+        // Four stale answers exhaust the three restarts: the refusal propagates.
+        QueuedResponseProtocol.enqueue([
+            (200, fx.page1), (200, kCursorStaleFrame),
+            (200, fx.page1), (200, kCursorStaleFrame),
+            (200, fx.page1), (200, kCursorStaleFrame),
+            (200, fx.page1), (200, kCursorStaleFrame),
+        ])
+        do {
+            _ = try await client.listMemories(locationPrefix: "harness-import/")
+            Issue.record("expected DaemonError.refused(cursor_stale)")
+        } catch DaemonError.refused(let code, _) {
+            #expect(code == "cursor_stale")
+        }
+        #expect(QueuedResponseProtocol.requests(for: "moot_memory_list").count == 8)
+    }
+
+    @Test("listMemories: a refusal other than a cursor code propagates; a page without has_more is a parse error")
+    func listMemoriesRefusalAndMalformedPage() async throws {
+        let client = makeQueuedClient()
+        QueuedResponseProtocol.enqueue([(200, makeRefusalFrame(
+            tool: "moot_memory_list", code: "estate_unavailable", message: "closed", retryable: true))])
+        do {
+            _ = try await client.listMemories(locationPrefix: "harness-import/")
+            Issue.record("expected DaemonError.refused(estate_unavailable)")
+        } catch DaemonError.refused(let code, _) {
+            #expect(code == "estate_unavailable")
+        }
+
+        let noHasMore = """
+        {"jsonrpc":"2.0","id":1,"result":{"isError":false,"structuredContent":{"surface_version":"v2","tool":"moot_memory_list","data":{"memories":[],"revision":"abc"}},"content":[]}}
+        """.data(using: .utf8)!
+        QueuedResponseProtocol.enqueue([(200, noHasMore)])
+        do {
+            _ = try await client.listMemories(locationPrefix: "harness-import/")
+            Issue.record("expected DaemonError.parseError")
+        } catch DaemonError.parseError {
+            // A page that does not say whether more follow is not an empty wing.
+        }
+    }
+
+    @Test("listMemories: has_more true without next_cursor is an error, not a truncated wing")
+    func listMemoriesHasMoreWithoutCursorThrows() async throws {
+        let client = makeQueuedClient()
+        let page1 = try fixtureData("swift_memory_list_page1.json")
+        let rows = Array((try fixtureDataObject(page1)["memories"] as? [[String: Any]] ?? []).prefix(3))
+        QueuedResponseProtocol.enqueue([(200, try makeListFrame(rows: rows, hasMore: true, nextCursor: nil))])
+        do {
+            _ = try await client.listMemories(locationPrefix: "harness-import/")
+            Issue.record("expected DaemonError.parseError; the rest of the wing is unreachable")
+        } catch DaemonError.parseError {
+            // The Rust twin answers the same frame with Transport("malformed page").
+        }
+    }
+
+    @Test("listMemories: a repeated next_cursor is an error, not a truncated wing")
+    func listMemoriesRepeatedCursorThrows() async throws {
+        let client = makeQueuedClient()
+        let page1 = try fixtureData("swift_memory_list_page1.json")
+        let rows = Array((try fixtureDataObject(page1)["memories"] as? [[String: Any]] ?? []).prefix(3))
+        QueuedResponseProtocol.enqueue([
+            (200, try makeListFrame(rows: Array(rows.prefix(2)), hasMore: true, nextCursor: "c1")),
+            (200, try makeListFrame(rows: Array(rows.suffix(1)), hasMore: true, nextCursor: "c1")),
+        ])
+        do {
+            _ = try await client.listMemories(locationPrefix: "harness-import/")
+            Issue.record("expected DaemonError.parseError on a cursor already used")
+        } catch DaemonError.parseError {
+            // Two pages were read; neither is returned as the whole wing.
+        }
+        #expect(QueuedResponseProtocol.requests(for: "moot_memory_list").count == 2)
+    }
+
+    @Test("listMemories: an alternating cursor (c1, c2, c1) throws rather than spinning")
+    func listMemoriesAlternatingCursorThrowsRatherThanSpinning() async throws {
+        // The third page repeats the FIRST cursor, not the one immediately
+        // before it. A single-value "last cursor" comparison walks straight
+        // past this and loops forever; only tracking every cursor seen (a
+        // Set) catches it. Distinct rows on each page so the pages cannot be
+        // mistaken for one another.
+        let client = makeQueuedClient()
+        let page1 = try fixtureData("swift_memory_list_page1.json")
+        let rows = Array((try fixtureDataObject(page1)["memories"] as? [[String: Any]] ?? []).prefix(3))
+        QueuedResponseProtocol.enqueue([
+            (200, try makeListFrame(rows: [rows[0]], hasMore: true, nextCursor: "c1")),
+            (200, try makeListFrame(rows: [rows[1]], hasMore: true, nextCursor: "c2")),
+            (200, try makeListFrame(rows: [rows[2]], hasMore: true, nextCursor: "c1")),
+        ])
+        do {
+            _ = try await client.listMemories(locationPrefix: "harness-import/")
+            Issue.record("expected DaemonError.parseError on a cursor already used")
+        } catch DaemonError.parseError {
+            // Three pages were read; the client must not spin past the repeat.
+        }
+        let lists = QueuedResponseProtocol.requests(for: "moot_memory_list")
+        #expect(lists.count == 3, "the loop must stop at the third page, not spin forever")
+        #expect(QueuedResponseProtocol.arguments(of: lists[1])["cursor"] as? String == "c1", "second request carries page1's cursor")
+        #expect(QueuedResponseProtocol.arguments(of: lists[2])["cursor"] as? String == "c2", "third request carries page2's cursor")
+    }
+
+    @Test("restore through LiveDaemonClient: has_more without a cursor is one failed result and zero files")
+    func restoreThroughClientUnreachableTailWritesNothing() async throws {
+        let dir = try makeSandboxDir(tag: "restore-live-tail")
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let page1 = try fixtureData("swift_memory_list_page1.json")
+        let rows = Array((try fixtureDataObject(page1)["memories"] as? [[String: Any]] ?? []).prefix(3))
+        QueuedResponseProtocol.enqueue([(200, try makeListFrame(rows: rows, hasMore: true, nextCursor: nil))])
+        let client = makeQueuedClient()
+
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: client)
+
+        #expect(results.count == 1)
+        guard case .failed(let reason) = results[0].outcome else {
+            Issue.record("expected one .failed result, got \(results.map(\.outcome))"); return
+        }
+        #expect(reason.hasPrefix("Estate enumeration failed:"))
+        let projectsURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+        #expect(!FileManager.default.fileExists(atPath: projectsURL.path), "zero files written")
+    }
+
+    // MARK: Restore through the live client (files on disk are the assertion)
+
+    @Test("restore through LiveDaemonClient: cursor_stale restart, every record lands on disk")
+    func restoreThroughClientRestartsAndWritesAll() async throws {
+        let dir = try makeSandboxDir(tag: "restore-live-client")
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        let fx = try pageFixtures()
+        QueuedResponseProtocol.enqueue(
+            [(200, fx.page1), (200, kCursorStaleFrame), (200, fx.page1), (200, fx.page2)]
+            + (try makeGetFrames(rows: fx.rows)))
+        let client = makeQueuedClient()
+
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: client)
+
+        let restored = results.filter { if case .restored = $0.outcome { return true }; return false }
+        #expect(restored.count == fx.rows.count)
+        let memoryDir = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+            .appendingPathComponent("bigslug/memory")
+        let names = try FileManager.default.contentsOfDirectory(atPath: memoryDir.path)
+        // Every record's file, plus the MEMORY.md index restore regenerates for the slug.
+        var idsOnDisk = Set<String>()
+        for name in names where name != "MEMORY.md" {
+            let raw = try String(contentsOf: memoryDir.appendingPathComponent(name), encoding: .utf8)
+            if let id = HarnessMemoryFrontMatter.strip(raw).memoryId { idsOnDisk.insert(id) }
+        }
+        #expect(idsOnDisk.count == fx.rows.count)
+        #expect(idsOnDisk == Set(fx.rows.map(\.id)))
+        #expect(names.contains("MEMORY.md"))
+        #expect(names.count == fx.rows.count + 1)
+
+        let lists = QueuedResponseProtocol.requests(for: "moot_memory_list").map { QueuedResponseProtocol.arguments(of: $0) }
+        #expect(lists.count == 4)
+        #expect(lists[2]["cursor"] == nil, "the third list request restarts without a cursor")
+        #expect(QueuedResponseProtocol.requests(for: "moot_update_memory").isEmpty, "restore mutates nothing")
+    }
+
+    @Test("restore through LiveDaemonClient: a get refusal is one failed result and zero files")
+    func restoreThroughClientRefusalWritesNothing() async throws {
+        let dir = try makeSandboxDir(tag: "restore-live-refusal")
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+        // page1 fixture cut to three rows with has_more false.
+        let page1 = try fixtureData("swift_memory_list_page1.json")
+        let rows = Array((try fixtureDataObject(page1)["memories"] as? [[String: Any]] ?? []).prefix(3))
+        #expect(rows.count == 3)
+        QueuedResponseProtocol.enqueue([
+            (200, try makeListFrame(rows: rows, hasMore: false, nextCursor: nil)),
+            (200, kMemoryNotFoundFrame),
+        ])
+        let client = makeQueuedClient()
+
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: client)
+
+        #expect(results.count == 1)
+        guard case .failed(let reason) = results[0].outcome else {
+            Issue.record("expected one .failed result, got \(results.map(\.outcome))"); return
+        }
+        #expect(reason.hasPrefix("Estate enumeration failed:"))
+        #expect(reason.contains("memory_not_found"))
+        let projectsURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+        #expect(!FileManager.default.fileExists(atPath: projectsURL.path), "zero files written")
+    }
+}
+
+// MARK: - Live round trip (env-gated)
+
+/// Runs only with `MOOT_HARNESS_LIVE_PORT=<port>` set: restore the daemon's
+/// harness memories into a temp home, ingest every restored file back, and
+/// prove the estate's id set is unchanged. Nothing under the real home is touched.
+@Suite("HarnessMemory live round trip")
+struct HarnessMemoryLiveRoundTripTests {
+
+    @Test("restore then ingest against the live daemon leaves every id in place",
+          .enabled(if: ProcessInfo.processInfo.environment["MOOT_HARNESS_LIVE_PORT"] != nil))
+    func liveRoundTrip() async throws {
+        let port = try #require(Int(ProcessInfo.processInfo.environment["MOOT_HARNESS_LIVE_PORT"] ?? ""))
+        let client = LiveDaemonClient(port: port)
+        let dir = try makeSandboxDir(tag: "live-round-trip")
+        defer { cleanupSandbox(dir) }
+        let home = dir.appendingPathComponent("home")
+
+        let before = try await client.listMemories(locationPrefix: "harness")
+        let beforeIds = Set(before.map(\.id))
+        var byId: [String: HarnessMemoryRecord] = [:]
+        for record in before { byId[record.id] = record }
+
+        let results = await HarnessMemoryRestore.restore(homeDirectory: home, daemon: client)
+        let restored = results.filter { if case .restored = $0.outcome { return true }; return false }
+        if before.count > 200 {
+            #expect(restored.count > 200, "paging: more than one server page restored")
+        }
+
+        for result in restored {
+            let url = URL(fileURLWithPath: result.filePath)
+            let raw = try String(contentsOf: url, encoding: .utf8)
+            let stripped = HarnessMemoryFrontMatter.strip(raw)
+            let id = try #require(stripped.memoryId, "restored file carries its id: \(result.filePath)")
+            let record = try #require(byId[id], "restored id was listed before restore")
+            #expect(stripped.body == record.content, "body matches the row: \(result.location)")
+            #expect(record.location == result.location)
+        }
+
+        // Re-enable ingests every file in every restored directory, the generated
+        // MEMORY.md indexes included: those are discarded, every other file matches.
+        var matched = 0
+        var discardedIndexes = 0
+        let projectsURL = HarnessMemoryPaths.claudeProjectsURL(homeDirectory: home)
+        let slugs = try FileManager.default.contentsOfDirectory(atPath: projectsURL.path).sorted()
+        for slug in slugs {
+            let memoryDir = projectsURL.appendingPathComponent(slug).appendingPathComponent("memory")
+            for name in try FileManager.default.contentsOfDirectory(atPath: memoryDir.path).sorted() {
+                let url = memoryDir.appendingPathComponent(name)
+                let ingest = await HarnessMemoryIngest.ingestFile(url, projectSlug: slug, daemon: client)
+                switch ingest.outcome {
+                case .matched: matched += 1
+                case .discardedIndex: discardedIndexes += 1
+                case .filed: Issue.record("re-enable filed a fresh row for \(slug)/\(name)")
+                default: Issue.record("expected .matched or .discardedIndex for \(slug)/\(name), got \(ingest.outcome)")
+                }
+            }
+        }
+
+        let after = try await client.listMemories(locationPrefix: "harness")
+        let afterIds = Set(after.map(\.id))
+        #expect(beforeIds == afterIds, "the estate's id set is unchanged")
+        let locations = after.map(\.location)
+        #expect(Set(locations).count == locations.count, "no duplicate locations after re-enable")
+        #expect(matched == restored.count)
+        print("LIVE ROUND TRIP \(port): before=\(before.count) after=\(after.count) restored=\(restored.count) matched=\(matched) discarded_indexes=\(discardedIndexes) ids=\(afterIds.sorted().joined(separator: ","))")
     }
 }

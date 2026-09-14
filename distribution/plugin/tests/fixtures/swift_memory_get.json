@@ -1,0 +1,49 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "Fetched 1 authorized memories.",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "data": {
+        "memories": [
+          {
+            "confirmation": "unconfirmed",
+            "content": "# Notes for testslug",
+            "distilled": "# Notes for testslug",
+            "event_time": "2026-09-09T00:01:00Z",
+            "exportability": "private_",
+            "fetch": {
+              "arguments": {
+                "memory_id": "84de1bc0-ee45-4054-9eb8-f308d938172b"
+              },
+              "tool": "moot_memory_get"
+            },
+            "filed_at": "2026-09-09T18:27:48Z",
+            "lineage_id": "705c48c3-0843-4f6c-a466-bf31f4c2596f",
+            "memory_id": "84de1bc0-ee45-4054-9eb8-f308d938172b",
+            "placement": {
+              "room": "harness-import/testslug/notes.md",
+              "wing": "Agentic Memory"
+            },
+            "sensitivity": "normal",
+            "state": "active",
+            "subject": "notes for testslug",
+            "trust": "verbatim"
+          }
+        ]
+      },
+      "meta": {
+        "completeness": "incomplete",
+        "effect": "read"
+      },
+      "surface_version": "v2",
+      "tool": "moot_memory_get"
+    }
+  }
+}
