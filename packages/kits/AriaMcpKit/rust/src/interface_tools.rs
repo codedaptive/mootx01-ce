@@ -699,6 +699,7 @@ pub struct StructuredRow {
     pub room: Option<String>,
     pub content: Option<String>,
     pub subject: Option<String>,
+    pub skim: Option<crate::recall_skim::RecallSkim>,
 }
 
 impl StructuredRow {
@@ -713,6 +714,9 @@ impl StructuredRow {
         }
         if let Some(ref subject) = self.subject {
             object.insert("subject".to_string(), serde_json::Value::String(subject.clone()));
+        }
+        if let Some(ref skim) = self.skim {
+            object.insert("skim".to_string(), serde_json::to_value(skim).expect("string-only skim"));
         }
         serde_json::Value::Object(object)
     }
@@ -755,18 +759,21 @@ pub fn structured_recall_row(
     use locus_kit::provenance::Sensitivity;
     match drawer.sensitivity() {
         Sensitivity::Restricted => StructuredRow {
+            skim: None,
             id: id.to_string(),
             room,
             content: content.map(|_| crate::result_composer::RESTRICTED_MARKER.to_string()),
             subject: Some(crate::result_composer::RESTRICTED_MARKER.to_string()),
         },
         Sensitivity::Secret => StructuredRow {
+            skim: None,
             id: id.to_string(),
             room,
             content: content.map(|_| crate::result_composer::SECRET_MARKER.to_string()),
             subject: Some(crate::result_composer::SECRET_MARKER.to_string()),
         },
         _ => StructuredRow {
+            skim: None,
             id: id.to_string(),
             room,
             content,
@@ -789,6 +796,7 @@ pub fn structured_recall_row(
 /// Mirrors Swift `ToolDispatcher.opaqueStructuredRow`.
 pub fn opaque_structured_row(id: &str) -> StructuredRow {
     StructuredRow {
+        skim: None,
         id: id.to_string(),
         room: None,
         content: None,
@@ -1452,10 +1460,10 @@ fn run_memory_get(
     // `ids:[...]` makes the Case-2 winnow one call. Mirrors Swift
     // runMemoryGet.
     let depth = optional_string(args, "depth")?.unwrap_or("full").to_string();
-    if !["subject", "distilled", "full"].contains(&depth.as_str()) {
+    if !["subject", "distilled", "skim", "full"].contains(&depth.as_str()) {
         return Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
-            format!("Unknown depth: {depth}. Valid: subject, distilled, full"),
+            format!("Unknown depth: {depth}. Valid: subject, distilled, skim, full"),
         ));
     }
     let mut row_ids: Vec<String> = Vec::new();
@@ -1606,6 +1614,18 @@ fn run_memory_get(
                     lines.push(text.clone());
                     results.push(structured_recall_row(&d.id, room, Some(text), d));
                 }
+                "skim" => {
+                    let mut header = crate::result_composer::candidate_from_drawer(d);
+                    header.best_span = None;
+                    lines.push(crate::result_composer::render_s2_row(&header));
+                    let skim = crate::recall_skim::render(&d.content);
+                    lines.push(skim.text.clone());
+                    lines.push(format!("complete: {}; budgetHonored: {}", skim.complete, skim.budget_honored));
+                    lines.push(skim.savings.clone());
+                    let mut row = structured_recall_row(&d.id, room, None, d);
+                    row.skim = Some(skim);
+                    results.push(row);
+                }
                 _ => {
                     // depth:full in batch mode — repeat the full record shape.
                     lines.extend(memory_get_full_record_lines(&mut coord, &estate.handle, d)?);
@@ -1616,6 +1636,7 @@ fn run_memory_get(
                     // (admissible_by_id excludes them), so the row is built
                     // directly, not via the marker switch.
                     results.push(StructuredRow {
+                        skim: None,
                         id: d.id.clone(),
                         room,
                         content: Some(d.content.clone()),
@@ -1672,6 +1693,7 @@ fn run_memory_get(
     let get_node_names =
         coord.resolve_drawer_node_names(&estate.handle, &[drawer.parent_node_id.clone()]);
     let row = StructuredRow {
+        skim: None,
         id: drawer.id.clone(),
         room: get_node_names.get(&drawer.parent_node_id).map(|(_, room)| room.clone()),
         content: Some(drawer.content.clone()),

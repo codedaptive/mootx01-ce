@@ -57,6 +57,7 @@ impl<'a> EstateV2MemoryService<'a> {
             memory_id,
             subject: drawer.subject.clone(),
             distilled: Some(crate::v2::render::compact_text(&drawer.content)),
+            skim: None,
             content: Some(drawer.content.clone()),
             placement: Some(V2Placement { wing, room }),
             filed_at: Some(crate::result_composer::iso8601_flex(drawer.filed_at)),
@@ -790,4 +791,3 @@ fn parse_iso8601_ms(value: &str) -> Option<i64> {
     // Reuse the wire parser already pinned by the request-path bench clock.
     crate::dispatch::bench_clock_parse_iso8601_ms(value)
 }
-
