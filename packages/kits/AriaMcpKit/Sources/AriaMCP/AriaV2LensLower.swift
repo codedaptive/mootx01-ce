@@ -143,12 +143,11 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 guard AriaV2RecallLensPrivacy.classify(drawer) == .admissible else {
                     return .object(["id": .string(id), "centrality": .double(keystone.centrality)])
                 }
-                // Normalize bestSpan through the shared ResultComposer helper so
-                // newlines and whitespace runs collapse to spaces (matching Rust's
-                // normalize_value path in result_composer.rs). The noSubjectMarker
+                // Normalize and cut bestSpan through the shared ResultComposer helper.
+                // The noSubjectMarker
                 // matches Rust's NO_SUBJECT_MARKER = "(no subject)" via
                 // ARIAServerConstants, keeping both ports on the same wire value.
-                let span = ResultComposer.normalizeValue(drawer.content)
+                let span = ResultComposer.truncateFirstSentence(drawer.content)
                 return .object([
                     "id": .string(id),
                     "centrality": .double(keystone.centrality),
@@ -854,10 +853,9 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             guard AriaV2RecallLensPrivacy.classify(drawer) == .admissible else {
                 return .object(["id": .string(lowID)])
             }
-            // Normalize through shared helpers — mirrors Rust result_composer.rs
-            // candidate_from_drawer + normalize_value so both ports emit identical
+            // Normalize and cut through the shared helper so both ports emit identical
             // values for subject-debt drawers and multiline content.
-            let span = ResultComposer.normalizeValue(drawer.content)
+            let span = ResultComposer.truncateFirstSentence(drawer.content)
             return .object([
                 "id": .string(lowID),
                 "subject": .string(drawer.subject ?? ResultComposer.noSubjectMarker),
