@@ -3780,7 +3780,8 @@ fn lens_apriori_description_matches_swift_spec() {
 /// After filing a memory and running the dream cycle, the recall-trace table
 /// count must be zero — the cycle reads estate data through `all_drawers` and
 /// `all_tunnels` (no trace_limit), and writes only through `add_proposal` /
-/// `add_diary_entry`. This test is the force-proof mandated by the mission gate.
+/// `add_diary_entry`. This test drives the shipped cycle rather than a helper,
+/// so a future write path that does add a trace row fails here.
 
 // ---------------------------------------------------------------------------
 // Vault gating
