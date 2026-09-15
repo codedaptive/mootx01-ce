@@ -295,7 +295,8 @@ pub enum V2SearchTarget { Query(String), Near(Uuid) }
 
 /// Validated filter values for `moot_memory_search`. Unknown spellings are
 /// rejected at decode with `V2InvalidArgument`, producing a -32602 INVALID_PARAMS
-/// error rather than a success-shaped refusal envelope. Mirrors Swift decodeFilterChain.
+/// error rather than a success-shaped refusal envelope. Mirrors the Swift
+/// `AriaV2MemorySearchRequest` filter decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2SearchFilter { Unconfirmed, UserConfirmed, Exportable, Contained, Pinned }
 
@@ -603,11 +604,6 @@ pub fn execute_file_memory(mut request: V2FileMemoryRequest, dependencies: &V2Co
         Ok(filed) => success(FILE_MEMORY_TOOL, &FileData { memory_id: canonical_uuid(filed.memory_id), placement: filed.placement, fetch: fetch(filed.memory_id) }, &meta, &format!("filed memory {}", canonical_uuid(filed.memory_id))).map_err(jsonrpc_internal),
         Err(failure) => Ok(failure.render(FILE_MEMORY_TOOL, &meta)),
     }
-}
-
-pub fn run_memory_search(arguments: &JsonValue, dependencies: &V2CoreMemoryDependencies<'_>) -> Result<Value, JSONRPCError> {
-    let request = V2MemorySearchRequest::decode(arguments).map_err(V2InvalidArgument::into_jsonrpc_error)?;
-    execute_memory_search(request, dependencies)
 }
 
 pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2CoreMemoryDependencies<'_>) -> Result<Value, JSONRPCError> {
