@@ -219,13 +219,13 @@ struct UpgradeCommand: AsyncParsableCommand {
             refreshManifest(estate: estate)
             let okKG     = await runKGFactIdentityBackfill(estate: estate, home: home)
             let okSP     = await runSearchProjectionBackfill(estate: estate, home: home)
-            let okRecl   = await runSharedContentReclaimIfPending(estate: estate, home: home)
             let okVacuum = await runWholeRecordVacuum(estate: estate, home: home)
+            let okRecl   = await runSharedContentReclaimIfPending(estate: estate, home: home)
             let okFacts  = await runSSCFactsBackfill(estate: estate, home: home)
             let okDense  = await runDensePoolingConvergence(estate: estate, home: home)
             let okSpan   = await runSpanEncodeBackfill(estate: estate, home: home)
             let okVec    = await runVectorReclaim(estate: estate, home: home)
-            guard okKG && okSP && okRecl && okVacuum && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
+            guard okKG && okSP && okVacuum && okRecl && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
             return
         }
 
@@ -349,8 +349,8 @@ struct UpgradeCommand: AsyncParsableCommand {
                     refreshManifest(estate: estate)
                     await runKGFactIdentityBackfill(estate: estate, home: home)
                     await runSearchProjectionBackfill(estate: estate, home: home)
-                    await runSharedContentReclaimIfPending(estate: estate, home: home)
                     await runWholeRecordVacuum(estate: estate, home: home)
+                    await runSharedContentReclaimIfPending(estate: estate, home: home)
                     await runSSCFactsBackfill(estate: estate, home: home)
                     await runDensePoolingConvergence(estate: estate, home: home)
                     await runSpanEncodeBackfill(estate: estate, home: home)
@@ -990,10 +990,11 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// representation claim; the 1.7 to 1.8 capsule seeds fact_extraction),
     /// so this step counts the rows before the open, opens the estate through
     /// GeniusLocusKit, counts again, and returns the freed pages to the
-    /// filesystem with a VACUUM when anything was deleted. It runs after the
+    /// filesystem with a VACUUM when anything was deleted. It runs BEFORE the
     /// shared-content reclaim and before the ssc facts backfill: the first
-    /// estate open of the sequence, so the capsules' work is reported here
-    /// and every later step finds the estate at 1.8. Idempotent: a vacuumed
+    /// estate open of the sequence, so the migration chain runs here and leaves
+    /// the estate reclaim-pending; the shared-content reclaim step that follows
+    /// collects that state. Every later step finds the estate at 1.8. Idempotent: a vacuumed
     /// estate deletes nothing and skips the VACUUM. Twin of the Rust
     /// `run_whole_record_vacuum`.
     ///
@@ -1259,6 +1260,8 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// Opens the estate through GeniusLocusKit rather than raw storage because
     /// `completeSharedContentReclaim` accesses the estate via the GLK
     /// migration-host seam, which requires an open GLK handle.
+    /// Runs after the whole-record vacuum so the reclaim-pending state the
+    /// migration chain leaves is collected in the same upgrade.
     /// Returns `true` on success or when there is nothing to reclaim, `false` on failure.
     @discardableResult
     private func runSharedContentReclaimIfPending(estate: EstateRecord, home: URL) async -> Bool {
@@ -1625,8 +1628,8 @@ struct UpgradeCommand: AsyncParsableCommand {
             await runKGFactIdentityBackfill(estate: estate, home: home)
             await runSSCFactsBackfill(estate: estate, home: home)
             await runSearchProjectionBackfill(estate: estate, home: home)
-            await runSharedContentReclaimIfPending(estate: estate, home: home)
             await runWholeRecordVacuum(estate: estate, home: home)
+            await runSharedContentReclaimIfPending(estate: estate, home: home)
             await runDensePoolingConvergence(estate: estate, home: home)
             await runSpanEncodeBackfill(estate: estate, home: home)
             _ = await runVectorReclaim(estate: estate, home: home)
