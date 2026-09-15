@@ -50,6 +50,8 @@ fn g1_migration_seeds_five_preferences_creates_table_and_stamps_v1_9() {
     let keys = preference_seed_keys();
     assert_eq!(keys.len(), 5);
     assert!(!keys.contains(&EstatePreferenceKey::FactExtraction));
+    assert!(!keys.contains(&EstatePreferenceKey::FactExtractor),
+        "fact_extractor is not seeded; absent reads as Nuextract by default");
     for key in &keys {
         let raw_before = coord
             .estate_for(&handle)
@@ -138,4 +140,36 @@ fn g2_migration_preserves_explicit_off() {
         .read_if_present()
         .expect("read_if_present");
     assert_eq!(stamp, Some(EstateFormatVersion::V1_9), "capsule stamps V1_9 even when a value is pre-set");
+}
+
+// ---------------------------------------------------------------------------
+// G3 FactExtractor absent reads as Nuextract; Apple is accepted; On is refused
+// ---------------------------------------------------------------------------
+
+#[test]
+fn g3_fact_extractor_absent_reads_nuextract_apple_accepted_on_refused() {
+    let (coord, handle, _) = make_estate();
+
+    // Absent → default Nuextract.
+    let absent = coord
+        .provisioned_preference(&handle, EstatePreferenceKey::FactExtractor)
+        .expect("provisioned_preference");
+    assert_eq!(absent, EstatePreferenceValue::Nuextract);
+
+    // Write Apple and read it back.
+    coord
+        .provision_preference(&handle, EstatePreferenceKey::FactExtractor, EstatePreferenceValue::Apple)
+        .expect("provision Apple");
+    let stored = coord
+        .provisioned_preference(&handle, EstatePreferenceKey::FactExtractor)
+        .expect("provisioned_preference after set");
+    assert_eq!(stored, EstatePreferenceValue::Apple);
+
+    // On is outside allowed values for FactExtractor — must be refused.
+    let result = coord.provision_preference(
+        &handle,
+        EstatePreferenceKey::FactExtractor,
+        EstatePreferenceValue::On,
+    );
+    assert!(result.is_err(), "On must be refused for FactExtractor");
 }
