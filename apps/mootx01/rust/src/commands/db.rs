@@ -24,12 +24,15 @@
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
-use genius_locus_kit::estate_format::EstateFormatVersion;
+use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
 use genius_locus_kit::{
     EstateBackend, EstateCatalog, EstateCatalogNames, EstateManifest, EstateManifestEncryption,
-    EstateRecord, EstateRecordKind, EstateSelector,
+    EstateOpenPosture, EstateRecord, EstateRecordKind, EstateSelector,
 };
 use genius_locus_kit_migrations::{composite_schema_version, iso8601_utc};
+
+use locus_kit::drawer_store::DrawerStore;
+use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 
 use crate::cli::DbCommand;
 use crate::exit;
@@ -95,10 +98,8 @@ fn create(value: &str, no_encrypt: bool, now_millis: i64) -> Result<(), String> 
         return Err(format!("'{shown}' already exists; delete it or choose another name"));
     }
 
-    // The directory and the manifest are the estate's identity on disk; the
-    // substrate writes the SQLite file lazily on first open. The encryption
-    // posture is settled here, in the manifest, before the file exists — the
-    // same record install writes.
+    // Settle the encryption posture in the manifest before provisioning the
+    // database, so its first open uses the requested key custody.
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create '{shown}': {e}"))?;
     // Leave nothing behind on any later failure. An estate directory whose key
     // could not be provisioned would otherwise be opened as plaintext later,
@@ -119,15 +120,17 @@ fn create(value: &str, no_encrypt: bool, now_millis: i64) -> Result<(), String> 
     );
     EstateCatalog::write_manifest(&manifest, &record).map_err(|e| fail_closed(e.to_string()))?;
 
-    // The manifest written above is the record of the posture. Plaintext needs
-    // nothing more; an encrypted registered estate gets its key now. Rust key
-    // custody is `db.key` beside the database: minting it here rather than at
+    // The manifest records the posture; an encrypted registered estate gets
+    // its key before the database is opened. Rust key custody is `db.key`
+    // beside the database: minting it here rather than at
     // first open surfaces a failure while nothing is half-made, and delete
     // disposes of the key with the directory, which keeps create and delete
     // symmetric.
     if !no_encrypt {
         aria_mcp::ensure_install_key(&dir).map_err(|e| fail_closed(e.to_string()))?;
     }
+
+    provision_database(&record, now_millis).map_err(fail_closed)?;
 
     if registered {
         catalog
@@ -145,6 +148,36 @@ fn create(value: &str, no_encrypt: bool, now_millis: i64) -> Result<(), String> 
     } else {
         println!("Unregistered: attach it with `--db {shown}`, or `mootx01 db register {shown}`.");
     }
+    Ok(())
+}
+
+/// Provision a missing SQLite database and its current-format manifest for
+/// `db create` or a preference command. Existing databases are left intact;
+/// their format can only be advanced by `mootx01 upgrade`.
+pub(crate) fn provision_database(record: &EstateRecord, now_millis: i64) -> Result<(), String> {
+    if record.database_path().exists() {
+        return Ok(());
+    }
+    let posture = EstateOpenPosture::resolve(record).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&record.directory).map_err(|e| e.to_string())?;
+    if !record.manifest_path().exists() {
+        let manifest = EstateManifest::new(
+            &record.name,
+            composite_schema_version(),
+            EstateFormatVersion::CURRENT,
+            posture.manifest_encryption(),
+            iso8601_utc(now_millis),
+        );
+        EstateCatalog::write_manifest(&manifest, record).map_err(|e| e.to_string())?;
+    }
+    // The store creates the schema and adopts the sibling key for encrypted
+    // registered estates. Only this fresh database receives a format stamp.
+    let store = SqliteDrawerStore::from_path(
+        &record.database_path().to_string_lossy(), now_millis, None, 5.0,
+    ).map_err(|e| format!("could not provision estate '{}': {e:?}", record.name))?;
+    let storage = store.storage().ok_or("SQLite estate has no storage")?;
+    EstateFormatStore::new(storage).stamp(EstateFormatVersion::CURRENT, now_millis)
+        .map_err(|e| format!("could not stamp estate '{}': {e:?}", record.name))?;
     Ok(())
 }
 
@@ -295,6 +328,9 @@ mod tests {
         assert_eq!(manifest.encryption, EstateManifestEncryption::Encrypted);
         assert_eq!(manifest.created, "2026-09-08T00:00:00Z");
         assert!(record.directory.join(aria_mcp::INSTALL_KEY_FILE).exists(), "default create mints db.key");
+        assert!(record.database_path().is_file(), "database exists at provision");
+        let bytes = std::fs::read(record.database_path()).unwrap();
+        assert!(!bytes.starts_with(b"SQLite format 3"), "registered database is encrypted");
         assert_eq!(catalog.active().name, "default", "create does not activate");
     }
 
@@ -319,8 +355,26 @@ mod tests {
         assert!(!elsewhere.join("scratch").exists(), "nothing created on refusal");
 
         create(&value, true, 0).unwrap();
-        assert!(elsewhere.join("scratch").join(EstateCatalogNames::MANIFEST).exists());
+        let record = EstateRecord::with("scratch", elsewhere.join("scratch"), EstateRecordKind::Transient, EstateBackend::Sqlite);
+        assert!(record.manifest_path().is_file());
+        assert!(record.database_path().is_file(), "database exists before first serve");
+        let store = SqliteDrawerStore::from_path(&record.database_path().to_string_lossy(), 0, None, 5.0).unwrap();
+        assert_eq!(EstateFormatStore::new(store.storage().unwrap()).read_if_present().unwrap(), Some(EstateFormatVersion::CURRENT));
         assert!(EstateCatalog::open().unwrap().record_named("scratch").is_none(), "pathname stays unregistered");
+    }
+
+    #[test]
+    fn provisioning_keeps_an_existing_estates_format_and_manifest() {
+        let s = configuration("provision-existing");
+        let record = EstateRecord::with("scratch", s.dir.join("scratch"), EstateRecordKind::Transient, EstateBackend::Sqlite);
+        provision_database(&record, 0).unwrap();
+        let manifest = std::fs::read(record.manifest_path()).unwrap();
+        let store = SqliteDrawerStore::from_path(&record.database_path().to_string_lossy(), 0, None, 5.0).unwrap();
+        let format = EstateFormatStore::new(store.storage().unwrap());
+        format.stamp(EstateFormatVersion::V1_8, 0).unwrap();
+        provision_database(&record, 1000).unwrap();
+        assert_eq!(format.read_if_present().unwrap(), Some(EstateFormatVersion::V1_8));
+        assert_eq!(std::fs::read(record.manifest_path()).unwrap(), manifest);
     }
 
     #[test]
@@ -388,6 +442,7 @@ mod tests {
         let dir = s.dir.join("databases").join("work");
         let outside = s.dir.join("outside.sqlite");
         std::fs::write(&outside, b"x").unwrap();
+        std::fs::remove_file(dir.join("estate.sqlite")).unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("estate.sqlite")).unwrap();
         assert!(delete("work", true, || true).is_err(), "a file pointing outside the estate blocks delete");
         assert!(outside.exists());
