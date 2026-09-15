@@ -58,6 +58,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "{#BinDir}\mootx01.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\moot-mgr.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; The fact-extraction worker the daemon spawns as a sibling process.
+Source: "{#BinDir}\moot-nuextract-worker.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; Encoder model: packed alongside the binaries in the release zip at
 ; share\mootx01\models\arctic-embed-s-w60\. Installed one level above {app}
 ; so the Rust resolver's <exe>/../share/mootx01/models/<id>/ slot finds it.
@@ -67,6 +69,10 @@ Source: "{#BinDir}\moot-mgr.exe"; DestDir: "{app}"; Flags: ignoreversion skipifs
 Source: "{#BinDir}\share\mootx01\models\arctic-embed-s-w60\*"; \
   DestDir: "{app}\..\share\mootx01\models\arctic-embed-s-w60"; \
   Flags: ignoreversion recursesubdirs createallsubdirs
+; Fact-extraction model (GGUF + tokenizer) in the same share slot.
+Source: "{#BinDir}\share\mootx01\models\nuextract-tiny-v1.5\*"; \
+  DestDir: "{app}\..\share\mootx01\models\nuextract-tiny-v1.5"; \
+  Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 ; Migrate pre-1.0.6 beta installs that landed in Roaming AppData: remove
@@ -74,6 +80,7 @@ Source: "{#BinDir}\share\mootx01\models\arctic-embed-s-w60\*"; \
 ; Roaming PATH entry (if any) is harmless once these are gone.
 Type: files; Name: "{userappdata}\.mootx01\bin\mootx01.exe"
 Type: files; Name: "{userappdata}\.mootx01\bin\moot-mgr.exe"
+Type: files; Name: "{userappdata}\.mootx01\bin\moot-nuextract-worker.exe"
 
 [Registry]
 ; Add the install dir to the user PATH (same effect as install.ps1).
