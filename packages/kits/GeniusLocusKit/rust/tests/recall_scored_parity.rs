@@ -321,6 +321,7 @@ fn a9_glk_recall_result_drawers_filters_none() {
         lane_ranks: std::collections::HashMap::new(),
         query_lattice_anchor: None,
         cross_encoder: None,
+        route: None,
         hits,
     };
     // No drawers have Some(drawer), so drawers() returns empty.
