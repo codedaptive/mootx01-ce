@@ -15,20 +15,26 @@
 // Tests:
 //   1. After prepare: kind 1 and the graph rows are gone, the kind 0 and
 //      kind 2 counts are unchanged, the lane-1 claim is released and the
-//      lane-0 claim kept, the estate is stamped v1_7, and the binary lane
-//      returns the same ordered ids as before.
+//      lane-0 claim kept, the estate is stamped current (the chain runs on
+//      through the 1.7→1.8 capsule after this one stamps v1_7), and the
+//      binary lane returns the same ordered ids as before.
 //   2. The capsule's report carries the counts; a second run deletes
-//      nothing, releases nothing and leaves the stamp at v1_7.
-//   3. The format value is pinned: current is v1_7.
-//   4. Fresh estate (nil stamp): prepare stamps v1_7 without running the
+//      nothing, releases nothing and reports v1_7 again; prepare afterwards
+//      carries the estate to current.
+//   3. The format values are pinned: current is v1_8, and v1_7 keeps its
+//      (1, 7) identity, above v1_6 and below current.
+//   4. Fresh estate (nil stamp): prepare stamps current without running the
 //      capsule.
 //   5. On a SQLite estate the `.vec` sidecar is rewritten by the capsule and
 //      a fresh store loads it without a rebuild.
 //   6. v1_5-stamped estate: the chain runs the 1.5→1.6 capsule and then this
-//      one, ending at v1_7 (gated on the 1.5→1.6 capsule being compiled).
+//      one, ending at current (gated on the 1.5→1.6 capsule being compiled).
 //   7. Under WholeRecordDense an estate whose manifest names a whole-record
 //      provider keeps its rows and is still stamped v1_7; the span encoder
 //      value vacuums like the default ensemble.
+//   8. v1_7-stamped estate: the chain's `found < .v1_7` guard skips this
+//      capsule, so the float rows, the graph row and the lane-1 claim survive
+//      prepare and the estate still ends at current.
 
 import CorpusKit
 import EngramLib
@@ -135,7 +141,7 @@ private func inMemory() -> InMemoryStorage {
 @Suite("WholeRecordFloatVacuumMigration", .serialized)
 struct WholeRecordFloatVacuumMigrationTests {
 
-    // MARK: §1 The float and graph rows go, the binary and span rows stay, v1_7 stamped
+    // MARK: §1 The float and graph rows go, the binary and span rows stay, current stamped
 
     @Test
     func v1_6EstateLosesFloatAndGraphRowsAndKeepsTheRest() async throws {
@@ -150,10 +156,9 @@ struct WholeRecordFloatVacuumMigrationTests {
         #expect(before == ["i1", "i2"])
 
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_7)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_7)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await kindCount(storage, 0) == 2)
         #expect(try await kindCount(storage, 1) == 0)
         #expect(try await kindCount(storage, 2) == 2)
@@ -175,7 +180,7 @@ struct WholeRecordFloatVacuumMigrationTests {
         #expect(second == WholeRecordFloatVacuumMigrationReport(
             floatRows: 0, graphRows: 0, claimsReleased: 0, vacuumed: true, format: .v1_7))
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_7)
+        #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(try await kindCount(storage, 0) == 2)
         #expect(try await kindCount(storage, 2) == 2)
@@ -185,10 +190,11 @@ struct WholeRecordFloatVacuumMigrationTests {
     // MARK: §3 The format value is pinned
 
     @Test
-    func currentFormatIsV1_7() {
-        #expect(EstateFormatVersion.current == .v1_7)
+    func currentFormatIsV1_8() {
+        #expect(EstateFormatVersion.current == .v1_8)
         #expect(EstateFormatVersion.v1_7 == EstateFormatVersion(major: 1, minor: 7))
         #expect(EstateFormatVersion.v1_6 < EstateFormatVersion.v1_7)
+        #expect(EstateFormatVersion.v1_7 < EstateFormatVersion.current)
     }
 
     // MARK: §4 Fresh estate (nil stamp)
@@ -201,9 +207,9 @@ struct WholeRecordFloatVacuumMigrationTests {
         let handle = try await kit.open(
             storage: storage, owner: testOwner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_7)
+        #expect(prep.format == .current)
         #expect(prep.migrated == false)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_7)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         // The capsule never ran: no SynapseKit ledger row was created by it.
         #expect(try await storage.currentSchemaVersion(for: VectorStore.kitID) == 0)
     }
@@ -233,12 +239,14 @@ struct WholeRecordFloatVacuumMigrationTests {
         #expect(after == before)
         #expect(await fresh.sidecarRebuildCount == 0, "the sidecar the capsule wrote is current")
         #expect(try await kindCount(storage, 1) == 0)
+        // The 1.6→1.7 capsule stamps .v1_7; this pins the capsule's own output,
+        // not the chain's final stamp (which would be .current after all capsules run).
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_7)
         try await kit.close(handle)
         await storage.close()
     }
 
-    // MARK: §6 Chain from v1_5 ends at v1_7
+    // MARK: §6 Chain from v1_5 ends at current
 
     #if GLK_MIGRATION_V1_5_TO_V1_6
     @Test
@@ -246,8 +254,8 @@ struct WholeRecordFloatVacuumMigrationTests {
         let storage = inMemory()
         let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_5)
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_7)
-        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_7)
+        #expect(prep.format == .current)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await kindCount(storage, 1) == 0)
         #expect(try await graphCount(storage) == 0)
         #expect(try await kindCount(storage, 0) == 2)
@@ -283,6 +291,29 @@ struct WholeRecordFloatVacuumMigrationTests {
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_7)
     }
     #endif
+
+    // MARK: §8 Chain from v1_7 skips this capsule: the rows survive
+
+    /// The catalog runs this capsule only when `found < .v1_7`. An estate
+    /// stamped exactly v1_7 carries the rows the capsule would delete, so
+    /// their survival is what shows the guard skipped it: without the guard
+    /// the kind 1 count drops to 0, the graph row goes and the lane-1 claim
+    /// is released, and each of those assertions goes red.
+    @Test
+    func v1_7EstateKeepsTheRowsBecauseTheChainSkipsTheCapsule() async throws {
+        let storage = inMemory()
+        let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_7)
+        let before = try await orderedIDs(storage)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        #expect(prep.format == .current)
+        #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
+        #expect(try await kindCount(storage, 1) == 2, "the guard kept the float rows")
+        #expect(try await graphCount(storage) == 1, "the guard kept the graph row")
+        #expect(try await claimLanes(storage) == [0, 1], "the guard kept the lane-1 claim")
+        #expect(try await kindCount(storage, 0) == 2)
+        #expect(try await kindCount(storage, 2) == 2)
+        #expect(try await orderedIDs(storage) == before)
+    }
 }
 
 #endif // GLK_MIGRATION_V1_6_TO_V1_7

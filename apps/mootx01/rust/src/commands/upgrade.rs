@@ -75,7 +75,7 @@ pub fn run(
     // daemon only when a live resident serves this estate. This explicit
     // estate-only path retains its own ordering: schema gate → correctness
     // migration → projection backfill → VACUUM-backed reclaim → whole-record
-    // vacuum (the first estate open, so the 1.6 → 1.7 capsule runs and reports here) → ssc
+    // vacuum (the first estate open, so the migration chain runs and reports here) → ssc
     // facts → dense pooling convergence → span encode → vector reclaim.
     // A refused schema version stops the sequence (every later step would
     // open the schema and stamp it); otherwise all steps run even when
@@ -499,11 +499,12 @@ fn run_kg_fact_identity_backfill(record: &EstateRecord) -> bool {
 
 /// Populate `kg_facts.searchProjection` and
 /// `kg_facts.searchProjectionVersion` for rows that the v19 → v20
-/// migration added those columns to. Before this backfill those rows were
-/// invisible to `FactFirstRecall`'s hard guard (which excludes any fact
-/// with an empty searchProjection). `mootx01 upgrade` is the ONLY
-/// migration vehicle (Bob's ruling) — no detection or prompting lives
-/// anywhere else.
+/// migration added those columns to. A fact with an empty
+/// `searchProjection` is invisible to any consumer that filters on the
+/// projection (the contract: a row must carry a non-empty, current-version
+/// projection to participate in fact-search results). `mootx01 upgrade`
+/// is the ONLY migration vehicle (Bob's ruling) — no detection or
+/// prompting lives anywhere else.
 ///
 /// Idempotent: rows whose searchProjectionVersion already matches are
 /// skipped. A second run over a fully-projected estate reports scanned: 0.
@@ -826,14 +827,15 @@ fn run_span_encode_backfill(record: &EstateRecord) -> bool {
 /// (`dense-families` feature off). Their rows serve nothing at 19 or 20.
 /// Vacuum the whole-record float rows (`vectors` kind 1) and the `hnsw_graph`
 /// rows nothing serves any more (GENIUSLOCUSKIT_SPEC I-26). The 1.6 → 1.7
-/// capsule does the work inside the registry's migration chain when the
-/// estate opens (it also rebuilds the binary sidecar and releases the float
-/// representation claim), so this step counts the rows before the open, opens
-/// the estate through the registry's maintenance path, counts again, and
+/// and 1.7 → 1.8 capsules do the work inside the registry's migration chain
+/// when the estate opens (the 1.6 → 1.7 capsule also rebuilds the binary
+/// sidecar and releases the float representation claim; the 1.7 → 1.8 capsule
+/// seeds fact_extraction), so this step counts the rows before the open,
+/// opens the estate through the registry's maintenance path, counts again, and
 /// returns the freed pages to the filesystem with a VACUUM when anything was
 /// deleted. It runs after the shared-content reclaim and before the ssc facts
-/// backfill: the first estate open of the sequence, so the capsule's work is
-/// reported here and every later step finds the estate at 1.7. Idempotent: a
+/// backfill: the first estate open of the sequence, so the capsules' work is
+/// reported here and every later step finds the estate at 1.8. Idempotent: a
 /// vacuumed estate deletes nothing and skips the VACUUM. Twin of Swift
 /// `UpgradeCommand.runWholeRecordVacuum`.
 ///
@@ -857,8 +859,8 @@ fn run_whole_record_vacuum(record: &EstateRecord) -> bool {
             let result = (|| -> Result<(usize, usize, i64), String> {
                 let before = whole_record_row_counts(&path, now)?;
                 // The maintenance open runs the migration chain, which runs the
-                // 1.6 → 1.7 capsule on an estate that has not taken it yet.
-                // Dropping the registry stops and joins the drain worker.
+                // 1.6 → 1.7 and 1.7 → 1.8 capsules on an estate that has not
+                // taken them yet. Dropping the registry stops and joins the drain worker.
                 let reg = aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
                     &path,
                     "aria-mcp-default",

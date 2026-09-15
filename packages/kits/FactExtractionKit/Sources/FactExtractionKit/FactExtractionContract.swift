@@ -43,9 +43,9 @@ public struct FactExtractorModelSpec: Sendable, Codable, Equatable, Hashable {
     }
 }
 
-/// A source range selected by ContextDistillLib. Both offset systems are
-/// carried because Foundation strings and worker protocols do not share an
-/// implicit indexing unit.
+/// A source range in the original drawer body. Both offset systems are carried
+/// because Foundation strings and worker protocols do not share an implicit
+/// indexing unit.
 public struct FactSourceSpan: Sendable, Codable, Equatable, Hashable {
     public let start: Int
     public let end: Int
@@ -58,29 +58,88 @@ public struct FactSourceSpan: Sendable, Codable, Equatable, Hashable {
         self.startUTF8Byte = startUTF8Byte
         self.endUTF8Byte = endUTF8Byte
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case start
+        case end
+        case startUTF8Byte = "startUtf8Byte"
+        case endUTF8Byte = "endUtf8Byte"
+    }
 }
 
-/// Provider input. Only distilled text and the allowed evidence ranges cross
-/// the inference boundary; the original source stays with the host validator.
+/// Provider input. `sourceText` is an exact contiguous slice of the original
+/// drawer body; the host validates model evidence against that same body.
 public struct FactExtractionRequest: Sendable, Codable, Equatable {
     public let sourceID: String
     public let sourceDigest: String
-    public let distilledText: String
+    public let sourceText: String
     public let eligibleSourceSpans: [FactSourceSpan]
     public let maximumFacts: Int
 
     public init(
         sourceID: String,
         sourceDigest: String,
-        distilledText: String,
+        sourceText: String,
         eligibleSourceSpans: [FactSourceSpan],
         maximumFacts: Int
     ) {
         self.sourceID = sourceID
         self.sourceDigest = sourceDigest
-        self.distilledText = distilledText
+        self.sourceText = sourceText
         self.eligibleSourceSpans = eligibleSourceSpans
         self.maximumFacts = maximumFacts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sourceID = "sourceId"
+        case sourceDigest
+        case sourceText
+        case eligibleSourceSpans
+        case maximumFacts
+    }
+}
+
+/// One source-exact model input and its offsets in the original drawer body.
+public struct FactSourceChunk: Sendable, Equatable {
+    public let text: String
+    public let span: FactSourceSpan
+
+    public init(text: String, span: FactSourceSpan) {
+        self.text = text
+        self.span = span
+    }
+}
+
+/// Deterministic source-exact chunking for model context limits. Adjacent
+/// chunks overlap by up to the grounding evidence limit so a supported quote
+/// is not lost merely because it crosses a model-input boundary.
+public enum FactSourceChunker {
+    public static func chunks(
+        originalSource: String,
+        maximumCharacters: Int,
+        overlapCharacters: Int = FactGroundingValidator.maximumEvidenceCharacters
+    ) -> [FactSourceChunk] {
+        guard maximumCharacters > 0, !originalSource.isEmpty else { return [] }
+        let scalars = Array(originalSource.unicodeScalars)
+        let overlap = min(max(overlapCharacters, 0), max(maximumCharacters - 1, 0))
+        var byteOffsets = [Int](repeating: 0, count: scalars.count + 1)
+        for index in scalars.indices {
+            byteOffsets[index + 1] = byteOffsets[index] + String(scalars[index]).utf8.count
+        }
+
+        var result: [FactSourceChunk] = []
+        var start = 0
+        while start < scalars.count {
+            let end = min(start + maximumCharacters, scalars.count)
+            result.append(FactSourceChunk(
+                text: String(String.UnicodeScalarView(scalars[start..<end])),
+                span: FactSourceSpan(
+                    start: start, end: end,
+                    startUTF8Byte: byteOffsets[start], endUTF8Byte: byteOffsets[end])))
+            guard end < scalars.count else { break }
+            start = end - overlap
+        }
+        return result
     }
 }
 
@@ -139,6 +198,15 @@ public struct FactExtractionResponse: Sendable, Codable, Equatable {
         self.schemaVersion = schemaVersion
         self.candidates = candidates
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case sourceDigest
+        case providerID = "providerId"
+        case modelID = "modelId"
+        case modelVersion
+        case schemaVersion
+        case candidates
+    }
 }
 
 /// A candidate that has been resolved to exact original-source offsets.
@@ -184,7 +252,7 @@ public enum FactExtractionError: Error, Sendable, Equatable {
 }
 
 /// Provider-neutral extraction seam. Implementations include Apple's
-/// Foundation Models adapter and the resident NuExtract worker client.
+/// Foundation Models and native NuExtract adapters.
 public protocol FactExtractor: Sendable {
     var spec: FactExtractorModelSpec { get }
     func extract(_ request: FactExtractionRequest) async throws -> FactExtractionResponse

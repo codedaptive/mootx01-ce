@@ -2,6 +2,7 @@ import Foundation
 import MootProductIdentity
 import AriaMCP
 import CognitionKit
+import FactExtractionKit
 import GeniusLocusKit
 import NeuronKit
 import ObserverSink
@@ -251,6 +252,13 @@ public enum AriaResident {
         /// Estate→vault poll interval in seconds (default 60).
         /// Controls how often exportable drawers are pushed from estate to vault.
         public var vaultEstatePollSeconds: Int
+        /// Fact extractor to activate at estate open (when the estate's
+        /// fact_extraction setting is `.on`). `nil` means no extractor is available
+        /// and Signal 14 remains inert regardless of the setting. Resolved by the
+        /// caller (ServeCommand) so the daemon reads no environment and no paths
+        /// itself. The extractor carries its own FactExtractorModelSpec, which
+        /// `runResidentDaemon` uses to derive the recipe ID.
+        public var factExtractor: (any FactExtractor)?
 
         public init(
             port: UInt16,
@@ -259,7 +267,8 @@ public enum AriaResident {
             monitoringPollMs: Int,
             statsStorePath: String?,
             vaultPath: String? = nil,
-            vaultEstatePollSeconds: Int = 60
+            vaultEstatePollSeconds: Int = 60,
+            factExtractor: (any FactExtractor)? = nil
         ) {
             self.port = port
             self.maxBodyBytes = maxBodyBytes
@@ -268,6 +277,84 @@ public enum AriaResident {
             self.statsStorePath = statsStorePath
             self.vaultPath = vaultPath
             self.vaultEstatePollSeconds = vaultEstatePollSeconds
+            self.factExtractor = factExtractor
+        }
+    }
+
+    // MARK: - Fact-extraction activation
+
+    /// Batch limit for one Signal 14 invocation. 16 sources per cycle keeps
+    /// per-tick latency predictable; the signal fires every 300 seconds and
+    /// schedules until bit-28 debt is cleared, so throughput is bounded by
+    /// the duty cadence rather than by the batch limit.
+    static let factExtractionBatchLimit = 16
+
+    /// Decide whether Signal 14 (fact-extraction) runs live and, if so, activate
+    /// the extractor. Returns the live cycle closure when activation succeeds,
+    /// or `nil` when the signal should remain inert.
+    ///
+    /// All three cases are resolved here so the daemon path and the test suite
+    /// drive exactly the same logic:
+    ///
+    /// - `.off`: the operator has disabled extraction; the signal stays inert.
+    /// - `.on`, extractor `nil`: no extractor was provisioned (model assets
+    ///   absent or unavailable); the signal stays inert. This is the common
+    ///   case in a fresh install that carries no CoreAI asset. Logged, not fatal.
+    /// - `.on`, extractor non-nil: activate the recipe, wire the live cycle.
+    ///
+    /// The recipe ID is derived from the extractor's own spec so that changing
+    /// the model clears bit-28 debt estate-wide:
+    ///   `"\(providerID):\(modelID):\(modelVersion)"`
+    /// This form is the cross-port contract (unit 2a constructs the identical
+    /// string in Rust from the same three spec fields).
+    ///
+    /// - Parameters:
+    ///   - setting: The estate's `fact_extraction` setting.
+    ///   - extractor: The extractor resolved by the caller, or `nil` if absent.
+    ///   - kit: The running GeniusLocusKit coordinator.
+    ///   - handle: The open estate.
+    /// - Returns: A live cycle closure, or `nil` when the signal stays inert.
+    static func resolveFactExtractionCycle(
+        setting: FactExtractionSetting,
+        extractor: (any FactExtractor)?,
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async -> (@Sendable (Date) async throws -> Int)? {
+        switch setting {
+        case .off:
+            // Operator opt-out: preserve today's behaviour exactly.
+            return nil
+        case .on:
+            guard let extractor else {
+                // No extractor available — model assets absent or not installed.
+                // This is the common field case; log and continue.
+                Logging.stderr.log(
+                    "AriaResident fact extraction: setting=on but no extractor available " +
+                    "(install coreai_asset + coreai_tokenizer in config.json to enable CoreAI NuExtract)")
+                return nil
+            }
+            // Derive the recipe ID from the extractor's own spec so a model change
+            // clears bit-28 debt estate-wide (cross-port contract: same three-field
+            // colon-separated form as the Rust port).
+            let spec = extractor.spec
+            let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
+            do {
+                let cleared = try await kit.activateFactExtractor(
+                    extractor, recipeID: recipeID, for: handle)
+                Logging.stderr.log(
+                    "AriaResident fact extraction activated: recipe=\(recipeID) " +
+                    "provider=\(spec.providerID) cleared=\(cleared)")
+                return { now in
+                    let result = try await kit.runFactExtractionBatch(
+                        handle, limit: AriaResident.factExtractionBatchLimit, now: now)
+                    return result.factsFiled
+                }
+            } catch {
+                Logging.stderr.log(
+                    "AriaResident fact-extraction activation failed: \(error). " +
+                    "Signal 14 will remain inert.")
+                return nil
+            }
         }
     }
 
@@ -446,6 +533,26 @@ public enum AriaResident {
         // cadences so a drawer filed between fires is never missed. The hunt
         // persists proposed contradicts tunnels itself; the closure returns
         // counts only (single-write invariant, same as dreamingCycle).
+        // Fact-extraction activation (FACT_EXTRACTION_WIRE §2b).
+        // Read the estate setting and resolve the live cycle closure
+        // BEFORE registering standing signals so Signal 14 starts in the
+        // correct state.  If the setting read throws (e.g. storage offline
+        // during open), treat as .on — the cycle closure will still be nil
+        // if no extractor was provisioned, which is the safe inert path.
+        let factExtractionSetting: FactExtractionSetting
+        do {
+            factExtractionSetting = try await kit.provisionedFactExtraction(for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedFactExtraction read failed (\(error)) — defaulting to .on")
+            factExtractionSetting = .on
+        }
+        let factExtractionCycleClosure = await AriaResident.resolveFactExtractionCycle(
+            setting: factExtractionSetting,
+            extractor: config.factExtractor,
+            kit: kit,
+            handle: handle)
+
         if let vectorStore = vectorStore {
             do {
                 _ = try await kit.registerDefaultStandingSignals(
@@ -474,6 +581,10 @@ public enum AriaResident {
                     spanEncodeCycle: { now in
                         try await kit.runSpanEncodeBatch(handle: handle, now: now)
                     },
+                    // Live fact-extraction cycle (FACT_EXTRACTION_WIRE §2b):
+                    // non-nil when setting=.on AND an extractor is provisioned;
+                    // nil (inert default) when setting=.off or no extractor.
+                    factExtractionCycle: factExtractionCycleClosure ?? { _ in 0 },
                     now: Date()
                 )
                 Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults)")

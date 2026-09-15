@@ -12,7 +12,7 @@
 //      whose checkpoint row carries the column: after prepare the column is
 //      gone, the row's other fields are intact, the ledger reads v4 and the
 //      estate is stamped current (the chain continues through the 1.6→1.7
-//      capsule after this one stamps v1_6).
+//      and 1.7→1.8 capsules after this one stamps v1_6).
 //   2. The same on an estate with NO CorpusKitIndexState ledger row (the
 //      composite-declaration shape every provisioned estate has): the ladder
 //      replays from version 0 and still drops the column.
@@ -22,9 +22,9 @@
 //      capsule and without recording a CorpusKitIndexState row.
 //   5. On a SQLite estate the column is physically gone (a row read returns
 //      no such key) and the row survives.
-//   6. v1_4-stamped estate: the chain runs the 1.4→1.5 capsule, this one and
-//      the 1.6→1.7 capsule, ending at current (gated on the 1.4→1.5 capsule
-//      being compiled).
+//   6. v1_4-stamped estate: the chain runs the 1.4→1.5 capsule, this one,
+//      the 1.6→1.7 capsule and the 1.7→1.8 capsule, ending at current (gated
+//      on the 1.4→1.5 capsule being compiled).
 
 import CorpusKit
 import Foundation
@@ -116,7 +116,7 @@ private func checkpointRow(_ storage: any Storage) async throws -> StorageRow {
 @Suite("IndexCompositionColumnDropMigration", .serialized)
 struct IndexCompositionColumnDropMigrationTests {
 
-    // MARK: §1 Ledger at v3: the column goes, the row stays, v1_6 stamped
+    // MARK: §1 Ledger at v3: the column goes, the row stays, current stamped
 
     @Test
     func v1_5EstateWithLedgerRowDropsTheColumn() async throws {
@@ -126,7 +126,6 @@ struct IndexCompositionColumnDropMigrationTests {
         #expect(try await checkpointRow(storage)["composition_policy"] == .text("lex=original;dense=original"))
 
         let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
-        #expect(prep.format == .v1_7)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)

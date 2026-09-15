@@ -64,6 +64,7 @@
   },
   "queues": {
     "ariaHTTPAccept": "com.mootx01.aria-mcp.http.accept",
+    "ariaHTTPRawRead": "com.mootx01.aria-mcp.raw-read",
     "managerControlChannelAccept": "com.mootx01.mgr.control-channel.accept",
     "managerHTTPReadAPIAccept": "com.mootx01.mgr.http-read-api.accept",
     "lanDiscovery": "com.mootx01.lan-discovery",

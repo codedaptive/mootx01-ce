@@ -1,11 +1,10 @@
-import ContextDistillLib
 import CryptoKit
 import FactExtractionKit
 import Foundation
 import LocusKit
 import SubstrateKernel
 
-/// Outcome of one bounded distilled-fact duty invocation.
+/// Outcome of one bounded source-grounded fact duty invocation.
 public struct FactExtractionBatchResult: Sendable, Equatable {
     public let completedSources: Int
     public let factsFiled: Int
@@ -72,9 +71,9 @@ public extension GeniusLocusKit {
         factExtractors[handle]
     }
 
-    /// Run a bounded extraction batch. ContextDistillLib is the sole
-    /// preprocessor; the model sees its mining body, while grounding resolves
-    /// evidence against the unchanged original source.
+    /// Run a bounded extraction batch. Models see only source-exact chunks of
+    /// the original drawer body, and grounding resolves evidence against that
+    /// same unchanged body.
     func runFactExtractionBatch(
         _ handle: EstateHandle,
         limit: Int = 16,
@@ -106,31 +105,47 @@ public extension GeniusLocusKit {
                 continue
             }
             do {
-                let distilled = ContextDistiller().distill(
-                    ContextDistillLib.DistillationInput(original: source),
-                    converter: .intentSpanV23Attributed)
-                let spans = distilled.selectedSourceSpans.compactMap(Self.factSourceSpan)
-                let distilledText = String(
-                    distilled.miningBody.unicodeScalars.prefix(
-                        extractor.spec.maximumInputCharacters))
-                let request = FactExtractionRequest(
-                    sourceID: drawer.id,
-                    sourceDigest: distilled.sourceSHA256,
-                    distilledText: distilledText,
-                    eligibleSourceSpans: spans,
-                    maximumFacts: extractor.spec.maximumFactsPerSource)
-                let response = try await extractor.extract(request)
-                let grounding = FactGroundingValidator.validate(
-                    response: response, request: request, originalSource: source,
-                    expectedSpec: extractor.spec)
-                rejected += grounding.rejected.count
+                let sourceDigest = Self.factSourceDigest(source)
+                let chunks = FactSourceChunker.chunks(
+                    originalSource: source,
+                    maximumCharacters: extractor.spec.maximumInputCharacters)
+                var groundedCandidates: [GroundedFactCandidate] = []
+                var sourceRejected = 0
+                for chunk in chunks {
+                    let request = FactExtractionRequest(
+                        sourceID: drawer.id,
+                        sourceDigest: sourceDigest,
+                        sourceText: chunk.text,
+                        eligibleSourceSpans: [chunk.span],
+                        maximumFacts: extractor.spec.maximumFactsPerSource)
+                    let response = try await extractor.extract(request)
+                    let grounding = FactGroundingValidator.validate(
+                        response: response, request: request, originalSource: source,
+                        expectedSpec: extractor.spec)
+                    sourceRejected += grounding.rejected.count
 
-                // A genuinely empty response is a valid zero-fact result. A
-                // non-empty response whose every candidate failed grounding is
-                // provider failure and remains debt for retry/diagnosis.
-                guard response.candidates.isEmpty || !grounding.accepted.isEmpty else {
-                    failed += 1
-                    continue
+                    // A genuinely empty response is a valid zero-fact result.
+                    // A non-empty response whose every candidate failed
+                    // grounding is provider failure and remains debt.
+                    guard response.candidates.isEmpty || !grounding.accepted.isEmpty else {
+                        rejected += sourceRejected
+                        throw FactExtractionError.malformedResponse(
+                            "all non-empty model candidates failed grounding")
+                    }
+                    groundedCandidates.append(contentsOf: grounding.accepted)
+                }
+                rejected += sourceRejected
+                var seenCandidates = Set<String>()
+                groundedCandidates = groundedCandidates.filter { candidate in
+                    seenCandidates.insert([
+                        candidate.subject, candidate.predicate, candidate.object,
+                        candidate.evidenceQuote,
+                        String(candidate.evidenceSpan.start), String(candidate.evidenceSpan.end),
+                    ].joined(separator: "\u{0}")).inserted
+                }
+                if groundedCandidates.count > extractor.spec.maximumFactsPerSource {
+                    groundedCandidates = Array(
+                        groundedCandidates.prefix(extractor.spec.maximumFactsPerSource))
                 }
                 guard try await estate.getDrawers(ids: [drawer.id]).first?.content == source else {
                     skipped += 1
@@ -143,9 +158,9 @@ public extension GeniusLocusKit {
                 var desiredIDs = Set<String>()
                 var newlyFiled: [String] = []
 
-                for candidate in grounding.accepted {
+                for candidate in groundedCandidates {
                     let key = Self.factSemanticKey(
-                        candidate, digest: request.sourceDigest, spec: extractor.spec)
+                        candidate, digest: sourceDigest, spec: extractor.spec)
                     if let existing = active.first(where: {
                         Self.factSemanticKey($0) == key
                     }) {
@@ -169,7 +184,7 @@ public extension GeniusLocusKit {
                         evidenceEnd: candidate.evidenceSpan.end,
                         evidenceStartUTF8Byte: candidate.evidenceSpan.startUTF8Byte,
                         evidenceEndUTF8Byte: candidate.evidenceSpan.endUTF8Byte,
-                        sourceDigest: request.sourceDigest,
+                        sourceDigest: sourceDigest,
                         extractorProviderID: extractor.spec.providerID,
                         extractorModelID: extractor.spec.modelID,
                         extractorModelVersion: extractor.spec.modelVersion,
@@ -227,21 +242,9 @@ public extension GeniusLocusKit {
             .map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func factSourceSpan(_ row: [String: Any]) -> FactSourceSpan? {
-        func value(_ key: String) -> Int? {
-            if let value = row[key] as? Int { return value }
-            if let value = row[key] as? NSNumber { return value.intValue }
-            return nil
-        }
-        guard let start = value("start"), let end = value("end"),
-              let startByte = value("start_utf8_byte"),
-              let endByte = value("end_utf8_byte"),
-              start >= 0, end >= start, startByte >= 0, endByte >= startByte else {
-            return nil
-        }
-        return FactSourceSpan(
-            start: start, end: end,
-            startUTF8Byte: startByte, endUTF8Byte: endByte)
+    private static func factSourceDigest(_ source: String) -> String {
+        SHA256.hash(data: Data(source.utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     private static func factSemanticKey(

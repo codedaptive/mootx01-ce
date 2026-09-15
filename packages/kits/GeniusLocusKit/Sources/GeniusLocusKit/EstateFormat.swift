@@ -46,7 +46,13 @@ public struct EstateFormatVersion: Sendable, Codable, Hashable, Comparable,
     /// migration catalog, the binary sidecar is rebuilt and the float
     /// representation claim is released; a fresh estate is born without them.
     public static let v1_7 = EstateFormatVersion(major: 1, minor: 7)
-    public static let current = v1_7
+    /// Format 1.8: the fact-extraction toggle (`fact_extraction` manifest key)
+    /// is seeded as `"on"` on every populated estate through the migration
+    /// catalog, so the on-by-default ruling is recorded per estate rather than
+    /// inferred from an absent key, and an operator's opt-out survives a later
+    /// change to the default.
+    public static let v1_8 = EstateFormatVersion(major: 1, minor: 8)
+    public static let current = v1_8
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         (lhs.major, lhs.minor) < (rhs.major, rhs.minor)

@@ -25,7 +25,7 @@ public struct FactGroundingReport: Sendable, Equatable {
 }
 
 /// Deterministic post-model gate. No candidate becomes a durable assertion
-/// until its verbatim quote resolves uniquely inside a distiller-selected span.
+/// until its verbatim quote resolves uniquely inside an eligible original-source span.
 public enum FactGroundingValidator {
     public static let maximumFieldCharacters = 240
     public static let maximumEvidenceCharacters = 600
