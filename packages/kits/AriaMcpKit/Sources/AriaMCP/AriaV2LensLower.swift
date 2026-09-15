@@ -106,7 +106,6 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // is set; provenance-gated rows (bits 30-35) may be present regardless and
             // are caught by AriaV2RecallLensPrivacy.classify in the row builder. Both
             // axes produce the same sparse key set {id, centrality} (indistinguishability rule).
-            let estate = try await kit.estate(for: handle)
             // Full hydration so drawer.content is populated — structured hydration
             // returns content == "" (Swift spec §7.3) which would collapse every
             // bestSpan to "-". Rust get_drawers_matching_frame always loads full rows
@@ -123,13 +122,13 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 await AriaV2Withheld.record(counted.withheldBySensitivity)
             }
             if context.maximumSensitivity != nil {
-                let admitted = try await estate.getDrawers(
+                let admitted = try await kit.getDrawers(in: handle, 
                     ids: ranked.map(\.id), matchingFrame: context.authorizationFrame,
                     hydrationLevel: .full).admissible
                 drawersByID = Dictionary(uniqueKeysWithValues: admitted.map { ($0.id, $0) })
             } else {
                 drawersByID = try await RecipeTools.structuredDrawersByID(
-                    ids: ranked.map { $0.id }, estate: estate, hydrationLevel: .full)
+                    ids: ranked.map { $0.id }, kit: kit, handle: handle, hydrationLevel: .full)
             }
             let keystoneOnly = try boolean(request, "keystoneOnly", defaultValue: false)
             let admittedRanked = context.maximumSensitivity == nil ? ranked : ranked.filter {
@@ -210,7 +209,6 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // The v2 projection preserves the existing contradiction lens's two
             // typed signals.  It reads the persisted output of the atomic hunt
             // directly; it never parses a rendered text response.
-            let estate = try await kit.estate(for: handle)
             // COUNT FIRST, THEN WITHHOLD. Filtering by sensitivity before
             // counting makes a restricted contradiction vanish from the total,
             // so an estate with three contradictions reports one and the
@@ -219,7 +217,7 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // rows are omitted from the emitted set; only the tally is complete.
             // Endpoint ids within kept (Normal/Elevated) tunnel rows are always
             // emitted — an id is not body-derived content (WITHHELD-ID-ONLY = a).
-            let allContradictions = (try await estate.allTunnels()).filter {
+            let allContradictions = (try await kit.allTunnels(in: handle)).filter {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
                     && ($0.lifecycle == .active || $0.lifecycle == .proposed)
             }
@@ -393,9 +391,8 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // Dense-row hydration through the sensitivity gate (empty filterChain).
             // Full hydration so drawer.content is populated for bestSpan computation;
             // structured hydration returns content == "" per Swift spec §7.3.
-            let trustEstate = try await kit.estate(for: handle)
             let trustDrawersByID = try await RecipeTools.structuredDrawersByID(
-                ids: output.rankedIDs, estate: trustEstate, hydrationLevel: .full)
+                ids: output.rankedIDs, kit: kit, handle: handle, hydrationLevel: .full)
             return .init(
                 data: trustData(output, drawersByID: trustDrawersByID),
                 compactText: "Synthesized \(output.rankedIDs.count) trust-ranked memories.")
@@ -475,7 +472,6 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
 
         case .lensNodeMotion:
             let id = try string(request, "memory_id")
-            let estate = try await kit.estate(for: handle)
             // Both storage spellings, and the result is keyed by whichever one
             // the estate holds rather than by the spelling the caller sent.
             // Public v2 ids are canonical lowercase while the estate may hold
@@ -488,7 +484,7 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             let spellings = (UUID(uuidString: id).map(
                 AriaV2ArgumentDecoder.storageIdentitySpellings) ?? [id])
             let resolved = try await RecipeTools.structuredDrawersByID(
-                ids: spellings, estate: estate,
+                ids: spellings, kit: kit, handle: handle,
                 filterChain: context.authorizationFrame.filterChain)
             guard let drawer = spellings.compactMap({ resolved[$0] }).first,
                   drawer.tombstonedAt == nil else {
@@ -948,7 +944,6 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
     private func partialCueOutcome(
         _ matches: [CueMatch], context: AriaV2LensLower.Context
     ) async throws -> AriaV2RecallLensOutcome {
-        let estate = try await kit.estate(for: handle)
         // Full hydration so drawer.content is populated for bestSpan computation;
         // structured hydration returns content == "" (Swift spec §7.3) which would
         // make every bestSpan nil. Two independent sensitivity axes still gate
@@ -959,10 +954,10 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
         // field and is applied below by AriaV2RecallLensPrivacy.project; neither
         // axis covers the other. This mirrors the keystones path.
         let drawersByID = try await RecipeTools.structuredDrawersByID(
-            ids: matches.map(\.id), estate: estate,
+            ids: matches.map(\.id), kit: kit, handle: handle,
             filterChain: context.authorizationFrame.filterChain,
             hydrationLevel: .full)
-        let nodeNames = try await estate.resolveNodeNames(
+        let nodeNames = try await kit.resolveNodeNames(handle, 
             parentNodeIds: drawersByID.values.map(\.parentNodeId))
         let rows = matches.map { match -> CandidateRowData in
             guard let drawer = drawersByID[match.id] else {

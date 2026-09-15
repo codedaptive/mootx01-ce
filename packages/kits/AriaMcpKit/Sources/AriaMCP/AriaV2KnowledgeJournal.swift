@@ -293,35 +293,33 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
 
     public func connectionSearch(_ request: AriaV2ConnectionSearchRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeTunnel] {
         try validateEstate(request.estateID, context: context)
-        let estate = try await kit.estate(for: handle)
         var candidates: [Tunnel] = []
         for id in AriaV2ArgumentDecoder.storageIdentitySpellings(request.memoryID) {
             if request.direction == .outgoing || request.direction == .both {
-                candidates += try await estate.activeTunnelsFrom(drawerId: id)
+                candidates += try await kit.activeTunnels(in: handle, from: id)
             }
             if request.direction == .incoming || request.direction == .both {
-                candidates += try await estate.activeTunnelsTo(drawerId: id)
+                candidates += try await kit.activeTunnels(in: handle, to: id)
             }
         }
         let filtered = candidates.filter { tunnel in
             request.relationship == nil || tunnel.label == request.relationship
         }
-        return try await visibleTunnels(filtered, estate: estate, ceiling: context.maximumSensitivity, limit: request.limit)
+        return try await visibleTunnels(filtered, ceiling: context.maximumSensitivity, limit: request.limit)
     }
 
     public func connectionMap(_ request: AriaV2ConnectionMapRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeTunnel] {
         try validateEstate(request.estateID, context: context)
-        let estate = try await kit.estate(for: handle)
         var frontier = Set(AriaV2ArgumentDecoder.storageIdentitySpellings(request.memoryID))
         var visited = frontier
         var collected: [Tunnel] = []
         for _ in 0..<request.depth where !frontier.isEmpty && collected.count < request.limit {
             var next = Set<String>()
             for id in frontier.sorted() {
-                collected += try await estate.activeTunnelsFrom(drawerId: id)
-                collected += try await estate.activeTunnelsTo(drawerId: id)
+                collected += try await kit.activeTunnels(in: handle, from: id)
+                collected += try await kit.activeTunnels(in: handle, to: id)
             }
-            let visible = try await visibleTunnels(collected, estate: estate, ceiling: context.maximumSensitivity, limit: request.limit)
+            let visible = try await visibleTunnels(collected, ceiling: context.maximumSensitivity, limit: request.limit)
             for tunnel in visible {
                 if let fromID = tunnel.fromID { next.insert(fromID.uuidString) }
                 if let toID = tunnel.toID { next.insert(toID.uuidString) }
@@ -329,15 +327,14 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
             frontier = next.subtracting(visited)
             visited.formUnion(frontier)
         }
-        return try await visibleTunnels(collected, estate: estate, ceiling: context.maximumSensitivity, limit: request.limit)
+        return try await visibleTunnels(collected, ceiling: context.maximumSensitivity, limit: request.limit)
     }
 
     public func fileFact(_ request: AriaV2FileFactRequest, context: AriaV2MemoryOperationContext) async throws -> AriaV2KnowledgeFact {
         try validateEstate(request.estateID, context: context)
         var storedSourceID = ""
         if let sourceMemoryID = request.sourceMemoryID {
-            let estate = try await kit.estate(for: handle)
-            let source = try await estate.getDrawers(
+            let source = try await kit.getDrawers(in: handle, 
                 ids: AriaV2ArgumentDecoder.storageIdentitySpellings(sourceMemoryID),
                 hydrationLevel: .structured)
             guard let admitted = source.first(where: {
@@ -373,16 +370,15 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
         subjectExact: String?
     ) async throws -> [AriaV2KnowledgeFact] {
         try validateEstate(request.estateID, context: context)
-        let estate = try await kit.estate(for: handle)
         let facts: [KGFact]
         if sourceIDExact != nil || subjectExact != nil {
-            facts = try await estate.kgFacts(
+            facts = try await kit.kgFacts(in: handle, 
                 subjectEq: subjectExact,
                 sourceDrawerIDEq: sourceIDExact)
         } else {
             facts = try await kit.recallKGFacts(handle)
         }
-        return try (try await visibleFacts(facts, estate: estate, context: context))
+        return try (try await visibleFacts(facts, context: context))
             .filter { fact in
                 // The provider's source/subject selectors are its own stable
                 // 1.1 contract. Keep the SQL equality predicates above for
@@ -401,7 +397,7 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
     public func retireFact(_ request: AriaV2RetireFactRequest, context: AriaV2MemoryOperationContext) async throws {
         try validateEstate(request.estateID, context: context)
         let facts = try await kit.recallKGFacts(handle)
-        let visible = try await visibleFacts(facts, estate: try await kit.estate(for: handle), context: context)
+        let visible = try await visibleFacts(facts, context: context)
         guard let storedID = AriaV2ArgumentDecoder.matchingStorageIdentity(request.factID, among: visible.map(\.id)) else {
             throw AriaV2InvalidArgument(
                 code: "fact_unavailable", path: "fact_id",
@@ -416,7 +412,7 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
     public func factTimeline(_ request: AriaV2FactTimelineRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2KnowledgeFact] {
         try validateEstate(request.estateID, context: context)
         let facts = try await kit.recallKGFactTimeline(handle, entity: request.subject)
-        return try (try await visibleFacts(facts, estate: try await kit.estate(for: handle), context: context))
+        return try (try await visibleFacts(facts, context: context))
             .filter { $0.subject == request.subject && (request.predicate == nil || $0.predicate == request.predicate) }
             .prefix(request.limit)
             .map { try factProjection($0) }
@@ -454,7 +450,7 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
         }
     }
 
-    private func visibleTunnels(_ candidates: [Tunnel], estate: Estate, ceiling: AdjectiveSensitivity, limit: Int) async throws -> [AriaV2KnowledgeTunnel] {
+    private func visibleTunnels(_ candidates: [Tunnel], ceiling: AdjectiveSensitivity, limit: Int) async throws -> [AriaV2KnowledgeTunnel] {
         let unique = Dictionary(grouping: candidates, by: \.id).values.compactMap(\.first).sorted { $0.id < $1.id }
         let rows = unique.compactMap { tunnel -> (Tunnel, UUID, UUID?, UUID?)? in
             // Connection surfaces report SETTLED edges only. v1 pushed this into
@@ -472,7 +468,7 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
             return (tunnel, tunnelID, fromID, toID)
         }
         let endpoints = Set(rows.flatMap { [$0.0.sourceDrawerId, $0.0.targetDrawerId].compactMap { $0 } })
-        let drawers = try await estate.getDrawers(ids: Array(endpoints), hydrationLevel: .structured)
+        let drawers = try await kit.getDrawers(in: handle, ids: Array(endpoints), hydrationLevel: .structured)
         let visibleIDs = Set(drawers.filter { $0.adjectiveSensitivity.rawValue <= ceiling.rawValue }.map(\.id))
         return rows.filter {
             ($0.0.sourceDrawerId.map(visibleIDs.contains) ?? true) &&
@@ -483,13 +479,13 @@ public struct AriaV2GeniusLocusKnowledgeJournalBackend: AriaV2KnowledgeJournalBa
         }
     }
 
-    private func visibleFacts(_ facts: [KGFact], estate: Estate, context: AriaV2MemoryOperationContext) async throws -> [KGFact] {
+    private func visibleFacts(_ facts: [KGFact], context: AriaV2MemoryOperationContext) async throws -> [KGFact] {
         let ceilingFacts = facts.filter {
             $0.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue &&
                 (!context.exportableOnly || $0.exportability == .public_)
         }
         let sourceIDs = Set(ceilingFacts.map(\.sourceDrawerID).filter { !$0.isEmpty })
-        let drawers = try await estate.getDrawers(ids: Array(sourceIDs), hydrationLevel: .structured)
+        let drawers = try await kit.getDrawers(in: handle, ids: Array(sourceIDs), hydrationLevel: .structured)
         let visibleSources = Set(drawers.filter {
             $0.adjectiveSensitivity.rawValue <= context.maximumSensitivity.rawValue &&
                 (!context.exportableOnly || $0.exportability == .public_)

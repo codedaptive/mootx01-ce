@@ -336,11 +336,10 @@ public struct AriaV2GeniusLocusRecallLensAuthority: AriaV2RecallLensAuthority {
         reportsDistillation: Bool = false
     ) async throws -> AriaV2RecallLensOutcome {
         let shown = Array(matches.prefix(50))
-        let estate = try await kit.estate(for: handle)
         let drawersByID = try await RecipeTools.structuredDrawersByID(
-            ids: shown.map(\.id), estate: estate, filterChain: filterChain,
+            ids: shown.map(\.id), kit: kit, handle: handle, filterChain: filterChain,
             hydrationLevel: .full)
-        let nodeNames = try await estate.resolveNodeNames(
+        let nodeNames = try await kit.resolveNodeNames(handle, 
             parentNodeIds: drawersByID.values.map(\.parentNodeId))
         let rows = shown.map { match -> CandidateRowData in
             guard let drawer = drawersByID[match.id] else {
