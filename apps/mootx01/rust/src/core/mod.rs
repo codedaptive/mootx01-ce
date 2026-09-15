@@ -2,7 +2,7 @@
 //!
 //! Exports: clients, daemon_client, depth, estate_adoption, mcp_ownership,
 //! merge, paths,
-//! permissions, release, sensitivity_crypto, sensitivity_hashes,
+//! permissions, platform_log, release, sensitivity_crypto, sensitivity_hashes,
 //! unlock_authority, update_advisor, and service — the full
 //! installer-core module set.
 
@@ -26,6 +26,7 @@ pub mod mcp_ownership;
 pub mod merge;
 pub mod paths;
 pub mod permissions;
+pub mod platform_log;
 pub mod release;
 pub mod sensitivity_crypto;
 /// Sidecar storage for per-tier PBKDF2-HMAC-SHA256 password hashes
