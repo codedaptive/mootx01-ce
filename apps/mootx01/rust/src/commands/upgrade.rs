@@ -69,14 +69,14 @@ pub fn run(
     // --backfill-only, or a transient estate: estate-only convergence for
     // scripted and benchmark estates. Runs the estate migration steps (schema
     // 10 → 19 → 20, manifest refresh, kg_facts identity, projection
-    // backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense
+    // backfill, whole-record vacuum, shared-content reclaim, ssc facts, dense
     // pooling convergence, span encode, vector reclaim) against the selected
     // estate, then exits. No network, no prompts; each step quiesces the
     // daemon only when a live resident serves this estate. This explicit
     // estate-only path retains its own ordering: schema gate → correctness
-    // migration → projection backfill → VACUUM-backed reclaim → whole-record
-    // vacuum (the first estate open, so the migration chain runs and reports here) → ssc
-    // facts → dense pooling convergence → span encode → vector reclaim.
+    // migration → projection backfill → whole-record vacuum (the first estate
+    // open, so the migration chain runs and reports here) → shared-content
+    // reclaim → ssc facts → dense pooling convergence → span encode → vector reclaim.
     // A refused schema version stops the sequence (every later step would
     // open the schema and stamp it); otherwise all steps run even when
     // earlier steps fail (independent + retryable) and the exit is non-zero
@@ -96,13 +96,13 @@ pub fn run(
         refresh_manifest(&record);
         let ok_kg    = run_kg_fact_identity_backfill(&record);
         let ok_sp    = run_search_projection_backfill(&record);
-        let ok_recl  = run_shared_content_reclaim_if_pending(&record);
         let ok_vacuum = run_whole_record_vacuum(&record);
+        let ok_recl  = run_shared_content_reclaim_if_pending(&record);
         let ok_facts = run_ssc_facts_backfill(&record);
         let ok_dense = run_dense_pooling_convergence(&record);
         let ok_span  = run_span_encode_backfill(&record);
         let ok_vec   = run_vector_reclaim(&record);
-        if ok_kg && ok_sp && ok_recl && ok_vacuum && ok_facts && ok_dense && ok_span && ok_vec {
+        if ok_kg && ok_sp && ok_vacuum && ok_recl && ok_facts && ok_dense && ok_span && ok_vec {
             return ExitCode::from(exit::OK);
         } else {
             return ExitCode::from(exit::FAILURE);
@@ -155,8 +155,8 @@ pub fn run(
                 refresh_manifest(&record);
                 run_kg_fact_identity_backfill(&record);
                 run_search_projection_backfill(&record);
-                run_shared_content_reclaim_if_pending(&record);
                 run_whole_record_vacuum(&record);
+                run_shared_content_reclaim_if_pending(&record);
                 run_ssc_facts_backfill(&record);
                 run_dense_pooling_convergence(&record);
                 run_span_encode_backfill(&record);
@@ -283,8 +283,8 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
         let _ = run_kg_fact_identity_backfill(record);
         let _ = run_ssc_facts_backfill(record);
         let _ = run_search_projection_backfill(record);
-        let _ = run_shared_content_reclaim_if_pending(record);
         let _ = run_whole_record_vacuum(record);
+        let _ = run_shared_content_reclaim_if_pending(record);
         let _ = run_dense_pooling_convergence(record);
         let _ = run_span_encode_backfill(record);
         let _ = run_vector_reclaim(record);
@@ -878,9 +878,10 @@ fn run_span_encode_backfill(record: &EstateRecord) -> bool {
 /// seeds fact_extraction), so this step counts the rows before the open,
 /// opens the estate through the registry's maintenance path, counts again, and
 /// returns the freed pages to the filesystem with a VACUUM when anything was
-/// deleted. It runs after the shared-content reclaim and before the ssc facts
-/// backfill: the first estate open of the sequence, so the capsules' work is
-/// reported here and every later step finds the estate at 1.8. Idempotent: a
+/// deleted. It runs BEFORE the shared-content reclaim and before the ssc facts
+/// backfill: the first estate open of the sequence, so the migration chain runs
+/// here and leaves the estate reclaim-pending; the shared-content reclaim step
+/// that follows collects that state. Every later step finds the estate at 1.8. Idempotent: a
 /// vacuumed estate deletes nothing and skips the VACUUM. Twin of Swift
 /// `UpgradeCommand.runWholeRecordVacuum`.
 ///
@@ -1123,6 +1124,8 @@ fn run_ssc_facts_backfill(record: &EstateRecord) -> bool {
     ok
 }
 
+/// Runs after the whole-record vacuum so the reclaim-pending state the
+/// migration chain leaves is collected in the same upgrade.
 /// Returns `true` on success or when there is nothing to reclaim, `false` on failure.
 fn run_shared_content_reclaim_if_pending(record: &EstateRecord) -> bool {
     use genius_locus_kit::EstateCoordinator;
