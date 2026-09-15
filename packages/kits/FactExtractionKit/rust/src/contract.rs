@@ -41,9 +41,54 @@ pub struct FactSourceSpan {
 pub struct FactExtractionRequest {
     pub source_id: String,
     pub source_digest: String,
-    pub distilled_text: String,
+    pub source_text: String,
     pub eligible_source_spans: Vec<FactSourceSpan>,
     pub maximum_facts: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactSourceChunk {
+    pub text: String,
+    pub span: FactSourceSpan,
+}
+
+/// Source-exact chunks with enough overlap to preserve the maximum grounded
+/// evidence quote across a model-context boundary.
+pub fn fact_source_chunks(
+    original_source: &str,
+    maximum_characters: usize,
+    overlap_characters: usize,
+) -> Vec<FactSourceChunk> {
+    if original_source.is_empty() || maximum_characters == 0 {
+        return Vec::new();
+    }
+    let characters: Vec<char> = original_source.chars().collect();
+    let overlap = overlap_characters.min(maximum_characters.saturating_sub(1));
+    let mut byte_offsets = Vec::with_capacity(characters.len() + 1);
+    byte_offsets.push(0);
+    for character in &characters {
+        byte_offsets.push(byte_offsets.last().copied().unwrap_or(0) + character.len_utf8());
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < characters.len() {
+        let end = (start + maximum_characters).min(characters.len());
+        chunks.push(FactSourceChunk {
+            text: characters[start..end].iter().collect(),
+            span: FactSourceSpan {
+                start,
+                end,
+                start_utf8_byte: byte_offsets[start],
+                end_utf8_byte: byte_offsets[end],
+            },
+        });
+        if end == characters.len() {
+            break;
+        }
+        start = end - overlap;
+    }
+    chunks
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
