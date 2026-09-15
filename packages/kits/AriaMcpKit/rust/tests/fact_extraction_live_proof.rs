@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::path::Path;
 
 use aria_mcp::{build_fact_extraction_cycle, estate_registry::EstateRegistry};
-use genius_locus_kit::coordinator::FactExtractionSetting;
+use genius_locus_kit::{EstatePreferenceKey, EstatePreferenceValue};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::estate_types::LatticeAnchor;
@@ -138,7 +138,7 @@ fn live_proof_cycle_from_build_fact_extraction_cycle_files_at_least_one_fact() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_fact_extraction(&handle, FactExtractionSetting::On)
+            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::On)
             .expect("provision fact extraction On");
     }
 

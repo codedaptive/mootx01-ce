@@ -1,5 +1,5 @@
 // standing_signals_parity.rs — conformance gate for the Rust mirror
-// of the twelve standing signals (GLK-05 + brain-layer governor ownership
+// of the standing signals (GLK-05 + brain-layer governor ownership
 // + consolidation-sweep signal 11 + anomaly-flag sweep signal 12
 // + span-encode drain signal 13).
 //
@@ -8,14 +8,14 @@
 // 1. Each signal's stable name and cadence match the Swift reference.
 // 2. Each signal's spec produces the expected emission classes when
 //    fired through a `SerialLaneScheduler` instance.
-// 3. The default-set helper registers all twelve in the canonical order.
+// 3. The default-set helper registers all seven always-on signals in the canonical order.
 // 4. VectorSimilaritySignal with an empty VectorStore emits only the
 //    scan-summary diagnostic (zero associate emissions) — parity with
 //    the Swift empty-store test.
 // 5. TrainingSignal fires TrainingDaemon::run_once and emits exactly
 //    one diagnostic per tick regardless of gate state.
-// 6. ConsolidationSignal (signal 11): daily cadence, default_spec emits
-//    "consolidation-sweep.fired", live spec surfaces sweep report counts.
+// 6. ConsolidationSignal (signal 11): daily cadence, preference-gated (no
+//    no-op spec); live spec surfaces sweep report counts.
 // 7. AnomalySweepSignal (signal 12, P3a): hourly cadence, default_spec
 //    emits "anomaly-flag-sweep.fired", live spec surfaces changed-drawer
 //    count in "anomaly-flag-sweep.complete".
@@ -25,7 +25,11 @@
 
 use std::sync::Arc;
 
-use genius_locus_kit::brain::signals::{AnomalySweepSignal, ContradictionScoutSignal, FactExtractionSignal, SpanEncodeSignal};
+use genius_locus_kit::brain::end_of_day_tournament::TournamentReport;
+use genius_locus_kit::brain::signals::{
+    preference_gated_standing_signal_names, AnomalySweepSignal, ContradictionScoutSignal,
+    ContradictionSweepSignal, FactExtractionSignal, SpanEncodeSignal,
+};
 use genius_locus_kit::{
     default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
     ConsolidationSignal, DecaySweepSignal, DreamingSignal,
@@ -150,8 +154,13 @@ fn default_signal_names_and_cadences_match_swift_reference() {
 #[test]
 fn default_standing_signal_names_helper_returns_canonical_order() {
     // Keep this compile-time roster synchronized with the production helper.
-    // Signal 11 (consolidation-sweep) appended after training-daemon.
-    // Signal 12 (anomaly-flag-sweep, P3a) appended after consolidation-sweep.
+    // Signal 11 (consolidation-sweep), the contradiction sweep, the
+    // maintenance family (maintenance-daemon, decay-sweep,
+    // by-reference-validity) and the adaptive-recall trio
+    // (temporal-causality-fold, training-daemon, end-of-day-tournament) are
+    // preference-gated and listed in preference_gated_standing_signal_names,
+    // not here.
+    // Signal 12 (anomaly-flag-sweep, P3a) follows contradiction-scout.
     // Signal 13 (span-encode, ENCODER_RERANK_CONTRACT §10): REM-ALPHA (30 s)
     // cadence; appended after anomaly-flag-sweep.
     let names = default_standing_signal_names();
@@ -159,15 +168,8 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
         names,
         [
             "dreaming-daemon",
-            "maintenance-daemon",
             "vector-similarity",
             "contradiction-scout",
-            "decay-sweep",
-            "by-reference-validity",
-            "end-of-day-tournament",
-            "temporal-causality-fold",
-            "training-daemon",
-            "consolidation-sweep",
             "anomaly-flag-sweep",
             "span-encode",
             "fact-extraction",
@@ -176,14 +178,17 @@ fn default_standing_signal_names_helper_returns_canonical_order() {
 }
 
 #[test]
-fn default_standing_signal_specs_returns_thirteen_specs_with_interval_triggers() {
-    // Thirteen specs: signal 13 is SpanEncodeSignal (ENCODER_RERANK_CONTRACT §10,
-    // REM-ALPHA 30 s drain); signal 8's slot is empty (the distilled rendering
-    // is computed inline at read time).
-    // hunt_cycle, anomaly_cycle, and span_encode_cycle are None → no-op defaults.
+fn default_standing_signal_specs_returns_six_specs_with_interval_triggers() {
+    // Six always-on specs: signal 8's slot is empty (the distilled rendering
+    // is computed inline at read time) and the eight preference-gated signals
+    // (consolidation-sweep, contradiction-sweep, maintenance-daemon,
+    // decay-sweep, by-reference-validity, temporal-causality-fold,
+    // training-daemon, end-of-day-tournament) are absent because no live
+    // cycle is passed. The other
+    // injected cycles are None → no-op defaults.
     let store = make_empty_vector_store();
-    let specs = default_standing_signal_specs(store, "test-model", None, None, None, None, None);
-    assert_eq!(specs.len(), 13);
+    let specs = default_standing_signal_specs(store, "test-model", None, None, None, None, None, None, None, None, None, None, None, None, None);
+    assert_eq!(specs.len(), 6);
     for spec in &specs {
         match spec.trigger {
             SignalTrigger::Interval { .. } => {}
@@ -250,27 +255,14 @@ fn dreaming_signal_emits_zero_proposals_for_empty_estate() {
 }
 
 #[test]
-fn maintenance_signal_emits_two_proposes_and_one_diagnostic() {
-    let report = fire(MaintenanceSignal::default_spec());
+fn maintenance_signal_runs_injected_cycle_and_reports_tombstone_count() {
+    let cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(|| Ok(2));
+    let report = fire(MaintenanceSignal::spec(Arc::new(move || cycle())));
     assert_eq!(report.name, "maintenance-daemon");
-    assert_eq!(report.emission_count, 3);
-    let propose_count = report
-        .recent_outcomes
-        .iter()
-        .filter(|o| {
-            matches!(
-                o,
-                SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb }
-                if verb == "propose"
-            )
-        })
-        .count();
-    assert_eq!(propose_count, 2);
+    assert_eq!(report.emission_count, 1, "one diagnostic per fire; proposals come from the engine's sink");
     assert_eq!(report.recent_diagnostics.len(), 1);
-    assert_eq!(
-        report.recent_diagnostics[0].title,
-        "maintenance.scan.summary"
-    );
+    assert_eq!(report.recent_diagnostics[0].title, "maintenance-daemon.complete");
+    assert!(report.recent_diagnostics[0].detail.contains("2 tombstone candidate(s)"));
 }
 
 #[test]
@@ -401,84 +393,52 @@ fn vector_similarity_signal_probe_limit_zero_emits_only_diagnostic_on_populated_
 }
 
 #[test]
-fn decay_sweep_signal_routes_through_propose() {
-    let report = fire(DecaySweepSignal::default_spec());
+fn decay_sweep_signal_runs_injected_cycle_and_reports_decay_count() {
+    let cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(|| Ok(3));
+    let report = fire(DecaySweepSignal::spec(Arc::new(move || cycle())));
     assert_eq!(report.name, "decay-sweep");
-    assert_eq!(report.emission_count, 2);
-    let propose_count = report
-        .recent_outcomes
-        .iter()
-        .filter(|o| {
-            matches!(
-                o,
-                SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb }
-                if verb == "propose"
-            )
-        })
-        .count();
-    assert_eq!(propose_count, 1);
+    assert_eq!(report.emission_count, 1, "one diagnostic per fire; proposals come from the engine's sink");
     assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(report.recent_diagnostics[0].title, "decay-sweep.complete");
+    assert!(report.recent_diagnostics[0].detail.contains("3 decay candidate(s)"));
 }
 
 #[test]
-fn by_reference_validity_signal_emits_propose_and_diagnostic() {
-    let report = fire(ByReferenceValiditySignal::default_spec());
+fn by_reference_validity_signal_runs_injected_cycle_and_reports_drift_count() {
+    let cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(|| Ok(1));
+    let report = fire(ByReferenceValiditySignal::spec(Arc::new(move || cycle())));
     assert_eq!(report.name, "by-reference-validity");
-    assert_eq!(report.emission_count, 2);
-    let propose_count = report
-        .recent_outcomes
-        .iter()
-        .filter(|o| {
-            matches!(
-                o,
-                SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb }
-                if verb == "propose"
-            )
-        })
-        .count();
-    assert_eq!(propose_count, 1);
-    assert_eq!(
-        report.recent_diagnostics[0].title,
-        "by_reference.validation.summary"
-    );
+    assert_eq!(report.emission_count, 1, "one diagnostic per fire; proposals come from the engine's sink");
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(report.recent_diagnostics[0].title, "by-reference-validity.complete");
+    assert!(report.recent_diagnostics[0].detail.contains("1 drift(s)"));
 }
 
 #[test]
-fn end_of_day_tournament_signal_emits_propose_and_diagnostic() {
-    let report = fire(EndOfDayTournamentSignal::default_spec());
+fn end_of_day_tournament_signal_runs_injected_cycle_and_reports_counts() {
+    let cycle: Arc<dyn Fn() -> Result<TournamentReport, String> + Send + Sync> =
+        Arc::new(|| Ok(TournamentReport { contests: 2, rated_drawers: 3 }));
+    let report = fire(EndOfDayTournamentSignal::spec(Arc::new(move || cycle())));
     assert_eq!(report.name, "end-of-day-tournament");
-    assert_eq!(report.emission_count, 2);
-    let propose_count = report
-        .recent_outcomes
-        .iter()
-        .filter(|o| {
-            matches!(
-                o,
-                SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb }
-                if verb == "propose"
-            )
-        })
-        .count();
-    assert_eq!(propose_count, 1);
-    assert_eq!(
-        report.recent_diagnostics[0].title,
-        "tournament.end_of_day.summary"
-    );
+    assert_eq!(report.emission_count, 1, "one diagnostic per fire; ratings are written by the cycle");
+    assert_eq!(report.recent_diagnostics.len(), 1);
+    assert_eq!(report.recent_diagnostics[0].title, "end-of-day-tournament.complete");
+    assert!(report.recent_diagnostics[0].detail.contains("contests=2 ratedDrawers=3"));
 }
 
 #[test]
-fn registering_all_thirteen_default_specs_produces_thirteen_reports() {
-    // Thirteen specs including signal 13 (SpanEncodeSignal, REM-ALPHA 30 s,
-    // ENCODER_RERANK_CONTRACT §10).
-    // The "span-encode" name must appear in the report.
+fn registering_all_nine_default_specs_produces_nine_reports() {
+    // Six always-on specs including signal 13 (SpanEncodeSignal, REM-ALPHA
+    // 30 s, ENCODER_RERANK_CONTRACT §10). The "span-encode" name must appear
+    // in the report; the preference-gated signals are absent with no live cycle.
     let mut scheduler = make_scheduler();
     let store = make_empty_vector_store();
-    // hunt_cycle, anomaly_cycle, and span_encode_cycle are None → no-op defaults.
-    for spec in default_standing_signal_specs(store, "test-model", None, None, None, None, None) {
+    // Every injected cycle is None → no-op defaults, gated pair absent.
+    for spec in default_standing_signal_specs(store, "test-model", None, None, None, None, None, None, None, None, None, None, None, None, None) {
         scheduler.register(spec, T0_NANOS);
     }
     let reports = scheduler.report();
-    assert_eq!(reports.len(), 13);
+    assert_eq!(reports.len(), 6);
     let mut names: Vec<String> = reports.iter().map(|r| r.name.clone()).collect();
     names.sort();
     let mut expected: Vec<String> = default_standing_signal_names()
@@ -582,56 +542,7 @@ fn training_signal_fires_training_daemon_run_once() {
     );
 }
 
-/// Parity with Swift's `TrainingSignal.defaultSpec()` diagnostic emission.
-/// The no-op spec fires a "training-daemon.fired" diagnostic on each tick.
-#[test]
-fn training_signal_default_spec_emits_fired_diagnostic() {
-    let spec = TrainingSignal::default_spec();
-    let report = fire(spec);
-    assert_eq!(report.name, "training-daemon");
-    assert_eq!(report.emission_count, 1,
-        "default spec emits one diagnostic per tick");
-    assert_eq!(report.recent_diagnostics.len(), 1);
-    assert_eq!(
-        report.recent_diagnostics[0].title, "training-daemon.fired",
-        "no-op spec must emit training-daemon.fired title"
-    );
-}
-
-/// Parity with the TemporalCausalitySignal diagnostic-only default spec.
-#[test]
-fn temporal_causality_signal_default_spec_emits_fired_diagnostic() {
-    let spec = TemporalCausalitySignal::default_spec();
-    let report = fire(spec);
-    assert_eq!(report.name, "temporal-causality-fold");
-    assert_eq!(report.emission_count, 1,
-        "default spec emits one diagnostic per tick");
-    assert_eq!(report.recent_diagnostics.len(), 1);
-    assert_eq!(
-        report.recent_diagnostics[0].title, "temporal-causality-fold.fired",
-        "no-op spec must emit temporal-causality-fold.fired title"
-    );
-}
-
 // ─── Signal 11: ConsolidationSignal parity tests ──────────────────────────────
-
-/// Parity with Swift's `ConsolidationSignal.defaultSpec()` no-op emission.
-/// The no-op spec fires a "consolidation-sweep.fired" diagnostic on each tick.
-#[test]
-fn consolidation_signal_default_spec_emits_fired_diagnostic() {
-    let spec = ConsolidationSignal::default_spec();
-    let report = fire(spec);
-    assert_eq!(report.name, "consolidation-sweep");
-    assert_eq!(
-        report.emission_count, 1,
-        "default spec emits one diagnostic per tick"
-    );
-    assert_eq!(report.recent_diagnostics.len(), 1);
-    assert_eq!(
-        report.recent_diagnostics[0].title, "consolidation-sweep.fired",
-        "no-op spec must emit consolidation-sweep.fired title"
-    );
-}
 
 /// Parity with Swift `ConsolidationSignal.spec` live path: successful sweep
 /// surfaces new_vague_items, fold_ins, and fold_in_rejections counts in the
@@ -865,7 +776,7 @@ fn live_hunt_closure_emits_complete_diagnostic_not_noop_fired() {
 
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(
-        store, "test-model", None, Some(hunt_cycle), None, None, None,
+        store, "test-model", None, Some(hunt_cycle), None, None, None, None, None, None, None, None, None, None, None,
     );
 
     let scout_spec = specs
@@ -923,7 +834,7 @@ fn live_anomaly_closure_emits_complete_diagnostic_not_noop_fired() {
 
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(
-        store, "test-model", None, None, Some(anomaly_cycle), None, None,
+        store, "test-model", None, None, Some(anomaly_cycle), None, None, None, None, None, None, None, None, None, None,
     );
 
     let anomaly_spec = specs
@@ -977,7 +888,7 @@ fn live_span_encode_closure_emits_complete_diagnostic_not_noop_fired() {
 
     let store = make_empty_vector_store();
     let specs = default_standing_signal_specs(
-        store, "test-model", None, None, None, Some(span_encode_cycle), None,
+        store, "test-model", None, None, None, Some(span_encode_cycle), None, None, None, None, None, None, None, None, None,
     );
 
     let span_encode_spec = specs
@@ -1021,7 +932,7 @@ fn live_fact_extraction_closure_emits_complete_diagnostic() {
         Ok(3)
     });
     let specs = default_standing_signal_specs(
-        make_empty_vector_store(), "test-model", None, None, None, None, Some(cycle),
+        make_empty_vector_store(), "test-model", None, None, None, None, Some(cycle), None, None, None, None, None, None, None, None,
     );
     let report = fire(
         specs
@@ -1032,4 +943,90 @@ fn live_fact_extraction_closure_emits_complete_diagnostic() {
     assert!(called.load(Ordering::SeqCst));
     assert_eq!(report.recent_diagnostics[0].title, "fact-extraction.complete");
     assert!(report.recent_diagnostics[0].detail.contains("completed 3 source(s)"));
+}
+
+// ─── Preference-gated signals ────────────────────────────────────────────────
+//
+// Parity with Swift's preferenceGatedSignalsRegisterOnlyWithLiveCycles: the
+// consolidation sweep and the contradiction sweep have no no-op default. They
+// are present in the spec set only when the host passes a live cycle (the
+// host's non-Off preference path) and absent otherwise (the Off path).
+
+/// Gate: `None` for both gated cycles → neither name in the spec set, and
+/// neither name in the always-on roster.
+#[test]
+fn preference_gated_signals_absent_without_live_cycles() {
+    let specs = default_standing_signal_specs(
+        make_empty_vector_store(), "test-model", None, None, None, None, None, None, None, None, None, None, None, None, None,
+    );
+    let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+    assert!(!names.contains(&ConsolidationSignal::SIGNAL_NAME));
+    assert!(!names.contains(&ContradictionSweepSignal::SIGNAL_NAME));
+    assert!(!names.contains(&MaintenanceSignal::SIGNAL_NAME));
+    assert!(!names.contains(&DecaySweepSignal::SIGNAL_NAME));
+    assert!(!names.contains(&ByReferenceValiditySignal::SIGNAL_NAME));
+    assert!(!names.contains(&TemporalCausalitySignal::SIGNAL_NAME));
+    assert!(!names.contains(&TrainingSignal::SIGNAL_NAME));
+    assert!(!names.contains(&EndOfDayTournamentSignal::SIGNAL_NAME));
+    for gated in preference_gated_standing_signal_names() {
+        assert!(
+            !default_standing_signal_names().contains(&gated),
+            "{gated} must not sit in the always-on roster"
+        );
+    }
+}
+
+/// Gate: `Some` for both gated cycles → both names present, and the spec set
+/// is exactly the always-on roster plus the gated pair. Building a spec never
+/// invokes its cycle, so an erroring closure is enough to prove the wiring.
+#[test]
+fn preference_gated_signals_present_with_live_cycles() {
+    let consolidation_cycle: Arc<
+        dyn Fn() -> Result<
+                genius_locus_kit::brain::consolidation_cycle::ConsolidationSweepReport,
+                String,
+            > + Send
+            + Sync,
+    > = Arc::new(|| Err("unfired".into()));
+    let contradiction_sweep_cycle: Arc<
+        dyn Fn() -> Result<
+                genius_locus_kit::brain::conflict_projection_sweep::ConflictTunnelProposalReport,
+                String,
+            > + Send
+            + Sync,
+    > = Arc::new(|| Err("unfired".into()));
+    let specs = default_standing_signal_specs(
+        make_empty_vector_store(),
+        "test-model",
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(consolidation_cycle),
+        Some(contradiction_sweep_cycle),
+        Some(Arc::new(|| Err("unfired".into()))),
+        Some(Arc::new(|| Err("unfired".into()))),
+        Some(Arc::new(|| Err("unfired".into()))),
+        Some(Arc::new(|| Err("unfired".into()))),
+        Some(Arc::new(|| Err("unfired".into()))),
+        Some(Arc::new(|| Err("unfired".into()))),
+    );
+    let mut names: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+    assert!(names.iter().any(|n| n == ConsolidationSignal::SIGNAL_NAME));
+    assert!(names.iter().any(|n| n == ContradictionSweepSignal::SIGNAL_NAME));
+    assert!(names.iter().any(|n| n == MaintenanceSignal::SIGNAL_NAME));
+    assert!(names.iter().any(|n| n == DecaySweepSignal::SIGNAL_NAME));
+    assert!(names.iter().any(|n| n == ByReferenceValiditySignal::SIGNAL_NAME));
+    assert!(names.iter().any(|n| n == TemporalCausalitySignal::SIGNAL_NAME));
+    assert!(names.iter().any(|n| n == TrainingSignal::SIGNAL_NAME));
+    assert!(names.iter().any(|n| n == EndOfDayTournamentSignal::SIGNAL_NAME));
+    names.sort();
+    let mut expected: Vec<String> = default_standing_signal_names()
+        .iter()
+        .chain(preference_gated_standing_signal_names().iter())
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
+    assert_eq!(names, expected);
 }

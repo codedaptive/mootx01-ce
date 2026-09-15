@@ -162,6 +162,7 @@ mod proposal_tests;
 pub mod provenance;
 #[cfg(test)]
 mod reanchor_tests;
+pub mod recall_rating;
 pub mod recall_stream;
 pub mod recall_trace_item;
 pub mod schema;

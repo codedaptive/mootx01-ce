@@ -33,4 +33,5 @@ pub mod orchestration;
 pub mod orchestration_lower;
 pub mod registry;
 pub mod render;
+pub mod similar_recall;
 pub mod transcript_recall;

@@ -52,7 +52,12 @@ public struct EstateFormatVersion: Sendable, Codable, Hashable, Comparable,
     /// inferred from an absent key, and an operator's opt-out survives a later
     /// change to the default.
     public static let v1_8 = EstateFormatVersion(major: 1, minor: 8)
-    public static let current = v1_8
+    /// Format 1.9: the consolidation, contradiction_sweep,
+    /// cross_encoder_routing, maintenance and adaptive_recall preferences are
+    /// seeded "on" on every populated estate, and the recall_ratings table
+    /// exists.
+    public static let v1_9 = EstateFormatVersion(major: 1, minor: 9)
+    public static let current = v1_9
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         (lhs.major, lhs.minor) < (rhs.major, rhs.minor)
