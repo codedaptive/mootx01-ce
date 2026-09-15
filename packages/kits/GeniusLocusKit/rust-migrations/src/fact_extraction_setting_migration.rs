@@ -13,7 +13,8 @@
 //!      that already carries a value — including `"off"` — keeps it.
 //!   2. Stamp the estate format V1_8.
 
-use genius_locus_kit::coordinator::{EstateCoordinator, FactExtractionSetting};
+use genius_locus_kit::coordinator::EstateCoordinator;
+use genius_locus_kit::estate_preference::{EstatePreferenceKey, EstatePreferenceValue};
 use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
 use genius_locus_kit::handle::EstateHandle;
 use std::sync::Arc;
@@ -89,19 +90,19 @@ impl FactExtractionSettingMigrationExt for EstateCoordinator {
             }
         })?;
         let existing = estate
-            .meta(EstateCoordinator::FACT_EXTRACTION_META_KEY)
+            .meta(EstatePreferenceKey::FactExtraction.as_str())
             .map_err(|e| FactExtractionSettingMigrationError::StorageUnavailable {
                 reason: format!("fact_extraction key read failed: {e:?}"),
             })?;
         if existing.is_none() {
-            estate
-                .set_meta(
-                    EstateCoordinator::FACT_EXTRACTION_META_KEY,
-                    FactExtractionSetting::On.as_str(),
-                )
-                .map_err(|e| FactExtractionSettingMigrationError::SettingWriteFailed {
-                    reason: format!("{e:?}"),
-                })?;
+            self.provision_preference(
+                handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::On,
+            )
+            .map_err(|e| FactExtractionSettingMigrationError::SettingWriteFailed {
+                reason: format!("{e:?}"),
+            })?;
         }
 
         // Step 2: advance the estate format to V1_8.

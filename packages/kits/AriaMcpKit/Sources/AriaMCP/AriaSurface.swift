@@ -9,6 +9,7 @@ enum AriaOperation: String, Sendable {
     case memoryList
     case memoryGet
     case transcriptRecall
+    case similarRecall
     case typedRecall
     case synthesize
     case dream
@@ -62,7 +63,7 @@ enum AriaOperation: String, Sendable {
 
     var effect: Effect {
         switch self {
-        case .help, .memorySearch, .memoryList, .memoryGet, .transcriptRecall, .typedRecall, .synthesize, .migrationRun, .federatedRecall, .huntContradictions, .connectionSearch, .connectionMap, .factSearch, .factTimeline, .readJournal, .monitoringStatus, .estatePing, .estateStatus, .estateMap, .drainStatus, .rebuildStatus, .timingReport, .listLenses, .listRecipes, .vaultExport, .vaultJob, .datasetQuery, .datasetStats, .vaultStatus:
+        case .help, .memorySearch, .memoryList, .memoryGet, .transcriptRecall, .similarRecall, .typedRecall, .synthesize, .migrationRun, .federatedRecall, .huntContradictions, .connectionSearch, .connectionMap, .factSearch, .factTimeline, .readJournal, .monitoringStatus, .estatePing, .estateStatus, .estateMap, .drainStatus, .rebuildStatus, .timingReport, .listLenses, .listRecipes, .vaultExport, .vaultJob, .datasetQuery, .datasetStats, .vaultStatus:
             return .inspection
         case .fileMemory, .dream, .migrationConfirm, .proposeContradictions, .fileFact, .retireFact, .writeJournal, .monitoringSet, .updateMemory, .withdrawMemory, .eraseMemory, .confirmMemory, .moveMemory, .linkMemories, .reviewTunnel, .vaultImport, .reindex, .reclassifyFDC, .palaceImport, .jsonImport, .fileDataset, .vaultReconcile:
             return .mutation
@@ -78,6 +79,7 @@ enum AriaSurfaceRequest: Sendable {
     case memoryList(AriaV2MemoryListRequest)
     case memoryGet(AriaV2MemoryGetRequest)
     case transcriptRecall(AriaV2TranscriptRecallRequest)
+    case similarRecall(AriaV2SimilarRecallRequest)
     case recallLens(AriaV2RecallLensRequest)
     case synthesize(AriaV2SynthesizeRequest)
     case dream(AriaV2Dream.Request)
@@ -121,6 +123,7 @@ enum AriaSurfaceRequest: Sendable {
         case .memoryList: return .memoryList
         case .memoryGet: return .memoryGet
         case .transcriptRecall: return .transcriptRecall
+        case .similarRecall: return .similarRecall
         case .recallLens: return .typedRecall
         case .synthesize: return .synthesize
         case .dream: return .dream
@@ -180,6 +183,7 @@ enum AriaSurfaceRequest: Sendable {
         case .memoryList: return AriaV2MemoryListRequest.toolName
         case .memoryGet: return "moot_memory_get"
         case .transcriptRecall: return AriaV2TranscriptRecallRequest.toolName
+        case .similarRecall: return AriaV2SimilarRecallRequest.toolName
         case .recallLens(let request): return request.operation.rawValue
         case .synthesize: return AriaV2OrchestrationOperation.synthesize.rawValue
         case .dream: return AriaV2Dream.toolName
@@ -236,6 +240,8 @@ enum AriaSurfaceDecoder {
             return .memoryGet(try AriaV2MemoryGetRequest(arguments: object))
         case AriaV2TranscriptRecallRequest.toolName:
             return .transcriptRecall(try AriaV2TranscriptRecallRequest(arguments: object))
+        case AriaV2SimilarRecallRequest.toolName:
+            return .similarRecall(try AriaV2SimilarRecallRequest(arguments: object))
         case AriaV2RecallLensOperation.recallPrecise.rawValue:
             return .recallLens(try AriaV2RecallLensRequest(tool: name, arguments: object))
         case AriaV2RecallLensOperation.recallTemporal.rawValue:

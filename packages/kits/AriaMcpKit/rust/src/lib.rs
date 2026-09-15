@@ -15,7 +15,7 @@
 //!               └─► dispatcher::Dispatcher::handle
 //!                     ├─► surface::SelectedSurface::decode (v2 admission + frozen gate)
 //!                     └─► surface::execute  ──► v2::{core_memory, estate_diagnostics, …}
-//!                                                 ├─► (80 ARIA v2 tools)
+//!                                                 ├─► (81 ARIA v2 tools)
 //! stdout (newline-delimited JSON responses)
 //! ```
 //!

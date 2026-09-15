@@ -25,19 +25,27 @@ pub struct RecallRoute {
     pub transform: fn(GLKRecallRequest) -> GLKRecallRequest,
 }
 
-/// Route 1 — cross-encoder strict-transcript routing.
+/// Route 1 — cross-encoder conversation routing.
 ///
 /// - Preference: `cross_encoder_routing` estate-manifest key, absent = on.
 /// - Predicate: `is_conversation_question` — the question carries a quoted
 ///   phrase, a speaker cue or a conversation reference.
-/// - Transform: set `rerank_directive = RerankDirective::strict_transcript(None)`.
+/// - Transform: set `rerank_directive =
+///   RerankDirective::apply(Some(CROSS_ENCODER_ROUTE_REASON))` — the
+///   degradable directive, never the transcript operation's fail-closed
+///   `strict_transcript`.
 ///
 /// Mirrors Swift `crossEncoderRoute` (RecallRouter.swift).
 pub const CROSS_ENCODER_ROUTE: RecallRoute = RecallRoute {
     preference_key: "cross_encoder_routing",
     predicate: is_conversation_question,
-    transform: apply_strict_transcript,
+    transform: apply_cross_encoder_rerank,
 };
+
+/// Diagnostic code Route 1 writes into its directive; the stage echoes it in
+/// the recall report so a reader can tell a routed rerank from one an operation
+/// asked for. Shared with the Swift twin (`crossEncoderRouteReason`).
+pub const CROSS_ENCODER_ROUTE_REASON: &str = "route:cross_encoder_routing";
 
 /// The ordered route list the coordinator applies once per scored recall.
 /// `apply_recall_routes` fires the first entry whose preference is on and
@@ -72,10 +80,16 @@ pub fn is_conversation_question(query: &str) -> bool {
     CONVERSATION_CUES.iter().any(|cue| text.contains(cue))
 }
 
-/// Route 1 transform: the request leaves carrying the strict-transcript
-/// directive, so the cross-encoder stage runs on this recall.
-fn apply_strict_transcript(request: GLKRecallRequest) -> GLKRecallRequest {
-    request.with_rerank_directive(RerankDirective::strict_transcript(None))
+/// Route 1 transform: the request leaves carrying the degradable `apply`
+/// directive, so the cross-encoder stage reranks the head when it can run and
+/// otherwise reports its degrade reason and leaves the lane order standing.
+///
+/// Not `strict_transcript`: that directive fails closed (an empty strict pool
+/// returns zero rows) and belongs to the `moot_memory_recall_transcript`
+/// operation alone. A routed ordinary question — one that merely trips a cue
+/// such as "meeting" — must never lose results to it.
+fn apply_cross_encoder_rerank(request: GLKRecallRequest) -> GLKRecallRequest {
+    request.with_rerank_directive(RerankDirective::apply(Some(CROSS_ENCODER_ROUTE_REASON)))
 }
 
 /// Walks `RECALL_ROUTES` in order and applies the first route whose preference

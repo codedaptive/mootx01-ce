@@ -62,21 +62,4 @@ public enum ConsolidationSignal {
                 }
             })
     }
-
-    /// Diagnostic-only spec for registration contexts with no live cycle
-    /// (mirrors TemporalCausalitySignal.defaultSpec — registerDefaultStandingSignals
-    /// cannot supply estate context).
-    public static func defaultSpec() -> SignalSpec {
-        SignalSpec(
-            name: signalName,
-            trigger: .interval(seconds: defaultCadenceSeconds),
-            freshnessTarget: defaultCadenceSeconds * 2,
-            concurrencyPolicy: .single,
-            emit: { context in
-                return [.diagnostic(DiagnosticReport(
-                    title: "consolidation-sweep.fired",
-                    detail: "sweep signal fired (no-op) at \(context.now.ISO8601Format())",
-                    observedAt: context.now))]
-            })
-    }
 }

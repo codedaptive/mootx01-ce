@@ -49,7 +49,7 @@ struct UpgradeReclaimSetTests {
         for value in values {
             withUnsafeBytes(of: value.bitPattern.littleEndian) { bytes.append(contentsOf: $0) }
         }
-        return VectorPayload(kind: .float32, dim: values.count, bytes: bytes)
+        return VectorPayload(kind: .float32, dim: UInt32(values.count), bytes: bytes)
     }
 
     /// Every `model_id` left in the `vectors` table, one entry per row.
