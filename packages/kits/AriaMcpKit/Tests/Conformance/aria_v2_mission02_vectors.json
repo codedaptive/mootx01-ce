@@ -1,7 +1,7 @@
 {
   "catalog": {
     "base_full_feature_roster": {
-      "expected_tool_count": 80,
+      "expected_tool_count": 81,
       "feature_prerequisites": [
         "core",
         "vault"
@@ -15,7 +15,7 @@
     },
     "catalog_variants": [
       {
-        "expected_tool_count": 80,
+        "expected_tool_count": 81,
         "features": [
           "core",
           "vault"
@@ -85,6 +85,7 @@
           "moot_recall_distilled",
           "moot_recall_precise",
           "moot_recall_shaped",
+          "moot_recall_similar",
           "moot_recall_temporal",
           "moot_recall_vague",
           "moot_recall_walk",
@@ -105,7 +106,7 @@
         ]
       },
       {
-        "expected_tool_count": 73,
+        "expected_tool_count": 74,
         "features": [
           "core"
         ],
@@ -172,6 +173,7 @@
           "moot_recall_distilled",
           "moot_recall_precise",
           "moot_recall_shaped",
+          "moot_recall_similar",
           "moot_recall_temporal",
           "moot_recall_vague",
           "moot_recall_walk",
@@ -187,7 +189,7 @@
         ]
       },
       {
-        "expected_tool_count": 81,
+        "expected_tool_count": 82,
         "features": [
           "core",
           "vault",
@@ -258,6 +260,7 @@
           "moot_recall_distilled",
           "moot_recall_precise",
           "moot_recall_shaped",
+          "moot_recall_similar",
           "moot_recall_temporal",
           "moot_recall_vague",
           "moot_recall_walk",
@@ -279,7 +282,7 @@
         ]
       },
       {
-        "expected_tool_count": 74,
+        "expected_tool_count": 75,
         "features": [
           "core",
           "memory_adapter"
@@ -347,6 +350,7 @@
           "moot_recall_distilled",
           "moot_recall_precise",
           "moot_recall_shaped",
+          "moot_recall_similar",
           "moot_recall_temporal",
           "moot_recall_vague",
           "moot_recall_walk",
@@ -10783,6 +10787,156 @@
             },
             "tool": {
               "const": "moot_recall_shaped"
+            }
+          },
+          "required": [
+            "surface_version",
+            "tool",
+            "data",
+            "meta"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "accepted_keys": [
+          "estate_id",
+          "limit",
+          "query"
+        ],
+        "availability": {
+          "all_of": [
+            "core"
+          ]
+        },
+        "description": "Find memories that mean the same as the question even when they share no words with it.",
+        "effect": "read",
+        "help": {
+          "example": {
+            "arguments": {
+              "query": "example"
+            },
+            "name": "moot_recall_similar"
+          },
+          "intent": "Find memories that mean the same as the question even when they share no words with it.",
+          "nearest_alternative": null
+        },
+        "id": "similar_recall",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "estate_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "limit": {
+              "default": 10,
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "query": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "moot_recall_similar",
+        "outputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "additionalProperties": false,
+              "properties": {
+                "matches": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "excerpt": {
+                        "type": "string"
+                      },
+                      "fetch": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "arguments": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "memory_id": {
+                                "format": "uuid",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "memory_id"
+                            ],
+                            "type": "object"
+                          },
+                          "tool": {
+                            "const": "moot_memory_get"
+                          }
+                        },
+                        "required": [
+                          "tool",
+                          "arguments"
+                        ],
+                        "type": "object"
+                      },
+                      "memory_id": {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      "room": {
+                        "type": "string"
+                      },
+                      "score": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "memory_id",
+                      "room",
+                      "excerpt",
+                      "score",
+                      "fetch"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "matches"
+              ],
+              "type": "object"
+            },
+            "hint": {
+              "type": "string"
+            },
+            "meta": {
+              "additionalProperties": true,
+              "properties": {
+                "completeness": {
+                  "const": "incomplete"
+                },
+                "effect": {
+                  "const": "read"
+                }
+              },
+              "required": [
+                "completeness",
+                "effect"
+              ],
+              "type": "object"
+            },
+            "surface_version": {
+              "const": "v2"
+            },
+            "tool": {
+              "const": "moot_recall_similar"
             }
           },
           "required": [

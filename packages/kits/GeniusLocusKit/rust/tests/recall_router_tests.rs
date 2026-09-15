@@ -100,6 +100,18 @@ fn router_on_dialogue_query_fires_route() {
         result.cross_encoder.is_some(),
         "cross-encoder report should be present when route 1 fires"
     );
+    // The routed directive is the degradable `apply`, never the transcript
+    // operation's fail-closed `strict_transcript`: a routed ordinary question
+    // must keep its lane order when the stage cannot run, so no
+    // strict-transcript evidence is produced for it.
+    assert!(
+        result
+            .cross_encoder
+            .as_ref()
+            .and_then(|report| report.strict_transcript.as_ref())
+            .is_none(),
+        "route 1 must not carry strict-transcript evidence"
+    );
 }
 
 /// Gate: preference off + dialogue query → route does not fire.

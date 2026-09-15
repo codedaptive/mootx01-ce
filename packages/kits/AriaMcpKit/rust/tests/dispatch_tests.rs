@@ -353,7 +353,7 @@ fn session_fdc_floor(session: &SelectedV2Session) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 1. tools/list surface assertions — 80 tools exact (v2 catalog)
+// 1. tools/list surface assertions — 81 tools exact (v2 catalog)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -390,11 +390,11 @@ fn tools_list_count_is_80() {
     //       moot_recall_walk escalation-ladder recall recipe; 2026-08-26 added
     //       moot_rebuild_status, the derived-state rebuild condition surface;
     //       work packets retired V2_PACKETS_RETIRE)
-    // v2 catalog: 80 tools with vault-on (the default), 73 without vault.
+    // v2 catalog: 81 tools with vault-on (the default), 74 without vault.
     // Use selected_tools_for_registry with vault_enabled() for deterministic count.
     let tools = selected_tools_for_registry(&selected_registry_with_vault(vault_enabled()));
     let arr = tools.as_array().expect("selected_tools must return an array");
-    assert_eq!(arr.len(), 80, "expected 80 v2 tools; got {}", arr.len());
+    assert_eq!(arr.len(), 81, "expected 81 v2 tools; got {}", arr.len());
 }
 
 #[test]
@@ -435,6 +435,7 @@ fn tools_list_name_set_matches_expected_names() {
         "moot_hunt_contradictions", "moot_propose_contradictions",
         // Transcript recall (1)
         "moot_memory_recall_transcript",
+        "moot_recall_similar",
         // Help (1)
         "moot_help",
         // Estate reads (3)
@@ -470,7 +471,7 @@ fn tools_list_name_set_matches_expected_names() {
     .copied()
     .collect();
 
-    // v2 catalog with vault-on (80 tools).
+    // v2 catalog with vault-on (81 tools).
     let tools = selected_tools_for_registry(&selected_registry_with_vault(vault_enabled()));
     let arr = tools.as_array().expect("selected_tools must return an array");
     let actual: std::collections::HashSet<&str> =
@@ -3808,7 +3809,7 @@ fn vault_enabled_default_is_true() {
 fn v2_catalog_with_vault_on_includes_vault_tools() {
     let tools = selected_tools_for_registry(&selected_registry_with_vault(true));
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 80, "vault-on must produce 80 v2 tools");
+    assert_eq!(arr.len(), 81, "vault-on must produce 81 v2 tools");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",
@@ -3822,7 +3823,7 @@ fn v2_catalog_with_vault_on_includes_vault_tools() {
 fn v2_catalog_with_vault_off_excludes_vault_tools() {
     let tools = selected_tools_for_registry(&selected_registry_with_vault(false));
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 73, "vault-off must produce 73 v2 tools (80 - 7 vault-gated)");
+    assert_eq!(arr.len(), 74, "vault-off must produce 74 v2 tools (81 - 7 vault-gated)");
     let names: std::collections::HashSet<&str> =
         arr.iter().filter_map(|t| t["name"].as_str()).collect();
     for name in &["moot_vault_export", "moot_vault_import", "moot_vault_status",

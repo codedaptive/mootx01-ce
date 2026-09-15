@@ -94,7 +94,12 @@ public actor AutonomicGovernor {
     private let kit: GeniusLocusKit
     private let handle: EstateHandle
     private let dreaming: DreamingDaemon
-    private let maintenance: MaintenanceDaemon
+    /// The estate's maintenance daemon. The governor tick does not pump it:
+    /// the resident wires the three maintenance-family standing signals
+    /// (`maintenance-daemon`, `decay-sweep`, `by-reference-validity`) to
+    /// `triggerMaintenanceCycle(now:categories:)` on this actor, so each scan
+    /// category runs on its own signal cadence through `signalTick`.
+    public let maintenance: MaintenanceDaemon
     /// Base loop granularity in milliseconds — the sampling resolution for the
     /// daemons' own (longer) cadences, not a cadence itself.
     private let baseTickMs: Int
@@ -304,7 +309,6 @@ public actor AutonomicGovernor {
     /// What fired on one tick — returned for tests; ignored by `run()`.
     public struct GovernorReport: Sendable {
         public let dreamingFired: Bool
-        public let maintenanceFired: Bool
         public let signalsTicked: Bool
         /// True when this tick dispatched a graph-analytics scan Task.
         public let graphAnalyticsFired: Bool
@@ -368,7 +372,6 @@ public actor AutonomicGovernor {
     @discardableResult
     public func tick(now: Date) async -> GovernorReport {
         var dreamingFired = false
-        var maintenanceFired = false
         var signalsTicked = false
 
         // REM dispatch table: iterate the shared table so
@@ -431,11 +434,6 @@ public actor AutonomicGovernor {
                     catch { logger.error("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
                 }
             }
-        }
-
-        if await maintenance.due(now: now) {
-            do { maintenanceFired = try await maintenance.pump(now: now) != nil }
-            catch { logger.error("AutonomicGovernor: maintenance pump error: \(error)") }
         }
 
         // Standing signals: the resident daemon registers the default standing
@@ -645,7 +643,6 @@ public actor AutonomicGovernor {
 
         return GovernorReport(
             dreamingFired: dreamingFired,
-            maintenanceFired: maintenanceFired,
             signalsTicked: signalsTicked,
             graphAnalyticsFired: graphAnalyticsElapsed,
             graphCentralityFired: graphCentralityElapsed,

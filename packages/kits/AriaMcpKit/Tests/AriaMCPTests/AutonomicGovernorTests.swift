@@ -54,7 +54,7 @@ struct AutonomicGovernorTests {
             fallback: .failClosed, origin: .external))
     }
 
-    @Test func firstTickFiresDreamingAndMaintenance() async throws {
+    @Test func firstTickFiresDreaming() async throws {
         let (kit, handle) = try await makeEstate()
         let governor = AutonomicGovernor(kit: kit, handle: handle, poolDirectory: nil, poolTableArtifactURL: nil)
         // v2 (T9): dreaming fires on the first due tick ONLY when the dreaming
@@ -62,7 +62,6 @@ struct AutonomicGovernorTests {
         try await seedDreamingQueue(kit, handle)
         let report = await governor.tick(now: Date(timeIntervalSince1970: 1_000_000))
         #expect(report.dreamingFired)
-        #expect(report.maintenanceFired)
     }
 
     @Test func dreamingRespectsCadence() async throws {

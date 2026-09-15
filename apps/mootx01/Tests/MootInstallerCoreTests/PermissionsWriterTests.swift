@@ -149,6 +149,8 @@ struct PermissionsWriterTests {
             "moot_read_journal", "moot_recall_connected", "moot_recall_distilled",
             "moot_recall_precise", "moot_recall_shaped", "moot_recall_temporal",
             "moot_recall_vague", "moot_recall_walk",
+            // Nearest drawers by whole-record vector; Allow tier.
+            "moot_recall_similar",
             "moot_reclassify_fdc", "moot_reindex", "moot_retire_fact", "moot_timing_report",
             "moot_review_tunnel",
             "moot_synthesize", "moot_update_memory", "moot_vault_export", "moot_vault_import",
@@ -179,7 +181,8 @@ struct PermissionsWriterTests {
         // −2 (Encoder Rerank Program): moot_distill and moot_redistill retired
         // (distillation is inline at read); moot_synthesize now classified as a
         // read (it was live but unclassified).
-        #expect(realTools.count == 80, "pinned tool inventory drifted from the real surface count")
+        // +1: moot_recall_similar — paraphrase recall over the whole-record lane, Allow tier.
+        #expect(realTools.count == 81, "pinned tool inventory drifted from the real surface count")
 
         let classified = PermissionsWriter.explicitlyClassifiedTools
         let untriaged = realTools.subtracting(classified)

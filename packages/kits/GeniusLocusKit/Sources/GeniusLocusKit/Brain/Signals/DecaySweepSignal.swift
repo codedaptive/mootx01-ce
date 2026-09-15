@@ -1,58 +1,59 @@
 import Foundation
 import LocusKit
 
-/// Decay-sweep signal — architecture spec §11.2 (maintenance daemon
-/// emissions, "decay candidates") and §6.8 / cookbook §6.8 (matrix
-/// decay).
+/// Decay-sweep standing signal — architecture spec §11.2 row 5.
 ///
-/// Decay is broken out as its own standing signal even though the
-/// maintenance daemon also handles decay candidates because the two
-/// have different cadences and different output classes:
+/// Fires the NeuronKit maintenance engine's `decay` category on each tick:
+/// `MaintenanceDaemon.triggerMaintenanceCycle(now:categories: [.decay])`
+/// scans that category only, proposes its candidates through the engine's
+/// own sink (routed through `propose`), and the signal surfaces the
+/// `decayCandidates` count as a diagnostic. The engine's audit-chain monitor
+/// and QID-pending retry run on the same call.
 ///
-/// - Maintenance runs hourly and emits forbidden-combination
-///   discipline proposals plus a mixed decay/tombstone candidate
-///   list.
-/// - Decay-sweep runs daily (cookbook §15.2 "Decay" entry, ~10 ms
-///   compute) and emits exclusively `propose(mutate_candidate)` for
-///   rows whose operational bitmap's `active → decayed` transition
-///   window has matured.
-///
-/// Routing: every candidate is routed through `propose` per
-/// architecture spec §11.1 ("mutate-candidate routed through `propose`
-/// for confirmation"). The signal does not mutate the row's bitmap
-/// directly.
+/// Mirrors `AnomalySweepSignal` in structure: interval cadence, `.single`
+/// concurrency, diagnostic-only emission, injected closure for the live
+/// cycle. Registered by `registerDefaultStandingSignals` only when the host
+/// passes a live cycle — the host reads the estate's `.maintenance`
+/// preference and passes nil when it is `.off`, so the governor's tick
+/// never pumps the engine on this category.
 public enum DecaySweepSignal {
 
-    /// Default cadence in seconds (86 400 = 1 day). Cookbook §15.2.
+    /// Default cadence in seconds (86 400 = 1 day; cookbook §15.2).
     public static let defaultCadenceSeconds: TimeInterval = 86_400
 
     /// Stable name surfaced in `SignalReport.name`.
     public static let signalName = "decay-sweep"
 
-    public static func defaultSpec() -> SignalSpec {
+    /// Build a signal spec that runs the engine's `decay` category on each fire.
+    ///
+    /// - Parameter decayCycle: async closure called with the scheduler's `now`;
+    ///   runs the scoped maintenance cycle and returns `decayCandidates`.
+    ///   A throw is caught and surfaced as a diagnostic so the scheduler's
+    ///   drain loop is not interrupted.
+    public static func spec(
+        decayCycle: @escaping @Sendable (Date) async throws -> Int
+    ) -> SignalSpec {
         SignalSpec(
             name: signalName,
             trigger: .interval(seconds: defaultCadenceSeconds),
             freshnessTarget: defaultCadenceSeconds * 2,
             concurrencyPolicy: .single,
             emit: { context in
-                // Decay candidate — `mutateCandidate` with kind
-                // `.supersede`, routed through `propose`. The scheduler
-                // rewrites the emission into a ProposalFrame with
-                // kind="mutate_candidate" before dispatch (see
-                // StandingSignalScheduler.applyEmission).
-                let candidate = SignalEmission.mutateCandidate(
-                    rowID: "decay/aged-candidate",
-                    kind: .supersede)
-                let diagnostic = DiagnosticReport(
-                    title: "decay_sweep.pass.summary",
-                    detail:
-                        "daily decay pass observed 1 aged candidate; signal=\(context.signalID.rawValue)",
-                    observedAt: context.now)
-                return [
-                    candidate,
-                    .diagnostic(diagnostic),
-                ]
+                do {
+                    let count = try await decayCycle(context.now)
+                    return [.diagnostic(DiagnosticReport(
+                        title: "decay-sweep.complete",
+                        detail: "\(count) decay candidate(s) at \(context.now.ISO8601Format())",
+                        observedAt: context.now))]
+                } catch {
+                    // Surface cycle errors as diagnostics so the scheduler's
+                    // drain loop is not interrupted; the failure appears in
+                    // recentDiagnostics for application-layer monitoring.
+                    return [.diagnostic(DiagnosticReport(
+                        title: "decay-sweep.error",
+                        detail: "\(error)",
+                        observedAt: context.now))]
+                }
             })
     }
 }

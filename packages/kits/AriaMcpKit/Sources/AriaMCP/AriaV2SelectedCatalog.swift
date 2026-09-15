@@ -207,6 +207,24 @@ enum AriaV2SelectedCatalog {
             required: ["query"], dataSchema: transcriptRecallDataSchema()
         ),
         descriptor(
+            identity: "similar_recall",
+            name: AriaV2SimilarRecallRequest.toolName,
+            effect: .read,
+            description: "Find memories that mean the same as the question even when they share no words with it.",
+            intents: ["similar memories", "paraphrase recall", "meaning search"],
+            properties: [
+                "query": .object(["type": .string("string"), "minLength": .integer(1)]),
+                "limit": .object([
+                    "type": .string("integer"),
+                    "minimum": .integer(AriaV2SimilarRecallRequest.minimumLimit),
+                    "maximum": .integer(AriaV2SimilarRecallRequest.maximumLimit),
+                    "default": .integer(AriaV2SimilarRecallRequest.defaultLimit),
+                ]),
+                "estate_id": uuidSchema(),
+            ],
+            required: ["query"], dataSchema: similarRecallDataSchema()
+        ),
+        descriptor(
             identity: "recall_precise", name: AriaV2RecallLensOperation.recallPrecise.rawValue,
             effect: .read, description: "Recall known-token answers with a named precision composition.",
             intents: ["Recall known-token answers with a named precision composition."],
@@ -1706,6 +1724,18 @@ enum AriaV2SelectedCatalog {
         return orderedExactObjectSchema([
             "matches": .object(["type": .string("array"), "items": match]), "strict_rerank": evidence,
         ], required: ["matches", "strict_rerank"])
+    }
+
+    /// `moot_recall_similar` rows carry the transcript row shape; there is no
+    /// evidence block because the lane applies no rerank.
+    private static func similarRecallDataSchema() -> JSONValue {
+        let match = orderedExactObjectSchema([
+            "memory_id": uuidSchema(), "room": stringSchema(), "excerpt": stringSchema(),
+            "score": numberSchema(), "fetch": fetchSchema(),
+        ], required: ["memory_id", "room", "excerpt", "score", "fetch"])
+        return orderedExactObjectSchema([
+            "matches": .object(["type": .string("array"), "items": match]),
+        ], required: ["matches"])
     }
 
     private static func dreamDataSchema() -> JSONValue {

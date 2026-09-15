@@ -90,34 +90,4 @@ impl ConsolidationSignal {
             }),
         }
     }
-
-    /// No-op spec for registration contexts where no live consolidation cycle
-    /// can be supplied (tests, and the generic `default_standing_signal_specs`
-    /// helper which cannot supply estate-specific closures). Fires on cadence
-    /// and surfaces a "consolidation-sweep.fired" diagnostic so the scheduler's
-    /// rhythm remains observable.
-    ///
-    /// Mirrors Swift `ConsolidationSignal.defaultSpec`.
-    pub fn default_spec() -> SignalSpec {
-        SignalSpec {
-            name: Self::SIGNAL_NAME.to_string(),
-            trigger: SignalTrigger::Interval {
-                seconds: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS),
-            },
-            resource_cost: ResourceCostEstimate::ZERO,
-            freshness_target: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS * 2),
-            concurrency_policy: ConcurrencyPolicy::Single,
-            emit: Arc::new(|context: &SignalContext| {
-                let diagnostic = DiagnosticReport {
-                    title: "consolidation-sweep.fired".into(),
-                    detail: format!(
-                        "consolidation sweep fired (no-op); signal={}",
-                        context.signal_id.0
-                    ),
-                    observed_at_nanos: context.now_nanos,
-                };
-                vec![SignalEmission::Diagnostic(diagnostic)]
-            }),
-        }
-    }
 }

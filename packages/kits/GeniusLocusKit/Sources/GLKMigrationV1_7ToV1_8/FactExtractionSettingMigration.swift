@@ -62,16 +62,14 @@ public extension GeniusLocusKit {
         // nil would silently write "on" over an estate that holds "off".
         let existing: String?
         do {
-            existing = try await estate(for: handle).meta(key: GeniusLocusKit.factExtractionMetaKey)
+            existing = try await estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
         } catch {
             throw FactExtractionSettingMigrationError.storageUnavailable(
                 reason: "fact_extraction key read failed: \(error)")
         }
         if existing == nil {
             do {
-                try await estate(for: handle).setMeta(
-                    key: GeniusLocusKit.factExtractionMetaKey,
-                    value: FactExtractionSetting.on.rawValue)
+                try await provisionPreference(.factExtraction, .on, for: handle)
             } catch {
                 throw FactExtractionSettingMigrationError.settingWriteFailed(
                     reason: "\(error)")

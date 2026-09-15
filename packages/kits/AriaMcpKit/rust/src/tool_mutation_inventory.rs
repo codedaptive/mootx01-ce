@@ -109,6 +109,8 @@ pub const FROZEN_READ_TOOLS: &[&str] = &[
     "moot_help",
     // Transcript recall (reads session transcript, no estate writes).
     "moot_memory_recall_transcript",
+    // Similar recall (nearest drawers by whole-record vector, pure read).
+    "moot_recall_similar",
     // Monitoring status: read-only telemetry report (moot_monitoring_set is a mutation).
     "moot_monitoring_status",
     // Recipe reads: catalogs and the recall family.
@@ -140,7 +142,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every tool name dispatchable by a live serve: the 80 v2 catalog tools
+    /// Every tool name dispatchable by a live serve: the 81 v2 catalog tools
     /// (vault-on) plus the command-classified adapters that are not in the
     /// catalog but are reachable through the dispatch layer's command routing.
     fn reachable() -> HashSet<String> {

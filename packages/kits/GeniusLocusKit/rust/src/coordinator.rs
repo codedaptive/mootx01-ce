@@ -62,6 +62,7 @@ use convergence_kit::types::SyncState;
 // expansion, which is why they appear to the compiler as unused at the
 // call sites. The macro re-qualifies them via `intellectus_lib::` rather than
 // importing them here, so these imports can be dropped.
+use crate::estate_preference::{EstatePreferenceKey, EstatePreferenceValue};
 use crate::telemetry::metric_names;
 use crate::glk_emit;
 
@@ -745,6 +746,13 @@ pub struct DreamingItem {
 /// `GeniusLocusKit.huntSnippetLimit`.
 pub const HUNT_SNIPPET_LIMIT: usize = 160;
 
+/// Weight of the end-of-day tournament rating term in the matrix-aware
+/// score: a small additive reward, `RATING_WEIGHT × rating`, per candidate
+/// that holds a `recall_ratings` row. Zero when no row exists, so a fresh
+/// estate scores byte-identically to one that has never run a tournament.
+/// The Swift twin carries the same value (`RecallDirector.ratingWeight`).
+pub const RATING_WEIGHT: f32 = 0.1;
+
 /// One lexical retrieval pass's classified output — the tier-2/3 half
 /// of the tiered search, factored so `tiered_contradiction_search` (the
 /// read verb) and `propose_conflict_tunnels` (the P2.5 filing pass)
@@ -1205,57 +1213,6 @@ impl Default for ModesManifest {
 impl ModesManifest {
     fn default_sticky_enabled() -> bool { true }
     fn default_coaching_calls() -> usize { 25 }
-}
-
-// FactExtractionSetting
-// ---------------------------------------------------------------------------
-
-/// The fact-extraction toggle governing whether a future consumer runs
-/// extraction on ingested drawers. No consumer reads this setting yet.
-/// Stored as `"on"` or `"off"` under the estate manifest key
-/// `"fact_extraction"`. Mirrors Swift `GeniusLocusKit.FactExtractionSetting`.
-///
-/// Default is `On` — an absent key or an unrecognised string returns `On`.
-/// This inverts the fail-quiet contract of the other members of this family:
-/// `On` is the ruled product behaviour for this feature, not a record of
-/// prior production state.
-///
-/// Seeded as `"on"` on populated estates through the 1.7 → 1.8 migration
-/// capsule (GENIUSLOCUSKIT_SPEC I-27).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FactExtractionSetting {
-    /// Fact extraction is enabled (the default when no value is stored).
-    On,
-    /// Fact extraction is disabled; when a consumer reads this setting,
-    /// it will skip extraction.
-    Off,
-}
-
-impl Default for FactExtractionSetting {
-    /// Absent key and unrecognised strings both resolve to `On`.
-    fn default() -> Self { Self::On }
-}
-
-impl FactExtractionSetting {
-    /// The stored string for this value. Mirrors Swift `rawValue`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::On => "on",
-            Self::Off => "off",
-        }
-    }
-
-    /// Decode a stored string. Returns `None` for unrecognised values —
-    /// callers fall back to `FactExtractionSetting::default()`. Mirrors
-    /// the Swift `init(rawValue:)` fallible initialiser convention.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "on" => Some(Self::On),
-            "off" => Some(Self::Off),
-            _ => None,
-        }
-    }
 }
 
 /// What an estate holds for the cross encoder once an apply has been tried.
@@ -4573,66 +4530,55 @@ impl EstateCoordinator {
             .unwrap_or_default())
     }
 
-    /// The estate-manifest key carrying the USER-OWNED fact-extraction toggle:
-    /// the plain string `"on"` or `"off"`. Read back via
-    /// `provisioned_fact_extraction`. Mirrors Swift
-    /// `GeniusLocusKit.factExtractionMetaKey` (RecallDirector.swift).
+    /// Provision one USER-OWNED estate preference: stored as the plain string
+    /// `"on"` or `"off"` under `key.as_str()`.
     ///
-    /// Default is ON — absent key means `On`. ON is the ruled product
-    /// behaviour for this feature; the capsule seeds the value explicitly so
-    /// a later change to the default cannot silently flip an estate already
-    /// in use.
+    /// An absent key is treated as `On` when read back. ON is the ruled
+    /// product behaviour for every key in this family; the seeding capsules
+    /// (the 1.7 → 1.8 capsule for `FactExtraction`, GENIUSLOCUSKIT_SPEC I-27)
+    /// write `"on"` explicitly so the key is physically present and a later
+    /// default change cannot flip an estate already in use.
     ///
-    /// Seeded as `"on"` on populated estates through the 1.7 → 1.8 migration
-    /// capsule (GENIUSLOCUSKIT_SPEC I-27); no migration is required for a fresh
-    /// estate.
-    pub const FACT_EXTRACTION_META_KEY: &str = "fact_extraction";
-
-    /// Provision the USER-OWNED fact-extraction toggle on an estate:
-    /// stored as the plain string `"on"` or `"off"` under `"fact_extraction"`.
-    ///
-    /// An absent key is treated as `On` when read back. The 1.7 → 1.8
-    /// migration capsule seeds `"on"` on populated estates so the key is
-    /// physically present and a later default change cannot flip an estate
-    /// already in use.
-    ///
-    /// Mirrors Swift `GeniusLocusKit.provisionFactExtraction(_:for:)`.
-    pub fn provision_fact_extraction(
+    /// Mirrors Swift `GeniusLocusKit.provisionPreference(_:_:for:)`.
+    pub fn provision_preference(
         &self,
         handle: &EstateHandle,
-        setting: FactExtractionSetting,
+        key: EstatePreferenceKey,
+        value: EstatePreferenceValue,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         // The value is a plain string — no JSON encoding needed.
         estate
-            .set_meta(Self::FACT_EXTRACTION_META_KEY, setting.as_str())
+            .set_meta(key.as_str(), value.as_str())
             .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
-                verb: "provisionFactExtraction".to_string(),
-                reason: format!("provision_fact_extraction set_meta failed: {e:?}"),
+                verb: "provisionPreference".to_string(),
+                reason: format!("provision_preference({}) set_meta failed: {e:?}", key.as_str()),
             }))
     }
 
-    /// Read back the provisioned fact-extraction toggle, or `On` when the
-    /// estate carries none.
+    /// Read back one USER-OWNED estate preference, or `On` when the estate
+    /// carries none.
     ///
     /// Note: absent key means ON, not OFF. ON is the ruled product default
-    /// for this feature; the capsule seeds the value explicitly so a later
-    /// default change cannot flip an estate already in use. An unrecognised
-    /// string also returns `On` — the same fail-quiet contract
-    /// `provisioned_door_config` applies to unrecognised JSON. Storage errors
-    /// degrade to `On` (fail-quiet); use `provision_fact_extraction` to write.
+    /// for every key in this family; the seeding capsules write the value
+    /// explicitly so a later default change cannot flip an estate already in
+    /// use. An unrecognised string also returns `On` — the same fail-quiet
+    /// contract `provisioned_door_config` applies to unrecognised JSON.
+    /// Storage errors degrade to `On` (fail-quiet); use
+    /// `provision_preference` to write.
     ///
-    /// Mirrors Swift `GeniusLocusKit.provisionedFactExtraction(for:)`.
-    pub fn provisioned_fact_extraction(
+    /// Mirrors Swift `GeniusLocusKit.provisionedPreference(_:for:)`.
+    pub fn provisioned_preference(
         &self,
         handle: &EstateHandle,
-    ) -> Result<FactExtractionSetting, VerbDispatchError> {
+        key: EstatePreferenceKey,
+    ) -> Result<EstatePreferenceValue, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         Ok(estate
-            .meta(Self::FACT_EXTRACTION_META_KEY)
+            .meta(key.as_str())
             .ok()
             .flatten()
-            .and_then(|s| FactExtractionSetting::from_str(&s))
+            .and_then(|s| EstatePreferenceValue::from_str(&s))
             .unwrap_or_default())
     }
 
@@ -9340,6 +9286,68 @@ impl EstateCoordinator {
         Ok(())
     }
 
+    // MARK: - adaptive-recall standing-signal cycles
+
+    /// Hourly fold of the new audit-log tail into the temporal causality
+    /// matrix — the `temporal-causality-fold` standing signal's cycle.
+    /// Rebuilds the derived accelerators from the log the same way estate
+    /// open does: the persisted snapshot is loaded, folded forward over the
+    /// audit tail past its watermark and re-persisted, so the `matrixAware`
+    /// recall lane reads a tier that includes every capture since the
+    /// previous fire. Mirrors Swift
+    /// `GeniusLocusKit.runTemporalCausalityFold(_:now:)`.
+    pub fn run_temporal_causality_fold(
+        &mut self,
+        handle: &EstateHandle,
+        now_millis: i64,
+    ) -> Result<(), VerbDispatchError> {
+        self.rebuild_derived_accelerators(handle, now_millis)
+    }
+
+    /// One training-daemon tick over this coordinator's matrix tier for
+    /// `handle` — the `training-daemon` standing signal's cycle.
+    ///
+    /// Runs `TrainingDaemon::run_once` against the estate's audit log. The
+    /// daemon is minted per tick with the default threshold gate, so its
+    /// watermark starts at zero and an active tick folds the full log; the
+    /// gate keeps the tick dormant (no matrix work) until the estate has
+    /// crossed the transition threshold. The tier is taken from
+    /// `matrix_tiers` (a fresh tier is installed when none is registered
+    /// yet). Calibration is not tracked per-estate on the coordinator, the
+    /// same posture as `rebuild_derived_accelerators`, so each tick records
+    /// its observations into a fresh registry. Returns a one-line summary
+    /// of the tick for the signal's diagnostic. Mirrors Swift
+    /// `GeniusLocusKit.runTrainingTick(_:now:)`.
+    pub fn run_training_tick(
+        &mut self,
+        handle: &EstateHandle,
+        now_millis: i64,
+    ) -> Result<String, VerbDispatchError> {
+        let log = self.audit_log(handle)?;
+        let tier = self
+            .matrix_tiers
+            .entry(*handle)
+            .or_insert_with(crate::matrix::MatrixTier::new);
+        let mut calibration = crate::matrix::MatrixCalibrationRegistry::default();
+        let mut daemon = crate::training::TrainingDaemon::new(
+            crate::training::TrainingThresholdGate::default(),
+        );
+        let tick = daemon.run_once(&log, tier, &mut calibration);
+        let state = if tick.decision.is_active() { "active" } else { "dormant" };
+        Ok(format!(
+            "training tick {}: transitions {}/{}, considered {}, F cells {}, O keys {}, T keys {}, calibration observations {} at {}ms",
+            state,
+            tick.decision.transition_count(),
+            tick.decision.threshold(),
+            tick.pass_result.transitions_considered,
+            tick.pass_result.f_cells_touched,
+            tick.pass_result.o_keys_touched,
+            tick.pass_result.t_keys_touched,
+            tick.pass_result.calibration_observations_recorded,
+            now_millis
+        ))
+    }
+
     // MARK: - all_tunnels
 
     /// All tunnels in the estate across all wings.
@@ -9656,6 +9664,58 @@ impl EstateCoordinator {
     ) -> Result<Vec<RecallTraceItem>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         estate.recent_recall_traces(since, now).map_err(|e| remap("recent_recall_traces", "", e).into())
+    }
+
+    // MARK: - end_of_day_tournament
+
+    /// Folds the day's recalls into per-drawer Bradley-Terry ratings: every
+    /// recall trace since `now - 24h` is grouped by minute of `recalled_at`;
+    /// within a group the first-listed drawer beats the others (one
+    /// observation per group with two or more targets); the observations
+    /// feed an estimator seeded from the stored ratings; the resulting
+    /// strengths are upserted into `recall_ratings`. Drawer ids that are not
+    /// UUID strings are skipped; a drawer's stored `contests` count is
+    /// carried forward and incremented by the observations it took part in.
+    /// `now_millis` is the caller's clock in epoch milliseconds; nothing
+    /// reads the wall clock. Mirrors Swift
+    /// `GeniusLocusKit.endOfDayTournament(_:now:)`.
+    pub fn end_of_day_tournament(
+        &self,
+        handle: &EstateHandle,
+        now_millis: i64,
+    ) -> Result<crate::brain::end_of_day_tournament::TournamentReport, VerbDispatchError> {
+        use crate::brain::end_of_day_tournament::{
+            fold_ratings, group_contests, TournamentReport, TOURNAMENT_WINDOW_SECONDS,
+        };
+        let estate = self.estate_for_verb(handle)?;
+        // The trace window reads are ISO8601 bounds; the store compares them
+        // lexicographically, so both are rendered through the same formatter.
+        let now_secs = now_millis.div_euclid(1000);
+        let now_iso = epoch_secs_to_iso8601(now_secs);
+        let since_iso = epoch_secs_to_iso8601(now_secs - TOURNAMENT_WINDOW_SECONDS);
+        let traces = estate
+            .recent_recall_traces(&since_iso, &now_iso)
+            .map_err(|e| remap("end_of_day_tournament", "", e))?;
+
+        let contests = group_contests(&traces);
+        if contests.observations.is_empty() {
+            return Ok(TournamentReport { contests: 0, rated_drawers: 0 });
+        }
+
+        let participant_ids: Vec<String> =
+            contests.appearances.keys().map(|id| id.to_string()).collect();
+        let id_refs: Vec<&str> = participant_ids.iter().map(String::as_str).collect();
+        let stored = estate
+            .recall_ratings(&id_refs)
+            .map_err(|e| remap("end_of_day_tournament", "", e))?;
+        let ratings = fold_ratings(&contests, &stored, &now_iso);
+        estate
+            .upsert_recall_ratings(&ratings)
+            .map_err(|e| remap("end_of_day_tournament", "", e))?;
+        Ok(TournamentReport {
+            contests: contests.observations.len(),
+            rated_drawers: ratings.len(),
+        })
     }
 
     // MARK: - prune_recall_traces
@@ -13689,11 +13749,24 @@ impl EstateCoordinator {
             // the matrix term uses the EXACT pre-steer combined expression so the
             // nil/all-ones score is byte-identical (no float reassociation).
             let matrix_neutral = sh_co_occur == 1.0 && sh_temporal == 1.0;
+            // Tournament ratings for every candidate in the buffer: one point
+            // read per id; ids without a recall_ratings row are absent from the
+            // map and contribute 0 below. Mirrors Swift's `estate.recallRatings`.
+            let rating_by_id: HashMap<String, f32> = {
+                let id_refs: Vec<&str> = ordered_ids.iter().map(String::as_str).collect();
+                estate
+                    .recall_ratings(&id_refs)
+                    .map_err(|e| remap("recall", "", e))?
+                    .into_iter()
+                    .map(|r| (r.drawer_id, r.rating as f32))
+                    .collect()
+            };
             let agreement_bonus: f32 = 0.05;
             explain_agreement_scale = budget.agreement * agreement_bonus;
             for (i, v) in col_final.iter_mut().take(count).enumerate() {
                 let matrix_term = if matrix_neutral {
-                    let matrix_signal = (col_co_occur[i] + col_temporal[i]) * 0.5;
+                    let matrix_signal = (col_co_occur[i] + col_temporal[i]) * 0.5
+                        + RATING_WEIGHT * rating_by_id.get(&ordered_ids[i]).copied().unwrap_or(0.0);
                     budget.matrix * matrix_signal
                 } else {
                     sh_co_occur  * budget.matrix * 0.5 * col_co_occur[i]

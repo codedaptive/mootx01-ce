@@ -3654,6 +3654,75 @@ public actor DrawerStore {
         return try rows.map(Self.recallTraceFromRow)
     }
 
+    /// Make sure the `recall_ratings` ledger exists before it is written.
+    /// Populated estates receive the table from the 1.8 → 1.9 estate-format
+    /// capsule; a fresh estate is stamped at the current format without
+    /// running that capsule, so the store applies the same declaration on
+    /// the first write. `migrate(to:)` is a no-op once the table exists.
+    /// Only `upsertRecallRatings` calls this: a read never creates the
+    /// table (see `recallRatings(ids:)`). Mirrors Rust
+    /// `ensure_recall_ratings_table`.
+    private func ensureRecallRatingsTable() async throws {
+        try await storage.migrate(to: RecallRating.schema)
+    }
+
+    /// Write the end-of-day tournament ratings. One `insert or replace`
+    /// per rating keyed on `recall_ratings.drawer_id`; `updated_at` is
+    /// stored as ISO8601 TEXT. Empty input writes nothing and does not
+    /// touch the table.
+    public func upsertRecallRatings(_ ratings: [RecallRating]) async throws {
+        if ratings.isEmpty { return }
+        try await ensureRecallRatingsTable()
+        for rating in ratings {
+            _ = try await storage.rowStore.upsert(
+                table: "recall_ratings",
+                values: [
+                    "drawer_id": .text(rating.drawerID),
+                    "rating": .float(rating.rating),
+                    "contests": .int(Int64(rating.contests)),
+                    "updated_at": .timestamp(rating.updatedAt),
+                ],
+                conflictColumns: ["drawer_id"]
+            )
+        }
+    }
+
+    /// Tournament ratings for `ids`, keyed by drawer id. Ids with no
+    /// `recall_ratings` row are absent from the result. One point read per
+    /// id (the row store has no set predicate); order of `ids` is irrelevant.
+    /// Empty input reads nothing and does not touch the table.
+    ///
+    /// A read never writes. When the schema ledger carries no row for the
+    /// rating declaration's kit id the table has never been created (neither
+    /// the 1.8 → 1.9 capsule nor an upsert has run), so no drawer holds a
+    /// rating and the read returns empty without creating the table. The
+    /// scorer reads ratings on every matrixAware recall, and a frozen estate
+    /// must stay byte-identical on disk across a pure read.
+    public func recallRatings(ids: [String]) async throws -> [String: RecallRating] {
+        var result: [String: RecallRating] = [:]
+        if ids.isEmpty { return result }
+        guard try await storage.currentSchemaVersion(for: RecallRating.schema.kitID) > 0 else {
+            return result
+        }
+        for id in ids where result[id] == nil {
+            let rows = try await storage.rowStore.query(
+                table: "recall_ratings",
+                where: .eq(Column(table: "recall_ratings", name: "drawer_id"), .text(id)),
+                orderBy: [],
+                limit: 1,
+                offset: nil
+            )
+            guard let row = rows.first else { continue }
+            result[id] = RecallRating(
+                drawerID: Self.string(row["drawer_id"]),
+                rating: Self.optDouble(row["rating"]) ?? 0,
+                contests: Int(Self.int64(row["contests"])),
+                updatedAt: try Self.date(table: "recall_ratings", column: "updated_at", row["updated_at"])
+            )
+        }
+        return result
+    }
+
     /// Delete recall-trace rows whose `recalledAt` is strictly before
     /// `cutoff`. Returns the number of rows deleted.
     ///
