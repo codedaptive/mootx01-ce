@@ -4530,11 +4530,11 @@ impl EstateCoordinator {
             .unwrap_or_default())
     }
 
-    /// Provision one USER-OWNED estate preference: stored as the plain string
-    /// `"on"` or `"off"` under `key.as_str()`.
+    /// Provision one USER-OWNED estate preference under `key.as_str()`.
     ///
-    /// An absent key is treated as `On` when read back. ON is the ruled
-    /// product behaviour for every key in this family; the seeding capsules
+    /// `value` must be in `key.allowed_values()`; values outside it are refused
+    /// with `VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure)`. An
+    /// absent key reads back as `key.default_value()`. The seeding capsules
     /// (the 1.7 → 1.8 capsule for `FactExtraction`, GENIUSLOCUSKIT_SPEC I-27)
     /// write `"on"` explicitly so the key is physically present and a later
     /// default change cannot flip an estate already in use.
@@ -4546,6 +4546,16 @@ impl EstateCoordinator {
         key: EstatePreferenceKey,
         value: EstatePreferenceValue,
     ) -> Result<(), VerbDispatchError> {
+        if !key.allowed_values().contains(&value) {
+            let allowed: Vec<&str> = key.allowed_values().iter().map(|v| v.as_str()).collect();
+            return Err(VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionPreference".to_string(),
+                reason: format!(
+                    "value '{}' is not allowed for '{}'; allowed: {}",
+                    value.as_str(), key.as_str(), allowed.join(", ")
+                ),
+            }));
+        }
         let estate = self.estate_for_verb(handle)?;
         // The value is a plain string — no JSON encoding needed.
         estate
@@ -4556,16 +4566,13 @@ impl EstateCoordinator {
             }))
     }
 
-    /// Read back one USER-OWNED estate preference, or `On` when the estate
-    /// carries none.
+    /// Read back one USER-OWNED estate preference, or `key.default_value()` when
+    /// the estate carries none.
     ///
-    /// Note: absent key means ON, not OFF. ON is the ruled product default
-    /// for every key in this family; the seeding capsules write the value
-    /// explicitly so a later default change cannot flip an estate already in
-    /// use. An unrecognised string also returns `On` — the same fail-quiet
-    /// contract `provisioned_door_config` applies to unrecognised JSON.
-    /// Storage errors degrade to `On` (fail-quiet); use
-    /// `provision_preference` to write.
+    /// Absent key, unrecognised string, value outside `key.allowed_values()`, or
+    /// storage error each return `key.default_value()` (fail-quiet). For the six
+    /// on/off switches the default is `On`; for `FactExtractor` the default is
+    /// `Nuextract`. Use `provision_preference` to write.
     ///
     /// Mirrors Swift `GeniusLocusKit.provisionedPreference(_:for:)`.
     pub fn provisioned_preference(
@@ -4579,7 +4586,8 @@ impl EstateCoordinator {
             .ok()
             .flatten()
             .and_then(|s| EstatePreferenceValue::from_str(&s))
-            .unwrap_or_default())
+            .and_then(|v| if key.allowed_values().contains(&v) { Some(v) } else { None })
+            .unwrap_or_else(|| key.default_value()))
     }
 
     /// Hydrate the exact candidate IDs through LocusKit's counted gate.
