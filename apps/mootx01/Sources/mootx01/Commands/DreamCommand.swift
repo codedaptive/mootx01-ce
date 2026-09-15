@@ -45,6 +45,7 @@ import PersistenceKitSQLite
 import QueueKit
 import MootInstallerCore
 import MootEstateOpen
+import MootFactExtractorActivation
 import Darwin
 
 struct DreamCommand: AsyncParsableCommand {
@@ -152,6 +153,37 @@ struct DreamCommand: AsyncParsableCommand {
         } catch {
             Logging.stderr.log("mootx01 dream fatal: estate open/wiring failed: \(error)")
             throw ExitCode.failure
+        }
+
+        // The detached/on-demand finisher owns one bounded Signal 14 pass while
+        // the estate is open. This runs before the REM queue gate so fact debt
+        // progresses even when no recall-driven dreaming job is pending.
+        let factExtractionSetting = try? await kit.provisionedPreference(
+            .factExtraction, for: handle)
+        let factExtractorSetting = try? await kit.provisionedPreference(
+            .factExtractor, for: handle)
+        let factSettingsDirectory = estate.kind == .registered
+            ? EstateCatalog.configurationDirectory : estate.directory
+        if let extractor = FactExtractorBuilder.build(
+            masterSetting: factExtractionSetting ?? .off,
+            extractorSetting: factExtractorSetting ?? .nuextract,
+            settingsDirectory: factSettingsDirectory,
+            workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+        {
+            let spec = extractor.spec
+            let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
+            do {
+                _ = try await kit.activateFactExtractor(
+                    extractor, recipeID: recipeID, for: handle)
+                let result = try await kit.runFactExtractionBatch(
+                    handle, limit: 16, now: Date())
+                Logging.stderr.log(
+                    "mootx01 dream: fact extraction cycle complete — " +
+                    "\(result.factsFiled) fact(s) filed")
+            } catch {
+                Logging.stderr.log(
+                    "mootx01 dream warning: fact extraction cycle failed: \(error)")
+            }
         }
 
         // Force-mount the dreaming queue so that `dreamingQueuePendingCount`
