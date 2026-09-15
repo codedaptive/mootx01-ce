@@ -47,6 +47,8 @@ func migrationSeedsFivePreferencesCreatesTableAndStampsV1_9() async throws {
     }
     #expect(GeniusLocusKit.preferenceSeedKeys.count == 5)
     #expect(!GeniusLocusKit.preferenceSeedKeys.contains(.factExtraction))
+    #expect(!GeniusLocusKit.preferenceSeedKeys.contains(.factExtractor),
+            "fact_extractor is not seeded; absent reads as .nuextract by default")
     #expect(try await storage.currentSchemaVersion(for: "GLKRecallRatings") == 0,
             "recall_ratings must not exist before migration")
 
@@ -89,6 +91,30 @@ func migrationPreservesExplicitOff() async throws {
     }
     let stamp = try await EstateFormatStore(storage: storage).readIfPresent()
     #expect(stamp == .v1_9, "capsule stamps v1_9 even when a value is pre-set")
+}
+
+// MARK: - G3 fact_extractor absent reads as .nuextract and accepts .apple
+
+@Test("G3: absent fact_extractor reads .nuextract; provisionPreference(.factExtractor, .apple) reads back .apple; on is refused")
+func factExtractorPreferenceBehaviour() async throws {
+    let (kit, handle, _) = try await makeEstate()
+
+    // Absent → default .nuextract.
+    let absent = try await kit.provisionedPreference(.factExtractor, for: handle)
+    #expect(absent == .nuextract)
+
+    // Write .apple and read it back.
+    try await kit.provisionPreference(.factExtractor, .apple, for: handle)
+    let stored = try await kit.provisionedPreference(.factExtractor, for: handle)
+    #expect(stored == .apple)
+
+    // .on is outside the allowed values for fact_extractor and must be refused.
+    do {
+        try await kit.provisionPreference(.factExtractor, .on, for: handle)
+        Issue.record("expected throw for disallowed value .on on fact_extractor")
+    } catch is GeniusLocusKitError {
+        // Expected path: invalidManifest error.
+    }
 }
 
 // MARK: - Chain from v1_8 reaches current through the 1.8→1.9 capsule
