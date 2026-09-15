@@ -54,7 +54,12 @@ impl EstateFormatVersion {
     /// inferred from an absent key, and an operator's opt-out survives a later
     /// change to the default.
     pub const V1_8: Self = Self { major: 1, minor: 8 };
-    pub const CURRENT: Self = Self::V1_8;
+    /// Format 1.9: the consolidation, contradiction_sweep,
+    /// cross_encoder_routing, maintenance and adaptive_recall preferences are
+    /// seeded "on" on every populated estate, and the recall_ratings table
+    /// exists.
+    pub const V1_9: Self = Self { major: 1, minor: 9 };
+    pub const CURRENT: Self = Self::V1_9;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

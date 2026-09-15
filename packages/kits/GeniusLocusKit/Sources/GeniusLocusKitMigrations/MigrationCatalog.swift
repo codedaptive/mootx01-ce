@@ -20,6 +20,10 @@
 @_exported import GLKMigrationV1_7ToV1_8
 #endif
 
+#if GLK_MIGRATION_V1_8_TO_V1_9
+@_exported import GLKMigrationV1_8ToV1_9
+#endif
+
 #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG
 @_exported import GLKMigrationFlatLayoutToCatalog
 #endif
@@ -68,24 +72,27 @@ public struct GLKMigrationPreparation: Sendable, Equatable {
 public enum GLKMigrationCatalog {
     public static var compiledFloor: EstateFormatVersion? {
         #if GLK_MIGRATION_V1_0_TO_V1_1
-        // Floor covers the 1.0→1.1, 1.4→1.5, 1.5→1.6, 1.6→1.7 and 1.7→1.8 capsules.
+        // Floor covers the 1.0→1.1, 1.4→1.5, 1.5→1.6, 1.6→1.7, 1.7→1.8 and 1.8→1.9 capsules.
         .v1_0
         #elseif GLK_MIGRATION_V1_4_TO_V1_5
-        // The 1.4→1.5, 1.5→1.6, 1.6→1.7 and 1.7→1.8 capsules are compiled. They
+        // The 1.4→1.5, 1.5→1.6, 1.6→1.7, 1.7→1.8 and 1.8→1.9 capsules are compiled. They
         // serve every stamp from 1.1 up: the 1.1→1.2 column is added by CorpusKit's
         // own ladder at open, the 1.2→1.3 column was removed by schema v19,
         // and the 1.3→1.4 setting retired with the index composition policy,
         // so nothing separates 1.1, 1.2, 1.3 and 1.4 any more.
         .v1_1
         #elseif GLK_MIGRATION_V1_5_TO_V1_6
-        // The 1.5→1.6 column-drop, 1.6→1.7 vacuum and 1.7→1.8 seed capsules are compiled.
+        // The 1.5→1.6 column-drop, 1.6→1.7 vacuum, 1.7→1.8 seed and 1.8→1.9 seed capsules are compiled.
         .v1_5
         #elseif GLK_MIGRATION_V1_6_TO_V1_7
-        // The 1.6→1.7 vacuum and 1.7→1.8 seed capsules are compiled.
+        // The 1.6→1.7 vacuum, 1.7→1.8 seed and 1.8→1.9 seed capsules are compiled.
         .v1_6
         #elseif GLK_MIGRATION_V1_7_TO_V1_8
-        // Only the 1.7→1.8 fact-extraction-setting seed capsule is compiled.
+        // The 1.7→1.8 fact-extraction-setting seed and 1.8→1.9 preference-seed capsules are compiled.
         .v1_7
+        #elseif GLK_MIGRATION_V1_8_TO_V1_9
+        // Only the 1.8→1.9 preference-seed capsule is compiled.
+        .v1_8
         #else
         nil
         #endif
@@ -150,8 +157,9 @@ public enum GLKMigrationCatalog {
     /// found == v1_5 runs 1.5 -> 1.6 and 1.6 -> 1.7; found == v1_6 runs
     /// 1.6 -> 1.7 only. The 1.4 -> 1.5 ledger rewrite runs before every
     /// older capsule (the 1.0 -> 1.1 capsule opens the vector store, whose
-    /// ladder must find its row under the new id); the 1.6 -> 1.7 vacuum runs
-    /// last and writes the final stamp. A build that compiles no chain
+    /// ladder must find its row under the new id); the 1.7 -> 1.8 and
+    /// 1.8 -> 1.9 seeds follow, and the 1.8 -> 1.9 preference seed runs last
+    /// and writes the final stamp. A build that compiles no chain
     /// reaching the current format cannot serve a historical estate at all.
     private static func runCompiledChain(
         kit: GeniusLocusKit,
@@ -159,9 +167,10 @@ public enum GLKMigrationCatalog {
         from found: EstateFormatVersion,
         now: Date
     ) async throws -> GLKMigrationPreparation {
-        #if GLK_MIGRATION_V1_7_TO_V1_8
+        #if GLK_MIGRATION_V1_8_TO_V1_9
         var migrated = false
         var migrationState: String? = nil
+        #if GLK_MIGRATION_V1_7_TO_V1_8
         #if GLK_MIGRATION_V1_6_TO_V1_7
         #if GLK_MIGRATION_V1_5_TO_V1_6
         #if GLK_MIGRATION_V1_4_TO_V1_5
@@ -201,8 +210,15 @@ public enum GLKMigrationCatalog {
         }
         #endif
         // The 1.7 -> 1.8 capsule: seed `fact_extraction = "on"` when absent
-        // and write the v1_8 stamp, the last write of the chain (I-27).
-        try await kit.runFactExtractionSettingMigration(handle: handle, now: now)
+        // and write the v1_8 stamp (I-27).
+        if found < .v1_8 {
+            try await kit.runFactExtractionSettingMigration(handle: handle, now: now)
+        }
+        #endif
+        // The 1.8 -> 1.9 capsule: seed the five remaining preferences "on"
+        // when absent, create recall_ratings and write the v1_9 stamp, the
+        // last write of the chain (I-28).
+        try await kit.runPreferenceSeedMigration(handle: handle, now: now)
         return GLKMigrationPreparation(
             format: .current,
             migrated: migrated,

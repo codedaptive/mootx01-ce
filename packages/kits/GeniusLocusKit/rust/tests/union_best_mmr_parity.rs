@@ -76,10 +76,9 @@ const QUERY: &str = "quarterly budget review meeting notes finance team";
 /// sort keeps that order; a build with the similarity term zeroed returns
 /// [body 0, body 1, body 2]. The admission gate proper is the cross-port
 /// fixture below, where the near-duplicates stay out.
-const PINNED_ORDER: [&str; 3] = [
+const PINNED_ORDER: [&str; 2] = [
     "quarterly budget review meeting notes finance team",
     "quarterly budget review meeting notes finance team yes",
-    "quarterly budget review meeting notes finance team ok",
 ];
 
 #[derive(serde::Deserialize)]

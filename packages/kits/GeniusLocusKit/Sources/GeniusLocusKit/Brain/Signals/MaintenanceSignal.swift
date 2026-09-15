@@ -1,34 +1,21 @@
 import Foundation
 import LocusKit
 
-/// Maintenance daemon — architecture spec §11.2 row 2, spec invariant
-/// I-3 ("The substrate accepts no `secret + public` combination").
+/// Maintenance daemon standing signal — architecture spec §11.2 row 2.
 ///
-/// What it does: scans the substrate's bitmap tier for the four
-/// classes of maintenance concern the spec enumerates —
+/// Fires the NeuronKit maintenance engine's `tombstone` category on each tick:
+/// `MaintenanceDaemon.triggerMaintenanceCycle(now:categories: [.tombstone])`
+/// scans that category only, proposes its candidates through the engine's
+/// own sink (routed through `propose`), and the signal surfaces the
+/// `tombstoneCandidates` count as a diagnostic. The engine's audit-chain monitor
+/// and QID-pending retry run on the same call.
 ///
-/// 1. Forbidden-combination violations (`sensitivity=secret` AND
-///    `exportability=public`). On detection: a `propose`
-///    discipline-violation row plus a diagnostic report.
-/// 2. Decay candidates: rows whose operational bitmap puts them in
-///    the `active → decayed` transition window (spec §6.2.4 row 1).
-///    Routed through `propose` as a mutate candidate.
-/// 3. Fingerprint drift: rows whose fingerprint no longer matches
-///    their bitmap+lattice projection (cookbook §3.6). The
-///    maintenance daemon rebuilds fingerprints on withdraw/expunge
-///    rather than synchronously per architecture spec §11.5.
-/// 4. Tombstone candidates: rows ready for expunge after the
-///    forget-window has elapsed. A diagnostic report so the
-///    application can audit before the next expunge pass picks them
-///    up.
-///
-/// What it does NOT do: mutate state directly. Every detection goes
-/// through `propose` or surfaces as a diagnostic on
-/// `SignalReport.recentDiagnostics`.
-///
-/// Cadence: hourly. The maintenance scan is cheap on a per-row basis
-/// (bitmap & operations) so an hourly cadence keeps drift bounded
-/// without saturating the serial lane.
+/// Mirrors `AnomalySweepSignal` in structure: interval cadence, `.single`
+/// concurrency, diagnostic-only emission, injected closure for the live
+/// cycle. Registered by `registerDefaultStandingSignals` only when the host
+/// passes a live cycle — the host reads the estate's `.maintenance`
+/// preference and passes nil when it is `.off`, so the governor's tick
+/// never pumps the engine on this category.
 public enum MaintenanceSignal {
 
     /// Default cadence in seconds (3 600 = 1 hour).
@@ -37,44 +24,36 @@ public enum MaintenanceSignal {
     /// Stable name surfaced in `SignalReport.name`.
     public static let signalName = "maintenance-daemon"
 
-    public static func defaultSpec() -> SignalSpec {
+    /// Build a signal spec that runs the engine's `tombstone` category on each fire.
+    ///
+    /// - Parameter maintenanceCycle: async closure called with the scheduler's `now`;
+    ///   runs the scoped maintenance cycle and returns `tombstoneCandidates`.
+    ///   A throw is caught and surfaced as a diagnostic so the scheduler's
+    ///   drain loop is not interrupted.
+    public static func spec(
+        maintenanceCycle: @escaping @Sendable (Date) async throws -> Int
+    ) -> SignalSpec {
         SignalSpec(
             name: signalName,
             trigger: .interval(seconds: defaultCadenceSeconds),
             freshnessTarget: defaultCadenceSeconds * 2,
             concurrencyPolicy: .single,
             emit: { context in
-                // Forbidden-combination scan — spec invariant I-3.
-                // The proposal targets the offending row's identifier;
-                // until the bitmap evaluator hands the maintenance
-                // daemon a real candidate list the target string is
-                // a stable sentinel the diagnostic layer can recognise.
-                let disciplineProposal = ProposalFrame(
-                    target: "maintenance/forbidden-combination",
-                    kind: .disciplineViolation,
-                    justification:
-                        "invariant I-3: sensitivity=secret AND exportability=public scan")
-                // Tombstone-and-decay candidates — routed through
-                // propose per spec §11.1 ("mutate-candidate routed
-                // through `propose` for confirmation"). The candidate
-                // is a sentinel until the bitmap evaluator wires
-                // through.
-                let decayCandidate = SignalEmission.mutateCandidate(
-                    rowID: "maintenance/decay-candidate",
-                    kind: .supersede)
-                // Diagnostic report — the maintenance pass surfaces
-                // its observed counts so the application can audit
-                // before the next cycle's verb work lands.
-                let summary = DiagnosticReport(
-                    title: "maintenance.scan.summary",
-                    detail:
-                        "hourly maintenance pass observed: 0 forbidden combinations; signal=\(context.signalID.rawValue)",
-                    observedAt: context.now)
-                return [
-                    .propose(disciplineProposal),
-                    decayCandidate,
-                    .diagnostic(summary),
-                ]
+                do {
+                    let count = try await maintenanceCycle(context.now)
+                    return [.diagnostic(DiagnosticReport(
+                        title: "maintenance-daemon.complete",
+                        detail: "\(count) tombstone candidate(s) at \(context.now.ISO8601Format())",
+                        observedAt: context.now))]
+                } catch {
+                    // Surface cycle errors as diagnostics so the scheduler's
+                    // drain loop is not interrupted; the failure appears in
+                    // recentDiagnostics for application-layer monitoring.
+                    return [.diagnostic(DiagnosticReport(
+                        title: "maintenance-daemon.error",
+                        detail: "\(error)",
+                        observedAt: context.now))]
+                }
             })
     }
 }

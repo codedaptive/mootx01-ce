@@ -59,6 +59,15 @@ public actor GeniusLocusKit {
     /// Internal — only the verb surface and tests reference this constant.
     internal static let traceRetentionSeconds: TimeInterval = 30 * 24 * 60 * 60
 
+    /// The production distillation function for the consolidation sweep:
+    /// `defaultDistillFn`, the intra-item reduction with the contract-pinned
+    /// default extractor. Named for the host outside the module (the ARIA
+    /// resident) that passes it to `consolidationSweepReport` when it wires
+    /// the consolidation standing signal.
+    public static var consolidationDistillFn: @Sendable (SubstrateML.DistillationInput) -> DistillationOutput {
+        defaultDistillFn
+    }
+
     // MARK: - Per-estate registries
     //
     // ADDING A PER-ESTATE REGISTRY

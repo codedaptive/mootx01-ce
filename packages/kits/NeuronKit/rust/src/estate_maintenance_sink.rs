@@ -262,8 +262,8 @@ mod tests {
         let mut sink = EstateMaintenanceSink::new(Arc::clone(&store), 2_000_000);
         let entry = MaintenanceDiaryEntry {
             agent_name: "maintenance-daemon".into(),
-            entry: "maintenance cycle 1: audit-checked false, forbidden 0, decay 0, tombstone 0, \
-                    fingerprint-drift 0, byReference-drift 0, proposed 0, suppressed 0"
+            entry: "maintenance cycle 1: audit-checked false, decay 0, tombstone 0, \
+                    byReference-drift 0, proposed 0, suppressed 0"
                 .into(),
             topic: "maintenance-cycle".into(),
             wing: "wing_maintenance-daemon".into(),

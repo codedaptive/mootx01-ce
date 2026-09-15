@@ -71,6 +71,8 @@ pub mod dataset_signatures;
 pub mod estate_catalog;
 pub mod estate_open_posture;
 pub mod estate_format;
+pub mod estate_preference;
+pub use estate_preference::*;
 pub mod branches;
 pub mod coordinator;
 // recall_router.rs — estate recall route list: one ordered list consulted once
@@ -110,6 +112,7 @@ pub mod migration;
 pub mod node_topology;
 pub mod substrate_node_topology_provider;
 pub mod recall;
+pub mod similar_recall;
 pub mod recall_explainer;
 pub mod span_rerank;
 // The retrieval-time cross-encoder stage (fusion rule, span selection,

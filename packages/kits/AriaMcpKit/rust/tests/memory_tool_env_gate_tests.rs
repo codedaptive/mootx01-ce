@@ -99,8 +99,8 @@ fn memory_tool_present_when_env_var_enabled() {
 
     assert_eq!(
         tools.len(),
-        81,
-        "MOOTX01_MEMORY_TOOL=1: tools/list must have 81 entries; got {}",
+        82,
+        "MOOTX01_MEMORY_TOOL=1: tools/list must have 82 entries; got {}",
         tools.len(),
     );
     assert!(
@@ -136,8 +136,8 @@ fn memory_tool_absent_when_env_var_disabled() {
 
     assert_eq!(
         tools.len(),
-        80,
-        "MOOTX01_MEMORY_TOOL=0: tools/list must have 80 entries; got {}",
+        81,
+        "MOOTX01_MEMORY_TOOL=0: tools/list must have 81 entries; got {}",
         tools.len(),
     );
     assert!(

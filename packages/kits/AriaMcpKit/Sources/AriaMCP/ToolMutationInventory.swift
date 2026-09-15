@@ -112,6 +112,8 @@ public enum ToolMutationInventory {
         // Tier 1-5 interface reads.
         "moot_memory_search", "moot_memory_list", "moot_memory_get",
         "moot_memory_recall_transcript",
+        // Similar recall: nearest drawers by whole-record vector, pure read.
+        "moot_recall_similar",
         "moot_connection_search", "moot_connection_map",
         "moot_fact_search", "moot_fact_timeline",
         "moot_read_journal",

@@ -7,7 +7,7 @@ use aria_mcp::v2::capability_digest::{
 #[test]
 fn selected_catalog_digest_shared_vector() {
     let digest = aria_mcp::v2::catalog::selected_capability_digest();
-    assert_eq!(digest, "f9e67547120a7034e464d01013a0e103a8a1a7d735f84a1a42c786e64783cceb");
+    assert_eq!(digest, "7e16e5149d12665d517d576ce17a4121b29848066783fbb750b46842270871a6");
     let artifact_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().unwrap()
         .join("Registry/aria-v2-selected-release.json");

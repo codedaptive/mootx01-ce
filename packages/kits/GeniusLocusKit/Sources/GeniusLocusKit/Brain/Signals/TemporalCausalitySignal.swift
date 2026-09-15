@@ -26,8 +26,9 @@ import Foundation
 /// surfaced as a `.diagnostic` emission — the scheduler's drain loop
 /// continues unaffected.
 ///
-/// For registration without a live fold (e.g., test scaffolds), use
-/// `defaultSpec()`, which fires a diagnostic-only no-op.
+/// There is no no-op variant: `registerDefaultStandingSignals` registers
+/// this signal only when handed a live `foldCycle`, which the host passes
+/// only while the estate's `.adaptiveRecall` preference is not `.off`.
 public enum TemporalCausalitySignal {
 
     /// Hourly cadence in seconds — design-council 2026-06-04 decision.
@@ -75,30 +76,6 @@ public enum TemporalCausalitySignal {
                         detail: "\(error)",
                         observedAt: context.now))]
                 }
-            })
-    }
-
-    /// Build a diagnostic-only spec for test and registration contexts
-    /// where no live fold cycle is available.
-    ///
-    /// The registered signal fires at the hourly cadence and emits a
-    /// single diagnostic confirming the fire. No fold work is performed.
-    /// This is the correct spec for `registerDefaultStandingSignals`,
-    /// which cannot supply a live fold closure without knowing the
-    /// caller's estate context.
-    public static func defaultSpec() -> SignalSpec {
-        SignalSpec(
-            name: signalName,
-            trigger: .interval(seconds: defaultCadenceSeconds),
-            freshnessTarget: defaultCadenceSeconds * 2,
-            concurrencyPolicy: .single,
-            emit: { context in
-                // No-op fold: fires the scheduled signal and surfaces a
-                // diagnostic so the scheduler's cadence is observable.
-                return [.diagnostic(DiagnosticReport(
-                    title: "temporal-causality-fold.fired",
-                    detail: "T-fold signal fired (no-op) at \(context.now.ISO8601Format())",
-                    observedAt: context.now))]
             })
     }
 }

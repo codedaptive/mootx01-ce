@@ -7,7 +7,8 @@
 
 use std::sync::Arc;
 
-use genius_locus_kit::coordinator::{EstateCoordinator, FactExtractionSetting};
+use genius_locus_kit::coordinator::EstateCoordinator;
+use genius_locus_kit::estate_preference::{EstatePreferenceKey, EstatePreferenceValue};
 use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit_migrations::FactExtractionSettingMigrationExt;
@@ -40,18 +41,21 @@ fn make_estate() -> (EstateCoordinator, EstateHandle, Arc<dyn Storage>) {
 }
 
 // ---------------------------------------------------------------------------
-// G1 FactExtractionSetting enum default
+// G1 EstatePreferenceValue default
 // ---------------------------------------------------------------------------
 
 #[test]
-fn g1_fact_extraction_setting_default_is_on() {
-    let def = FactExtractionSetting::default();
-    assert_eq!(def, FactExtractionSetting::On);
+fn g1_estate_preference_value_default_is_on() {
+    let def = EstatePreferenceValue::default();
+    assert_eq!(def, EstatePreferenceValue::On);
     assert_eq!(def.as_str(), "on");
     // Roundtrip: from_str returns Some for known values, None for garbage.
-    assert_eq!(FactExtractionSetting::from_str("on"), Some(FactExtractionSetting::On));
-    assert_eq!(FactExtractionSetting::from_str("off"), Some(FactExtractionSetting::Off));
-    assert_eq!(FactExtractionSetting::from_str("garbage"), None);
+    assert_eq!(EstatePreferenceValue::from_str("on"), Some(EstatePreferenceValue::On));
+    assert_eq!(EstatePreferenceValue::from_str("off"), Some(EstatePreferenceValue::Off));
+    assert_eq!(EstatePreferenceValue::from_str("garbage"), None);
+    // The fact-extraction key is stored under the manifest key "fact_extraction".
+    assert_eq!(EstatePreferenceKey::FactExtraction.as_str(), "fact_extraction");
+    assert_eq!(EstatePreferenceKey::from_str("fact_extraction"), Some(EstatePreferenceKey::FactExtraction));
 }
 
 // ---------------------------------------------------------------------------
@@ -66,15 +70,15 @@ fn g2_migration_seeds_fact_extraction_on_when_absent() {
     let raw_before = coord
         .estate_for(&handle)
         .ok()
-        .and_then(|e| e.meta(EstateCoordinator::FACT_EXTRACTION_META_KEY).ok())
+        .and_then(|e| e.meta(EstatePreferenceKey::FactExtraction.as_str()).ok())
         .flatten();
     assert!(raw_before.is_none(), "key must be absent before migration");
 
     // The public accessor returns On even when absent (absent-means-on).
     let before = coord
-        .provisioned_fact_extraction(&handle)
-        .expect("provisioned_fact_extraction");
-    assert_eq!(before, FactExtractionSetting::On);
+        .provisioned_preference(&handle, EstatePreferenceKey::FactExtraction)
+        .expect("provisioned_preference");
+    assert_eq!(before, EstatePreferenceValue::On);
 
     // Run the capsule.
     coord
@@ -85,14 +89,14 @@ fn g2_migration_seeds_fact_extraction_on_when_absent() {
     let raw_after = coord
         .estate_for(&handle)
         .ok()
-        .and_then(|e| e.meta(EstateCoordinator::FACT_EXTRACTION_META_KEY).ok())
+        .and_then(|e| e.meta(EstatePreferenceKey::FactExtraction.as_str()).ok())
         .flatten();
     assert_eq!(raw_after.as_deref(), Some("on"), "migration seeded fact_extraction = on");
 
     let after = coord
-        .provisioned_fact_extraction(&handle)
-        .expect("provisioned_fact_extraction after migration");
-    assert_eq!(after, FactExtractionSetting::On);
+        .provisioned_preference(&handle, EstatePreferenceKey::FactExtraction)
+        .expect("provisioned_preference after migration");
+    assert_eq!(after, EstatePreferenceValue::On);
     drop(storage);
 }
 
@@ -106,7 +110,7 @@ fn g3_migration_preserves_explicit_off() {
 
     // Pre-write Off through the public provisioner before migration.
     coord
-        .provision_fact_extraction(&handle, FactExtractionSetting::Off)
+        .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::Off)
         .expect("provision Off");
 
     // Run the capsule.
@@ -116,14 +120,14 @@ fn g3_migration_preserves_explicit_off() {
 
     // The capsule must not overwrite an existing value.
     let after = coord
-        .provisioned_fact_extraction(&handle)
+        .provisioned_preference(&handle, EstatePreferenceKey::FactExtraction)
         .expect("provisioned after migration");
-    assert_eq!(after, FactExtractionSetting::Off, "capsule must not overwrite Off");
+    assert_eq!(after, EstatePreferenceValue::Off, "capsule must not overwrite Off");
 
     let raw = coord
         .estate_for(&handle)
         .ok()
-        .and_then(|e| e.meta(EstateCoordinator::FACT_EXTRACTION_META_KEY).ok())
+        .and_then(|e| e.meta(EstatePreferenceKey::FactExtraction.as_str()).ok())
         .flatten();
     assert_eq!(raw.as_deref(), Some("off"));
     // The stamp advances to V1_8 even when the value was pre-set.
@@ -149,7 +153,9 @@ fn g4_migration_stamps_v1_8() {
         .read_if_present()
         .expect("read_if_present");
     assert_eq!(stamp, Some(EstateFormatVersion::V1_8), "capsule must stamp V1_8");
-    assert_eq!(EstateFormatVersion::CURRENT, EstateFormatVersion::V1_8);
+    // The capsule stamps V1_8 in isolation; later capsules carry the estate
+    // on to `EstateFormatVersion::CURRENT`, which sits at or above V1_8.
+    assert!(EstateFormatVersion::V1_8 <= EstateFormatVersion::CURRENT);
 }
 
 // ---------------------------------------------------------------------------
@@ -170,9 +176,9 @@ fn g5_migration_is_idempotent() {
         .expect("second run succeeded");
 
     let after = coord
-        .provisioned_fact_extraction(&handle)
+        .provisioned_preference(&handle, EstatePreferenceKey::FactExtraction)
         .expect("provisioned after second run");
-    assert_eq!(after, FactExtractionSetting::On, "second run must leave value at On");
+    assert_eq!(after, EstatePreferenceValue::On, "second run must leave value at On");
 
     let stamp = EstateFormatStore::new(Arc::clone(&storage))
         .read_if_present()
@@ -185,7 +191,7 @@ fn g5_migration_is_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn g6_provisioned_fact_extraction_returns_on_for_unrecognised_value_garbage() {
+fn g6_provisioned_preference_returns_on_for_unrecognised_value_garbage() {
     let (coord, handle, _storage) = make_estate();
 
     // Write "garbage" directly via set_meta, bypassing the typed provisioner,
@@ -194,12 +200,12 @@ fn g6_provisioned_fact_extraction_returns_on_for_unrecognised_value_garbage() {
     coord
         .estate_for(&handle)
         .expect("estate open")
-        .set_meta(EstateCoordinator::FACT_EXTRACTION_META_KEY, "garbage")
+        .set_meta(EstatePreferenceKey::FactExtraction.as_str(), "garbage")
         .expect("set_meta succeeded");
 
     // The accessor must degrade to On — the fail-quiet fallback.
     let result = coord
-        .provisioned_fact_extraction(&handle)
-        .expect("provisioned_fact_extraction");
-    assert_eq!(result, FactExtractionSetting::On, "unrecognised value must fall back to On");
+        .provisioned_preference(&handle, EstatePreferenceKey::FactExtraction)
+        .expect("provisioned_preference");
+    assert_eq!(result, EstatePreferenceValue::On, "unrecognised value must fall back to On");
 }
