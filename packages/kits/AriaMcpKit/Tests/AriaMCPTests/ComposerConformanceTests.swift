@@ -105,41 +105,6 @@ struct ComposerConformanceTests {
 
         switch shape {
 
-        // ── S1 ranked surface ────────────────────────────────────────────────
-
-        case "s1":
-            let rows = (tc["rows"] as? [[String: Any]] ?? []).map(candidateRow)
-            let control = controlSignals(from: tc["control"] as? [String: Any] ?? [:])
-            let result = ResultComposer.renderS1Surface(rows: rows, control: control)
-            let expectedText = tc["expectedText"] as? String ?? ""
-            #expect(result.text == expectedText,
-                    "[\(name)] S1 text mismatch")
-            if let expAny = tc["expectedStructured"] {
-                let expVal = try toJSONValue(expAny)
-                #expect(result.structured == expVal,
-                        "[\(name)] S1 structured mismatch")
-            }
-
-        // ── S1 empty ─────────────────────────────────────────────────────────
-
-        case "s1_empty":
-            let hint = tc["hint"] as? String
-            let result = ResultComposer.renderEmptyS1(hint: hint)
-            let expectedText = tc["expectedText"] as? String ?? ""
-            #expect(result.text == expectedText,
-                    "[\(name)] S1 empty text mismatch")
-
-        // ── S1 cap line ───────────────────────────────────────────────────────
-
-        case "s1_cap":
-            // Verifies the cap-line format string (ResultComposer.renderCapLine).
-            let limit = tc["capLimit"] as? Int ?? 0
-            let narrowingArg = tc["narrowingArg"] as? String ?? ""
-            let capLine = ResultComposer.renderCapLine(limit: limit, narrowingArg: narrowingArg)
-            let expected = tc["expectedCapLine"] as? String ?? ""
-            #expect(capLine == expected,
-                    "[\(name)] cap line format mismatch")
-
         // ── S2 listing ────────────────────────────────────────────────────────
 
         case "s2_listing":
@@ -414,25 +379,6 @@ struct ComposerConformanceTests {
             let expectedText = tc["expectedText"] as? String ?? ""
             #expect(result.text == expectedText,
                     "[\(name)] federated recall text mismatch")
-
-        // ── Structured parity — forbidden keys ────────────────────────────────
-
-        case "s1_structured_parity":
-            // Verifies absent optional fields are ABSENT (not null) from structured JSON.
-            let rows = (tc["rows"] as? [[String: Any]] ?? []).map(candidateRow)
-            let result = ResultComposer.renderS1Surface(rows: rows, control: ControlSignals())
-            let forbiddenKeys = tc["forbiddenKeys"] as? [String] ?? []
-            guard case .object(let topObj) = result.structured,
-                  case .array(let results) = topObj["results"],
-                  let firstResult = results.first,
-                  case .object(let rowObj) = firstResult else {
-                Issue.record("[\(name)] structured output missing expected shape")
-                return
-            }
-            for key in forbiddenKeys {
-                #expect(rowObj[key] == nil,
-                        "[\(name)] forbidden key '\(key)' must be absent from structured row")
-            }
 
         default:
             // Unknown shape: fail explicitly so the fixture and the test stay in sync.

@@ -59,7 +59,20 @@ struct SensitivityUnlockIntegrationTests {
               case let .object(first)? = content.first,
               case let .string(s)? = first["text"]
         else { return "" }
-        return s
+        // v2 compact text is "found N candidate memories"; include subjects and
+        // excerpts from structuredContent.data.results so existing assertions work.
+        var parts = [s]
+        if case let .object(structured)? = obj["structuredContent"],
+           case let .object(data)? = structured["data"],
+           case let .array(results)? = data["results"] {
+            for row in results {
+                if case let .object(r) = row {
+                    if case let .string(subject)? = r["subject"] { parts.append(subject) }
+                    if case let .string(excerpt)? = r["excerpt"] { parts.append(excerpt) }
+                }
+            }
+        }
+        return parts.joined(separator: "\n")
     }
 
     private func isError(_ result: JSONValue) -> Bool {
@@ -85,14 +98,14 @@ struct SensitivityUnlockIntegrationTests {
 
         try await seed("unlock-marker-restricted classified briefing", sensitivity: .restricted, in: handle, kit: kit)
 
-        let before = try await dispatcher.runMemorySearch(["query": .string("unlock-marker-restricted")])
+        let before = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("unlock-marker-restricted")]))
         #expect(text(of: before).contains("found 0 candidate memories"),
                 "without a grant the restricted drawer must not appear at all")
 
         let now = Date()
         await dispatcher.sensitivityUnlockLedger.grantRestricted(now: now, calendar: utcCalendar)
 
-        let after = try await dispatcher.runMemorySearch(["query": .string("unlock-marker-restricted")])
+        let after = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("unlock-marker-restricted")]))
         #expect(text(of: after).contains("classified briefing"),
                 "with a live restricted grant the drawer's content must be visible")
     }
@@ -137,12 +150,12 @@ struct SensitivityUnlockIntegrationTests {
         try await seed("unlock-secret-marker top secret payload", sensitivity: .secret, in: handle, kit: kit)
 
         await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
-        let stillHidden = try await dispatcher.runMemorySearch(["query": .string("unlock-secret-marker")])
+        let stillHidden = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("unlock-secret-marker")]))
         #expect(text(of: stillHidden).contains("found 0 candidate memories"),
                 "a restricted-only grant must not reveal secret-tier content")
 
         await dispatcher.sensitivityUnlockLedger.grantSecret(now: Date())
-        let nowVisible = try await dispatcher.runMemorySearch(["query": .string("unlock-secret-marker")])
+        let nowVisible = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("unlock-secret-marker")]))
         #expect(text(of: nowVisible).contains("top secret payload"),
                 "a live secret grant must reveal secret-tier content")
     }
@@ -160,18 +173,17 @@ struct SensitivityUnlockIntegrationTests {
         try await seed("unlock-expiry-marker secret content", sensitivity: .secret, in: handle, kit: kit)
 
         // Grant "in the past" relative to the search call below by granting
-        // at an already-past `now`, then searching — runMemorySearch reads
+        // at an already-past `now`, then searching — the search path reads
         // wall-clock Date() internally, so to prove expiry deterministically
         // we instead verify directly against the ledger's own now-parameterized
-        // API (the seam runMemorySearch delegates to), matching the ledger
-        // unit tests' style, and cross-check the dispatch-level effect at a
-        // live grant vs. a grant we know has expired.
+        // API, matching the ledger unit tests' style, and cross-check the
+        // dispatch-level effect at a live grant vs. a grant we know has expired.
         let grantedAt = Date().addingTimeInterval(-31 * 60) // 31 minutes ago
         await dispatcher.sensitivityUnlockLedger.grantSecret(now: grantedAt)
         #expect(!(await dispatcher.sensitivityUnlockLedger.isSecretGranted(now: Date())),
                 "a grant issued 31 minutes ago must have expired under the fixed 30-minute window")
 
-        let result = try await dispatcher.runMemorySearch(["query": .string("unlock-expiry-marker")])
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("unlock-expiry-marker")]))
         #expect(text(of: result).contains("found 0 candidate memories"),
                 "an expired secret grant must not reveal secret-tier content")
     }
@@ -208,11 +220,11 @@ struct SensitivityUnlockIntegrationTests {
 
         try await seed("unlock-lock-marker sensitive detail", sensitivity: .restricted, in: handle, kit: kit)
         await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
-        let visible = try await dispatcher.runMemorySearch(["query": .string("unlock-lock-marker")])
+        let visible = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("unlock-lock-marker")]))
         #expect(text(of: visible).contains("sensitive detail"))
 
         await dispatcher.sensitivityUnlockLedger.lock()
-        let hiddenAgain = try await dispatcher.runMemorySearch(["query": .string("unlock-lock-marker")])
+        let hiddenAgain = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("unlock-lock-marker")]))
         #expect(text(of: hiddenAgain).contains("found 0 candidate memories"))
     }
 
@@ -228,7 +240,7 @@ struct SensitivityUnlockIntegrationTests {
 
         let drawer = try await seed("audit-search-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
         await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
-        _ = try await dispatcher.runMemorySearch(["query": .string("audit-search-marker")])
+        _ = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("audit-search-marker")]))
 
         let log = try await kit.auditLog(for: handle)
         let entries = log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }
@@ -265,7 +277,7 @@ struct SensitivityUnlockIntegrationTests {
 
         try await seed("audit-normal-marker ordinary content", sensitivity: .normal, in: handle, kit: kit)
         await dispatcher.sensitivityUnlockLedger.grantRestricted(now: Date(), calendar: utcCalendar)
-        _ = try await dispatcher.runMemorySearch(["query": .string("audit-normal-marker")])
+        _ = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("audit-normal-marker")]))
 
         let log = try await kit.auditLog(for: handle)
         #expect(log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }.isEmpty,
@@ -281,22 +293,22 @@ struct SensitivityUnlockIntegrationTests {
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         try await seed("audit-nogrant-marker restricted content", sensitivity: .restricted, in: handle, kit: kit)
-        _ = try await dispatcher.runMemorySearch(["query": .string("audit-nogrant-marker")])
+        _ = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(["query": .string("audit-nogrant-marker")]))
 
         let log = try await kit.auditLog(for: handle)
         #expect(log.orderedEntries.filter { $0.verb == .sensitivityReadUnderGrant }.isEmpty)
     }
 
-    // MARK: - v2 surface (dispatcher.dispatch) read-under-grant audit — the shipped entry point
+    // MARK: - v2 surface (dispatcher.dispatch) read-under-grant audit — search and get together
     //
-    // The four `...via...EmitsAuditEntry`/`DoesNotEmitAuditEntry` cases above
-    // call `dispatcher.runMemorySearch` / `dispatcher.runMemoryGet` directly —
-    // the dark v1 runners, which the shipped `dispatcher.dispatch(name:
-    // arguments:)` v2 surface never reaches (V2_RESTORE_A). This case drives
-    // the identical scenario through `dispatch(name:arguments:)`, the entry
-    // point the live server actually calls for `moot_memory_search` and
-    // `moot_memory_get`, proving the audit fires on the real v2 code path
-    // rather than only on the retired v1 one.
+    // The four `...EmitsAuditEntry`/`DoesNotEmitAuditEntry` cases above drive
+    // the search half through `dispatcher.dispatch(name:arguments:)`, the
+    // entry point the live server calls for `moot_memory_search`, and the get
+    // half through `dispatcher.runMemoryGet`, the dark v1 runner the shipped
+    // `moot_memory_get` dispatch never reaches. This case covers what they do
+    // not: `moot_memory_get` through `dispatch(name:arguments:)` at every
+    // depth, and search and get audited in one estate, so the audit is
+    // proven on the real v2 path for both tools.
 
     @Test("v2 dispatch: reading a restricted drawer under a live grant emits a sensitivityReadUnderGrant audit entry, via moot_memory_search and via moot_memory_get at every depth")
     func v2DispatchRestrictedReadUnderGrantEmitsAuditEntries() async throws {
@@ -345,9 +357,10 @@ struct SensitivityUnlockIntegrationTests {
 
     /// Direct unit coverage of `ToolDispatcher.isSensitivityFilter`, the
     /// classifier that decides whether the grant ceiling should be
-    /// injected at all. NOTE: today's `decodeFilterChain` only accepts a
-    /// small closed vocabulary ("unconfirmed", "userConfirmed",
-    /// "exportable", "contained") for the `filter` MCP argument — none of
+    /// injected at all. NOTE: today's `filter` decode
+    /// (`AriaV2MemorySearchRequest`) only accepts a small closed vocabulary
+    /// ("unconfirmed", "userConfirmed", "exportable", "contained", "pinned")
+    /// for the `filter` MCP argument — none of
     /// which produce a `.sensitivity`/`.sensitivityAtMost` case, so this
     /// suppression path is not reachable through the current tool surface.
     /// It is still real, defensive code (protects a future filter-argument

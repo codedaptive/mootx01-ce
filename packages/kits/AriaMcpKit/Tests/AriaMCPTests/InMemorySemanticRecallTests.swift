@@ -56,7 +56,20 @@ private func text(of result: JSONValue) -> String {
           case let .object(first)? = content.first,
           case let .string(s)? = first["text"]
     else { return "" }
-    return s
+    // v2 compact text is "found N candidate memories"; include subjects and
+    // excerpts from structuredContent.data.results so existing assertions work.
+    var parts = [s]
+    if case let .object(structured)? = obj["structuredContent"],
+       case let .object(data)? = structured["data"],
+       case let .array(results)? = data["results"] {
+        for row in results {
+            if case let .object(r) = row {
+                if case let .string(subject)? = r["subject"] { parts.append(subject) }
+                if case let .string(excerpt)? = r["excerpt"] { parts.append(excerpt) }
+            }
+        }
+    }
+    return parts.joined(separator: "\n")
 }
 
 /// Replicate AriaMCPMain's in-memory estate wiring: Estate.create + kit.open,
@@ -118,9 +131,9 @@ struct InMemorySemanticRecallTests {
 
         // Impatient ingest is inline — BM25 + vector lane must surface it immediately.
         // Without Corpus registered this returns 0 hits.
-        let result = try await dispatcher.runMemorySearch([
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object([
             "query": .string("swallow migration spring"),
-        ])
+        ]))
         let body = text(of: result)
         #expect(body.contains("swallow"),
             "in-memory estate with semantic recall wired must surface impatient capture; got: \(body)")
@@ -148,9 +161,9 @@ struct InMemorySemanticRecallTests {
         // the encode queue synchronously so the BM25 index is populated before recall.
         try await kit.awaitEncodeDrain(for: handle)
 
-        let result = try await dispatcher.runMemorySearch([
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object([
             "query": .string("arctic tern migration endurance"),
-        ])
+        ]))
         let body = text(of: result)
         #expect(body.contains("arctic tern"),
             "in-memory estate must surface regular+drained capture via BM25; got: \(body)")
@@ -222,9 +235,9 @@ struct InMemorySemanticRecallTests {
                 "impatient": .bool(true),
             ])
 
-            let result = try await dispatcher.runMemorySearch([
+            let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object([
                 "query": .string("red kite reintroduction conservation"),
-            ])
+            ]))
             let body = text(of: result)
             #expect(body.contains("red kite"),
                 "PostgreSQL estate with semantic recall wired must surface impatient capture; got: \(body)")

@@ -5,8 +5,8 @@
 // are surfaced. Mirrors the four scenarios from the mission spec.
 //
 // The production path is `recall(_ handle:, _ request: GLKRecallRequest)` with
-// `origin: .external` — this is what `run_memory_search` (moot_memory_search,
-// moot_recall_precise, moot_recall_shaped) calls. The legacy shim
+// `origin: .external` — this is what the ARIA v2 memory operations
+// (moot_memory_search, moot_recall_precise, moot_recall_shaped) call. The legacy shim
 // `recall(_ handle:, _ frame: RecallFrame)` always uses `.internal` origin and
 // must NEVER enqueue dreaming items (B-10a anti-regression).
 //
@@ -104,7 +104,7 @@ private func captureDrawers(
 }
 
 /// Build a GLKRecallRequest for the external ARIA boundary (origin: .external).
-/// This is the path run_memory_search uses — the production enqueue seam.
+/// This is the path moot_memory_search uses — the production enqueue seam.
 private func externalRecallRequest(limit: Int = 50) -> GLKRecallRequest {
     GLKRecallRequest(
         frame: RecallFrame(
@@ -174,7 +174,7 @@ struct DreamingQueueTests {
         // Capture 3 drawers so recall has content to surface.
         _ = try await captureDrawers(count: 3, kit: kit, handle: handle)
 
-        // External-origin scored recall — the production MCP path (run_memory_search).
+        // External-origin scored recall — the production MCP path (moot_memory_search).
         let result = try await kit.recall(handle, externalRecallRequest())
         #expect(result.drawers.count >= 2,
             "recall must surface ≥ 2 drawers for the dreaming guard to pass")

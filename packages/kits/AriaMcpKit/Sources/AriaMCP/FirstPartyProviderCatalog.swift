@@ -172,7 +172,14 @@ public enum FirstPartyProviderCatalog {
         }
         guard Set(arguments.keys).isSubset(of: Set(properties.keys)) else {
             let unknown = arguments.keys.filter { properties[$0] == nil }.sorted().joined(separator: ", ")
-            throw invalid("Undeclared argument(s) for \(name): \(unknown).")
+            // Derived from AriaV2ArgumentDecoder.swift:53-58: path "arguments" with the declared
+            // keys as allowed, so callers can see the valid surface in one error response.
+            throw AriaV2InvalidArgument(
+                path: "arguments",
+                message: "Undeclared argument(s) for \(name): \(unknown).",
+                allowed: properties.keys.sorted(),
+                correction: "Remove the argument or use one of the declared keys."
+            ).jsonRPCError
         }
         if admittedVersion == legacyContractVersion {
             let additions: Set<String>
@@ -187,14 +194,31 @@ public enum FirstPartyProviderCatalog {
             }
             let newer = Set(arguments.keys).intersection(additions)
             guard newer.isEmpty else {
-                throw invalid("Argument(s) \(newer.sorted().joined(separator: ", ")) require FirstPartyProvider 1.1.0.")
+                // Same shape as the undeclared-args refusal above: path "arguments",
+                // allowed is the subset available at the legacy version.
+                throw AriaV2InvalidArgument(
+                    path: "arguments",
+                    message: "Argument(s) \(newer.sorted().joined(separator: ", ")) require FirstPartyProvider 1.1.0.",
+                    allowed: properties.keys.filter { !additions.contains($0) }.sorted(),
+                    correction: "Upgrade the caller to FirstPartyProvider 1.1.0 or remove the unsupported argument."
+                ).jsonRPCError
             }
             if name == "moot_move_memory", arguments["wing"] == nil {
-                throw invalid("Missing required argument 'wing'.")
+                // Derived from AriaV2RecallLens.swift:43: path is the key, message is canonical.
+                throw AriaV2InvalidArgument(
+                    path: "wing",
+                    message: "Missing required argument 'wing'."
+                ).jsonRPCError
             }
         }
         for key in schema["required"]?.arrayValue?.compactMap(\.stringValue) ?? [] {
-            guard arguments[key] != nil else { throw invalid("Missing required argument '\(key)'.") }
+            // Derived from AriaV2RecallLens.swift:43: path is the key, message is canonical.
+            guard arguments[key] != nil else {
+                throw AriaV2InvalidArgument(
+                    path: key,
+                    message: "Missing required argument '\(key)'."
+                ).jsonRPCError
+            }
         }
         let alternativeGroups = (schema["oneOf"].map { [$0] } ?? [])
             + (schema["allOf"]?.arrayValue ?? []).compactMap { $0.objectValue?["oneOf"] }
@@ -206,7 +230,21 @@ public enum FirstPartyProviderCatalog {
                 let forbidden = object["not"]?.objectValue?["required"]?.arrayValue?.compactMap(\.stringValue) ?? []
                 return required.allSatisfy { arguments[$0] != nil } && forbidden.allSatisfy { arguments[$0] == nil }
             }
-            guard matched.count == 1 else { throw invalid("Arguments for \(name) must satisfy exactly one declared alternative.") }
+            guard matched.count == 1 else {
+                // Derived from AriaV2ArgumentDecoder.swift:139-143: path is the alternatives
+                // joined with "|", allowed is the same set, correction states the constraint.
+                let keys = alternatives.flatMap { alt -> [String] in
+                    guard let obj = alt.objectValue else { return [] }
+                    return obj["required"]?.arrayValue?.compactMap(\.stringValue) ?? []
+                }.sorted()
+                throw AriaV2InvalidArgument(
+                    code: "conflicting_arguments",
+                    path: keys.joined(separator: "|"),
+                    message: "Provide exactly one of \(keys.joined(separator: ", ")).",
+                    allowed: keys,
+                    correction: "Remove the conflicting argument or provide one required argument."
+                ).jsonRPCError
+            }
         }
         for (key, value) in arguments {
             guard let property = properties[key]?.objectValue else { continue }
@@ -215,29 +253,89 @@ public enum FirstPartyProviderCatalog {
     }
 
     private static func validate(value: JSONValue, property: [String: JSONValue], key: String) throws {
+        // Derived from AriaV2ArgumentDecoder.swift:178-183 (invalidScalar): path: key,
+        // message and correction name the expected type.
         switch property["type"]?.stringValue {
-        case "string": guard value.stringValue != nil else { throw invalid("Argument '\(key)' must be a string.") }
-        case "integer": guard value.integerValue != nil else { throw invalid("Argument '\(key)' must be an integer.") }
-        case "boolean": guard value.boolValue != nil else { throw invalid("Argument '\(key)' must be a boolean.") }
+        case "string":
+            guard value.stringValue != nil else {
+                throw AriaV2InvalidArgument(
+                    path: key,
+                    message: "Argument '\(key)' must be a string.",
+                    correction: "Provide \(key) as a string."
+                ).jsonRPCError
+            }
+        case "integer":
+            guard value.integerValue != nil else {
+                throw AriaV2InvalidArgument(
+                    path: key,
+                    message: "Argument '\(key)' must be an integer.",
+                    correction: "Provide \(key) as an integer."
+                ).jsonRPCError
+            }
+        case "boolean":
+            guard value.boolValue != nil else {
+                throw AriaV2InvalidArgument(
+                    path: key,
+                    message: "Argument '\(key)' must be a boolean.",
+                    correction: "Provide \(key) as a boolean."
+                ).jsonRPCError
+            }
         default: break
         }
-        if let allowed = property["enum"]?.arrayValue, !allowed.contains(value) {
-            throw invalid("Argument '\(key)' is not one of the declared values.")
+        if let enumValues = property["enum"]?.arrayValue, !enumValues.contains(value) {
+            // Every enum in this catalog is built by enumSchema(_:), which maps [String] to
+            // JSONValue.string, so every member is a string. Non-string members are dropped
+            // from the hint via compactMap; the refusal remains correct because the
+            // containment check above uses the full JSONValue array. jsonRPCError sorts
+            // allowed before encoding (AriaV2ArgumentDecoder.swift:33), so no pre-sort needed.
+            let allowedStrings = enumValues.compactMap { $0.stringValue }
+            throw AriaV2InvalidArgument(
+                path: key,
+                message: "Argument '\(key)' is not one of the declared values.",
+                allowed: allowedStrings.isEmpty ? nil : allowedStrings
+            ).jsonRPCError
         }
-        if let constant = property["const"], value != constant { throw invalid("Argument '\(key)' must equal its declared constant.") }
+        // For const, minimum, minLength, maxLength, and uuid format there is no enumerated
+        // allowed list — the schema constraint IS the constraint, so correction states it.
+        if let constant = property["const"], value != constant {
+            throw AriaV2InvalidArgument(
+                path: key,
+                message: "Argument '\(key)' must equal its declared constant.",
+                correction: "Provide '\(key)' equal to its declared constant value."
+            ).jsonRPCError
+        }
         if let minimum = property["minimum"]?.integerValue,
-           let integer = value.integerValue, integer < minimum { throw invalid("Argument '\(key)' is below its declared minimum.") }
-        if let minimum = property["minLength"]?.integerValue,
-           let string = value.stringValue, string.count < minimum { throw invalid("Argument '\(key)' is shorter than its declared minimum.") }
-        if let maximum = property["maxLength"]?.integerValue,
-           let string = value.stringValue, string.count > maximum { throw invalid("Argument '\(key)' is longer than its declared maximum.") }
-        if property["format"]?.stringValue == "uuid", let string = value.stringValue, UUID(uuidString: string) == nil {
-            throw invalid("Argument '\(key)' must be a UUID string.")
+           let integer = value.integerValue, integer < minimum {
+            throw AriaV2InvalidArgument(
+                path: key,
+                message: "Argument '\(key)' is below its declared minimum.",
+                correction: "Argument '\(key)' must be at least \(minimum)."
+            ).jsonRPCError
         }
-    }
-
-    private static func invalid(_ message: String) -> JSONRPCError {
-        JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: message)
+        if let minimum = property["minLength"]?.integerValue,
+           let string = value.stringValue, string.count < minimum {
+            throw AriaV2InvalidArgument(
+                path: key,
+                message: "Argument '\(key)' is shorter than its declared minimum.",
+                correction: "Argument '\(key)' must be at least \(minimum) character\(minimum == 1 ? "" : "s")."
+            ).jsonRPCError
+        }
+        if let maximum = property["maxLength"]?.integerValue,
+           let string = value.stringValue, string.count > maximum {
+            throw AriaV2InvalidArgument(
+                path: key,
+                message: "Argument '\(key)' is longer than its declared maximum.",
+                correction: "Argument '\(key)' must be at most \(maximum) character\(maximum == 1 ? "" : "s")."
+            ).jsonRPCError
+        }
+        if property["format"]?.stringValue == "uuid", let string = value.stringValue, UUID(uuidString: string) == nil {
+            // Correction wording from AriaV2ArgumentDecoder.swift:191.
+            throw AriaV2InvalidArgument(
+                path: key,
+                message: "Argument '\(key)' must be a UUID string.",
+                correction: "Provide a valid UUID; accepted input casing is normalized on output."
+            ).jsonRPCError
+        }
     }
 
     private static func descriptor(
