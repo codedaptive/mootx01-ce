@@ -56,8 +56,7 @@ public struct AriaV2GeniusLocusOrchestrationProvider: AriaV2OrchestrationProvide
             estate: handle,
             kit: kit
         )
-        let estate = try await kit.estate(for: handle)
-        let loaded = try await estate.getDrawers(
+        let loaded = try await kit.getDrawers(in: handle, 
             ids: output.rankedIDs, hydrationLevel: .full)
         let grouped = Dictionary(grouping: loaded, by: { $0.id.lowercased() })
         let memories = try output.rankedIDs.map { id -> AriaV2CompactMemory in
