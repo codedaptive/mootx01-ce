@@ -328,7 +328,8 @@ public enum AriaResident {
         case .off:
             // Operator opt-out: preserve today's behaviour exactly.
             return nil
-        case .on:
+        // `setting` is the fact_extraction master switch, which only takes on/off; provisionedPreference normalises anything else to the key's default (on), so every value other than .off reads as on here.
+        default:
             guard let extractor else {
                 // No extractor available — model assets absent or not installed.
                 // This is the common field case; log and continue.
