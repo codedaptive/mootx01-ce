@@ -1,7 +1,7 @@
 //! Mission 6a-iii-wire — end-to-end PAYOFF proof (Rust parity leg).
 //!
 //! The default recall ensemble (`corpus_kit_providers::default_ensemble()`:
-//! RI/PPMI/LSA/NMF/FDC) un-pins recall. This is the Rust mirror of the Swift
+//! RI then LSA) un-pins recall. This is the Rust mirror of the Swift
 //! `DefaultEnsembleRecallPayoffTests`: the Corpus built here is exactly the one
 //! the Rust GLK provision path (via the moot-mgr / ARIA_MCP app callers) and
 //! `estate_registry` now construct (all thread `default_ensemble()` into
@@ -12,9 +12,9 @@
 //! ------------------------------------------------
 //! A single fake/hash lane (the old `Deterministic` default) collapses recall
 //! onto a handful of lexically-overlapping documents and misses
-//! semantically-related-but-lexically-different content. The five-signal
-//! ensemble — trained on the estate's own corpus plus stateless taxonomic FDC —
-//! produces distributional + categorical structure, so:
+//! semantically-related-but-lexically-different content. The two-signal
+//! ensemble — both signals trained on the estate's own corpus — produces
+//! distributional structure, so:
 //!   (a) varied queries return DIVERSE top hits (not pinned to one cluster),
 //!   (b) every hit carries MULTI-SIGNAL dense provenance (multiple model_ids vote),
 //!   (c) a semantically-related-but-lexically-different document is recalled.
@@ -22,11 +22,7 @@
 //! Real SQLite (file-backed), never InMemory: the same primitive-form read-back
 //! discipline as the other corpus integration tests.
 
-// The payoff under proof is the dense ensemble — dark dense families (contract sheet §13) —
-// so this file compiles only under the dense-families feature, like its Swift twin
-// behind MOOTX01_DENSE_FAMILIES. LSA-specific assertions additionally require `lsa`
-// (ruling 2026-09-07).
-#![cfg(feature = "dense-families")]
+// The payoff under proof is the default dense ensemble: RI and LSA, both always-on.
 
 use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
 use corpus_kit_providers::default_ensemble;
@@ -65,6 +61,8 @@ const DOCS: [(&str, &str); 12] = [
 
 const NOW_MILLIS: i64 = 1_700_000_000_000;
 
+/// Both default signals carry the 1.1.0 basis version, so a persisted 1.0
+/// basis is invalidated and retrained rather than restored.
 #[test]
 fn default_ensemble_invalidates_trainable_1_0_bases() {
     let models = default_ensemble();
@@ -72,21 +70,11 @@ fn default_ensemble_invalidates_trainable_1_0_bases() {
         .iter()
         .map(|model| match model {
             EmbeddingModelConfig::RandomIndexing { provider }
-            | EmbeddingModelConfig::Ppmi { provider }
-            | EmbeddingModelConfig::Nmf { provider } => provider.model_version(),
-            // LSA is on its own `lsa` switch (ruling 2026-09-07); the Lsa arm
-            // is only reachable when the feature is on.
-            #[cfg(feature = "lsa")]
-            EmbeddingModelConfig::Lsa { provider } => provider.model_version(),
-            EmbeddingModelConfig::Fdc { provider } => provider.model_version(),
+            | EmbeddingModelConfig::Lsa { provider } => provider.model_version(),
             _ => panic!("unexpected model in the default ensemble"),
         })
         .collect();
-    // With `lsa` ON: five members RI/PPMI/LSA/NMF/FDC; without: four RI/PPMI/NMF/FDC.
-    #[cfg(feature = "lsa")]
-    assert_eq!(versions, ["1.1.0", "1.1.0", "1.1.0", "1.1.0", "1.0.0"]);
-    #[cfg(not(feature = "lsa"))]
-    assert_eq!(versions, ["1.1.0", "1.1.0", "1.1.0", "1.0.0"]);
+    assert_eq!(versions, ["1.1.0", "1.1.0"]);
 }
 
 fn scratch_path() -> String {
@@ -108,7 +96,7 @@ fn storage_at(path: &str) -> Arc<dyn Storage> {
 }
 
 /// Build a Corpus on the canonical default ensemble, ingest the diverse
-/// corpus, and reindex (trains the four trainable signals). The call under test:
+/// corpus, and reindex (trains both signals). The call under test:
 /// `default_ensemble()` — the exact set the Rust production provision sites thread.
 fn make_trained_ensemble_corpus() -> Corpus {
     let corpus =
@@ -173,18 +161,10 @@ fn hits_carry_multi_signal_provenance() {
     let per_signal = corpus.float_nearest_per_signal("orbit spacecraft mission", 3);
 
     let model_ids: Vec<&str> = per_signal.iter().map(|(id, _)| id.as_str()).collect();
-    // With `lsa` ON: five model_ids in order; without: four (LSA dark, ruling 2026-09-07).
-    #[cfg(feature = "lsa")]
     assert_eq!(
         model_ids,
-        vec!["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
-        "per-signal provenance must carry all five default model_ids in order, got {model_ids:?}"
-    );
-    #[cfg(not(feature = "lsa"))]
-    assert_eq!(
-        model_ids,
-        vec!["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"],
-        "per-signal provenance must carry four default model_ids in order, got {model_ids:?}"
+        vec!["random-indexing-v1", "lsa-v1"],
+        "per-signal provenance must carry both default model_ids in order, got {model_ids:?}"
     );
 
     // MULTI-SIGNAL VOTING: more than one signal must produce ranked hits.
@@ -199,11 +179,8 @@ fn hits_carry_multi_signal_provenance() {
         voting.len()
     );
 
-    // The trained distributional signals must agree the top hit is space-cluster.
+    // Both trained distributional signals must agree the top hit is space-cluster.
     for (model_id, outcome) in per_signal.iter() {
-        if model_id == "fdc-v1" {
-            continue;
-        }
         let ids = ranked_ids(outcome);
         if let Some(top) = ids.first() {
             assert!(
@@ -240,4 +217,66 @@ fn semantic_not_lexical_recall() {
         ids.iter().any(|id| id == "cook-3"),
         "ensemble must recall the lexically-disjoint cooking doc cook-3; recalled: {ids:?}"
     );
+}
+
+// MARK: - Gate proofs: default ensemble composition and LSA lane
+
+/// Gate proof 1 — `default_ensemble()` must return exactly two configs: RI then LSA.
+/// Validates the always-on ensemble contract (DENSE_LANE_TRIM ruling).
+#[test]
+fn default_ensemble_is_ri_and_lsa() {
+    let ensemble = default_ensemble();
+    assert_eq!(ensemble.len(), 2, "default ensemble must contain exactly two signals");
+    assert!(
+        matches!(ensemble[0], EmbeddingModelConfig::RandomIndexing { .. }),
+        "first config must be RandomIndexing (RI)"
+    );
+    assert!(
+        matches!(ensemble[1], EmbeddingModelConfig::Lsa { .. }),
+        "second config must be Lsa"
+    );
+}
+
+/// Gate proof 2 — the LSA lane encodes two drawers with disjoint vocabulary
+/// and ranks the on-topic one first. Uses the public
+/// `Corpus::float_nearest_per_signal` surface on a real SQLite scratch estate
+/// and reads the `lsa-v1` entry, so the proof is about the LSA signal itself
+/// and not the default (RI) slot that `float_nearest` serves.
+#[test]
+fn lsa_lane_float_nearest_returns_hits_on_scratch_estate() {
+    let _guard = global_lock();
+    let storage = storage_at(&scratch_path());
+    let corpus = Corpus::open_many(storage, default_ensemble())
+        .expect("Corpus::open_many must succeed with default ensemble");
+
+    corpus.ingest("rocket launch orbit satellite spacecraft mission", "doc-space", NOW_MILLIS)
+        .expect("ingest doc-space");
+    corpus.ingest("recipe oven bake bread flour yeast dough", "doc-cook", NOW_MILLIS)
+        .expect("ingest doc-cook");
+    // Reindex trains the RI and LSA bases; untrained distributional lanes hold
+    // no float rows. The query is drawn from doc-space's vocabulary so the
+    // trained basis folds it in (an out-of-vocabulary query has no vector).
+    corpus.reindex(NOW_MILLIS).expect("reindex");
+
+    let per_signal = corpus.float_nearest_per_signal("rocket orbit", 10);
+    let (_, outcome) = per_signal
+        .iter()
+        .find(|(model_id, _)| model_id == "lsa-v1")
+        .expect("the default ensemble holds an lsa-v1 signal");
+    match outcome {
+        FloatLaneOutcome::Hits(hits) => {
+            let ids: Vec<&str> = hits.iter().map(|(id, _)| id.as_str()).collect();
+            assert_eq!(
+                ids.first().copied(),
+                Some("doc-space"),
+                "the LSA lane must rank the on-topic drawer first, got {ids:?}"
+            );
+            assert_ne!(
+                ids.last().copied(),
+                Some("doc-space"),
+                "doc-cook must rank below doc-space when both are returned, got {ids:?}"
+            );
+        }
+        other => panic!("expected Hits from the LSA lane on the scratch estate, got {other:?}"),
+    }
 }

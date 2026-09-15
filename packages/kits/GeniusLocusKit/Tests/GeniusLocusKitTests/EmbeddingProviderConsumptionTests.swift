@@ -126,16 +126,8 @@ struct EmbeddingProviderConsumptionTests {
             "provision(.glk) must register a CorpusContentEngine")
         let modelIDs = await corpus.providerGenerations().map(\.modelID)
 
-        // Byte-identical pin: absent key must yield the RI-only default
-        // (plan 70BC55F3, 2026-09-05; dense families off by default).
-        // With DenseFamilies ON: four signals. With LSA ON: five signals.
-        #if MOOTX01_LSA
-        let expectedDefault = ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"]
-        #elseif MOOTX01_DENSE_FAMILIES
-        let expectedDefault = ["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"]
-        #else
-        let expectedDefault = ["random-indexing-v1"]
-        #endif
+        // Absent key must yield the default ensemble: RI and LSA, both always on.
+        let expectedDefault = ["random-indexing-v1", "lsa-v1"]
         #expect(
             modelIDs == expectedDefault,
             "absent key must yield the unchanged default ensemble, got \(modelIDs)")
@@ -173,15 +165,8 @@ struct EmbeddingProviderConsumptionTests {
         let modelIDs = await corpus.providerGenerations().map(\.modelID)
 
         // Unknown ID must NOT add a slot. Ensemble must equal the default ensemble.
-        // RI-only by default (plan 70BC55F3); four signals with DenseFamilies ON;
-        // five with LSA ON.
-        #if MOOTX01_LSA
-        let expectedFallback = ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"]
-        #elseif MOOTX01_DENSE_FAMILIES
-        let expectedFallback = ["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"]
-        #else
-        let expectedFallback = ["random-indexing-v1"]
-        #endif
+        // Unknown ID must fall back to the default ensemble: RI and LSA.
+        let expectedFallback = ["random-indexing-v1", "lsa-v1"]
         #expect(
             modelIDs == expectedFallback,
             "unknown embedding_provider ID must fall back to the default ensemble, got \(modelIDs)")
@@ -232,18 +217,12 @@ struct EmbeddingProviderConsumptionTests {
             "provisioned apple-nl-v1 must add an NL provider slot; got \(modelIDs)")
 
         // Total slots: default count + 1 NL.
-        // RI-only default → 2 slots; DenseFamilies (4 signals) → 5 slots;
+        // RI + LSA default → 2 slots × 2 signals;
         // LSA (5 signals) → 6 slots.
-        #if MOOTX01_LSA
         let expectedCount = 6
         let expectedPrefix: [String] = ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"]
-        #elseif MOOTX01_DENSE_FAMILIES
-        let expectedCount = 5
-        let expectedPrefix: [String] = ["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"]
-        #else
         let expectedCount = 2
         let expectedPrefix: [String] = ["random-indexing-v1"]
-        #endif
         #expect(
             modelIDs.count == expectedCount,
             "ensemble must have exactly \(expectedCount) slots (default + 1 NL), got \(modelIDs.count): \(modelIDs)")

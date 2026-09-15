@@ -13,10 +13,12 @@
 //! capturing sink installed would see spurious emissions without the lock.
 
 use corpus_kit::{Corpus, EmbeddingModelConfig};
+use engram_lib::Engram;
 use intellectus_lib::Intellectus;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
 use std::sync::{Arc, Mutex, OnceLock};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 use uuid::Uuid;
 
 // Process-wide serialisation lock shared with corpuskit_telemetry_tests.rs,
@@ -276,67 +278,73 @@ fn chunk_id_parity_with_swift() {
 // Every test holds GLOBAL_LOCK to prevent interleaving with
 // telemetry-capturing tests.
 
-// MARK: - Named model cases (B2-5: Rust embedding parity)
+// MARK: - CandleNL provider round-trip (B2-5: Rust embedding parity)
 //
-// The named EmbeddingModelConfig cases (MiniLM/MPNet/EmbeddingGemma)
-// carry a host-supplied inference closure, exactly like Swift. These
-// tests use a fake inference closure (a model bundle is never bundled)
-// to prove the facade wires the named providers correctly: ingest +
-// recall succeed, and the float lane is AVAILABLE.
+// `CandleNL` is the surviving host-supplied-EmbeddingProvider case after the
+// audition losers (MiniLM/MPNet/EmbeddingGemma) were retired. These tests use
+// a stub provider to prove the facade wires the provider correctly: ingest +
+// recall succeed and the float lane is AVAILABLE.
 
-/// Fake inference: a fixed-dimension vector derived from the token
-/// count. Stands in for a real model pass — the kit owns tokenization
-/// and projection, the host owns this closure.
-fn fake_inference(dim: usize) -> corpus_kit::NamedInferenceFn {
-    Box::new(move |tokens: &[i32]| {
-        let base = (tokens.len() as f32).max(1.0);
-        Ok((0..dim).map(|d| ((d as f32 + 1.0) / base).sin()).collect())
-    })
+/// Fixed-dimension vector derived from text length. Stands in for a real
+/// model pass — the kit owns the pipeline, the host owns this provider.
+struct FakeVectorProvider {
+    dim: usize,
 }
 
-fn make_corpus_minilm() -> Corpus {
+impl EmbeddingProvider for FakeVectorProvider {
+    fn model_id(&self) -> &str { "test-fake-vector-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> {
+        Ok(Engram::ZERO)
+    }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        if text.is_empty() { return Ok(vec![]); }
+        let base = (text.len() as f32).max(1.0);
+        Ok((0..self.dim).map(|d| ((d as f32 + 1.0) / base).sin()).collect())
+    }
+}
+
+fn make_corpus_candle_nl() -> Corpus {
     let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
     Corpus::open(
         storage,
-        EmbeddingModelConfig::MiniLM { inference: fake_inference(384) },
+        EmbeddingModelConfig::CandleNL { provider: Box::new(FakeVectorProvider { dim: 384 }) },
     )
-    .expect("Corpus::open must succeed with MiniLM config")
+    .expect("Corpus::open must succeed with CandleNL config")
 }
 
 #[test]
-fn named_minilm_round_trip_ingest_and_recall() {
+fn candle_nl_round_trip_ingest_and_recall() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
-    let corpus = make_corpus_minilm();
+    let corpus = make_corpus_candle_nl();
     corpus
         .ingest(
             "Swift and Rust both ship from one substrate with shared test vectors.",
             "doc-parity",
             NOW_MILLIS,
         )
-        .expect("ingest must succeed under a named provider");
+        .expect("ingest must succeed under a CandleNL provider");
     let results = corpus
         .recall("shared substrate", 5, NOW_MILLIS)
         .expect("recall must succeed");
-    assert!(!results.is_empty(), "named-provider recall must return results");
+    assert!(!results.is_empty(), "CandleNL provider recall must return results");
 }
 
 // ── Farthest (anti-similarity, mission 6b-modifiers-antisim) ─────────────────
 
 #[test]
-fn named_providers_construct_for_all_three_models() {
+fn candle_nl_provider_constructs_and_indexes_content() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
-    for cfg in [
-        EmbeddingModelConfig::MiniLM { inference: fake_inference(384) },
-        EmbeddingModelConfig::MPNet { inference: fake_inference(768) },
-        EmbeddingModelConfig::EmbeddingGemma { inference: fake_inference(768) },
-    ] {
-        let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
-        let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
-        let corpus = Corpus::open(storage, cfg).expect("named config must open");
-        corpus.ingest("content", "src", NOW_MILLIS).expect("ingest must succeed");
-        assert_eq!(corpus.count().expect("count must succeed"), 1);
-    }
+    let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
+    let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
+    let corpus = Corpus::open(
+        storage,
+        EmbeddingModelConfig::CandleNL { provider: Box::new(FakeVectorProvider { dim: 384 }) },
+    )
+    .expect("CandleNL config must open");
+    corpus.ingest("content", "src", NOW_MILLIS).expect("ingest must succeed");
+    assert_eq!(corpus.count().expect("count must succeed"), 1);
 }

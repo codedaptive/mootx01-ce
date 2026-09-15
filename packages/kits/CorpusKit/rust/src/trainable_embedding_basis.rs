@@ -8,9 +8,9 @@
 //! concern. `synapsekit::EmbeddingProvider` is the universal embed surface; it
 //! must stay narrow so a future pre-trained encoder can conform WITHOUT being
 //! forced to declare a training method it cannot honour. `TrainableEmbeddingBasis`
-//! is the opt-in capability for the distributional providers (RI/PPMI/LSA/NMF)
-//! that genuinely train on the estate's own content. FDC (stateless taxonomic)
-//! and the deterministic/named-model providers do NOT implement it; their
+//! is the opt-in capability for the distributional providers (RI/LSA)
+//! that genuinely train on the estate's own content. The deterministic
+//! and `CandleNL` providers do NOT implement it; their
 //! opt-out is surfaced to callers as `CorpusKitError::NotTrainable`.
 //!
 //! ## Why this is the honest dispatch for type erasure
@@ -34,7 +34,7 @@
 //! (stable trait upcasting) wherever the corpus needs the embed surface. The
 //! trainable `EmbeddingModelConfig` cases carry `Box<dyn TrainableEmbeddingBasis>`
 //! directly, so `reconstruct` calls `reconstruct_basis` with no downcast and no
-//! `Any`; the non-trainable cases (Deterministic / named / FDC) carry
+//! `Any`; the non-trainable cases (Deterministic / CandleNL) carry
 //! `Box<dyn EmbeddingProvider>` and report `NotTrainable`.
 //!
 //! Swift port: packages/kits/CorpusKit/Sources/CorpusKit/TrainableEmbeddingBasis.swift
@@ -45,8 +45,8 @@ use synapsekit::EmbeddingProvider;
 /// A provider whose embedding basis is trained from a corpus and can be
 /// serialized to / reconstructed from a versioned basis blob.
 ///
-/// Implementors are the corpus-kit distributional providers (RI, PPMI, LSA,
-/// NMF) in `corpus-kit-providers`. The trait is the type-erasure seam that lets
+/// Implementors are the corpus-kit distributional providers (RI, LSA)
+/// in `corpus-kit-providers`. The trait is the type-erasure seam that lets
 /// `Corpus` drive training and serialization without core depending on
 /// `corpus-kit-providers`.
 ///
@@ -60,9 +60,9 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// The implementor is responsible for the FULL train+finalize sequence
     /// specific to its method:
     ///   - it tokenizes each text with the canonical `default_keyword_tokens`
-    ///     where its training API consumes term sequences (RI, PPMI), or passes
-    ///     raw text where its API consumes documents (LSA, NMF);
-    ///   - it runs any required finalization pass (PPMI/LSA/NMF; RI has none).
+    ///     where its training API consumes term sequences (RI), or passes
+    ///     raw text where its API consumes documents (LSA);
+    ///   - it runs any required finalization pass (LSA; RI has none).
     ///
     /// Deterministic: training is a pure function of `texts` and the provider's
     /// fixed seeds, so the same corpus yields a byte-identical basis on every
@@ -82,7 +82,7 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     fn accumulate_training(&mut self, texts: &[&str]);
 
     /// Run the method-specific finalization pass over the accumulated state
-    /// (PPMI/LSA/NMF; RI has none — no-op). Call exactly once, after the
+    /// (LSA; RI has none — no-op). Call exactly once, after the
     /// last `accumulate_training` page.
     fn finalize_training(&mut self);
 
@@ -150,7 +150,7 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     // instead of rebuilding them from scratch by re-reading the whole corpus on
     // every reindex. `Corpus` holds the provider as `Box<dyn ...>`, so these
     // uniform methods are the bridge: each implementor routes them to its own
-    // method-specific accumulation (RI/PPMI fold term sequences; LSA/NMF fold
+    // method-specific accumulation (RI folds term sequences; LSA folds
     // documents). Persistence is the caller's job and happens at BATCH
     // boundaries, never per chunk: re-serializing the whole counts blob on every
     // chunk would be O(N·vocab) over an import — the very wall this removes.
@@ -161,8 +161,8 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// Fold one chunk's raw text into the maintained accumulated counts.
     ///
     /// The implementor tokenizes with the canonical `default_keyword_tokens`
-    /// where its accumulation consumes term sequences (RI, PPMI), or folds the
-    /// raw document where it consumes documents (LSA, NMF). This is the per-chunk
+    /// where its accumulation consumes term sequences (RI), or folds the
+    /// raw document where it consumes documents (LSA). This is the per-chunk
     /// half of the same additive logic `train_on_corpus` runs over a whole
     /// corpus. Deterministic; does NOT finalize.
     fn add_to_counts(&mut self, text: &str);
@@ -185,8 +185,8 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// persist me as one blob" — so every provider whose counts are small keeps
     /// that behavior with no code. Only providers whose counts scale with
     /// vocabulary override it: RandomIndexing's map reached 1,009,861,855 bytes
-    /// on a real estate and exceeded SQLite's bind ceiling (ee#49), while Nmf
-    /// and Lsa sit at ~2 MB and gain nothing from a split.
+    /// on a real estate and exceeded SQLite's bind ceiling (ee#49), while Lsa
+    /// sits at ~2 MB and gains nothing from a split.
     ///
     /// The header MUST remain a valid counts blob on its own — same magic and
     /// format version, empty term map — so `corpus_provider_counts.counts` is
@@ -234,16 +234,15 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     ///   reconstructs the basis; finalization is a no-op, so this call is a
     ///   lossless promotion with no compute cost.
     ///
-    /// - **PPMI** (`true`): the maintained counts hold the full raw co-occurrence
-    ///   state (`coCount`, `termCount`, `totalPairs`, `totalTerms`) — exactly what
-    ///   `finalize_training` consumes to derive `ppmiVectors`. This method runs
-    ///   that finalize pass over the restored state and returns `true` once the
-    ///   PPMI vectors are populated.
+    /// - A provider whose maintained counts hold the full raw accumulation state
+    ///   its `finalize_training` consumes (`true`): this method runs that
+    ///   finalize pass over the restored state and returns `true` once the
+    ///   basis is populated. No default provider takes this route today.
     ///
     /// Returns `false` when the maintained counts are insufficient to derive a
     /// basis and the provider's state is left UNCHANGED:
     ///
-    /// - **LSA / NMF** (`false`): maintained counts hold only the vocabulary and
+    /// - **LSA** (`false`): maintained counts hold only the vocabulary and
     ///   `documentCount` trigger anchors. The per-document TF rows and per-term DF
     ///   that drive the matrix factorization are deliberately NOT persisted — by
     ///   design those are re-tokenized from corpus text at refactor time (see
@@ -281,10 +280,10 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// `serialize_basis`. This is the provider-side discriminator the retrain
     /// wiring (Part 3) reads to decide whether a delta-fold after restore is safe.
     ///
-    /// - **PPMI** (`true`): accumulation is integer co-occurrence count maps.
-    ///   Integer addition is commutative; the `finalize` pass sorts keys by raw
-    ///   UTF-8 bytes before iterating, so the derived PPMI vectors are independent
-    ///   of the fold order.
+    /// - A provider whose accumulation is integer count maps (`true`):
+    ///   integer addition is commutative and a finalize pass that sorts keys by
+    ///   raw UTF-8 bytes before iterating derives vectors independent of the
+    ///   fold order. No default provider qualifies.
     ///
     /// - **RandomIndexing** (`false` — Finding F-3): context vectors are running
     ///   f32 sums. f32 addition is NOT associative; folding additional texts into

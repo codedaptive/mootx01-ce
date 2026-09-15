@@ -91,13 +91,7 @@ struct RecallUnionBestRawReportingTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: { tokens in
-                let theta = Float(tokens.count) * 0.018
-                var v = Array(repeating: Float(0), count: 384)
-                v[0] = Foundation.cos(theta)
-                v[1] = Foundation.sin(theta)
-                return v
-            })]
+            models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))]
         )
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
