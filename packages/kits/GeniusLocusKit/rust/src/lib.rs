@@ -73,6 +73,11 @@ pub mod estate_open_posture;
 pub mod estate_format;
 pub mod branches;
 pub mod coordinator;
+// recall_router.rs — estate recall route list: one ordered list consulted once
+// per recall before the directive is read. Route 1 is the cross-encoder
+// strict-transcript path gated on `cross_encoder_routing`. Mirrors
+// RecallRouter.swift.
+pub mod recall_router;
 pub mod span_content_version;
 pub mod encoder_activation;
 pub use encoder_activation::{
