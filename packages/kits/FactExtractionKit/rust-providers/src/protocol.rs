@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use fact_extraction_kit::FactExtractionRequest;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAXIMUM_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,7 +135,7 @@ mod tests {
             extraction: FactExtractionRequest {
                 source_id: "drawer".into(),
                 source_digest: "digest".into(),
-                distilled_text: "line one\n{\"pretend\":\"frame\"}\0line two".into(),
+                source_text: "line one\n{\"pretend\":\"frame\"}\0line two".into(),
                 eligible_source_spans: vec![],
                 maximum_facts: 4,
             },

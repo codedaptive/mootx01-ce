@@ -75,6 +75,8 @@ pub mod result_composer;
 pub mod recipe_tools;
 pub mod runtime;
 pub use runtime::stats_store_path; // re-exported for integration tests
+pub use runtime::build_fact_extraction_cycle; // re-exported for integration tests
+pub use runtime::activate_and_build_extraction_cycle; // re-exported for integration tests
 pub mod sensitivity_grant_ledger;
 pub mod server;
 pub mod session_protocol;

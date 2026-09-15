@@ -2,7 +2,7 @@ import FactExtractionKit
 import FactExtractionKitProviders
 import Testing
 
-@Suite("Distilled fact extraction contract")
+@Suite("Source-grounded fact extraction contract")
 struct FactGroundingTests {
     let spec = FactExtractorModelSpec(
         providerID: "test", modelID: "fixture", modelVersion: "1",
@@ -13,7 +13,7 @@ struct FactGroundingTests {
     func acceptsGroundedFact() {
         let source = "Meeting notes. Jack's birthday is June 20th. Bring cake."
         let request = FactExtractionRequest(
-            sourceID: "drawer-1", sourceDigest: "digest", distilledText: source,
+            sourceID: "drawer-1", sourceDigest: "digest", sourceText: source,
             eligibleSourceSpans: [FactSourceSpan(
                 start: 0, end: source.unicodeScalars.count,
                 startUTF8Byte: 0, endUTF8Byte: source.utf8.count)],
@@ -40,7 +40,7 @@ struct FactGroundingTests {
         let source = "Alice likes tea. Alice likes tea. Bob likes coffee."
         let selected = FactSourceSpan(start: 0, end: 33, startUTF8Byte: 0, endUTF8Byte: 33)
         let request = FactExtractionRequest(
-            sourceID: "drawer-2", sourceDigest: "digest", distilledText: source,
+            sourceID: "drawer-2", sourceDigest: "digest", sourceText: source,
             eligibleSourceSpans: [selected], maximumFacts: 4)
         let response = FactExtractionResponse(
             sourceDigest: "digest", providerID: "test", modelID: "fixture",
@@ -62,7 +62,7 @@ struct FactGroundingTests {
     func rejectsUnsupportedValues() {
         let source = "Jack's birthday is June 20th."
         let request = FactExtractionRequest(
-            sourceID: "drawer-values", sourceDigest: "digest", distilledText: source,
+            sourceID: "drawer-values", sourceDigest: "digest", sourceText: source,
             eligibleSourceSpans: [FactSourceSpan(
                 start: 0, end: source.unicodeScalars.count,
                 startUTF8Byte: 0, endUTF8Byte: source.utf8.count)],
@@ -94,7 +94,7 @@ struct FactGroundingTests {
         }
         let request = FactExtractionRequest(
             sourceID: "drawer", sourceDigest: "digest",
-            distilledText: String(repeating: "x", count: 4097),
+            sourceText: String(repeating: "x", count: 4097),
             eligibleSourceSpans: [], maximumFacts: 1)
         await #expect(throws: FactExtractionError.self) {
             _ = try await provider.extract(request)
@@ -105,7 +105,7 @@ struct FactGroundingTests {
     func unicodeOffsets() {
         let source = "📝 Zoë's birthday is June 20th."
         let request = FactExtractionRequest(
-            sourceID: "drawer-unicode", sourceDigest: "digest", distilledText: source,
+            sourceID: "drawer-unicode", sourceDigest: "digest", sourceText: source,
             eligibleSourceSpans: [FactSourceSpan(
                 start: 0, end: source.unicodeScalars.count,
                 startUTF8Byte: 0, endUTF8Byte: source.utf8.count)],

@@ -1328,7 +1328,7 @@ public struct HTTPServer: Sendable {
                 }
                 // Stable name so the test gate can assert the read is NOT running
                 // on the shared pool. A pool worker does not carry this name.
-                thread.name = "com.mootx01.aria-mcp.raw-read"
+                thread.name = MootProductIdentity.Queues.ariaHTTPRawRead
                 thread.start()
             }
         } onCancel: {

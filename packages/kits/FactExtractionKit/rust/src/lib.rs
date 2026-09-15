@@ -1,4 +1,4 @@
-//! Provider-neutral distilled fact extraction contract.
+//! Provider-neutral source-grounded fact extraction contract.
 //! Swift mirror: `Sources/FactExtractionKit`.
 
 pub mod contract;
