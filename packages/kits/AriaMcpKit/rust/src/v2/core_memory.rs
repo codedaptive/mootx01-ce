@@ -776,6 +776,7 @@ fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) {
             memory.tunnels = None;
         }
         V2MemoryDepth::Distilled => {
+            memory.distilled = memory.content.as_deref().map(crate::recall_distillation::render);
             memory.content = None;
             // depth:distilled carries no tunnels key — same rationale as Subject.
             memory.tunnels = None;
@@ -796,6 +797,7 @@ fn project_depth(memory: &mut V2Memory, depth: V2MemoryDepth) {
             memory.lineage_id = None;
         }
         V2MemoryDepth::Full => {
+            memory.distilled = memory.content.as_deref().map(crate::recall_distillation::render);
             // depth:full always emits the tunnels key. tunnels is already
             // Some(vec) from record(); no change needed here.
         }
