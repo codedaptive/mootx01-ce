@@ -4,11 +4,9 @@
 // per-signal nearest and farthest recall the RecallDirector's whole-record
 // lane consumes, the discrimination signal, the float re-embed of one content
 // record (`recomposeDenseVector`) and the forced store-error test seam.
-// WholeRecordDense sidecar: compiled only under MOOTX01_WHOLE_RECORD_DENSE.
 //
 // Rust twin: rust/src/content_engine/float_lane.rs.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
 import CorpusKit
 import Foundation
 import IntellectusLib
@@ -260,4 +258,3 @@ extension CorpusContentEngine {
         return results
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

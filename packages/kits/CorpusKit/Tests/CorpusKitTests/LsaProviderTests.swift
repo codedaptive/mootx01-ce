@@ -1,7 +1,3 @@
-#if MOOTX01_LSA
-// LSA test — compiled only when the LSA trait is on (MOOTX01_LSA).
-// Dark and unproven since 2026-09-07; DenseFamilies does NOT enable it.
-// Enable with `swift test --traits LSA`. See CorpusKit/Package.swift.
 // LsaProviderTests.swift
 //
 // Conformance and correctness tests for LsaProvider.
@@ -218,15 +214,13 @@ struct LsaProviderTests {
         _ = eng
     }
 
-    @Test("projection seed differs from RI and PPMI seeds")
+    @Test("projection seed differs from RI seed")
     func projectionSeedIsolation() {
-        // lsaProjectionSeed must differ from riProjectionSeed and
-        // ppmiProjectionSeed so LSA engrams key to a separate bucket.
+        // lsaProjectionSeed must differ from riProjectionSeed so LSA engrams
+        // key to a separate bucket. (PPMI was retired in the dense-lane-trim
+        // mission; only RI and LSA remain as default-ensemble signals.)
         #expect(lsaProjectionSeed != riProjectionSeed,
                 "LSA and RI projection seeds must differ for bucket isolation")
-        #expect(lsaProjectionSeed != ppmiProjectionSeed,
-                "LSA and PPMI projection seeds must differ for bucket isolation")
     }
 }
 
-#endif // MOOTX01_LSA

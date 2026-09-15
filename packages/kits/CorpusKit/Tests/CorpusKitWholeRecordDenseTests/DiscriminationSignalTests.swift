@@ -20,13 +20,12 @@
 // §9 exercises the min(1.0, meanSpread / 0.15) formula that RecallDirector applies.
 //
 // Model helpers:
-//   directionalModel() — one-hot 384-d by token sum; orthogonal for distinct texts.
+//   directionalModel() — one-hot 384-d by FNV-1a hash of UTF-8 bytes; orthogonal for distinct texts.
 //   uniformModel()     — all texts return the same direction; cosine always 1.0.
 //
 // INTELLECTUS LOCK: all tests that call corpus.ingest or engine.indexContent
 // hold GlobalTestLock.shared to prevent telemetry cross-contamination.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
 import Foundation
 import Testing
 import PersistenceKit
@@ -46,28 +45,54 @@ private let testNow = Date(timeIntervalSince1970: 1_700_000_000)
 // These helpers mirror the pattern used in FloatLaneOutcomeTests.swift
 // (makeDirectionalCorpus / makeFloatCorpus) but are parameterised so
 // CorpusContentEngine tests can use them via `models: [...]`.
+//
+// Each helper wraps an EmbeddingProvider conformer in a pass-through
+// `.randomIndexing(provider:)` slot (a non-trainable provider there is a
+// stateless slot): directional → one-hot 384-d by FNV-1a hash of UTF-8
+// bytes; uniform → all-ones 384-d.
 
-/// One-hot 384-d model keyed by (sum of FNV-1a token IDs) mod 384.
-/// Texts with different token compositions land on orthogonal directions
-/// (cosine ≈ 0.0). Identical texts land on the same direction (cosine 1.0).
+/// One-hot 384-d provider keyed by FNV-1a hash of text UTF-8 bytes mod 384.
+/// Texts with different content land on orthogonal directions (cosine ≈ 0.0).
+/// Identical texts land on the same direction (cosine 1.0).
 /// Used for CONTRASTIVE fixtures: one winner, several orthogonal distractors.
-private func directionalModel() -> EmbeddingModel {
-    .miniLM(inference: { tokens in
+private struct DirectionalEmbeddingProvider: EmbeddingProvider, @unchecked Sendable {
+    let modelID: String = "test-directional-v1"
+    let modelVersion: String = "1.0.0"
+
+    func embed(_ text: String) async throws -> Engram { Engram.zero }
+
+    func embedFloat(_ text: String) async throws -> [Float] {
         var v = [Float](repeating: 0.0, count: 384)
-        let sum = tokens.reduce(Int32(0), &+)
-        let slot = Int((sum % 384 + 384) % 384)
-        v[slot] = 1.0
+        let hash = text.utf8.reduce(UInt64(14_695_981_039_346_656_037)) { acc, b in
+            (acc ^ UInt64(b)) &* 1_099_511_628_211
+        }
+        v[Int(hash % 384)] = 1.0
         return v
-    })
+    }
 }
 
-/// Uniform-direction 384-d model: all texts return the same direction vector.
+/// Uniform-direction 384-d provider: all texts return the same direction vector.
 /// Every (query, doc) pair has cosine similarity 1.0.
 /// Used for SATURATED fixtures: zero relative spread.
-private func uniformModel() -> EmbeddingModel {
-    .miniLM(inference: { _ in
+private struct UniformEmbeddingProvider: EmbeddingProvider, @unchecked Sendable {
+    let modelID: String = "test-uniform-v1"
+    let modelVersion: String = "1.0.0"
+
+    func embed(_ text: String) async throws -> Engram { Engram.zero }
+
+    func embedFloat(_ text: String) async throws -> [Float] {
         Array(repeating: 1.0, count: 384)
-    })
+    }
+}
+
+/// Returns an EmbeddingModel backed by DirectionalEmbeddingProvider.
+private func directionalModel() -> EmbeddingModel {
+    .randomIndexing(provider: DirectionalEmbeddingProvider())
+}
+
+/// Returns an EmbeddingModel backed by UniformEmbeddingProvider.
+private func uniformModel() -> EmbeddingModel {
+    .randomIndexing(provider: UniformEmbeddingProvider())
 }
 
 // MARK: - Engine helper
@@ -435,4 +460,3 @@ struct GlkDiscriminationFactorFormula {
         #expect(f < 1.0, "both signals saturated must produce discount")
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

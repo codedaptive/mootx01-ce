@@ -7,14 +7,11 @@
 //
 // ── Which providers are retrained ─────────────────────────────────────────
 // This hook calls `GeniusLocusKit.reindexCorpus`, which retrains whatever
-// providers are registered in the estate's Corpus. With `MOOTX01_DENSE_FAMILIES`
-// OFF (the default, plan 70BC55F3, 2026-09-05), `CorpusEnsemble.defaultEnsemble()`
-// returns RI only — so this hook retrains RI only on estates opened with the
-// default ensemble. With `MOOTX01_DENSE_FAMILIES` ON, all five providers are
-// retrained as before.
+// providers are registered in the estate's Corpus. `CorpusEnsemble.defaultEnsemble()`
+// returns RI and LSA — so this hook retrains both providers on every retrain cycle.
 //
 // ── Design rationale ─────────────────────────────────────────────────────
-// Distributional embedding bases (RI / PPMI / LSA / NMF) freeze their
+// Distributional embedding bases (RI / LSA) freeze their
 // vocabulary at training time. The corpus-growth probe (`CorpusGrowthProbe`)
 // fires a retrain on vocabulary GROWTH within ALPHA cycles, but that gate
 // can be silent on quiescent estates where content changes in kind rather

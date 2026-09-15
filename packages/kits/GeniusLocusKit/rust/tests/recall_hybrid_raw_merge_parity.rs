@@ -26,11 +26,13 @@
 use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
+use engram_lib::Engram;
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath, RecallFallbackPolicy,
     RecallOrigin,
 };
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -98,18 +100,28 @@ fn ramp(rank: usize) -> f32 {
     (FRONTIER_K - rank) as f32 / FRONTIER_K as f32
 }
 
-/// One-hot-ish direction keyed on token count, the same inference the
-/// raw-reporting fixture uses, so the dense lane orders the drawers without ties.
-fn minilm_monotonic_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MiniLM {
-        inference: Box::new(|tokens: &[i32]| {
-            let theta = tokens.len() as f32 * 0.018;
-            let mut v = vec![0.0_f32; 384];
-            v[0] = theta.cos();
-            v[1] = theta.sin();
-            Ok(v)
-        }),
+/// Word-count-based direction provider. Replaces the removed
+/// `EmbeddingModelConfig::MiniLM { inference }` case. Word count is a close
+/// proxy for token count for the simple test sentences used here.
+struct MonotonicProvider;
+impl EmbeddingProvider for MonotonicProvider {
+    fn model_id(&self) -> &str { "test-monotonic-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let word_count = text.split_whitespace().count();
+        let theta = word_count as f32 * 0.018;
+        let mut v = vec![0.0_f32; 384];
+        v[0] = theta.cos();
+        v[1] = theta.sin();
+        Ok(v)
     }
+}
+
+/// One-hot-ish direction keyed on word count, so the dense lane orders the
+/// drawers without ties. Replaces the removed `.miniLM(inference:)` case.
+fn minilm_monotonic_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(MonotonicProvider) }
 }
 
 fn make_vector_store() -> Arc<VectorStore> {

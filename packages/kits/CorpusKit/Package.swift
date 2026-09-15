@@ -20,33 +20,12 @@
 //
 // Compile-time switches (CorpusKitProviders target):
 //
-//   DenseFamilies  (Swift trait → MOOTX01_DENSE_FAMILIES, Rust feature dense-families)
-//       Compiles LSA, NMF, PPMI, FDC, MPNet, and EmbeddingGemma providers.
-//       OFF by default: measurement (plan 70BC55F3, 2026-09-05) showed these
-//       four families add cost without beating BM25+RI on two corpora.
-//       RI stays always-on because its binary fingerprint feeds dreaming,
-//       contradiction, and consolidation. Enable with:
-//           swift test --traits DenseFamilies
-//           cargo test --features dense-families
-//
 //   AppleEncoders  (Swift trait → APPLE_ENCODERS; Swift-only, no Rust twin)
 //       Compiles NLContextualEmbeddingProvider, NLEmbeddingProvider,
-//       AppleNLProvider, and NeuralEmbedProvider. OFF by default.
-//       These providers measured at half the signal of a retrieval-trained
-//       model; held for iOS and Apple cloud compute (v1.2). Enable with:
+//       AppleNLProvider, and NeuralEmbedProvider. OFF by default: retained
+//       in case Apple improves the NaturalLanguage framework, or for a
+//       device class that cannot host a CoreML encoder. Enable with:
 //           swift test --traits AppleEncoders
-//
-//   WholeRecordDense  (Swift trait → MOOTX01_WHOLE_RECORD_DENSE, Rust feature
-//                      whole-record-dense)
-//       Compiles the whole-record dense float engine: the float row write at
-//       ingest (vectorIndex 1), the per-signal float query surface
-//       (CorpusKitWholeRecordDense target) and their tests. OFF by default
-//       (ruling 2026-09-07): the span stage is the one dense provider in the
-//       product; the whole-record float lane was the audition baseline and
-//       cut lexical gold at fusion. DenseFamilies enables it because the
-//       dense families exist only as whole-record float signals. Enable with:
-//           swift test --traits WholeRecordDense
-//           cargo test --features whole-record-dense
 
 import PackageDescription
 
@@ -59,8 +38,8 @@ let package = Package(
     products: [
         .library(name: "CorpusKit", targets: ["CorpusKit"]),
         .library(name: "CorpusKitProviders", targets: ["CorpusKitProviders"]),
-        // The whole-record dense sidecar. Empty unless the WholeRecordDense
-        // trait is on; the default product graph never links it.
+        // The whole-record dense sidecar: the float query surface as `package`
+        // extensions of Corpus and CorpusContentEngine plus FloatLaneOutcome.
         .library(name: "CorpusKitWholeRecordDense", targets: ["CorpusKitWholeRecordDense"]),
     ],
     traits: [
@@ -69,28 +48,8 @@ let package = Package(
             description: "Compile optional standalone token-window passage indexing. GeniusLocusKit/MOOTx01 intentionally leaves this trait disabled."
         ),
         .trait(
-            name: "DenseFamilies",
-            description: "Compile LSA, NMF, PPMI, FDC, MPNet, and EmbeddingGemma providers. Off by default (plan 70BC55F3, 2026-09-05): measured cost exceeds benefit vs. BM25+RI on two corpora. Defines MOOTX01_DENSE_FAMILIES; enable with `swift test --traits DenseFamilies`. Enables WholeRecordDense: the families are whole-record float signals.",
-            enabledTraits: ["WholeRecordDense"]
-        ),
-        .trait(
-            name: "WholeRecordDense",
-            description: "Compile the whole-record dense float engine (float rows at ingest, the CorpusKitWholeRecordDense query surface, their tests). Off by default (ruling 2026-09-07): the span stage is the one dense provider. Defines MOOTX01_WHOLE_RECORD_DENSE; enable with `swift test --traits WholeRecordDense`."
-        ),
-        // LSA: the LsaProvider, its basis training, its ensemble membership and
-        // its tests on a switch of their own (ruling 2026-09-07). DenseFamilies
-        // does not enable it and the dark-variant gate does not build it: the
-        // family is dark and unproven (`reindex recovers a deliberately-degenerate
-        // LSA basis` fails). Enables DenseFamilies, which the provider's shared
-        // counts and reduced vocabulary need.
-        .trait(
-            name: "LSA",
-            description: "Compile the LsaProvider, its basis training and its tests. Dark and unproven since 2026-09-07; DenseFamilies does not enable it. Defines MOOTX01_LSA and enables DenseFamilies; enable with `swift test --traits LSA`.",
-            enabledTraits: ["DenseFamilies"]
-        ),
-        .trait(
             name: "AppleEncoders",
-            description: "Compile Apple NL embedding providers (NLContextualEmbeddingProvider, NLEmbeddingProvider, AppleNLProvider, NeuralEmbedProvider). Off by default; held for v1.2 iOS and Apple cloud compute. Swift-only. Defines APPLE_ENCODERS; enable with `swift test --traits AppleEncoders`."
+            description: "Compile Apple NL embedding providers (NLContextualEmbeddingProvider, NLEmbeddingProvider, AppleNLProvider, NeuralEmbedProvider). Off by default; retained in case Apple improves the NaturalLanguage framework, or for a device class that cannot host a CoreML encoder. Swift-only. Defines APPLE_ENCODERS; enable with `swift test --traits AppleEncoders`."
         ),
     ],
     dependencies: [
@@ -109,8 +68,7 @@ let package = Package(
         .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/EideticLib"),
-        // LatticeLib: FDC runtime (FDC.encode) and FDCFrame parent/ancestor
-        // derivation consumed by FDCProvider in CorpusKitProviders.
+        // LatticeLib: FDC runtime and FDCFrame parent/ancestor derivation.
         // Transitive dependency of EideticLib; declared explicitly here so
         // CorpusKitProviders can import LatticeLib directly.
         // Authority: in-repository dependency direction.
@@ -172,16 +130,10 @@ let package = Package(
                     "CORPUSKIT_STANDALONE_PASSAGES",
                     .when(traits: ["StandalonePassages"])
                 ),
-                // WholeRecordDense trait → MOOTX01_WHOLE_RECORD_DENSE: gates the
-                // float row write at ingest and the forced-error test seam the
-                // sidecar target reads.
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
         // The whole-record dense sidecar: the float query surface as `package`
         // extensions of Corpus and CorpusContentEngine plus FloatLaneOutcome.
-        // Every file is wrapped in `#if MOOTX01_WHOLE_RECORD_DENSE`, so the
-        // target is an empty module when the trait is off.
         .target(
             name: "CorpusKitWholeRecordDense",
             dependencies: [
@@ -190,10 +142,7 @@ let package = Package(
                 "SynapseKit",
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
             ],
-            path: "Sources/CorpusKitWholeRecordDense",
-            swiftSettings: [
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
-            ]
+            path: "Sources/CorpusKitWholeRecordDense"
         ),
         .target(
             name: "CorpusKitProviders",
@@ -208,20 +157,10 @@ let package = Package(
                 "SubstrateML",
                 "EngramLib",
                 "SynapseKit",
-                // FDCProvider: text → FDC code via LatticeLib's FDC runtime
-                // (FDC.encode). Ancestor chain via FDC.ancestors(of:), the
-                // runtime façade over FDCFrame.ancestors(of:). FDC math lives
-                // in LatticeLib — not reimplemented in CorpusKitProviders.
-                // Authority: honest semantic fusion (FDC co-classification signal).
-                .product(name: "LatticeLib", package: "LatticeLib"),
+                    .product(name: "LatticeLib", package: "LatticeLib"),
             ],
             path: "Sources/CorpusKitProviders",
             swiftSettings: [
-                // DenseFamilies trait → MOOTX01_DENSE_FAMILIES: gates NMF/PPMI/
-                // FDC/MPNet/EmbeddingGemma providers. Off by default (plan 70BC55F3).
-                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
-                // LSA trait → MOOTX01_LSA: gates the LsaProvider on its own switch.
-                .define("MOOTX01_LSA", .when(traits: ["LSA"])),
                 // AppleEncoders trait → APPLE_ENCODERS: gates Apple NL providers.
                 // Swift-only; no Rust twin. Off by default (held for v1.2).
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
@@ -232,9 +171,7 @@ let package = Package(
             dependencies: [
                 "CorpusKit",
                 "CorpusKitProviders",
-                // The DenseFamilies basis tests probe a trained basis through
-                // the whole-record float lane; DenseFamilies implies the trait.
-                .target(name: "CorpusKitWholeRecordDense", condition: .when(traits: ["WholeRecordDense"])),
+                "CorpusKitWholeRecordDense",
                 // SynapseKit supplies the EmbeddingProvider protocol the
                 // embedding-provider conformance gate references directly
                 // (EmbeddingProviderConformanceTests, B2-5 parity gate).
@@ -251,9 +188,6 @@ let package = Package(
                 // IntellectusLib is required by CorpusKitTelemetryTests, which
                 // install capturing sinks and toggle the enabled flag.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
-                // LatticeLib is required by FdcProviderTests, which test
-                // FDC.ancestors(of:) — the runtime façade used by FDCProvider
-                // for the ancestor chain (Gate 2 compliance verification).
                 .product(name: "LatticeLib", package: "LatticeLib"),
             ],
             path: "Tests/CorpusKitTests",
@@ -278,16 +212,11 @@ let package = Package(
                     "CORPUSKIT_STANDALONE_PASSAGES",
                     .when(traits: ["StandalonePassages"])
                 ),
-                // Mirror the provider switches in tests so dense-family and Apple
-                // encoder test suites compile only when the matching trait is on.
-                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
-                .define("MOOTX01_LSA", .when(traits: ["LSA"])),
+                // Apple encoder test suites compile only when the matching trait is on.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
-        // Tests of the whole-record dense engine. Compiled only with the
-        // WholeRecordDense trait (every file is wrapped in the define).
+        // Tests of the whole-record dense engine.
         .testTarget(
             name: "CorpusKitWholeRecordDenseTests",
             dependencies: [
@@ -302,11 +231,6 @@ let package = Package(
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
             ],
             path: "Tests/CorpusKitWholeRecordDenseTests",
-            swiftSettings: [
-                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
-                .define("MOOTX01_LSA", .when(traits: ["LSA"])),
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
-            ]
         ),
     ]
 )
