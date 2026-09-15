@@ -49,8 +49,7 @@
 //   train(terms:)  — accumulate context vectors AND the per-term document
 //                    frequency (one call = one document).
 //   finalize()     — fit the IDF table and the corpus-mean direction from
-//                    the accumulated counts. Required before embedding, the
-//                    same rule PPMI has always had.
+//                    the accumulated counts. Required before embedding.
 //   embed / embedFloat / embedPair — pool through the fitted basis.
 //
 // ## Projection seed
@@ -385,7 +384,7 @@ public final class RandomIndexingProvider: EmbeddingProvider, @unchecked Sendabl
         guard isFinalized, !text.isEmpty else { return [] }
         // Tokenize into keyword tokens (lowercase, alpha/digit split) via the
         // single canonical CorpusKit tokenizer — shared by BM25 and every
-        // distributional provider (RI/PPMI/LSA/NMF), and parity with the Rust
+        // distributional provider (RI/LSA), and parity with the Rust
         // port's corpus_kit::default_keyword_tokens.
         let terms = defaultKeywordTokens(text)
         guard !terms.isEmpty else { return [] }

@@ -17,7 +17,6 @@ public struct GLKRecallResult: Sendable {
     /// value is then zero. The excluded rows never leave LocusKit.
     public let withheldBySensitivity: Int
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     /// Dense float lane (Lane D) status for this query. Non-nil when the lane
     /// was dark (did not contribute hits), carrying the observable reason as a
     /// short string. Nil when the lane ran and returned hits (`.unionBest` only)
@@ -42,7 +41,6 @@ public struct GLKRecallResult: Sendable {
     /// reductions) use this field to detect misconfigured estates where the dense
     /// lane is expected but consistently dark.
     public let denseLaneStatus: String?
-#endif // MOOTX01_WHOLE_RECORD_DENSE
 
     /// Per-stage degradation indicators for this query.
     ///
@@ -168,8 +166,7 @@ public struct GLKRecallResult: Sendable {
     /// Memberwise initializer. Callers above the GLK layer (e.g. the
     /// AriaMcpKit packager wiring path) use this to construct a synthetic
     /// result without going through the Recall Director. `denseLaneStatus`
-    /// exists only in the WholeRecordDense build and defaults to nil there.
-#if MOOTX01_WHOLE_RECORD_DENSE
+    /// defaults to nil when the float lane did not run.
     public init(
         request: GLKRecallRequest,
         plan: RecallPlan,
@@ -195,32 +192,6 @@ public struct GLKRecallResult: Sendable {
         self.crossEncoder = crossEncoder
         self.route = route
     }
-#else
-    public init(
-        request: GLKRecallRequest,
-        plan: RecallPlan,
-        unionProfile: RecallUnionProfile?,
-        hits: [RecallHit],
-        withheldBySensitivity: Int = 0,
-        degradedStages: [String],
-        laneRanks: [String: [String: Int]],
-        queryLatticeAnchor: QueryLatticeAnchor.Anchor?,
-        crossEncoder: CrossEncoderReport? = nil,
-        route: String? = nil
-    ) {
-        self.request = request
-        self.plan = plan
-        self.unionProfile = unionProfile
-        self.hits = hits
-        self.withheldBySensitivity = withheldBySensitivity
-        self.degradedStages = degradedStages
-        self.laneRanks = laneRanks
-        self.queryLatticeAnchor = queryLatticeAnchor
-        self.crossEncoder = crossEncoder
-        self.route = route
-    }
-#endif
-
     /// A copy of this result with `request`, `hits`, `degradedStages`,
     /// `withheldBySensitivity`, `crossEncoder`, and/or `route` replaced, with
     /// every other field (including the WholeRecordDense lane status, when
@@ -240,7 +211,6 @@ public struct GLKRecallResult: Sendable {
         crossEncoder: CrossEncoderReport?? = nil,
         route: String?? = nil
     ) -> GLKRecallResult {
-#if MOOTX01_WHOLE_RECORD_DENSE
         GLKRecallResult(
             request: request ?? self.request, plan: plan, unionProfile: unionProfile,
             hits: hits ?? self.hits,
@@ -250,15 +220,5 @@ public struct GLKRecallResult: Sendable {
             laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
             crossEncoder: crossEncoder ?? self.crossEncoder,
             route: route ?? self.route)
-#else
-        GLKRecallResult(
-            request: request ?? self.request, plan: plan, unionProfile: unionProfile,
-            hits: hits ?? self.hits,
-            withheldBySensitivity: withheldBySensitivity ?? self.withheldBySensitivity,
-            degradedStages: degradedStages ?? self.degradedStages,
-            laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
-            crossEncoder: crossEncoder ?? self.crossEncoder,
-            route: route ?? self.route)
-#endif
     }
 }

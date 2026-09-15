@@ -6,22 +6,23 @@
 //! Coverage:
 //!   §1  Dark outcomes — `float_nearest_per_signal_with_discrimination` yields
 //!       `None` discrimination for every non-`Hits` outcome variant.
-//!   §2  Saturated fixture — uniform inference closure → all cosines ≈ 1.0
+//!   §2  Saturated fixture — uniform provider → all cosines ≈ 1.0
 //!       → `relative_spread` < 0.10 (discount would engage in coordinator).
-//!   §3  Contrastive fixture — directional one-hot inference → clear winner
+//!   §3  Contrastive fixture — directional one-hot provider → clear winner
 //!       at cosine 1.0, distractors at cosine 0.0 → `relative_spread` ≥ 0.15.
 //!   §4  Single-hit outcome → `relative_spread` = 0.0 (max == min).
 //!   §5  GLK factor formula — `min(1.0, mean_spread / 0.15)` mapping.
 //!
 //! INTELLECTUS LOCK: all tests hold GLOBAL_LOCK to prevent telemetry
 //! cross-contamination with concurrently-running telemetry test suites.
-#![cfg(feature = "whole-record-dense")]
 
-use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome, NamedInferenceFn};
+use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
+use engram_lib::Engram;
 use intellectus_lib::Intellectus;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
 use std::sync::{Arc, Mutex, OnceLock};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 use uuid::Uuid;
 
 // ── Process-wide serialisation lock ──────────────────────────────────────────
@@ -49,32 +50,42 @@ fn new_storage() -> Arc<dyn Storage> {
     Arc::new(InMemoryStorage::new(config))
 }
 
-/// One-hot 384-d directional inference: texts with different token sums map to
-/// orthogonal directions (cosine ≈ 0.0). Identical texts → same direction
-/// (cosine 1.0). Mirrors Swift `directionalModel()` and the existing
-/// `directional_inference()` in corpus_tests.rs.
-fn directional_inference() -> NamedInferenceFn {
-    Box::new(move |tokens: &[i32]| {
+/// One-hot 384-d directional provider: the FNV-1a hash of the text's UTF-8
+/// bytes picks the axis, so distinct texts map to orthogonal directions
+/// (cosine ≈ 0.0) and identical texts to the same direction (cosine 1.0).
+/// Mirrors Swift `DirectionalEmbeddingProvider` in DiscriminationSignalTests.
+struct DirectionalProvider;
+impl EmbeddingProvider for DirectionalProvider {
+    fn model_id(&self) -> &str { "test-directional-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let hash = text.bytes().fold(14_695_981_039_346_656_037u64, |acc, b| {
+            (acc ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
+        });
         let mut v = vec![0.0_f32; 384];
-        let sum: i32 = tokens.iter().fold(0i32, |a, t| a.wrapping_add(*t));
-        let slot = ((sum % 384 + 384) % 384) as usize;
-        v[slot] = 1.0;
+        v[(hash % 384) as usize] = 1.0;
         Ok(v)
-    })
+    }
 }
 
-/// Uniform inference: all texts return the same direction vector.
-/// Every cosine similarity is 1.0. Mirrors Swift `uniformModel()`.
-fn uniform_inference() -> NamedInferenceFn {
-    Box::new(|_tokens: &[i32]| Ok(vec![1.0_f32; 384]))
+/// Uniform provider: every text returns the same direction vector, so every
+/// cosine similarity is 1.0. Mirrors Swift `UniformEmbeddingProvider`.
+struct UniformProvider;
+impl EmbeddingProvider for UniformProvider {
+    fn model_id(&self) -> &str { "test-uniform-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, _text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        Ok(vec![1.0_f32; 384])
+    }
 }
 
-fn open_corpus(inference: NamedInferenceFn) -> Corpus {
-    Corpus::open(
-        new_storage(),
-        EmbeddingModelConfig::MiniLM { inference },
-    )
-    .expect("Corpus::open must succeed with MiniLM config")
+/// `CandleNL` is the pass-through slot for a host-supplied, non-trainable
+/// provider, which is exactly what a planted test provider is.
+fn open_corpus(provider: Box<dyn EmbeddingProvider>) -> Corpus {
+    Corpus::open(new_storage(), EmbeddingModelConfig::CandleNL { provider })
+        .expect("Corpus::open must succeed with a host provider")
 }
 
 // ── §1: Dark outcomes → None discrimination ───────────────────────────────────
@@ -85,7 +96,7 @@ fn dark_empty_query_yields_none_discrimination() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
 
-    let corpus = open_corpus(directional_inference());
+    let corpus = open_corpus(Box::new(DirectionalProvider));
     corpus.ingest("some content here", "doc1", NOW_MS).unwrap();
 
     let results = corpus.float_nearest_per_signal_with_discrimination("some content", 0);
@@ -100,14 +111,14 @@ fn dark_empty_query_yields_none_discrimination() {
     );
 }
 
-/// No ingest on a MiniLM corpus → UnavailableNoFloatRows → discrimination is None.
+/// No ingest on a float-capable corpus → UnavailableNoFloatRows → discrimination is None.
 #[test]
 fn dark_no_float_rows_yields_none_discrimination() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
 
-    // MiniLM provider CAN embed float, but no rows are stored → NoFloatRows.
-    let corpus = open_corpus(uniform_inference());
+    // The provider CAN embed float, but no rows are stored → NoFloatRows.
+    let corpus = open_corpus(Box::new(UniformProvider));
     let results = corpus.float_nearest_per_signal_with_discrimination("any query", 5);
     let (_, outcome, disc) = results.into_iter().next().expect("at least one slot");
     assert!(
@@ -129,7 +140,7 @@ fn saturated_fixture_yields_low_spread() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
 
-    let corpus = open_corpus(uniform_inference());
+    let corpus = open_corpus(Box::new(UniformProvider));
     corpus.ingest("document one text",   "d1", NOW_MS).unwrap();
     corpus.ingest("document two text",   "d2", NOW_MS).unwrap();
     corpus.ingest("document three text", "d3", NOW_MS).unwrap();
@@ -160,7 +171,7 @@ fn contrastive_fixture_yields_high_spread() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
 
-    let corpus = open_corpus(directional_inference());
+    let corpus = open_corpus(Box::new(DirectionalProvider));
     corpus.ingest("alpha alpha alpha", "winner",      NOW_MS).unwrap();
     corpus.ingest("omega omega omega", "distractor1", NOW_MS).unwrap();
     corpus.ingest("delta delta delta", "distractor2", NOW_MS).unwrap();
@@ -192,7 +203,7 @@ fn single_hit_yields_zero_spread() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
 
-    let corpus = open_corpus(directional_inference());
+    let corpus = open_corpus(Box::new(DirectionalProvider));
     corpus.ingest("alpha alpha alpha", "doc1", NOW_MS).unwrap();
     corpus.ingest("omega omega omega", "doc2", NOW_MS).unwrap();
 

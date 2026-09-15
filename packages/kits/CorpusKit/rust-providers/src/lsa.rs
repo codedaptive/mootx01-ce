@@ -58,7 +58,7 @@ use synapsekit::{EmbeddingProvider, SynapseKitError};
 // MARK: - Constants
 
 /// FloatSimHash projection seed for LSA. Encodes "LSA_V1_M" in ASCII.
-/// MUST differ from RI_PROJECTION_SEED and PPMI_PROJECTION_SEED.
+/// MUST differ from RI_PROJECTION_SEED.
 /// MUST NOT drift from the Swift constant `lsaProjectionSeed`.
 pub const LSA_PROJECTION_SEED: u64 = 0x4C53415F56315F4D;
 
@@ -215,9 +215,9 @@ impl LsaProvider {
 
         // factor over a reduced, informative sub-vocabulary so the
         // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
-        // (~10^15 ops, infeasible). Shared with NMF; frozen here; drives query
-        // projection. `vocab_size` below is the REDUCED column count — the SVD
-        // block that follows is unchanged and keys on it.
+        // (~10^15 ops, infeasible). The reduced vocab (`reduced_vocab`) is
+        // frozen here and drives query projection. `vocab_size` below is the
+        // REDUCED column count — the SVD block that follows keys on it.
         let reduced = select_reduced_vocabulary(
             &self.counts.vocab,
             &self.counts.df_counts,

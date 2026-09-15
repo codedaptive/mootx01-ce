@@ -1,8 +1,8 @@
 // BasisCodec.swift
 //
 // Shared little-endian binary codec for distributional-provider basis
-// serialization. One definition, used by all four
-// stateful providers (RandomIndexing, PPMI, LSA, NMF). This is
+// serialization. One definition, used by both
+// stateful providers (RandomIndexing, LSA). This is
 // PROVIDER-FORMAT code, not a math primitive — it lives in
 // CorpusKitProviders, never in the substrate.
 //

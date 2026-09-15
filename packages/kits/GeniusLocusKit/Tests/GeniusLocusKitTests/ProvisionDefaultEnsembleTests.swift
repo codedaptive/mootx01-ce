@@ -19,9 +19,7 @@ import Testing
 import Foundation
 import LocusKit
 import CorpusKit
-#if MOOTX01_WHOLE_RECORD_DENSE
 import CorpusKitWholeRecordDense
-#endif
 import PersistenceKit
 import PersistenceKitSQLite
 @testable import GeniusLocusKit
@@ -66,12 +64,10 @@ struct ProvisionDefaultEnsembleTests {
             lifetime: .ephemeral)
     }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     private func rankedIDs(_ outcome: FloatLaneOutcome) -> [String] {
         if case .hits(let pairs) = outcome { return pairs.map(\.itemID) }
         return []
     }
-#endif
 
     /// Provision a GLK estate with NO explicit embedding argument (the default),
     /// capture a diverse corpus through the ATTACHED production path (Drawer
@@ -104,9 +100,8 @@ struct ProvisionDefaultEnsembleTests {
         return (corpus, clusters)
     }
 
-    // Verify that the provision default wires the expected default ensemble.
-    // With DenseFamilies OFF (default, plan 70BC55F3): RI only (1 signal).
-    // With DenseFamilies ON: all five signals.
+    // Verify that the provision default wires the expected default ensemble:
+    // RI and LSA are both always-on.
     @Test("provision default wires the configured default ensemble")
     func provisionWiresDefaultEnsemble() async throws {
         let kit = GeniusLocusKit()
@@ -114,23 +109,12 @@ struct ProvisionDefaultEnsembleTests {
 
         // The held provider slots, in slot order, as the engine reports them.
         let modelIDs = await corpus.providerGenerations().map(\.modelID)
-        #if MOOTX01_LSA
         #expect(
-            modelIDs == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
-            "provision default must wire the five-signal ensemble with LSA ON, got \(modelIDs)")
-        #elseif MOOTX01_DENSE_FAMILIES
-        #expect(
-            modelIDs == ["random-indexing-v1", "ppmi-v1", "nmf-v1", "fdc-v1"],
-            "provision default must wire the four-signal ensemble with DenseFamilies ON, got \(modelIDs)")
-        #else
-        #expect(
-            modelIDs == ["random-indexing-v1"],
-            "provision default must wire RI-only with DenseFamilies OFF (plan 70BC55F3), got \(modelIDs)")
-        #endif
+            modelIDs == ["random-indexing-v1", "lsa-v1"],
+            "provision default must wire RI + LSA (always-on ensemble), got \(modelIDs)")
     }
 
     // Recall un-pins through the provision path: varied queries → distinct top hits.
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("recall un-pins through the provision default")
     func recallUnpinsThroughProvision() async throws {
         let kit = GeniusLocusKit()
@@ -152,5 +136,4 @@ struct ProvisionDefaultEnsembleTests {
         #expect(Set(topHits).count == queries.count,
                 "varied queries must recall DISTINCT top docs (un-pinned), got \(topHits)")
     }
-#endif
 }

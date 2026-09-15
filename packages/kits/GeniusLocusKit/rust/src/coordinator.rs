@@ -3522,7 +3522,7 @@ impl EstateCoordinator {
     /// the provider the Corpus ensemble should use for this estate.
     /// Mirrors Swift `GeniusLocusKit.embeddingProviderMetaKey`.
     ///
-    /// Absent key → deterministic default ensemble (RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on).
+    /// Absent key → the default ensemble (RI and LSA, always on).
     /// No estate migration required.
     pub const EMBEDDING_PROVIDER_META_KEY: &str = "embedding_provider";
 
@@ -10989,7 +10989,7 @@ impl EstateCoordinator {
     /// - `embedding_models`: The recall ensemble passed to `Corpus::open_many`.
     ///                       Production callers pass
     ///                       `corpus_kit_providers::default_ensemble()` (the
-    ///                       canonical default: RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on).
+    ///                       canonical default: RI and LSA, always on).
     ///                       Rust has no default arguments, so the caller supplies
     ///                       the Vec explicitly; the app layer owns the default. A
     ///                       single-element `vec![EmbeddingModelConfig::Deterministic]`
@@ -11560,7 +11560,6 @@ impl EstateCoordinator {
                 union_profile: result.union_profile,
                 hits: admissible,
                 withheld_by_sensitivity: result.withheld_by_sensitivity,
-                #[cfg(feature = "whole-record-dense")]
                 dense_lane_status: result.dense_lane_status,
                 degraded_stages: result.degraded_stages,
                 lane_ranks: result.lane_ranks,
@@ -11611,7 +11610,6 @@ impl EstateCoordinator {
                 union_profile: result.union_profile,
                 hits,
                 withheld_by_sensitivity: result.withheld_by_sensitivity,
-                #[cfg(feature = "whole-record-dense")]
                 dense_lane_status: result.dense_lane_status,
                 degraded_stages,
                 lane_ranks: result.lane_ranks,
@@ -11780,7 +11778,6 @@ impl EstateCoordinator {
             plan,
             union_profile: None,
             // locusOnly does not attempt the dense float lane — None per contract.
-            #[cfg(feature = "whole-record-dense")]
             dense_lane_status: None,
             degraded_stages,
             hits,
@@ -12205,7 +12202,6 @@ impl EstateCoordinator {
     /// to signed weights. Returns `(boost_by_id, cosine_by_id)`; `cosine_by_id` is
     /// the MAX normalized cosine across FORWARDING signals (the aggregate `dense`
     /// column). Mirrors Swift RecallDirector's dense-steered consensus fold.
-    #[cfg(feature = "whole-record-dense")]
     fn dense_consensus_boost(
         per_signal_lists: &[(String, Vec<(String, f32)>)],
         k: f32,
@@ -12628,13 +12624,11 @@ impl EstateCoordinator {
         // model_id, while other signals still vote. dense_lane_status (the aggregate
         // marker) reports the DEFAULT signal's (slot 0) dark reason, preserving
         // pre-6b single-signal semantics — at N=1 the default is the only signal.
-        // Step 4.5 — the whole-record DENSE FLOAT lane is a `whole-record-dense`
-        // feature lane (ruling 2026-09-07: the span stage is the one dense
-        // provider). In the default build the lane never runs: `dense_list` is
-        // empty so lane ranks, the buffer merge and attribution keep one shape,
+        // Step 4.5 — the whole-record float lane (always active): the span stage is the
+        // sole dense provider. When `dense_list` is empty (no float results) the lane
+        // does not contribute, so lane ranks, the buffer merge and attribution keep one shape,
         // and the discrimination factor stays neutral so Discriminative scoring
         // equals Rrf.
-        #[cfg(feature = "whole-record-dense")]
         let (dense_lane_status, dense_signals_by_id, dense_discrimination_factor, dense_consensus_boost, mut dense_list): (
             Option<String>,
             HashMap<String, Vec<String>>,
@@ -12891,9 +12885,6 @@ impl EstateCoordinator {
                 .collect();
             (dense_lane_status, dense_signals_by_id, dense_discrimination_factor, dense_consensus_boost, dense_list)
         };
-        #[cfg(not(feature = "whole-record-dense"))]
-        let (dense_discrimination_factor, dense_consensus_boost, mut dense_list): (f32, HashMap<String, f32>, Vec<(String, f32)>) =
-            (1.0, HashMap::new(), Vec::new());
 
         // --- Step 4.35: Graph / tunnel expansion lane (UnionBest only) ---
         //
@@ -14257,8 +14248,8 @@ impl EstateCoordinator {
                 // token and the caller receives the best-span bounds (sheet §8/§9).
                 let span_hit = span_hits.get(&id).cloned();
                 let bare = RecallHit { id, drawer, sources, score, explanation: Vec::new(), span_hit };
-                // `mut` is needed only by the whole-record provenance push below.
-                #[cfg_attr(not(feature = "whole-record-dense"), allow(unused_mut))]
+                // `mut` is needed by the whole-record provenance push below.
+                #[allow(unused_mut)]
                 let mut explanation = if request.mode == GLKRecallMode::UnionBest {
                     crate::recall_explainer::explain(
                         &bare,
@@ -14278,7 +14269,6 @@ impl EstateCoordinator {
                 // voted for this id, in slot order. Mirrors Swift's step-11
                 // "denseSignals: vectorDense:<modelID>, ..." line. Additive — only
                 // present when the dense lane surfaced this id.
-                #[cfg(feature = "whole-record-dense")]
                 if let Some(voters) = dense_signals_by_id.get(&bare.id) {
                     if !voters.is_empty() {
                         let names: Vec<String> =
@@ -14296,7 +14286,6 @@ impl EstateCoordinator {
             union_profile,
             // dense_lane_status is populated from the float_nearest outcome above:
             // Some("dark:<reason>") when the lane was dark, None on hits or no corpus.
-            #[cfg(feature = "whole-record-dense")]
             dense_lane_status,
             // degraded_stages accumulates stage IDs for any lane that threw and was
             // recovered. Empty on the happy path. "stage failed" (non-empty) is
@@ -14530,7 +14519,6 @@ impl EstateCoordinator {
         // CorpusOnly never attempt the dense lane, so they carry None; the
         // dark:noCorpus tag belongs to UnionBest, which the multi-lane path
         // sets in its dense block.
-        #[cfg(feature = "whole-record-dense")]
         let fallback_dense_lane_status: Option<String> = None;
 
         // M4 single-derivation: this path runs for modes that compile a sketch
@@ -14551,7 +14539,6 @@ impl EstateCoordinator {
             request,
             plan,
             union_profile,
-            #[cfg(feature = "whole-record-dense")]
             dense_lane_status: fallback_dense_lane_status,
             // Only a scoring-fallback stage can be recorded here (set above);
             // there is no throwing stage on the locus-ranked path.
@@ -16996,12 +16983,12 @@ mod tests {
                 Ok(acc)
             },
         );
-        // Fdc is the plain pass-through provider slot (stateless, no
-        // training) — the vehicle for injecting the token-bag provider.
+                // CandleNL is the plain pass-through provider slot (stateless, no
+        // training) — the vehicle for injecting an external EmbeddingProvider.
         let corpus = Arc::new(
             CorpusContentEngine::standalone_on(
                 storage,
-                vec![EmbeddingModelConfig::Fdc { provider: Box::new(provider) }],
+                vec![EmbeddingModelConfig::CandleNL { provider: Box::new(provider) }],
             )
             .expect("open corpus engine"),
         );
@@ -17799,7 +17786,6 @@ fn binary_metric_for(shape: Option<&RecallShape>) -> synapsekit::engine::metric:
 /// Unknown strings and `None` shapes both degrade to cosine per the shape
 /// contract — a shape must degrade, never fail. Twin of Swift
 /// `RecallDirector.floatMetric(for:)`.
-#[cfg(feature = "whole-record-dense")]
 fn float_metric_for(shape: Option<&RecallShape>) -> synapsekit::engine::metric::FloatMetric {
     match shape.map(|s| s.float_metric.as_str()) {
         Some("l2") => synapsekit::engine::metric::FloatMetric::L2,
