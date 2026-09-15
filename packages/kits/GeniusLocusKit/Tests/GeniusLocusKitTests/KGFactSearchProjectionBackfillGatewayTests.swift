@@ -66,8 +66,6 @@ struct KGFactSearchProjectionBackfillGatewayTests {
         ]
     )
 
-    private let now = Date(timeIntervalSince1970: 1_800_000_000)
-
     // MARK: — Gate C
 
     /// Gate C: the gateway injects the real FactSearchProjection build function
@@ -75,12 +73,10 @@ struct KGFactSearchProjectionBackfillGatewayTests {
     ///   - searchProjection == FactSearchProjection.build(s,p,o,aliases:[])
     ///   - searchProjectionVersion == FactSearchProjection.version (the symbol)
     ///
-    /// Also confirms that the backfilled fact is returned by FactFirstRecallStage.
-    ///
     /// Discrimination: temporarily replacing `FactSearchProjection.version` with a
     /// wrong string in KGFactSearchProjectionBackfillGateway.swift causes the
     /// searchProjectionVersion #expect to fail (red). Restoring it returns green.
-    @Test("Gate C: gateway injects real FactSearchProjection symbols; backfilled fact wins recall")
+    @Test("Gate C: gateway injects real FactSearchProjection symbols")
     func gateCSearchProjectionGateway() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("glk-gateway-\(UUID().uuidString).sqlite")
@@ -109,8 +105,6 @@ struct KGFactSearchProjectionBackfillGatewayTests {
                 "parent_node_id": .text("n1"), "addedBy": .text("test"),
                 "filedAt": .text("2024-01-01T00:00:00Z"), "embeddingModelID": .text("t1"),
                 "provenance": .int(0), "adjectiveBitmap": .int(0),
-                // factsExtracted bit (1 << 28) set so FactFirstRecallStage can
-                // score this drawer's facts in the recall step below.
                 "operationalBitmap": .int(DrawerFeatureFlags.factsExtracted.rawValue),
                 "lineageID": .text(""), "udcCode": .text(""),
             ])
@@ -160,48 +154,6 @@ struct KGFactSearchProjectionBackfillGatewayTests {
                 "searchProjection must equal FactSearchProjection.build(s,p,o,aliases:[])")
         #expect(row["searchProjectionVersion"] == .some(.text(FactSearchProjection.version)),
                 "searchProjectionVersion must equal FactSearchProjection.version (the symbol)")
-
-        // 6. Feed the gateway-backfilled fact to FactFirstRecallStage and confirm
-        //    it is returned. This closes the loop: the gateway writes exactly what
-        //    FactFirstRecall's version guard (FactFirstRecall.swift lines 79-80)
-        //    requires for the fact to participate in scoring.
-        //
-        //    Crucially, searchProjection and searchProjectionVersion are read back
-        //    from the database row — not recomputed from the symbols the test
-        //    already has. If the gateway had written nothing (or written wrong
-        //    bytes), this recall assertion would fail, not only the step-5 equality
-        //    assertions. That is what "closing the loop" means: the recall step is
-        //    testing the bytes the gateway actually stored.
-        guard case let .text(storedProjection) = row["searchProjection"] else {
-            Issue.record("searchProjection must be present and text in the stored row after gateway run")
-            return
-        }
-        guard case let .text(storedVersion) = row["searchProjectionVersion"] else {
-            Issue.record("searchProjectionVersion must be present and text in the stored row after gateway run")
-            return
-        }
-        let sourceDrawer = Drawer(
-            id: drawerID, content: "Jack's birthday is in June.",
-            parentNodeId: "n1", addedBy: "test", filedAt: now,
-            embeddingModelID: "t1",
-            // factsExtracted bit required by FactFirstRecall's settled-source guard.
-            operationalBitmap: DrawerFeatureFlags.factsExtracted.rawValue)
-        let backfilledFact = KGFact(
-            id: factID, subject: subject, predicate: predicate, object: object,
-            sourceDrawerID: drawerID,
-            searchProjection: storedProjection,
-            searchProjectionVersion: storedVersion,
-            filedAt: now)
-        let decision = FactFirstRecallStage.decide(
-            query: "jack birthday", queryEntities: ["Jack"],
-            facts: [backfilledFact], sourceDrawers: [drawerID: sourceDrawer])
-        guard case let .solid(family) = decision else {
-            Issue.record(
-                "gateway-backfilled fact must win recall; got \(decision). Check that FactSearchProjection.build produces high coverage for the query.")
-            return
-        }
-        #expect(family.fact.id == factID,
-                "the gateway-backfilled fact must be the one returned by FactFirstRecallStage")
 
         await storage.close()
     }

@@ -79,6 +79,7 @@ struct MootProductIdentityTests {
         (["preferences", "portableOnPowerOnly"], MootProductIdentity.Preferences.portableOnPowerOnly),
         (["preferences", "portableServiceName"], MootProductIdentity.Preferences.portableServiceName),
         (["queues", "ariaHTTPAccept"], MootProductIdentity.Queues.ariaHTTPAccept),
+        (["queues", "ariaHTTPRawRead"], MootProductIdentity.Queues.ariaHTTPRawRead),
         (["queues", "managerControlChannelAccept"], MootProductIdentity.Queues.managerControlChannelAccept),
         (["queues", "managerHTTPReadAPIAccept"], MootProductIdentity.Queues.managerHTTPReadAPIAccept),
         (["queues", "lanDiscovery"], MootProductIdentity.Queues.lanDiscovery),

@@ -942,7 +942,7 @@ mod tests {
 
     fn sample_manifest_json(name: &str, extra: &str) -> String {
         format!(
-            r#"{{"fileVersion":1,"name":"{name}","schemaVersion":1,"formatVersion":{{"major":1,"minor":7}},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"{extra}}}"#
+            r#"{{"fileVersion":1,"name":"{name}","schemaVersion":1,"formatVersion":{{"major":1,"minor":8}},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"{extra}}}"#
         )
     }
 
@@ -1249,11 +1249,11 @@ mod tests {
         let read = EstateCatalog::read_manifest(&record).unwrap();
         assert_eq!(read, written);
         assert_eq!(read.file_version, EstateManifest::CURRENT_FILE_VERSION);
-        assert_eq!(read.format_version, EstateFormatVersion::V1_7);
+        assert_eq!(read.format_version, EstateFormatVersion::CURRENT);
         // The file carries the shared shape: sorted keys, formatVersion as an object.
         let text = fs::read_to_string(record.manifest_path()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["formatVersion"], serde_json::json!({"major": 1, "minor": 7}));
+        assert_eq!(value["formatVersion"], serde_json::json!({"major": 1, "minor": 8}));
         let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, ["created", "encryption", "fileVersion", "formatVersion", "name", "schemaVersion"]);
         // Nothing else appears in the estate directory or its parent.

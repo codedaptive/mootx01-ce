@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(EstateOpenPosture::resolve(&record).unwrap().kind, EstateOpenPostureKind::NewPlaintextDeclared);
         // A manifest carrying a redirect key: refused, typed, with the catalog's detail.
         std::fs::write(record.manifest_path(),
-            r#"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z","path":"/elsewhere"}"#).unwrap();
+            r#"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z","path":"/elsewhere"}"#).unwrap();
         match EstateOpenPosture::resolve(&record) {
             Err(EstateOpenPostureError::ManifestRefused(EstateCatalogError::UnreadableEstateManifest { detail, .. })) =>
                 assert!(detail.contains("path"), "{detail}"),
@@ -357,11 +357,11 @@ mod tests {
         }
         // A manifest for another estate: refused too.
         std::fs::write(record.manifest_path(),
-            r#"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#).unwrap();
+            r#"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#).unwrap();
         assert!(matches!(EstateOpenPosture::resolve(&record), Err(EstateOpenPostureError::ManifestRefused(_))));
         // A correct manifest declaring plaintext: read.
         std::fs::write(record.manifest_path(),
-            r#"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#).unwrap();
+            r#"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#).unwrap();
         assert!(EstateOpenPosture::manifest_declares_plaintext(&record).unwrap());
         // No manifest but a symlinked database: refused by the same gate.
         std::fs::remove_file(record.manifest_path()).unwrap();

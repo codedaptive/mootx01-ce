@@ -123,12 +123,17 @@ let package = Package(
             name: "MigrationV1_6ToV1_7",
             description: "Compile the GLK 1.6 to 1.7 migration capsule (vacuums the whole-record float rows and the hnsw_graph rows, rebuilds the binary sidecar, releases the float representation claim)."
         ),
+        .trait(
+            name: "MigrationV1_7ToV1_8",
+            description: "Compile the GLK 1.7 to 1.8 migration capsule (seeds fact_extraction = on when absent and stamps the v1_8 estate format)."
+        ),
         // Layout capsule, not a format step: a 1.0.x Swift install kept its
         // estate flat in the configuration directory; the catalog places it
         // at databases/default/. Detected by the filesystem, not by the
         // format stamp, so no format version separates the two layouts.
-        // Every floor from 1.0 through 1.7 enables it: every flat estate
-        // that ever shipped is at or below format 1.7.
+        // Every floor from 1.0 through 1.6 enables it; MigrationFloor1_7
+        // omits it because a format 1.7 estate was already produced by a
+        // build that writes the catalog layout.
         .trait(
             name: "MigrationFlatLayoutToCatalog",
             description: "Compile the flat-layout to catalog-layout capsule (moves a pre-catalog estate from the configuration directory into databases/default/)."
@@ -145,41 +150,47 @@ let package = Package(
         // column is added by CorpusKit's own ladder at open, the 1.2->1.3 column
         // was removed by schema v19, and the 1.3->1.4 setting retired with the
         // index composition policy, so the 1.4->1.5 capsule runs directly on
-        // any of those stamps; the 1.5->1.6 and 1.6->1.7 capsules follow it.
+        // any of those stamps; the 1.5->1.6, 1.6->1.7 and 1.7->1.8 capsules
+        // follow it.
         .trait(
             name: "MigrationFloor1_0",
             description: "Support estates as old as GLK format 1.0.",
-            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+            enabledTraits: ["MigrationV1_0ToV1_1", "MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationV1_7ToV1_8", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
         ),
         .trait(
             name: "MigrationFloor1_1",
-            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule; compiles the 1.4->1.5, 1.5->1.6 and 1.6->1.7 capsules).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+            description: "Support estates as old as GLK format 1.1 (skips the 1.0->1.1 shared-content capsule; compiles the 1.4->1.5, 1.5->1.6, 1.6->1.7 and 1.7->1.8 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationV1_7ToV1_8", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
         ),
         .trait(
             name: "MigrationFloor1_2",
-            description: "Support estates as old as GLK format 1.2 (compiles the 1.4->1.5, 1.5->1.6 and 1.6->1.7 capsules).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+            description: "Support estates as old as GLK format 1.2 (compiles the 1.4->1.5, 1.5->1.6, 1.6->1.7 and 1.7->1.8 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationV1_7ToV1_8", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
         ),
         .trait(
             name: "MigrationFloor1_3",
-            description: "Support estates as old as GLK format 1.3 (compiles the 1.4->1.5, 1.5->1.6 and 1.6->1.7 capsules).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+            description: "Support estates as old as GLK format 1.3 (compiles the 1.4->1.5, 1.5->1.6, 1.6->1.7 and 1.7->1.8 capsules).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationV1_7ToV1_8", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
         ),
         .trait(
             name: "MigrationFloor1_4",
-            description: "Support estates as old as GLK format 1.4 (compiles the 1.4->1.5 storage-ledger kit-id capsule, the 1.5->1.6 capsule and the 1.6->1.7 capsule).",
-            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+            description: "Support estates as old as GLK format 1.4 (compiles the 1.4->1.5 storage-ledger kit-id capsule, the 1.5->1.6 capsule, the 1.6->1.7 capsule and the 1.7->1.8 capsule).",
+            enabledTraits: ["MigrationV1_4ToV1_5", "MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationV1_7ToV1_8", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
         ),
         .trait(
             name: "MigrationFloor1_5",
-            description: "Support estates as old as GLK format 1.5 (compiles the 1.5->1.6 column-drop capsule and the 1.6->1.7 vacuum capsule).",
-            enabledTraits: ["MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+            description: "Support estates as old as GLK format 1.5 (compiles the 1.5->1.6 column-drop capsule, the 1.6->1.7 vacuum capsule and the 1.7->1.8 seed capsule).",
+            enabledTraits: ["MigrationV1_5ToV1_6", "MigrationV1_6ToV1_7", "MigrationV1_7ToV1_8", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
         ),
         .trait(
             name: "MigrationFloor1_6",
-            description: "Support estates as old as GLK format 1.6 (compiles only the 1.6->1.7 whole-record float vacuum capsule).",
-            enabledTraits: ["MigrationV1_6ToV1_7", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+            description: "Support estates as old as GLK format 1.6 (compiles the 1.6->1.7 whole-record float vacuum capsule and the 1.7->1.8 fact-extraction seed capsule).",
+            enabledTraits: ["MigrationV1_6ToV1_7", "MigrationV1_7ToV1_8", "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog"]
+        ),
+        .trait(
+            name: "MigrationFloor1_7",
+            description: "Support estates as old as GLK format 1.7 (compiles only the 1.7->1.8 fact-extraction-setting seed capsule).",
+            enabledTraits: ["MigrationV1_7ToV1_8"]
         ),
         // Apple encoder providers (NLContextualEmbedding, NLEmbedding, NeuralEmbed).
         // Off by default (plan 70BC55F3, 2026-09-05): held for v1.2 iOS and
@@ -379,6 +390,25 @@ let package = Package(
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
+        // 1.7 -> 1.8 migration target: seeds fact_extraction = "on" when the
+        // key is absent and stamps v1_8. Mirrors GLKMigrationV1_6ToV1_7 target
+        // structure. The absent-means-on inversion is documented in
+        // FactExtractionSetting.swift; this capsule only writes when absent.
+        .target(
+            name: "GLKMigrationV1_7ToV1_8",
+            dependencies: [
+                "GeniusLocusKit",
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+            ],
+            path: "Sources/GLKMigrationV1_7ToV1_8",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_7_TO_V1_8",
+                    .when(traits: ["MigrationV1_7ToV1_8"])
+                ),
+            ]
+        ),
         // Flat-layout -> catalog-layout capsule: renames a pre-catalog
         // estate's files from the configuration directory into the default
         // record's directory. Filesystem only; depends on GeniusLocusKit for
@@ -424,6 +454,10 @@ let package = Package(
                     condition: .when(traits: ["MigrationV1_6ToV1_7"])
                 ),
                 .target(
+                    name: "GLKMigrationV1_7ToV1_8",
+                    condition: .when(traits: ["MigrationV1_7ToV1_8"])
+                ),
+                .target(
                     name: "GLKMigrationFlatLayoutToCatalog",
                     condition: .when(traits: ["MigrationFlatLayoutToCatalog"])
                 ),
@@ -449,6 +483,10 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_6_TO_V1_7",
                     .when(traits: ["MigrationV1_6ToV1_7"])
+                ),
+                .define(
+                    "GLK_MIGRATION_V1_7_TO_V1_8",
+                    .when(traits: ["MigrationV1_7ToV1_8"])
                 ),
                 .define(
                     "GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG",
@@ -745,6 +783,29 @@ let package = Package(
                 ),
                 .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
+            ]
+        ),
+        // Tests for the 1.7 -> 1.8 capsule: absent-means-on seeding, idempotent
+        // stamp, explicit-off preserved, v1_8 stamped, chain integration.
+        .testTarget(
+            name: "GLKMigrationV1_7ToV1_8Tests",
+            dependencies: [
+                "GeniusLocusKit",
+                "GeniusLocusKitMigrations",
+                .target(
+                    name: "GLKMigrationV1_7ToV1_8",
+                    condition: .when(traits: ["MigrationV1_7ToV1_8"])
+                ),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+            ],
+            path: "Tests/GLKMigrationV1_7ToV1_8Tests",
+            swiftSettings: [
+                .define(
+                    "GLK_MIGRATION_V1_7_TO_V1_8",
+                    .when(traits: ["MigrationV1_7ToV1_8"])
+                ),
             ]
         ),
         // Tests for the app-container -> catalog-layout capsule over temporary
