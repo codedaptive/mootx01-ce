@@ -78,7 +78,7 @@ public actor EstateAdmin {
         let backend: EstateBackendKind
         /// The composition kind requested at provision time, retained for the read
         /// badge. GLK persists the kind in the manifest's kind-prefixed framework
-        /// profile, but `estate(for:)` is package-internal, so the engine keeps the
+        /// profile, but direct estate access is package-internal, so the engine keeps the
         /// kind here rather than reading it back across the kit boundary.
         let kind: EstateKind
         /// Filesystem URL of the SQLite file for this estate, or `nil` for

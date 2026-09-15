@@ -1,5 +1,6 @@
 import Foundation
 import LocusKit
+import SubstrateTypes
 
 /// Handle-scoped estate reads for access surfaces.
 ///
@@ -14,6 +15,21 @@ import LocusKit
 ///
 /// Every method throws `GeniusLocusKitError.estateNotOpen` for a stale handle.
 public extension GeniusLocusKit {
+
+    /// Summarize rooms in the optional wing, retaining the ordering and counts
+    /// from `Estate.listRooms(in:)`. Applies no caller sensitivity filter.
+    func listRooms(in handle: EstateHandle, wing: String? = nil) async throws -> [RoomSummary] {
+        let estate = try estate(for: handle)
+        return try await estate.listRooms(in: wing)
+    }
+
+    /// The row's sealed audit events in HLC order, or an empty array when no
+    /// events exist. Delegates to `Estate.auditTrail(rowID:)` without applying
+    /// caller sensitivity filtering.
+    func auditTrail(in handle: EstateHandle, rowID: RowID) async throws -> [AuditEvent] {
+        let estate = try estate(for: handle)
+        return try await estate.auditTrail(rowID: rowID)
+    }
 
     /// Every drawer in the addressed estate at the given hydration level, up
     /// to `limit` rows; `nil` reads the whole estate. Delegates to
