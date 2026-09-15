@@ -254,8 +254,7 @@ public enum AriaV2Dream {
 
                 let subjectsBackfilled: Int?
                 if await kit.subjectProducerPipeline(for: admission.handle) != nil {
-                    let estate = try await kit.estate(for: admission.handle)
-                    if try await estate.countSubjectDebt() > 0 {
+                    if try await kit.countSubjectDebt(in: admission.handle) > 0 {
                         subjectsBackfilled = try await kit.subjectBackfillSweep(
                             admission.handle, batchLimit: 32, now: admission.now).written
                     } else {
