@@ -368,8 +368,8 @@ public struct FactTimelineRow: Sendable {
 // MARK: - S5 Edge Row Data
 
 /// One edge row for the S5 graph-edge surface (§11.8).
-/// The far endpoint renders the S2 pick fields (UUID, subject, first sentence,
-/// SSC, adornment, event time) without a score column.
+/// The far endpoint renders the S2 pick fields (UUID, subject, bestSpan,
+/// sscFacts, event time) without a score column.
 public struct EdgeRow: Sendable {
     public let tunnelID: String
     /// The edge kind/label. Lifecycle suffix "(lifecycle)" appended when not active.
