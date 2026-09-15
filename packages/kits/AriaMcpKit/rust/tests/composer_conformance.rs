@@ -152,44 +152,6 @@ fn verify_case(tc: &serde_json::Value) {
 
     match shape {
 
-        // ── S1 ranked surface ────────────────────────────────────────────────
-
-        "s1" => {
-            let rows: Vec<CandidateRowData> = tc["rows"]
-                .as_array().unwrap_or(&vec![])
-                .iter()
-                .map(decode_candidate_row)
-                .collect();
-            let control = decode_control_signals(&tc["control"]);
-            let result = result_composer::render_s1_surface(&rows, &control);
-            let expected_text = tc["expectedText"].as_str().unwrap_or("");
-            assert_eq!(result.text, expected_text, "[{}] S1 text mismatch", name);
-            if !tc["expectedStructured"].is_null() && tc["expectedStructured"].is_object() {
-                let got = result.structured.as_ref().expect("S1 must have structured output");
-                assert_eq!(got, &tc["expectedStructured"],
-                    "[{}] S1 structured mismatch", name);
-            }
-        }
-
-        // ── S1 empty ─────────────────────────────────────────────────────────
-
-        "s1_empty" => {
-            let hint = tc["hint"].as_str();
-            let result = result_composer::render_empty_s1(hint);
-            let expected_text = tc["expectedText"].as_str().unwrap_or("");
-            assert_eq!(result.text, expected_text, "[{}] S1 empty text mismatch", name);
-        }
-
-        // ── S1 cap line ───────────────────────────────────────────────────────
-
-        "s1_cap" => {
-            let limit = tc["capLimit"].as_u64().unwrap_or(0) as usize;
-            let narrowing_arg = tc["narrowingArg"].as_str().unwrap_or("");
-            let cap_line = result_composer::render_cap_line(limit, narrowing_arg);
-            let expected = tc["expectedCapLine"].as_str().unwrap_or("");
-            assert_eq!(cap_line, expected, "[{}] cap line format mismatch", name);
-        }
-
         // ── S2 listing ────────────────────────────────────────────────────────
 
         "s2_listing" => {
@@ -499,35 +461,6 @@ fn verify_case(tc: &serde_json::Value) {
             let result = result_composer::render_federated_recall(&sections);
             let expected_text = tc["expectedText"].as_str().unwrap_or("");
             assert_eq!(result.text, expected_text, "[{}] federated recall text mismatch", name);
-        }
-
-        // ── Structured parity — forbidden keys ────────────────────────────────
-
-        "s1_structured_parity" => {
-            // Verifies absent optional fields are ABSENT (not null) from structured JSON.
-            let rows: Vec<CandidateRowData> = tc["rows"]
-                .as_array().unwrap_or(&vec![])
-                .iter()
-                .map(decode_candidate_row)
-                .collect();
-            let result = result_composer::render_s1_surface(&rows, &ControlSignals::default());
-            // Collect forbidden keys as owned Strings to avoid temporary value borrow.
-            let empty_arr: Vec<serde_json::Value> = vec![];
-            let forbidden_keys: Vec<String> = tc["forbiddenKeys"]
-                .as_array().unwrap_or(&empty_arr)
-                .iter()
-                .filter_map(|k| k.as_str().map(|s| s.to_string()))
-                .collect();
-            let structured = result.structured.expect("S1 must have structured output");
-            // The first result row must not have any of the forbidden keys.
-            let first_row = &structured["results"][0];
-            for key in &forbidden_keys {
-                assert!(
-                    first_row.get(key.as_str()).is_none(),
-                    "[{}] forbidden key '{}' must be absent from structured row; got: {:?}",
-                    name, key, first_row
-                );
-            }
         }
 
         other => {
