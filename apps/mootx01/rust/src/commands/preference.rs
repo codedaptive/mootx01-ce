@@ -31,7 +31,8 @@ use crate::cli::PreferenceCommand;
 use crate::exit;
 
 /// Run one `preference` subcommand against the estate `--db` names (or the
-/// active estate) and exit 0 on success, 1 with the reason on stderr otherwise.
+/// active estate), provisioning a missing estate through the `db create`
+/// routine. Exit 0 on success, 1 with the reason on stderr otherwise.
 pub fn run(cmd: PreferenceCommand) -> ExitCode {
     let (db, operation) = match cmd {
         PreferenceCommand::List { db } => (db, Operation::List),
@@ -39,15 +40,6 @@ pub fn run(cmd: PreferenceCommand) -> ExitCode {
         PreferenceCommand::Set { key, value, db } => (db, Operation::Set { key, value }),
     };
     let result = estate_path(db.as_deref()).and_then(|path| {
-        // A preference lives in an estate that exists. Opening a store on an
-        // absent path would create an empty database, so the absence is
-        // reported instead of silently minting an estate.
-        if !path.exists() {
-            return Err(format!(
-                "estate '{}' does not exist; create it with `mootx01 db create` or run `mootx01 serve` first",
-                path.display()
-            ));
-        }
         let estate = open_estate(&path)?;
         apply(&operation, &estate.coordinator, &estate.handle)
     });
@@ -80,10 +72,13 @@ struct OpenEstate {
 /// The database path of the estate `db` selects: a registered name, a
 /// `<dir>/<name>` transient estate, or (when `None`) the catalog's active
 /// estate. Routes through the funnel (Windows base-directory adoption +
-/// catalog open), exactly as `upgrade` does.
+/// catalog open), then provisions a missing database with its manifest and
+/// current estate-format stamp through the shared `db create` routine.
 fn estate_path(db: Option<&str>) -> Result<PathBuf, String> {
     let catalog = crate::core::estate_open::catalog(db)?;
-    Ok(catalog.active().database_path())
+    let record = catalog.active();
+    crate::commands::db::provision_database(record, wall_now_millis())?;
+    Ok(record.database_path())
 }
 
 /// Open the estate at `path` through the substrate's real entry point:
@@ -178,6 +173,39 @@ fn wall_now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_on_absent_path_provisions_and_persists_after_reopen() {
+        use genius_locus_kit::{EstateCatalog, EstateRecord, EstateRecordKind, EstateBackend};
+        use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
+        let _guard = crate::core::estate_adoption::CONFIGURATION_TEST_LOCK
+            .lock().unwrap_or_else(|p| p.into_inner());
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) { EstateCatalog::set_configuration_directory_override(None); }
+        }
+        let root = tempfile::tempdir().unwrap();
+        EstateCatalog::set_configuration_directory_override(Some(root.path().join("config")));
+        let _reset = Reset;
+        let dir = root.path().join("nested/p1");
+        let db = dir.to_string_lossy().into_owned();
+        assert_eq!(run(PreferenceCommand::Set {
+            key: "fact_extraction".into(), value: "off".into(), db: Some(db.clone()),
+        }), ExitCode::SUCCESS);
+        let record = EstateRecord::with("p1", &dir, EstateRecordKind::Transient, EstateBackend::Sqlite);
+        assert!(record.database_path().is_file());
+        let manifest = EstateCatalog::read_manifest(&record).unwrap();
+        assert_eq!(manifest.format_version, EstateFormatVersion::CURRENT);
+        assert!(EstateCatalog::open().unwrap().record_named("p1").is_none());
+        assert!(!dir.join(aria_mcp::INSTALL_KEY_FILE).exists());
+        let path = estate_path(Some(&db)).unwrap();
+        let estate = open_estate(&path).unwrap();
+        assert_eq!(apply(&Operation::Get { key: "fact_extraction".into() },
+            &estate.coordinator, &estate.handle).unwrap(), "off\n");
+        let store = SqliteDrawerStore::from_path(&path.to_string_lossy(), 0, None, 5.0).unwrap();
+        assert_eq!(EstateFormatStore::new(store.storage().unwrap()).read_if_present().unwrap(),
+            Some(EstateFormatVersion::CURRENT));
+    }
 
     #[test]
     fn set_then_get_round_trips_consolidation_off() {
