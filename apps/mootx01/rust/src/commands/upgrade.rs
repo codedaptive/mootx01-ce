@@ -308,11 +308,16 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
 /// would mark an estate at 11–18 as 20 with none of the v20 objects in place.
 /// Pre-release development estates at 11–18 are moved to a supported version
 /// by the schema surgery script, never by this command.
+/// Also runs the CorpusKit basis ladder and stamps an unstamped 1.0.x estate
+/// at format 1.0 so the migration chain seeds it.
 /// Twin of Swift `UpgradeCommand.runSchemaUpgrade`.
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Returns `true` when the estate is at 20 afterwards (or absent).
 fn run_schema_upgrade(record: &EstateRecord) -> bool {
+    use std::sync::Arc;
+    use corpus_kit::BasisStore;
+    use genius_locus_kit::estate_format::{EstateFormatStore, EstateFormatVersion};
     use locus_kit::schema::{self, SchemaUpgradePath};
     use persistence_kit::sqlite::SqliteStorage;
     use persistence_kit::storage::{BackendConfiguration, EstateConfiguration, Storage};
@@ -336,11 +341,13 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                         busy_timeout_secs: 5.0,
                     },
                 );
-                let storage = SqliteStorage::new(config).map_err(|e| e.to_string())?;
+                let storage: Arc<dyn Storage> =
+                    Arc::new(SqliteStorage::new(config).map_err(|e| e.to_string())?);
                 // The ledger row, read before any schema open (see the doc comment).
                 let stored = storage
                     .current_schema_version_for(schema::KIT_ID)
                     .map_err(|e| e.to_string())?;
+                let mut stamped_format = false;
                 let outcome = match schema::upgrade_path(stored) {
                     SchemaUpgradePath::Unsupported { found } => Err(format!(
                         "refused: this estate is at LocusKit schema {found}.\n    This build upgrades schema {} (CE 1.0.35/1.0.37) and serves schema {}; nothing was changed.\n    A pre-release development estate at 11–18 is moved to a supported version by the schema surgery script, not by this build; a newer estate needs a newer build.",
@@ -352,9 +359,30 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                         // timestamps. The raw version gate above remains the only
                         // authority for schema acceptance before an open mutates.
                         storage.open(&schema::schema()).map_err(|e| e.to_string())?;
+                        // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
+                        // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
+                        // through the attached profile, which creates the component tables
+                        // for a fresh estate but carries no component migrations, so a
+                        // fielded 1.0.x estate keeps the v2 shape and every basis write fails
+                        // with "no column named part_index". mootx01 upgrade is the only
+                        // migration vehicle, so the ladder runs here, before any later step
+                        // opens the estate.
+                        storage.migrate(&BasisStore::schema_declaration()).map_err(|e| format!("basis ladder: {e:?}"))?;
+                        // A 1.0.x estate carries no glk_estate_format stamp (the table first
+                        // appeared in 1.1) and GLKMigrationCatalog.prepare treats a missing
+                        // stamp as a fresh estate: it stamps current and runs no capsule.
+                        // Stamping 1.0 makes the compiled chain run 1.0 → … → 1.9 on the first
+                        // GeniusLocusKit open of this upgrade (the whole-record vacuum step),
+                        // which seeds fact_extraction, the six preferences and recall_ratings.
+                        let format_store = EstateFormatStore::new(Arc::clone(&storage));
+                        if format_store.read_if_present().map_err(|e| format!("estate-format read: {e:?}"))?.is_none() {
+                            format_store.stamp(EstateFormatVersion::V1_0, wall_now_millis()).map_err(|e| format!("estate-format stamp: {e:?}"))?;
+                            stamped_format = true;
+                        }
                         Ok(format!(
-                            "already at LocusKit schema {}",
-                            schema::SCHEMA_VERSION
+                            "already at LocusKit schema {}{}",
+                            schema::SCHEMA_VERSION,
+                            if stamped_format { "; estate format stamped 1.0 for the migration chain" } else { "" }
                         ))
                     }
                     SchemaUpgradePath::Fresh => Ok(format!(
@@ -372,13 +400,34 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                                 schema::SCHEMA_VERSION
                             ))
                         } else {
+                            // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
+                            // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
+                            // through the attached profile, which creates the component tables
+                            // for a fresh estate but carries no component migrations, so a
+                            // fielded 1.0.x estate keeps the v2 shape and every basis write fails
+                            // with "no column named part_index". mootx01 upgrade is the only
+                            // migration vehicle, so the ladder runs here, before any later step
+                            // opens the estate.
+                            storage.migrate(&BasisStore::schema_declaration()).map_err(|e| format!("basis ladder: {e:?}"))?;
+                            // A 1.0.x estate carries no glk_estate_format stamp (the table first
+                            // appeared in 1.1) and GLKMigrationCatalog.prepare treats a missing
+                            // stamp as a fresh estate: it stamps current and runs no capsule.
+                            // Stamping 1.0 makes the compiled chain run 1.0 → … → 1.9 on the first
+                            // GeniusLocusKit open of this upgrade (the whole-record vacuum step),
+                            // which seeds fact_extraction, the six preferences and recall_ratings.
+                            let format_store = EstateFormatStore::new(Arc::clone(&storage));
+                            if format_store.read_if_present().map_err(|e| format!("estate-format read: {e:?}"))?.is_none() {
+                                format_store.stamp(EstateFormatVersion::V1_0, wall_now_millis()).map_err(|e| format!("estate-format stamp: {e:?}"))?;
+                                stamped_format = true;
+                            }
                             let v20_objects = "twelve kg_facts extraction columns, fact_extractor_models";
                             let hop_objects = if from == 19 {
                                 v20_objects.to_string()
                             } else {
                                 format!("encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution; {v20_objects}")
                             };
-                            Ok(format!("LocusKit {from} → {after} ({hop_objects})"))
+                            Ok(format!("LocusKit {from} → {after} ({hop_objects}){}",
+                                if stamped_format { "; estate format stamped 1.0 for the migration chain" } else { "" }))
                         }
                     }
                 };
