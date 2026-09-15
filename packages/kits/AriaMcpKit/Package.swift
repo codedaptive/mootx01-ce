@@ -42,16 +42,7 @@ let package = Package(
         // Sits ABOVE the telemetry-free AriaMCP core.
         .library(name: "AriaResident", targets: ["AriaResident"]),
     ],
-    traits: [
-        // WholeRecordDense: compiles the resident adapter's float index duties
-        // (THETA rebuild, BETA compaction) and turns on the same trait in
-        // NeuronKit, GeniusLocusKit and CorpusKit. Off by default (ruling
-        // 2026-09-07); the product graph never enables it.
-        .trait(
-            name: "WholeRecordDense",
-            description: "Compile the resident HNSW float index duties and enable the WholeRecordDense trait in NeuronKit, GeniusLocusKit and CorpusKit. Off by default; the span stage is the one dense provider."
-        ),
-    ],
+    traits: [],
     dependencies: [
         .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
@@ -60,12 +51,9 @@ let package = Package(
             path: "../GeniusLocusKit",
             traits: [
                 "MigrationFloor1_0",
-                .trait(name: "WholeRecordDense", condition: .when(traits: ["WholeRecordDense"])),
             ]
         ),
-        .package(name: "NeuronKit", path: "../NeuronKit", traits: [
-            .trait(name: "WholeRecordDense", condition: .when(traits: ["WholeRecordDense"])),
-        ]),
+        .package(name: "NeuronKit", path: "../NeuronKit"),
         // SubstrateML provides ARM (MiningThresholds) and FCA (BoundedConceptMiner,
         // FormalAttribute, FormalContext) types consumed by LensTools.swift.
         // These engines were relocated from NeuronKit in MX-0a (ARM) and MX-0B (FCA).
@@ -221,10 +209,7 @@ let package = Package(
                 // fact_extraction setting is on. App → kit layering, no inversion.
                 .product(name: "FactExtractionKit", package: "FactExtractionKit"),
             ],
-            path: "Sources/AriaResident",
-            swiftSettings: [
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
-            ]
+            path: "Sources/AriaResident"
         ),
         .testTarget(
             name: "AriaMCPTests",

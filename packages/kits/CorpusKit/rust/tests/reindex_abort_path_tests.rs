@@ -46,8 +46,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// Vector rows the RI slot writes per item: the engram row always; the float
-/// row (vector_index 1) only with the `whole-record-dense` feature.
-const LANES_PER_ITEM: usize = if cfg!(feature = "whole-record-dense") { 2 } else { 1 };
+/// row (vector_index 1).
+const LANES_PER_ITEM: usize = 2;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 

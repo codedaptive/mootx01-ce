@@ -1592,7 +1592,7 @@ extension ToolDispatcher {
     /// cross-port. This is what federation requires: reproducible without any
     /// model bundle or on-device inference runtime.
     ///
-    /// The learned semantic vector (MiniLM/MPNet/Gemma model providers) is an
+    /// The learned semantic vector (the span encoder's MiniLM provider) is an
     /// ADDITIVE v1.1 on-device lane — a richer, model-dependent signal that
     /// enhances on-device search but cannot serve as the federation vector
     /// (model-dependent → not reproducible cross-device). It does not replace

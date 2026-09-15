@@ -314,7 +314,6 @@ fn a9_glk_recall_result_drawers_filters_none() {
         withheld_by_sensitivity: 0,
         // A-9 is a structural parity test — dense_lane_status is None for
         // a hand-constructed result (no lane was run).
-        #[cfg(feature = "whole-record-dense")]
         dense_lane_status: None,
         // No lane was run — degraded_stages is empty per contract.
         degraded_stages: vec![],
@@ -934,7 +933,6 @@ fn c7_union_best_with_corpus_and_vector_populates_union_profile() {
 // dark:noFloatRows (store has no float rows), NOT dark:providerOptOut.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "whole-record-dense")]
 /// D-1: locusOnly result carries dense_lane_status = None.
 #[test]
 fn d1_locus_only_dense_lane_status_is_none() {
@@ -955,7 +953,6 @@ fn d1_locus_only_dense_lane_status_is_none() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-2: unionBest with no corpus registered → dark:noCorpus (Wave B Part 2).
 /// Previously serialized as None; now carries an explicit tag so callers can
 /// distinguish "lane never attempted (no corpus)" from "lane ran and produced hits".
@@ -981,7 +978,6 @@ fn d2_union_best_no_corpus_dense_lane_status_is_dark_no_corpus() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-6: unionBest with corpus registered but empty query text → dark:emptyQuery
 /// (Wave B Part 2). The float index cannot be queried without a query string.
 #[test]
@@ -1012,7 +1008,6 @@ fn d6_union_best_corpus_empty_query_dense_lane_status_is_dark_empty_query() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-3: unionBest with deterministic corpus + no ingest → dark:noFloatRows.
 /// The deterministic provider supports embed_float (returns 32 floats) so the
 /// probe succeeds; the store has no float rows → UnavailableNoFloatRows.
@@ -1042,7 +1037,6 @@ fn d3_union_best_corpus_no_ingest_dense_lane_status_dark_no_float_rows() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-4: unionBest with ingested content → dense_lane_status = None
 /// (the lane ran and contributed hits — no dark marker).
 #[test]
@@ -1076,7 +1070,6 @@ fn d4_union_best_with_ingest_dense_lane_status_is_none_on_hits() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-5: unionBest with forced provider opt-out → dark:providerOptOut.
 #[test]
 fn d5_union_best_throwing_provider_dense_lane_status_dark_provider_opt_out() {
@@ -1104,7 +1097,6 @@ fn d5_union_best_throwing_provider_dense_lane_status_dark_provider_opt_out() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-6: UnionBest with forced storeError — full chain proof.
 ///
 /// Uses the `forced_float_error` seam (enabled via the `test-seams` feature on
@@ -1183,7 +1175,6 @@ fn d6_union_best_forced_store_error_full_chain() {
     }
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-7 (mode-gating): Hybrid recall with a registered corpus produces NO dense
 /// status and NO VectorDense evidence — the dense lane is UnionBest-only.
 ///
@@ -1237,7 +1228,6 @@ fn d7_hybrid_mode_produces_no_dense_status_no_dense_evidence() {
     }
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// D-8 (mode-gating): CorpusOnly recall with a registered corpus produces NO
 /// dense status and NO VectorDense evidence — the dense lane is UnionBest-only.
 ///
@@ -1768,7 +1758,6 @@ fn f3_union_best_matrix_aware_with_tier_populates_union_profile() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 /// F-4: Dense column still consumed per the gate-2 contract.
 ///
 /// Verifies that when a corpus is registered and the dense lane runs in
@@ -2203,35 +2192,71 @@ fn f5_genuine_empty_records_no_locus_stage() {
 //
 // `RecallEvidencePath` is already imported at the top of this crate (GROUP A).
 
-/// A float-capable MiniLM provider config whose 384-d embedding is keyed off the
-/// first token so distinct content embeds distinctly. CorpusKit applies its own
-/// FloatSimHash projection over the returned vector.
-fn minilm_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MiniLM {
-        inference: Box::new(|tokens: &[i32]| {
-            let lead = tokens.first().copied().unwrap_or(0);
-            let mut v = vec![0.0_f32; 384];
-            let axis = (lead.unsigned_abs() as usize) % 384;
-            v[axis] = 1.0;
-            v[0] += 0.5; // shared component pulls everything toward the query
-            Ok(v)
-        }),
+// Provider stubs for whole-record float lane H-1/H-2 tests. The removed
+// `.miniLM` and `.mpNet` EmbeddingModel cases are replaced with CandleNL
+// wrappers that preserve the test's discriminating properties.
+use engram_lib::Engram;
+use synapsekit::{EmbeddingProvider as DenseEmbeddingProvider, SynapseKitError as DenseSynapseKitError};
+
+/// First-word-hash one-hot provider (384-d). Replaces the removed
+/// `EmbeddingModelConfig::MiniLM { inference }` case.
+///
+/// First word determines the one-hot axis (FNV-1a hash mod 384), with
+/// a small shared component v[0] += 0.5 that pulls all embeddings
+/// slightly toward each other — preserving the original test's
+/// "shared component toward the query" property.
+struct FirstWordProvider;
+impl DenseEmbeddingProvider for FirstWordProvider {
+    fn model_id(&self) -> &str { "test-first-word-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, DenseSynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, DenseSynapseKitError> {
+        let first = text.split_whitespace().next().unwrap_or("");
+        let h = first.bytes().fold(14_695_981_039_346_656_037u64, |a, b| {
+            (a ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
+        });
+        let mut v = vec![0.0_f32; 384];
+        let axis = (h as usize) % 384;
+        v[axis] = 1.0;
+        v[0] += 0.5;
+        Ok(v)
     }
 }
 
-/// A float-capable MPNet provider config (768-d). The "alpha"/consensus lead
-/// token maps to axis 1; other lead tokens route to a distant axis so only the
-/// consensus doc aligns with the query under mpnet.
-fn mpnet_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MPNet {
-        inference: Box::new(|tokens: &[i32]| {
-            let lead = tokens.first().copied().unwrap_or(0);
-            let mut v = vec![0.0_f32; 768];
-            let axis = if (lead.unsigned_abs() as usize) % 2 == 0 { 1 } else { 400 };
-            v[axis] = 1.0;
-            Ok(v)
-        }),
+/// Two-axis first-word provider (384-d). Replaces the removed
+/// `EmbeddingModelConfig::MPNet { inference }` case.
+///
+/// If the first char of the first word has an ODD Unicode code point
+/// (e.g. 'a' = 97), axis = 1. Even code points route to axis 300.
+/// The consensus content ("alpha...") starts with 'a' (odd) → axis 1;
+/// the single content ("zeta...") starts with 'z' (even) → axis 300.
+/// The query "alpha..." also routes to axis 1, so only the consensus
+/// doc aligns with the query under this provider.
+struct TwoAxisProvider;
+impl DenseEmbeddingProvider for TwoAxisProvider {
+    fn model_id(&self) -> &str { "test-two-axis-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, DenseSynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, DenseSynapseKitError> {
+        let first = text.split_whitespace().next().unwrap_or("");
+        let lead_code = first.chars().next().map(|c| c as u32).unwrap_or(0);
+        let mut v = vec![0.0_f32; 384];
+        let axis = if lead_code % 2 == 1 { 1 } else { 300 };
+        v[axis] = 1.0;
+        Ok(v)
     }
+}
+
+/// CandleNL provider config for H-1/H-2 dense lane tests. Replaces the
+/// removed `EmbeddingModelConfig::MiniLM { inference }` case.
+fn minilm_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(FirstWordProvider) }
+}
+
+/// CandleNL provider config for H-2 two-signal consensus test. Replaces the
+/// removed `EmbeddingModelConfig::MPNet { inference }` case.
+fn mpnet_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(TwoAxisProvider) }
 }
 
 fn corpus_with_models(models: Vec<EmbeddingModelConfig>) -> Arc<CorpusContentEngine> {
@@ -2242,7 +2267,6 @@ fn corpus_with_models(models: Vec<EmbeddingModelConfig>) -> Arc<CorpusContentEng
 
 // H-1: single-provider (production default) dense lane runs and surfaces a
 // VectorDense source — the pre-6b single-float_nearest path.
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn h1_single_provider_dense_lane_runs_unchanged() {
     let (mut coord, h) = open_one();
@@ -2284,7 +2308,6 @@ fn h1_single_provider_dense_lane_runs_unchanged() {
 // H-2: two-provider consensus — both dense signals vote, the fused hit records
 // per-signal provenance for both model_ids, and the strong-agreement drawer
 // ranks at/above the weak-agreement drawer.
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn h2_two_provider_dense_consensus_records_provenance_and_outranks() {
     let (mut coord, h) = open_one();

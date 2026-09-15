@@ -10,8 +10,8 @@ pub enum CorpusKitError {
     StoreUnavailable(String),
     /// The selected embedding model cannot be reconstructed from a trained
     /// basis because it does not implement `TrainableEmbeddingBasis` — the
-    /// deterministic provider, the named host-inference model cases, and the
-    /// stateless FDC provider have no trained basis to restore. Returned by
+    /// deterministic provider and the stateless `CandleNL` provider have no
+    /// trained basis to restore. Returned by
     /// `EmbeddingModelConfig::reconstruct` for those cases rather than
     /// panicking or returning a wrong provider.
     NotTrainable(String),

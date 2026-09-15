@@ -25,13 +25,13 @@
 // ## Coverage mask registry (modelID → coverage-mask bit offset K, bit position = 4+K)
 //
 // K=0  corpus-ri-v1         (RandomIndexing)
-// K=1  corpus-ppmi-v1       (PPMI)
+// K=1  corpus-ppmi-v1       (PPMI — retired family; the bit stays reserved)
 // K=2  corpus-lsa-v1        (LSA)
-// K=3  corpus-nmf-v1        (NMF)
-// K=4  corpus-fdc-v1        (FDC)
+// K=3  corpus-nmf-v1        (NMF — retired family; the bit stays reserved)
+// K=4  corpus-fdc-v1        (FDC — retired family; the bit stays reserved)
 // K=5  corpus-deterministic (Deterministic / FloatSimHash)
-// K=6  RESERVED             (miniLM)
-// K=7  RESERVED             (mpNet / embeddingGemma / nlEmbedding / nlContextual)
+// K=6  RESERVED             (never assigned)
+// K=7  RESERVED             (nlEmbedding / nlContextual)
 //
 // Slots beyond K=7 fall back to the corpus_provider_coverage side table
 // (hybrid: bitmap-accelerated for the common 8 slots, table-backed for overflow).
@@ -104,19 +104,19 @@ internal let indexGenerationModulus: Int64 = 16
 /// in BITMAP_LAYOUT.md before the provider ships.
 internal func coverageMaskBitOffset(for modelID: String) -> Int? {
     // K=0  corpus-ri-v1         (RandomIndexing)
-    // K=1  corpus-ppmi-v1       (PPMI)
+    // K=1  corpus-ppmi-v1       (PPMI — retired family; the bit stays reserved)
     // K=2  corpus-lsa-v1        (LSA)
-    // K=3  corpus-nmf-v1        (NMF)
-    // K=4  corpus-fdc-v1        (FDC)
+    // K=3  corpus-nmf-v1        (NMF — retired family; the bit stays reserved)
+    // K=4  corpus-fdc-v1        (FDC — retired family; the bit stays reserved)
     // K=5  corpus-deterministic (Deterministic / FloatSimHash)
-    // K=6  RESERVED (miniLM)
-    // K=7  RESERVED (mpNet / embeddingGemma / nlEmbedding / nlContextual)
+    // K=6  RESERVED (never assigned)
+    // K=7  RESERVED (nlEmbedding / nlContextual)
     switch modelID {
     case "corpus-ri-v1":          return 0
-    case "corpus-ppmi-v1":        return 1
+    case "corpus-ppmi-v1":        return 1   // retired family; bit stays reserved
     case "corpus-lsa-v1":         return 2
-    case "corpus-nmf-v1":         return 3
-    case "corpus-fdc-v1":         return 4
+    case "corpus-nmf-v1":         return 3   // retired family; bit stays reserved
+    case "corpus-fdc-v1":         return 4   // retired family; bit stays reserved
     case "corpus-deterministic":  return 5
     default:
         // Unregistered provider — falls back to corpus_provider_coverage.

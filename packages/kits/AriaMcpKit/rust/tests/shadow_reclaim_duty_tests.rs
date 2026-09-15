@@ -76,9 +76,7 @@ impl RecordingHNSWMaintenance {
 }
 
 impl HNSWGraphMaintenance for RecordingHNSWMaintenance {
-    #[cfg(feature = "whole-record-dense")]
     fn rebuild_float_index(&mut self, _now_epoch_secs: f64) -> bool { true }
-    #[cfg(feature = "whole-record-dense")]
     fn compact_float_index_tombstones(&mut self, _now_epoch_secs: f64) -> bool { true }
     fn reclaim_superseded_generations(&mut self, now_epoch_secs: f64) -> bool {
         self.reclaim_calls.lock().unwrap().push(now_epoch_secs);

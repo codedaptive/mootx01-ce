@@ -67,12 +67,11 @@ import Foundation
 /// - Note: A nil `hnswMaintenance` in `DreamingDaemon.init` silently disables
 ///   every duty on this seam (correct for tests that wire no vector store).
 ///   The float-index duties (`rebuildFloatIndex`, `compactFloatIndexTombstones`)
-///   exist only in the WholeRecordDense build: the default product writes no
+///   exist only when the whole-record float lane is active. The default product writes no
 ///   whole-record float rows, so the seam carries the generation reclaim
 ///   alone there (ruling 2026-09-07).
 public protocol HNSWGraphMaintenance: Sendable {
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     /// Rebuild all active HNSW graphs from current float records (THETA duty).
     ///
     /// Called after the daily basis retrain fires. Fetches current float32 rows
@@ -90,7 +89,6 @@ public protocol HNSWGraphMaintenance: Sendable {
     ///
     /// - Parameter now: Deterministic timestamp from the caller.
     func compactFloatIndexTombstones(now: Date) async throws
-#endif // MOOTX01_WHOLE_RECORD_DENSE
 
     /// Reclaim superseded-generation vector rows from the estate (BETA duty).
     ///

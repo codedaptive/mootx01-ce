@@ -1,7 +1,5 @@
 import CorpusKit
-#if MOOTX01_WHOLE_RECORD_DENSE
 import CorpusKitWholeRecordDense
-#endif
 import EngramLib
 import Foundation
 import MootProductIdentity
@@ -1471,7 +1469,6 @@ public extension GeniusLocusKit {
         shape?.binaryMetric == "jaccard" ? .binary(.jaccard) : .binary(.hamming)
     }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     /// Resolve the shape's float-lane metric (W2.5 M1 float unlock). Maps the
     /// string selector on `RecallShape.floatMetric` to a concrete `FloatMetric`
     /// value for the dense embedding lane. Unknown strings and nil shapes both
@@ -1485,7 +1482,6 @@ public extension GeniusLocusKit {
         default: return .cosine
         }
     }
-#endif
 
     /// The estate-manifest key carrying the OPTIMIZER-OWNED default lane
     /// weights (W2.5 Track R(b)): a JSON object of lane key → signed float.
@@ -1506,8 +1502,8 @@ public extension GeniusLocusKit {
     /// The estate-manifest key carrying the OPTIMIZER-OWNED embedding-provider
     /// selection: a plain string holding the `EmbeddingProvider.modelID` of
     /// the provider to use when constructing the Corpus ensemble for this
-    /// estate. Absent key → the deterministic default ensemble (RI/PPMI/NMF/FDC
-    /// under DenseFamilies; RI only by default) — no estate migration required.
+    /// estate. Absent key → the default ensemble (RI and LSA, always on) —
+    /// no estate migration required.
     ///
     /// Same optimizer-owned, fail-quiet contract as `laneWeightsMetaKey` and
     /// `recallTuningMetaKey`: the benchmarker/optimizer selects the provider;
@@ -2036,14 +2032,10 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Step 4.5 — the whole-record DENSE FLOAT lane is a WholeRecordDense
-        // sidecar lane (ruling 2026-09-07: the span stage at step 3.5 is the
-        // one dense provider in the product). In the default build the lane
-        // never runs: `denseHits` stays empty, so the buffer merge, lane ranks
-        // and content-sorts below keep one shape; the discrimination factor
+        // Step 4.5 — the whole-record float lane: the per-signal float nearest
+        // recall (the sidecar surface). The discrimination factor
         // stays neutral so `.discriminative` scoring equals `.rrf`.
         var denseHits: [RecallHit] = []
-#if MOOTX01_WHOLE_RECORD_DENSE
         // Discrimination factor for the matrixAware scoring formula (Item 3):
         // declared here so the scoring loop at step 9 can read it after the
         // corpus block closes. 1.0 = no discount.
@@ -2363,9 +2355,6 @@ public extension GeniusLocusKit {
             // to return hits, so tag it explicitly rather than leaving nil.
             denseLaneExplainerTag = "dark:emptyQuery"
         }
-#else
-        let denseDiscriminationFactor: Float = 1.0
-#endif // MOOTX01_WHOLE_RECORD_DENSE
 
         // Content-derived re-sort for BM25, vector, and dense lanes.
         //
@@ -3350,17 +3339,14 @@ public extension GeniusLocusKit {
             // float index ranked this drawer; a signal that did not vote for this
             // id is absent. Additive: the existing source/score/mode/why lines are
             // unchanged, so the N=1 explainer output gains only this one line.
-#if MOOTX01_WHOLE_RECORD_DENSE
             if let voters = denseSignalsByID[id], !voters.isEmpty {
                 explanationLines.append(
                     "denseSignals: " + voters.map { "vectorDense:\($0)" }.joined(separator: ", "))
             }
-#endif
             hits.append(RecallHit(id: id, drawer: drawer, sources: sources,
                                   score: sv, explanation: explanationLines, spanHit: spanHit))
         }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
         Self.recallLog.debug(
             "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) spanHits=\(spanHitsByID.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public) denseLane=\(denseLaneExplainerTag ?? "active", privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
@@ -3368,15 +3354,6 @@ public extension GeniusLocusKit {
         return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
                                denseLaneStatus: denseLaneExplainerTag, degradedStages: degradedStages,
                                laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
-#else
-        Self.recallLog.debug(
-            "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) spanHits=\(spanHitsByID.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public) degraded=\(degradedStages, privacy: .public)"
-        )
-
-        return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
-                               degradedStages: degradedStages,
-                               laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
-#endif
     }
 
     // MARK: - Empty-store column detection

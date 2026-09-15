@@ -39,19 +39,7 @@ let package = Package(
             targets: ["NeuronKit"]
         ),
     ],
-    traits: [
-        // WholeRecordDense: compiles the whole-record float index duties of the
-        // dreaming daemon (THETA rebuild, BETA compaction through the
-        // HNSWGraphMaintenance seam) and the `dense-fused` reduction
-        // composition. Off by default (ruling 2026-09-07): the span stage is
-        // the one dense provider and no float rows are written. Enable with
-        // `swift test --traits WholeRecordDense`. The GeniusLocusKit twin trait
-        // is independent: NeuronKit's gated code links nothing gated there.
-        .trait(
-            name: "WholeRecordDense",
-            description: "Compile the whole-record float index duties of dreaming (THETA rebuild, BETA compaction) and the dense-fused reduction composition. Off by default; the span stage is the one dense provider."
-        ),
-    ],
+    traits: [],
     dependencies: [
         .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/EideticLib"),
@@ -131,7 +119,6 @@ let package = Package(
                 .product(name: "SubstrateML", package: "SubstrateML"),
             ],
             swiftSettings: [
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
         .testTarget(
@@ -156,7 +143,6 @@ let package = Package(
             // Fixtures pattern).
             resources: [.copy("Fixtures")],
             swiftSettings: [
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
             ]
         ),
     ]

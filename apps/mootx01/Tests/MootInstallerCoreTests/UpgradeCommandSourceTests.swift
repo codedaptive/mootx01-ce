@@ -271,7 +271,8 @@ struct UpgradeCommandSourceTests {
             #expect(catalogAt < vectorAt, "\(name): the catalog must run before the vector tier is touched")
         }
         // The reclaim names the retired families once, in the shared constant.
-        #expect(source.contains("static let retiredDenseFamilyModelIDs = [\"lsa-v1\", \"nmf-v1\", \"ppmi-v1\", \"fdc-v1\"]"))
+        // lsa-v1 must never appear here: LSA is a live default-ensemble signal.
+        #expect(source.contains("static let retiredDenseFamilyModelIDs = [\"nmf-v1\", \"ppmi-v1\", \"fdc-v1\"]"))
     }
 
     @Test("An already-current upgrade still runs the KG fact backfill")

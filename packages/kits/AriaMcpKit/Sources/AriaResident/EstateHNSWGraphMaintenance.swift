@@ -63,10 +63,6 @@ public struct EstateHNSWGraphMaintenance: HNSWGraphMaintenance {
     // VectorStore.publishShadowGeneration, which flips the serving generation
     // and rebuilds the graph inside one atomic operation.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
-    // Float index duties: WholeRecordDense build only (the default product
-    // writes no whole-record float rows, ruling 2026-09-07).
-
     /// Delegates to `VectorStore.rebuildAllHNSWIndices()`.
     public func rebuildFloatIndex(now: Date) async throws {
         try await vectorStore.rebuildAllHNSWIndices()
@@ -76,7 +72,6 @@ public struct EstateHNSWGraphMaintenance: HNSWGraphMaintenance {
     public func compactFloatIndexTombstones(now: Date) async throws {
         try await vectorStore.compactAllHNSWTombstones()
     }
-#endif
 
     /// Delegates to `VectorStore.reclaimSupersededGenerations()`.
     ///

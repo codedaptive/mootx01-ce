@@ -29,7 +29,6 @@ use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::intake::LocusDrawerContentSource;
 use genius_locus_kit::EstateCoordinator;
 use genius_locus_kit_migrations::{SharedContentMigrationExt, SharedContentMigrationState};
-#[cfg(feature = "whole-record-dense")]
 use synapsekit::engine::metric::FloatMetric;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
@@ -326,7 +325,6 @@ fn qualify_large_estate_migration() {
     {
         // Per-signal whole-record float lane (sidecar build only): every
         // configured signal must serve.
-        #[cfg(feature = "whole-record-dense")]
         {
             let t_f = Instant::now();
             let per_signal = engine.float_nearest_per_signal(query, 5, FloatMetric::Cosine);

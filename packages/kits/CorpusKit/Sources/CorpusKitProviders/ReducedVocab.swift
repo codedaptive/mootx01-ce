@@ -1,20 +1,20 @@
 // ReducedVocab.swift — shared IDF-reduced vocabulary selection for the dense
-// distributional-factorization providers (LSA, NMF). shared reduced embedding vocabulary.
+// distributional-factorization provider (LSA).
 //
 // ## Why this exists
 //
-// LSA/NMF build a DENSE `docs × vocab` matrix and factor it (fixed-sweep Jacobi
-// SVD / ALS). On a real corpus the vocabulary is tens of thousands of distinct
+// LSA builds a DENSE `docs × vocab` matrix and factors it (fixed-sweep Jacobi
+// SVD). On a real corpus the vocabulary is tens of thousands of distinct
 // terms, so the factorization is ~10^15 ops — computationally infeasible, and it
 // hangs the encode drain. This picks a deterministic top-K informative
 // sub-vocabulary so the factored matrix is `docs × K` (feasible in seconds).
 //
-// ## Why it's shared (not per-provider)
+// ## Why it is a corpus property (not a provider property)
 //
 // Term informativeness is a property of the corpus, not of the factorization
-// method — "which terms carry signal" has the same answer for SVD and ALS, and
-// LSA↔NMF vectors are never compared. So both dense providers consume ONE
-// reduced vocab. The cap `K` and the band are optimizer knobs (default here).
+// method — "which terms carry signal" is answered once per corpus, so any
+// dense factorization provider consumes the ONE reduced vocab. The cap `K`
+// and the band are optimizer knobs (default here).
 //
 // ## Determinism (cross-port bit-identity)
 //
@@ -25,11 +25,11 @@
 
 import Foundation
 
-/// Default reduced-vocabulary cap. Dense Jacobi SVD / NMF-ALS cost scales as
+/// Default reduced-vocabulary cap. Dense Jacobi SVD cost scales as
 /// ~K²·numDocs, so K trades reindex latency against how many terms feed the
 /// latent factors. 512 keeps a large-corpus reindex in the seconds range while
-/// still giving far more input columns than the providers' rank (LSA 64 /
-/// NMF 32). Parameterized so the quality optimizer can tune it.
+/// still giving far more input columns than the provider's rank (LSA 64).
+/// Parameterized so the quality optimizer can tune it.
 public let defaultReducedVocabCap: Int = 512
 
 /// A frozen reduced vocabulary: the ordered kept terms plus the maps needed to

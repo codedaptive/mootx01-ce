@@ -24,7 +24,7 @@
 //!      nothing.
 //!   3. Stamp the estate format V1_7.
 //!
-//! With the `whole-record-dense` feature the lane is live again, and an
+//! The lane is now always live. An
 //! audition estate whose manifest names a whole-record provider (an
 //! `embedding_provider` value that is present, non-empty and not the span
 //! encoder) keeps its rows: the capsule stamps V1_7 without deleting
@@ -60,7 +60,7 @@ pub struct WholeRecordFloatVacuumMigrationReport {
     /// corpus-kit representation claims on vector_index 1 released by this run.
     pub claims_released: usize,
     /// True when the rows were vacuumed (every default-build run); false when
-    /// the whole-record-dense build found a whole-record provider named in
+    /// whole-record lane found a whole-record provider named in
     /// the manifest and left an audition estate's rows in place.
     pub vacuumed: bool,
     /// The estate format the capsule stamped.
@@ -133,7 +133,6 @@ impl WholeRecordFloatVacuumMigrationExt for EstateCoordinator {
             }
         })?;
 
-        #[cfg(feature = "whole-record-dense")]
         {
             // The audition build: an estate provisioned with a whole-record
             // provider keeps its float rows. The span encoder is a rerank

@@ -589,8 +589,7 @@ fn run_search_projection_backfill(record: &EstateRecord) -> bool {
 /// `db.key` on its own, so keyed and plaintext estates both open correctly.
 ///
 /// Bring the trainable provider bases a populated estate carries
-/// (random-indexing in every build; PPMI, NMF and FDC only in a
-/// dense-families build; LSA only under its own feature)
+/// (random-indexing and LSA in every build)
 /// onto the basis format this binary's codec writes. A basis row persisted
 /// under an earlier format version holds vectors pooled the old way; the
 /// corpus opens such a slot untrained and its open-time provider reconcile
@@ -822,9 +821,6 @@ fn run_span_encode_backfill(record: &EstateRecord) -> bool {
     ok
 }
 
-/// Models whose vector rows `mootx01 upgrade` reclaims: the dense
-/// distributional families the Encoder Rerank Program took dark
-/// (`dense-families` feature off). Their rows serve nothing at 19 or 20.
 /// Vacuum the whole-record float rows (`vectors` kind 1) and the `hnsw_graph`
 /// rows nothing serves any more (GENIUSLOCUSKIT_SPEC I-26). The 1.6 → 1.7
 /// and 1.7 → 1.8 capsules do the work inside the registry's migration chain
@@ -940,7 +936,14 @@ fn whole_record_row_counts(path: &str, now: i64) -> Result<(usize, usize), Strin
     Ok((float_rows, graph_rows))
 }
 
-const RETIRED_DENSE_FAMILY_MODEL_IDS: [&str; 4] = ["lsa-v1", "nmf-v1", "ppmi-v1", "fdc-v1"];
+/// Models whose vector rows `mootx01 upgrade` reclaims: the three retired
+/// audition families (NMF, PPMI, FDC). Their rows serve nothing at 19 or 20.
+///
+/// `lsa-v1` is NOT in this set: LSA is the second signal of the default
+/// ensemble (`corpus_kit_providers::default_ensemble()`), so every estate
+/// carries live `lsa-v1` rows and the reclaim must leave them in place.
+/// Twin of Swift `UpgradeCommand.retiredDenseFamilyModelIDs`.
+const RETIRED_DENSE_FAMILY_MODEL_IDS: [&str; 3] = ["nmf-v1", "ppmi-v1", "fdc-v1"];
 
 /// Reclaim the vector rows nothing serves at schema 20 (ENCODER_RERANK
 /// CONTRACT §12): every row of the retired dense families and every row at a
@@ -1183,7 +1186,7 @@ fn run_shared_content_reclaim_if_pending(record: &EstateRecord) -> bool {
 }
 
 /// CORPUS-COUNTS-01: clear the legacy text-keyed vocab rows and zero the
-/// stale PPMI counts blob so the next reindex starts from a clean slate.
+/// stale counts blobs so the next reindex starts from a clean slate.
 ///
 /// ## What this step does
 ///

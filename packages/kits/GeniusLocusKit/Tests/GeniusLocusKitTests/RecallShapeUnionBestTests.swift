@@ -21,8 +21,7 @@
 // tokens drive distinct embeddings so the per-signal cosine ordering is
 // deterministic and reproducible across the Swift/Rust ports.
 
-// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
-#if MOOTX01_WHOLE_RECORD_DENSE
+// Whole-record float lane tests.
 import Testing
 import Foundation
 import LocusKit
@@ -81,24 +80,13 @@ struct RecallShapeUnionBestTests {
 
         let corpusStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        // The two slots are registered under `miniLMID` / `mpNetID` so the
+        // `dense:<modelID>` keys the shapes steer name these providers.
         let corpus = try await CorpusKit.CorpusContentEngine(
             standaloneOn: corpusStorage,
             models: [
-                .miniLM(inference: { tokens in
-                    let lead = tokens.first ?? 0
-                    var v = Array(repeating: Float(0), count: 384)
-                    v[Int(abs(lead)) % 384] = 1.0
-                    v[0] += 0.5   // shared component pulls everything toward the query
-                    return v
-                }),
-                .mpNet(inference: { tokens in
-                    let lead = tokens.first ?? 0
-                    var v = Array(repeating: Float(0), count: 768)
-                    // Consensus/query lead token → axis 1; other docs → distant axis.
-                    let axis = (Int(abs(lead)) % 2 == 0) ? 1 : 400
-                    v[axis] = 1.0
-                    return v
-                })
+                .lsa(provider: FirstWordAxisProvider(modelID: Self.miniLMID)),
+                .lsa(provider: TwoAxisProvider(modelID: Self.mpNetID)),
             ]
         )
         // Hamming vector store so the bm25 + hamming fixed lanes also produce hits.
@@ -330,4 +318,3 @@ struct RecallShapeUnionBestTests {
         }
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

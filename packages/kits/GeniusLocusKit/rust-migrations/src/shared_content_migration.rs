@@ -872,16 +872,9 @@ impl SharedContentMigrationExt for EstateCoordinator {
         // Option for the circuit-breaker closure.  The flag is a bool (Copy)
         // and can be captured without conflicting with the subsequent move of
         // `models_opt` into CorpusContentEngine::open inside the closure.
-        let has_trainable_provider = models.iter().any(|model| {
-            !matches!(
-                model,
-                EmbeddingModelConfig::Deterministic
-                    | EmbeddingModelConfig::Fdc { .. }
-                    | EmbeddingModelConfig::MiniLM { .. }
-                    | EmbeddingModelConfig::MPNet { .. }
-                    | EmbeddingModelConfig::EmbeddingGemma { .. }
-            )
-        });
+        // Use the canonical trainable check rather than enumerating non-trainable
+        // variants: avoids breakage when new fixed-weight providers are added.
+        let has_trainable_provider = models.iter().any(|model| model.is_trainable());
         // Circuit-breaker wrapper: the immediately-invoked closure captures all
         // shared state by reference / mutable borrow; `?` inside returns from
         // the closure, not the outer function.  After the call the match handles
