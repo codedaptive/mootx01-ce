@@ -5,6 +5,15 @@ edition = "2021"
 rust-version = "1.75"
 publish = false
 
+# [package.metadata.moot-test] selects migration-floor-1-0 so cargo compiles
+# every [[test]] binary that carries a required-features declaration. Without
+# this block scripts/moot-test passes no --features flag and cargo silently
+# skips every required-features binary, emitting no warning. migration-floor-1-0
+# enables every capsule from 1.0 to current; a narrower floor would leave the
+# higher-floor capsule binaries unbuilt.
+[package.metadata.moot-test]
+test-features = ["migration-floor-1-0"]
+
 [features]
 default = []
 migration-v1-0-to-v1-1 = []
@@ -20,6 +29,9 @@ migration-v1-5-to-v1-6 = []
 # and the hnsw_graph rows from populated estates, rebuilds the binary sidecar
 # and releases the float representation claim (estate format 1.6 → 1.7 capsule).
 migration-v1-6-to-v1-7 = []
+# migration-v1-7-to-v1-8: seeds fact_extraction = "on" when absent (the
+# on-by-default opt-out model) and stamps the v1_8 estate format (I-27).
+migration-v1-7-to-v1-8 = []
 # whole-record-dense: the 1.6 → 1.7 capsule reads the estate manifest and
 # leaves an audition estate's float rows in place. Twin of the Swift
 # GLKMigrationV1_6ToV1_7 target's MOOTX01_WHOLE_RECORD_DENSE define.
@@ -30,15 +42,16 @@ whole-record-dense = ["genius-locus-kit/whole-record-dense", "corpus-kit/whole-r
 # CorpusKit's own ladder adds at open, the 1.2 → 1.3 step added a LocusKit
 # column that schema v19 removed, and the 1.3 → 1.4 step seeded the index
 # composition setting that retired with the policy, so the 1.4 → 1.5 capsule
-# runs directly on any of those stamps; the 1.5 → 1.6 and 1.6 → 1.7 capsules
-# follow it.
-migration-floor-1-0 = ["migration-v1-0-to-v1-1", "migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7"]
-migration-floor-1-1 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7"]
-migration-floor-1-2 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7"]
-migration-floor-1-3 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7"]
-migration-floor-1-4 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7"]
-migration-floor-1-5 = ["migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7"]
-migration-floor-1-6 = ["migration-v1-6-to-v1-7"]
+# runs directly on any of those stamps; the 1.5 → 1.6, 1.6 → 1.7 and
+# 1.7 → 1.8 capsules follow it.
+migration-floor-1-0 = ["migration-v1-0-to-v1-1", "migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7", "migration-v1-7-to-v1-8"]
+migration-floor-1-1 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7", "migration-v1-7-to-v1-8"]
+migration-floor-1-2 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7", "migration-v1-7-to-v1-8"]
+migration-floor-1-3 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7", "migration-v1-7-to-v1-8"]
+migration-floor-1-4 = ["migration-v1-4-to-v1-5", "migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7", "migration-v1-7-to-v1-8"]
+migration-floor-1-5 = ["migration-v1-5-to-v1-6", "migration-v1-6-to-v1-7", "migration-v1-7-to-v1-8"]
+migration-floor-1-6 = ["migration-v1-6-to-v1-7", "migration-v1-7-to-v1-8"]
+migration-floor-1-7 = ["migration-v1-7-to-v1-8"]
 
 [dependencies]
 genius-locus-kit = { path = "../rust" }
@@ -92,6 +105,10 @@ required-features = ["migration-v1-5-to-v1-6"]
 [[test]]
 name = "whole_record_float_vacuum_migration_tests"
 required-features = ["migration-v1-6-to-v1-7"]
+
+[[test]]
+name = "fact_extraction_setting_migration_tests"
+required-features = ["migration-v1-7-to-v1-8"]
 
 # The chain's entry gate (stamp read, floor and ceiling refusals, dispatch
 # from the detected version) needs a compiled chain to gate.

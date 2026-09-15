@@ -100,6 +100,7 @@ fn listed() -> BTreeMap<&'static str, Listed> {
         c!("preferences.portableOnPowerOnly", preferences::PORTABLE_ON_POWER_ONLY),
         c!("preferences.portableServiceName", preferences::PORTABLE_SERVICE_NAME),
         c!("queues.ariaHTTPAccept", queues::ARIA_HTTP_ACCEPT),
+        c!("queues.ariaHTTPRawRead", queues::ARIA_HTTP_RAW_READ),
         c!("queues.managerControlChannelAccept", queues::MANAGER_CONTROL_CHANNEL_ACCEPT),
         c!("queues.managerHTTPReadAPIAccept", queues::MANAGER_HTTP_READ_API_ACCEPT),
         c!("queues.lanDiscovery", queues::LAN_DISCOVERY),
