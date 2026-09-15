@@ -324,42 +324,39 @@ public enum AriaResident {
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async -> (@Sendable (Date) async throws -> Int)? {
-        switch setting {
-        case .off:
-            // Operator opt-out: preserve today's behaviour exactly.
+        guard setting == .on else {
+            // Operator opt-out, or a value invalid for the master key.
             return nil
-        // `setting` is the fact_extraction master switch, which only takes on/off; provisionedPreference normalises anything else to the key's default (on), so every value other than .off reads as on here.
-        default:
-            guard let extractor else {
+        }
+        guard let extractor else {
                 // No extractor available — model assets absent or not installed.
                 // This is the common field case; log and continue.
                 Logging.stderr.log(
                     "AriaResident fact extraction: setting=on but no extractor available " +
-                    "(install coreai_asset + coreai_tokenizer in config.json to enable CoreAI NuExtract)")
+                    "for the estate's selected provider")
                 return nil
+        }
+        // Derive the recipe ID from the extractor's own spec so a model change
+        // clears bit-28 debt estate-wide (cross-port contract: same three-field
+        // colon-separated form as the Rust port).
+        let spec = extractor.spec
+        let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
+        do {
+            let cleared = try await kit.activateFactExtractor(
+                extractor, recipeID: recipeID, for: handle)
+            Logging.stderr.log(
+                "AriaResident fact extraction activated: recipe=\(recipeID) " +
+                "provider=\(spec.providerID) cleared=\(cleared)")
+            return { now in
+                let result = try await kit.runFactExtractionBatch(
+                    handle, limit: AriaResident.factExtractionBatchLimit, now: now)
+                return result.factsFiled
             }
-            // Derive the recipe ID from the extractor's own spec so a model change
-            // clears bit-28 debt estate-wide (cross-port contract: same three-field
-            // colon-separated form as the Rust port).
-            let spec = extractor.spec
-            let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
-            do {
-                let cleared = try await kit.activateFactExtractor(
-                    extractor, recipeID: recipeID, for: handle)
-                Logging.stderr.log(
-                    "AriaResident fact extraction activated: recipe=\(recipeID) " +
-                    "provider=\(spec.providerID) cleared=\(cleared)")
-                return { now in
-                    let result = try await kit.runFactExtractionBatch(
-                        handle, limit: AriaResident.factExtractionBatchLimit, now: now)
-                    return result.factsFiled
-                }
-            } catch {
-                Logging.stderr.log(
-                    "AriaResident fact-extraction activation failed: \(error). " +
-                    "Signal 14 will remain inert.")
-                return nil
-            }
+        } catch {
+            Logging.stderr.log(
+                "AriaResident fact-extraction activation failed: \(error). " +
+                "Signal 14 will remain inert.")
+            return nil
         }
     }
 

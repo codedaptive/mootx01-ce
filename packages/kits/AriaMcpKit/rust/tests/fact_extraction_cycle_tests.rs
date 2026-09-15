@@ -5,6 +5,7 @@
 //!   GSS-14a  `build_fact_extraction_cycle` — Off → None (calls the real function)
 //!   GSS-14b  `activate_and_build_extraction_cycle` — On + stub extractor → Some
 //!   GSS-14c  `build_fact_extraction_cycle` — On + no config paths → None
+//!   GSS-14d  `build_fact_extraction_cycle` — provider selector + settings paths
 //!
 //! GSS-14b is the On-path gate: it calls the testable seam
 //! `activate_and_build_extraction_cycle` with a stub `FactExtractor` so that
@@ -246,4 +247,79 @@ fn build_fact_extraction_cycle_is_none_when_setting_on_and_no_config_paths() {
         coord_guard.registered_fact_extractor(&handle).is_none(),
         "no extractor must be registered when config paths are absent"
     );
+}
+
+// ---------------------------------------------------------------------------
+// GSS-14d: selector + settings choose the Rust NuExtract provider
+// ---------------------------------------------------------------------------
+
+/// One product-composition regression gate: configured, readable worker assets
+/// under `fact_extractor=nuextract` register the Candle worker client, while the
+/// same estate under `fact_extractor=apple` stays inactive on the Rust port.
+#[test]
+fn builder_selects_and_activates_only_nuextract_on_rust() {
+    let scratch = std::env::temp_dir().join(format!(
+        "aria-fec-selection-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let worker = scratch.join("moot-nuextract-worker");
+    let gguf = scratch.join("model.gguf");
+    let tokenizer = scratch.join("tokenizer.json");
+    std::fs::write(&worker, b"worker").unwrap();
+    std::fs::write(&gguf, b"gguf").unwrap();
+    std::fs::write(&tokenizer, b"{}").unwrap();
+    std::fs::write(
+        scratch.join("config.json"),
+        format!(
+            r#"{{"fact_extraction":{{"worker_executable":"{}","gguf":"{}","tokenizer":"{}","model_version":"test-v1"}}}}"#,
+            worker.display(), gguf.display(), tokenizer.display()
+        ),
+    )
+    .unwrap();
+
+    let (coord, handle) = open_estate();
+    {
+        let coord_guard = coord.lock().unwrap();
+        coord_guard
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::On,
+            )
+            .unwrap();
+        coord_guard
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtractor,
+                EstatePreferenceValue::Nuextract,
+            )
+            .unwrap();
+    }
+    let cycle = build_fact_extraction_cycle(&coord, handle, Some(&scratch));
+    assert!(cycle.is_some(), "configured NuExtract must activate signal 14");
+    let registered = coord
+        .lock()
+        .unwrap()
+        .registered_fact_extractor(&handle)
+        .expect("NuExtract worker client registered");
+    assert_eq!(registered.spec().provider_id, "nuextract-candle-worker");
+
+    let (apple_coord, apple_handle) = open_estate();
+    {
+        let coord_guard = apple_coord.lock().unwrap();
+        coord_guard
+            .provision_preference(
+                &apple_handle,
+                EstatePreferenceKey::FactExtractor,
+                EstatePreferenceValue::Apple,
+            )
+            .unwrap();
+    }
+    assert!(
+        build_fact_extraction_cycle(&apple_coord, apple_handle, Some(&scratch)).is_none(),
+        "Apple selector must fail quiet on the Rust product"
+    );
+
+    std::fs::remove_dir_all(scratch).ok();
 }

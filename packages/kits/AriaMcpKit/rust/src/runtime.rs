@@ -80,6 +80,18 @@ pub fn run(
     estate: crate::server::RuntimeEstate,
 ) {
     eprintln!("{banner}: starting Rust MCP server");
+    // Registered estates use the install-wide settings directory. Transient
+    // estates use their own directory, so a benchmark never consults the
+    // user's live config.json. The staged model beside the executable remains
+    // the no-config fallback in both cases.
+    let fact_settings_directory = match &estate {
+        crate::server::RuntimeEstate::Sqlite { record, .. }
+            if record.kind == genius_locus_kit::EstateRecordKind::Transient =>
+        {
+            record.directory.clone()
+        }
+        _ => moot_product_identity::storage::configuration_directory(),
+    };
     // Exits with a nonzero code when the estate cannot be opened (an
     // unreachable PostgreSQL estate fails fast here).
     let mut config = match ServerConfig::for_estate(estate) {
@@ -319,14 +331,13 @@ pub fn run(
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
                 });
-            // Signal 14 (FactExtractionDutySignal): activate the NuExtract
-            // worker and wire the cycle when the estate setting is On and the
-            // model assets are present. `None` from `build_fact_extraction_cycle`
-            // is not an error — most installs carry no model on disk.
+            // Signal 14 (FactExtractionDutySignal): activate the estate's
+            // selected provider when the master setting is On. `None` is a
+            // fail-quiet unavailable-provider result, not a server error.
             let fact_extraction_cycle = build_fact_extraction_cycle(
                 &coord_for_hnsw,
                 handle_for_hnsw,
-                None, // production: resolves the product default config dir
+                Some(&fact_settings_directory),
             );
             // Signal 11 (ConsolidationSignal) and the contradiction sweep are
             // preference-gated: each cycle is built only when the estate's
@@ -880,19 +891,15 @@ pub fn build_contradiction_sweep_cycle(
 /// build the worker client, activate, and return the cycle closure.
 ///
 /// Three cases:
-/// - Estate setting `Off` → `None`. No activation. Today's behaviour exactly.
-/// - Estate setting `On`, all four config.json paths present and the worker
-///   binary reachable → activate via `activate_and_build_extraction_cycle` and
-///   return `Some(cycle)` for argument 6 of `register_default_standing_signals`.
-/// - Estate setting `On` but any path missing or the worker binary unreachable
-///   → log and return `None`. This is the common case on most installs: the
-///   daemon continues serving, signal 14 is inactive. Missing assets are NOT
-///   an error.
+/// - Estate setting `Off` → `None`. No activation.
+/// - Estate setting `On`, selector `Nuextract`, and configured or bundled
+///   worker assets reachable → activate and return `Some(cycle)`.
+/// - Estate setting `On` with selector `Apple`, or with unavailable NuExtract
+///   assets → log and return `None`; the daemon continues serving.
 ///
-/// `config_dir` accepts `None` in production (resolves the product default
-/// configuration directory) and `Some(path)` in tests so no real config.json
-/// is touched. This keeps the decision and the production call site in sync —
-/// the server path calls this function; tests drive the same function.
+/// `config_dir` is the settings-module directory selected by the host. Product
+/// serve passes the install directory for registered estates and the estate's
+/// own directory for transient estates; tests pass a scratch directory.
 ///
 /// Activation and cycle construction delegate to `activate_and_build_extraction_cycle`.
 pub fn build_fact_extraction_cycle(
@@ -912,9 +919,23 @@ pub fn build_fact_extraction_cycle(
         return None;
     }
 
-    // Step 2: resolve the configuration directory and load the four Rust-port
-    // paths from config.json. Swift-only keys (coreai_asset, coreai_tokenizer)
-    // are already ignored by the Rust settings parser.
+    // The second preference selects the provider. Apple Foundation Models is
+    // an Apple-only runtime; the Rust product fails quiet when it is selected.
+    let extractor_setting = {
+        let coord_guard = coord.lock().ok()?;
+        coord_guard
+            .provisioned_preference(&handle, genius_locus_kit::EstatePreferenceKey::FactExtractor)
+            .ok()?
+    };
+    if extractor_setting == genius_locus_kit::EstatePreferenceValue::Apple {
+        eprintln!(
+            "AriaResident: fact_extractor=apple is unavailable on the Rust product; signal 14 inactive"
+        );
+        return None;
+    }
+
+    // Step 2: resolve the configuration directory and load any Rust-port path
+    // overrides from config.json. Swift-only keys are ignored by the parser.
     let owned_dir;
     let dir: &std::path::Path = match config_dir {
         Some(p) => p,
@@ -924,19 +945,48 @@ pub fn build_fact_extraction_cycle(
         }
     };
     let settings = moot_product_identity::settings::load(dir);
-    let (worker_exe, gguf, tokenizer, model_version) = match (
-        settings.fact_extraction_worker_executable,
-        settings.fact_extraction_gguf,
-        settings.fact_extraction_tokenizer,
-        settings.fact_extraction_model_version,
-    ) {
-        (Some(w), Some(g), Some(t), Some(v)) => (w, g, t, v),
+    let current_executable = std::env::current_exe().ok();
+    let sibling_worker = current_executable
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(|directory| directory.join("moot-nuextract-worker"));
+    let configured_model_directory = dir.join("models").join("nuextract-tiny-v1.5");
+    let bundled_model_directory = current_executable
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .map(|directory| directory.join("share/mootx01/models/nuextract-tiny-v1.5"));
+    let default_model_directory = [
+        Some(configured_model_directory),
+        bundled_model_directory,
+    ]
+    .into_iter()
+    .flatten()
+    .find(|directory| {
+        directory.join("model.gguf").is_file()
+            && directory.join("tokenizer.json").is_file()
+    });
+
+    let worker_exe = settings
+        .fact_extraction_worker_executable
+        .map(std::path::PathBuf::from)
+        .or(sibling_worker);
+    let gguf = settings
+        .fact_extraction_gguf
+        .map(std::path::PathBuf::from)
+        .or_else(|| default_model_directory.as_ref().map(|d| d.join("model.gguf")));
+    let tokenizer = settings
+        .fact_extraction_tokenizer
+        .map(std::path::PathBuf::from)
+        .or_else(|| default_model_directory.as_ref().map(|d| d.join("tokenizer.json")));
+    let model_version = settings
+        .fact_extraction_model_version
+        .unwrap_or_else(|| "63e2e80c804d9c97f3f19a4aa25613e7beca83c9".into());
+    let (worker_exe, gguf, tokenizer) = match (worker_exe, gguf, tokenizer) {
+        (Some(worker), Some(model), Some(tokenizer)) => (worker, model, tokenizer),
         _ => {
-            // One or more paths absent — this is expected on installs that
-            // have not provisioned a model. Signal 14 stays inactive.
             eprintln!(
-                "AriaResident: fact extraction On but config.json is missing \
-                 one or more fact_extraction paths; signal 14 inactive"
+                "AriaResident: NuExtract is selected but no configured or bundled worker/model is available; signal 14 inactive"
             );
             return None;
         }
@@ -945,9 +995,9 @@ pub fn build_fact_extraction_cycle(
     // Step 3: build the worker client. Fails quietly when the binary or model
     // files are unreadable (validate() checks that each path is a regular file).
     let config = fact_extraction_kit_providers::NuExtractWorkerConfig::tiny_v1_5(
-        &worker_exe,
-        &gguf,
-        &tokenizer,
+        worker_exe,
+        gguf,
+        tokenizer,
         &model_version,
     );
     let client = match fact_extraction_kit_providers::NuExtractWorkerClient::new(config) {

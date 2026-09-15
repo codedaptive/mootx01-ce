@@ -139,6 +139,7 @@ fn grounded_fact_files_with_provenance_and_settles_debt() {
 
     let facts = store.all_kg_facts().expect("facts");
     let fact = &facts[0];
+    assert!(uuid::Uuid::parse_str(&fact.id).is_ok());
     assert_eq!(fact.source_drawer_id, drawer_id);
     assert_eq!(fact.evidence_quote, SOURCE);
     assert_eq!(fact.evidence_start, 0);

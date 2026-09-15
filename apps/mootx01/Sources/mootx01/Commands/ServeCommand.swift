@@ -28,6 +28,7 @@ import MootProductIdentity
 import AriaResident
 import FactExtractionKit
 import FactExtractionKitProviders
+import MootFactExtractorActivation
 import Darwin
 
 
@@ -495,19 +496,19 @@ struct ServeCommand: AsyncParsableCommand {
             // MootPaths.daemonStatsStorePath — the same location moot-mgr reads
             // and the launchd plist no longer needs to carry the path in its env
             // (R6: ARIA_MCP_STATS_STORE moves from env to configuration).
-            // Fact-extraction extractor construction (FACT_EXTRACTION_WIRE §2b).
-            // Priority:
-            //   1. CoreAI NuExtract — when coreai_asset + coreai_tokenizer are present
-            //      in config.json and the assets exist on disk. Requires the
-            //      coreai-nuextract-worker subcommand (this binary itself).
-            //   2. nil — no extractor; Signal 14 stays inert.
-            //
-            // The resolver in resolveFactExtractionCycle also reads the estate's
-            // fact_extraction setting and gates activation behind it; the extractor
-            // built here is only activated if the setting is .on.
-            let productSettings = MootProductIdentity.Settings.load()
-            let factExtractor: (any FactExtractor)? = buildFactExtractor(
-                settings: productSettings,
+            // The master switch and selected provider are estate-owned. A
+            // transient benchmark estate reads only its own optional config;
+            // registered estates read the product configuration directory.
+            let factExtractionSetting = try? await kit.provisionedPreference(
+                .factExtraction, for: handle)
+            let factExtractorSetting = try? await kit.provisionedPreference(
+                .factExtractor, for: handle)
+            let factSettingsDirectory = estate.kind == .registered
+                ? EstateCatalog.configurationDirectory : estate.directory
+            let factExtractor: (any FactExtractor)? = FactExtractorBuilder.build(
+                masterSetting: factExtractionSetting ?? .off,
+                extractorSetting: factExtractorSetting ?? .nuextract,
+                settingsDirectory: factSettingsDirectory,
                 workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
 
             let config = AriaResident.ResidentConfig(
@@ -914,68 +915,6 @@ struct ServeCommand: AsyncParsableCommand {
         }
         return port
     }
-}
-
-// MARK: - Fact extractor construction (FACT_EXTRACTION_WIRE §2b)
-
-/// Build the best available fact extractor given the product settings and the
-/// running binary's URL (needed for CoreAI's out-of-process worker).
-///
-/// Priority order (documented in ServeCommand resident-HTTP build block above):
-///
-/// 1. **CoreAI NuExtract** — when `coreai_asset` + `coreai_tokenizer` are present
-///    in config.json. Throws `FactExtractionError.unavailable` when the .aimodel
-///    directory or tokenizer file is absent; the failure falls through to nil.
-///    `modelVersion` defaults to `"1.0"` when absent from config so the recipe ID
-///    is stable across installs that predate the key.
-///
-/// 2. **nil** — no extractor. Signal 14 stays inert. Install coreai_asset and
-///    coreai_tokenizer in config.json to enable CoreAI NuExtract.
-///
-/// The extractor is only ACTIVATED inside `resolveFactExtractionCycle`, which also
-/// gates on the estate's `fact_extraction` setting. Building the extractor here
-/// does not start any inference — construction just validates that the assets are
-/// reachable on disk.
-///
-/// - Parameters:
-///   - settings: Loaded product identity settings; may have nil CoreAI fields when
-///     the operator has not configured them.
-///   - workerExecutableURL: URL of the running binary — the `mootx01` binary is its
-///     own `coreai-nuextract-worker` via the registered subcommand.
-/// - Returns: The CoreAI NuExtract extractor, or `nil` when assets are absent.
-@Sendable
-private func buildFactExtractor(
-    settings: MootProductIdentity.Settings?,
-    workerExecutableURL: URL
-) -> (any FactExtractor)? {
-    // Step 1: CoreAI NuExtract (requires operator-provided model assets)
-    if let assetPath = settings?.factExtractionCoreAIAsset,
-       let tokenizerPath = settings?.factExtractionCoreAITokenizer {
-        let modelVersion = settings?.factExtractionModelVersion ?? "1.0"
-        do {
-            let extractor = try CoreAINuExtractFactExtractor(
-                workerExecutableURL: workerExecutableURL,
-                workerArgumentsPrefix: ["coreai-nuextract-worker"],
-                assetURL: URL(fileURLWithPath: assetPath),
-                tokenizerURL: URL(fileURLWithPath: tokenizerPath),
-                modelVersion: modelVersion)
-            Logging.stderr.log(
-                "mootx01 serve: CoreAI NuExtract extractor constructed " +
-                "(asset=\(assetPath), version=\(modelVersion))")
-            return extractor
-        } catch {
-            // Assets missing or worker binary not executable; no extractor available.
-            Logging.stderr.log(
-                "mootx01 serve: CoreAI NuExtract extractor unavailable (\(error)); " +
-                "no fact extractor will be activated")
-        }
-    }
-    // Step 2: No extractor available — install coreai_asset + coreai_tokenizer
-    // in config.json to enable fact extraction.
-    Logging.stderr.log(
-        "mootx01 serve: no fact extractor available " +
-        "(install coreai_asset + coreai_tokenizer in config.json to enable CoreAI)")
-    return nil
 }
 
 #endif

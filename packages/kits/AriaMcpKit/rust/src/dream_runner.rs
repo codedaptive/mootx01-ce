@@ -175,6 +175,29 @@ pub fn run_one_dreaming_cycle(
     let reg = EstateRegistry::new_sqlite_with(estate_path, owner, opening)
         .map_err(|e| format!("dream: estate open failed: {e}"))?;
     let handle = reg.default.handle.clone();
+
+    // The one-shot finisher owns Signal 14 while it has the estate open. Build
+    // and activate through the same production function as the resident, then
+    // run one bounded batch even when the REM-ALPHA queue is empty.
+    let fact_settings_directory = if opening.federate {
+        None
+    } else {
+        Path::new(estate_path).parent()
+    };
+    if let Some(fact_cycle) = crate::runtime::build_fact_extraction_cycle(
+        &reg.coord,
+        handle,
+        fact_settings_directory,
+    ) {
+        match fact_cycle() {
+            Ok(filed) => eprintln!(
+                "mootx01 dream: fact extraction cycle complete — {filed} fact(s) filed"
+            ),
+            Err(error) => eprintln!(
+                "mootx01 dream: fact extraction cycle failed: {error}"
+            ),
+        }
+    }
     // The DrawerStore is the manifest-backed KV surface for policy persistence.
     let store = std::sync::Arc::clone(&reg.default.store);
 
