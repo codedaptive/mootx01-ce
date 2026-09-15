@@ -2,9 +2,7 @@
 //
 // The whole-record dense float query surface of the legacy `Corpus` actor:
 // nearest and farthest per-signal recall over the stored float rows
-// (vectorIndex 1) and the per-signal discrimination signal. WholeRecordDense
-// sidecar: compiled only under MOOTX01_WHOLE_RECORD_DENSE; the default build
-// carries no float query surface and writes no float rows.
+// (vectorIndex 1) and the per-signal discrimination signal.
 //
 // The engine members this extension reads (`slots`, `vectorStore`,
 // `chunkSourceMap`, `defaultProvider`, `_forcedFloatError`) are `package`
@@ -12,7 +10,6 @@
 //
 // Rust twin: rust/src/corpus/float_lane.rs.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
 import CorpusKit
 import Foundation
 import MootProductIdentity
@@ -468,4 +465,3 @@ extension Corpus {
         }
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

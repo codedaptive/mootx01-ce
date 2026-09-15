@@ -1,15 +1,15 @@
 //! Whole-record dense float lane tests of the legacy `Corpus` surface:
 //! `FloatLaneOutcome` variants, the forced store-error seam, telemetry
 //! parity with monitoring off and on, and the farthest (anti-similar)
-//! per-signal recall. Rust twin of `FloatLaneOutcomeTests.swift`. Compiled
-//! only with the `whole-record-dense` feature (the sidecar engine).
-#![cfg(feature = "whole-record-dense")]
+//! per-signal recall.
 
 use corpus_kit::{Corpus, EmbeddingModelConfig, FloatLaneOutcome};
+use engram_lib::Engram;
 use intellectus_lib::Intellectus;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
 use std::sync::{Arc, Mutex, OnceLock};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 use uuid::Uuid;
 
 static GLOBAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -31,24 +31,32 @@ fn make_corpus() -> Corpus {
 
 const NOW_MILLIS: i64 = 1_000_000_000;
 
-/// Fake inference: a fixed-dimension vector derived from the token
-/// count. Stands in for a real model pass — the kit owns tokenization
-/// and projection, the host owns this closure.
-fn fake_inference(dim: usize) -> corpus_kit::NamedInferenceFn {
-    Box::new(move |tokens: &[i32]| {
-        let base = (tokens.len() as f32).max(1.0);
-        Ok((0..dim).map(|d| ((d as f32 + 1.0) / base).sin()).collect())
-    })
+/// Fake host provider: a fixed-dimension vector derived from the text
+/// length. Stands in for a real model pass — the kit owns the pipeline, the
+/// host owns the provider.
+struct FakeVectorProvider {
+    dim: usize,
+}
+impl EmbeddingProvider for FakeVectorProvider {
+    fn model_id(&self) -> &str { "test-fake-vector-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let base = (text.split_whitespace().count() as f32).max(1.0);
+        Ok((0..self.dim).map(|d| ((d as f32 + 1.0) / base).sin()).collect())
+    }
 }
 
-fn make_corpus_minilm() -> Corpus {
+/// A corpus over one host-supplied float-capable provider. `CandleNL` is the
+/// pass-through slot for a non-trainable provider.
+fn make_corpus_host_provider() -> Corpus {
     let config = EstateConfiguration::new(Uuid::new_v4(), BackendConfiguration::InMemory);
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
     Corpus::open(
         storage,
-        EmbeddingModelConfig::MiniLM { inference: fake_inference(384) },
+        EmbeddingModelConfig::CandleNL { provider: Box::new(FakeVectorProvider { dim: 384 }) },
     )
-    .expect("Corpus::open must succeed with MiniLM config")
+    .expect("Corpus::open must succeed with a host provider")
 }
 
 /// §1-rust EmptyQuery: empty query string → EmptyQuery outcome, no telemetry.
@@ -424,7 +432,7 @@ fn float_lane_outcome_store_error_hook_consumed_on_first_call() {
 fn named_minilm_float_lane_is_available() {
     let _guard = global_lock();
     Intellectus::set_enabled(false);
-    let corpus = make_corpus_minilm();
+    let corpus = make_corpus_host_provider();
     corpus
         .ingest("dense semantic lane content for the float path", "doc-float", NOW_MILLIS)
         .expect("ingest must succeed");
@@ -440,18 +448,23 @@ fn named_minilm_float_lane_is_available() {
     );
 }
 
-/// A direction-discriminating inference: each text gets a ONE-HOT 384-d
-/// direction chosen by the sum of its FNV-1a token ids mod 384, so distinct
+/// A direction-discriminating provider: each text gets a ONE-HOT 384-d
+/// direction chosen by the FNV-1a hash of its UTF-8 bytes mod 384, so distinct
 /// texts get distinct, mostly-orthogonal directions. Mirrors the Swift
-/// `makeDirectionalCorpus` so both ports steer the float lane identically.
-fn directional_inference() -> corpus_kit::NamedInferenceFn {
-    Box::new(move |tokens: &[i32]| {
+/// `DirectionalFloatProvider` so both ports steer the float lane identically.
+struct DirectionalProvider;
+impl EmbeddingProvider for DirectionalProvider {
+    fn model_id(&self) -> &str { "test-directional-float-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let hash = text.bytes().fold(14_695_981_039_346_656_037u64, |acc, b| {
+            (acc ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
+        });
         let mut v = vec![0.0_f32; 384];
-        let sum: i32 = tokens.iter().fold(0i32, |a, t| a.wrapping_add(*t));
-        let slot = ((sum % 384 + 384) % 384) as usize;
-        v[slot] = 1.0;
+        v[(hash % 384) as usize] = 1.0;
         Ok(v)
-    })
+    }
 }
 
 fn make_directional_corpus() -> Corpus {
@@ -459,9 +472,9 @@ fn make_directional_corpus() -> Corpus {
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(config));
     Corpus::open(
         storage,
-        EmbeddingModelConfig::MiniLM { inference: directional_inference() },
+        EmbeddingModelConfig::CandleNL { provider: Box::new(DirectionalProvider) },
     )
-    .expect("Corpus::open must succeed with MiniLM config")
+    .expect("Corpus::open must succeed with a host provider")
 }
 
 fn ids_of(outcome: &FloatLaneOutcome) -> Vec<String> {

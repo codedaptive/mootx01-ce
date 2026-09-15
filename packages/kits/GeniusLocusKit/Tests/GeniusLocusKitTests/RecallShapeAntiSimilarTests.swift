@@ -27,8 +27,7 @@
 // The inference closure gives each drawer a distinct one-hot direction so the
 // nearest/farthest ordering is deterministic and reproduces across Swift/Rust.
 
-// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
-#if MOOTX01_WHOLE_RECORD_DENSE
+// the whole-record float lane is always active.
 import Testing
 import Foundation
 import LocusKit
@@ -91,10 +90,9 @@ struct RecallShapeAntiSimilarTests {
     }
 
     /// Open a SINGLE-provider estate with `drawerCount` drawers. Drawer i is
-    /// captured with content whose FNV-1a lead token routes a one-hot direction;
-    /// `query` aligns (same direction) with drawer 0. The directions are spread
-    /// across distinct axes so cosine ordering is deterministic and the dense
-    /// top-K truncation drops a well-defined tail.
+    /// captured with i + 2 words, so its float direction sits at a distinct
+    /// angle from the one-word `query`; cosine ordering is deterministic and the
+    /// dense top-K truncation drops a well-defined tail.
     ///
     /// Returns the kit, handle, the captured drawer ids (index-aligned), and the
     /// query string aligned to drawer 0.
@@ -110,23 +108,17 @@ struct RecallShapeAntiSimilarTests {
         let corpusStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         // MONOTONIC cosine spread: a drawer's direction is [cos θ, sin θ, 0…] with
-        // θ proportional to its token COUNT. The query has the fewest tokens (θ≈0),
-        // so cosine-to-query decreases monotonically as a drawer's token count
-        // grows — drawer i (i filler words) is the i-th most dissimilar. This makes
-        // "most dissimilar" UNAMBIGUOUS (no cosine ties), so the dense top-K
-        // truncation drops a well-defined tail and the farthest pass keeps a
-        // well-defined head. The query's own count is pinned smallest below.
+        // θ proportional to its WORD count (WordCountAngleProvider). The query has
+        // the fewest words (θ≈0), so cosine-to-query decreases monotonically as a
+        // drawer's word count grows — drawer i (i filler words) is the i-th most
+        // dissimilar. This makes "most dissimilar" UNAMBIGUOUS (no cosine ties),
+        // so the dense top-K truncation drops a well-defined tail and the farthest
+        // pass keeps a well-defined head. The query's own count is pinned smallest
+        // below. The provider is registered under `miniLMID` so the dense lane
+        // key the tests steer is its own.
         let corpus = try await CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: { tokens in
-                // θ scaled so 0…drawerCount tokens sweeps ~0…90°: orthogonal at the
-                // far end, identical at the near end. 0.018 rad/token ≈ 82° at i=80.
-                let theta = Float(tokens.count) * 0.018
-                var v = Array(repeating: Float(0), count: 384)
-                v[0] = Foundation.cos(theta)
-                v[1] = Foundation.sin(theta)
-                return v
-            })]
+            models: [.lsa(provider: WordCountAngleProvider(modelID: Self.miniLMID))]
         )
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
@@ -134,7 +126,7 @@ struct RecallShapeAntiSimilarTests {
         let vectorStore = VectorStore(storage: vsStorage)
         let hammingModelID = await corpus.modelID
 
-        // Drawer i has a distinct token COUNT (i + 2 words) so its direction angle
+        // Drawer i has a distinct WORD count (i + 2 words) so its direction angle
         // θ(i) is monotonic in i; drawer 0 (fewest words) is closest to the query.
         // Each drawer also carries a unique lead word so BM25/Hamming still treat
         // them as distinct documents.
@@ -328,4 +320,3 @@ struct RecallShapeAntiSimilarTests {
         }
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

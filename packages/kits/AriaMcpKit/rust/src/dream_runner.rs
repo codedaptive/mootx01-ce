@@ -60,17 +60,13 @@ impl VectorStoreHNSWAdapter {
 impl HNSWGraphMaintenance for VectorStoreHNSWAdapter {
     /// Rebuild all active HNSW graphs from current float records (THETA duty;
     /// included here for protocol completeness — not called by the BETA path).
-    // Float index duty: `whole-record-dense` only (the default product writes
-    // no whole-record float rows, ruling 2026-09-07).
-    #[cfg(feature = "whole-record-dense")]
+    // Float index duty: the float index lane is always active.
     fn rebuild_float_index(&mut self, _now_epoch_secs: f64) -> bool {
         self.0.rebuild_all_hnsw_indices().is_ok()
     }
 
     /// Compact HNSW tombstones across all active graph partitions (BETA duty).
-    // Float index duty: `whole-record-dense` only (the default product writes
-    // no whole-record float rows, ruling 2026-09-07).
-    #[cfg(feature = "whole-record-dense")]
+    // Float index duty: the float index lane is always active.
     fn compact_float_index_tombstones(&mut self, _now_epoch_secs: f64) -> bool {
         self.0.compact_all_hnsw_tombstones().is_ok()
     }

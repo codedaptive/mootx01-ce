@@ -2,7 +2,7 @@
 //
 // Persistence for a trainable embedding provider's INCREMENTALLY-MAINTAINED
 // statistics ("counts"): the raw accumulated state a distributional provider
-// (RI/PPMI/LSA/NMF) builds from the corpus — vocabulary, document-frequencies,
+// (RI/LSA) builds from the corpus — vocabulary, document-frequencies,
 // co-occurrence counts, RI context vectors — kept as an opaque per-provider
 // blob plus two cheap, queryable trigger columns.
 //
@@ -341,9 +341,9 @@ public actor CorpusProviderCountsStore {
     /// assignment ever has to change.
     static let modelRegistry: [String: Int] = [
         "random-indexing-v1": 0,
-        "ppmi-v1": 1,
+        "ppmi-v1": 1,   // retired family; the bit stays reserved
         "lsa-v1": 2,
-        "nmf-v1": 3
+        "nmf-v1": 3     // retired family; the bit stays reserved
     ]
 
     /// Registry lookup that fails loudly on an unregistered model.

@@ -1,6 +1,6 @@
 //! The ONE pooling function that turns a bag of terms into a unit document
-//! vector for the sparse-index distributional families (Random Indexing and
-//! PPMI). Documents at index time and queries at recall time go through this
+//! vector for the sparse-index distributional family (Random Indexing).
+//! Documents at index time and queries at recall time go through this
 //! same function, so the two sides of a cosine comparison are built the same
 //! way — a document's own opening sentence lands on the document.
 //!
@@ -16,7 +16,7 @@
 //! co-occur with everything) and they occur in every long text. Every
 //! document therefore points at one shared direction — the corpus mean — and
 //! pairwise cosines sit near 1 regardless of content (measured 0.999 for RI
-//! and 0.955 for PPMI on a 13,817 drawer estate). Two fixes, each necessary:
+//! on a 13,817 drawer estate). Two fixes, each necessary:
 //!
 //!   1. IDF weighting shrinks the contribution of a term that appears in many
 //!      documents (a term in every document weighs exactly 0).

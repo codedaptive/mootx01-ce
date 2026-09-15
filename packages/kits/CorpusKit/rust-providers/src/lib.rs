@@ -8,8 +8,9 @@
 //!   bit-identical to Swift's same-named type (both fold token
 //!   strings through `substrate_types::fnv`).
 //! - `MiniLMTextProvider` -- the MiniLM text provider (always compiled).
-//! - `MPNetTextProvider`, `EmbeddingGemmaProvider` -- compiled only when
-//!   the `dense-families` feature is enabled (off by default; plan 70BC55F3).
+//! - `RandomIndexingProvider` -- the always-on distributional provider;
+//!   feeds dreaming, contradiction, and consolidation.
+//! - `LsaProvider` -- compiled when the `lsa` feature is on.
 //!
 //! The real WordPiece / SentencePiece tokenizers are owned by
 //! NEITHER port -- Swift's named providers default to
@@ -24,76 +25,41 @@
 //! to it directly. This layout matches Swift's split between
 //! `CorpusKit` and `CorpusKitProviders`.
 //!
-//! ## Compile-time switches
+//! ## Default ensemble
 //!
-//! `dense-families` (default: off, plan 70BC55F3 2026-09-05):
-//!     Compiles NMF, PPMI, FDC, MPNet, and EmbeddingGemma providers.
-//!     Off by default: measured cost exceeds benefit vs. BM25+RI on two corpora.
-//!     RI stays always-on: binary fingerprint feeds dreaming, contradiction,
-//!     and consolidation. Enable: `cargo test --features dense-families`.
-//!     Mirror of Swift trait DenseFamilies / #define MOOTX01_DENSE_FAMILIES.
-//!
-//! `lsa` (default: off, ruling 2026-09-07):
-//!     Compiles LsaProvider and its basis training on a switch of its own.
-//!     dense-families does not enable it: the family is dark and unproven.
-//!     Implies dense-families (shared counts and reduced vocabulary).
-//!     Mirror of Swift trait LSA / #define MOOTX01_LSA.
+//! RI and LSA are both always-on. No Cargo feature gates are required.
+//! RandomIndexingProvider and LsaProvider compile unconditionally.
 
 pub mod deterministic_tokenizer;
 // Shared little-endian binary codec for distributional-provider
 // basis serialization. PROVIDER-FORMAT code (not a math primitive) used by
-// RandomIndexing, PPMI, LSA, and NMF. Swift port: Sources/CorpusKitProviders/
+// RandomIndexing and LSA. Swift port: Sources/CorpusKitProviders/
 // BasisCodec.swift. The byte layout is the cross-port contract.
 pub mod basis_codec;
-// Shared term-document count builder reused by LSA, NMF, RI, and PPMI.
+// Shared term-document count builder reused by LSA and RI.
 // Owns vocab encounter-order construction, TF counts, DF counts, and the
 // one smoothed IDF function.
 // Swift port: Sources/CorpusKitProviders/TermDocumentCounts.swift.
 pub mod term_document_counts;
-// The ONE pooling function for the term-vector distributional providers
-// (RI, PPMI): IDF-weighted sum of the distinct terms' vectors, L2-normalised,
+// The ONE pooling function for the term-vector distributional provider
+// (RI): IDF-weighted sum of the distinct terms' vectors, L2-normalised,
 // corpus-mean direction removed, L2-normalised. Documents and queries share it.
 // Swift port: Sources/CorpusKitProviders/DistributionalPooling.swift.
 pub mod distributional_pooling;
 pub mod random_indexing;
 // MiniLM text provider — always compiled; used by the encoder rerank lane.
-// MPNet and EmbeddingGemma are under dense-families; see text_providers.rs.
 pub mod text_providers;
 // The ONE definition of the default recall ensemble.
-// With dense-families OFF: RI only. With dense-families ON (without lsa):
-// RI, PPMI, NMF, FDC. With lsa ON (implies dense-families): RI, PPMI, LSA, NMF, FDC.
+// Default ensemble: RI and LSA, both always on.
 // Mirrors Swift's CorpusEnsemble.defaultEnsemble() in CorpusKitProviders.
 pub mod default_ensemble;
 
-// Dense-family providers: compiled only when `dense-families` feature is on.
-// Off by default (plan 70BC55F3, 2026-09-05): NMF/PPMI/FDC add cost
-// without beating BM25+RI on two corpora. RI stays always-on.
-// Enable: cargo test --features dense-families.
-#[cfg(feature = "dense-families")]
-// shared IDF-reduced vocabulary selection for the dense NMF
-// factorizations (also used by LSA when the `lsa` feature is on;
-// bit-identical with Swift's CorpusKitProviders/ReducedVocab).
+// feature is on. Bit-identical with Swift's CorpusKitProviders/ReducedVocab.
 pub mod reduced_vocab;
 // Semantic fusion signal: LSA/SVD distributional-semantics provider.
 // Compiled only when the `lsa` feature is on (ruling 2026-09-07):
-// dark and unproven; dense-families does not enable it.
 // Uses substrate_ml::svd::JacobiSvd (deterministic, bit-identical with Swift).
-#[cfg(feature = "lsa")]
 pub mod lsa;
-#[cfg(feature = "dense-families")]
-// NMF latent-factor provider.
-// Reuses substrate_ml::nmf::NMFAlternatingLeastSquares (Gate-2: no reimplementation).
-// tolerance=0 forces fixed iteration count for bit-identical cross-port output.
-pub mod nmf_provider;
-#[cfg(feature = "dense-families")]
-pub mod ppmi;
-#[cfg(feature = "dense-families")]
-// FDC lattice co-classification provider.
-// Reuses lattice_lib::Fdc::encode (text→FDC code) and
-// lattice_lib::Fdc::ancestors (the runtime façade over FdcFrame::ancestors).
-// The decimal hierarchy math lives in LatticeLib — not reimplemented here.
-// Stateless — no training required.
-pub mod fdc_provider;
 
 // Candle-backed in-process ML inference provider (all-MiniLM-L6-v2).
 // Compiled only when the `candle` Cargo feature is enabled.
@@ -127,26 +93,9 @@ pub use random_indexing::{
     RandomIndexingProvider, RI_DIMENSION, RI_NONZEROS, RI_PROJECTION_SEED, RI_WINDOW,
     ri_index_vector,
 };
-// MiniLM is always compiled; MPNet and EmbeddingGemma are dense-families only.
+// MiniLM is always compiled; LSA is gated behind the `lsa` feature.
 pub use text_providers::MiniLMTextProvider;
-#[cfg(feature = "dense-families")]
-pub use text_providers::{EmbeddingGemmaProvider, MPNetTextProvider};
-#[cfg(feature = "lsa")]
 pub use lsa::{LsaProvider, LSA_DEFAULT_RANK, LSA_PROJECTION_SEED};
-#[cfg(feature = "dense-families")]
-pub use nmf_provider::{
-    NmfProvider, NMF_DEFAULT_ITERATIONS, NMF_DEFAULT_RANK, NMF_FACTORIZATION_SEED,
-    NMF_PROJECTION_SEED,
-};
-#[cfg(feature = "dense-families")]
-pub use ppmi::{
-    PpmiProvider, PPMI_DIMENSION, PPMI_NONZEROS, PPMI_PROJECTION_SEED, PPMI_WINDOW,
-};
-#[cfg(feature = "dense-families")]
-pub use fdc_provider::{
-    FDCProvider, FDC_DIMENSION, FDC_PROJECTION_SEED,
-    fdc_node_vector, fdc_embedding_vector,
-};
 pub use default_ensemble::default_ensemble;
 pub use span_encoder_factory::{SpanEncoderFactory, VOCABULARY_FILE_NAME};
 pub use pair_scorer_factory::PairScorerFactory;

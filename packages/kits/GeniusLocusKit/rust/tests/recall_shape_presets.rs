@@ -40,56 +40,16 @@ fn preset_names_are_discoverable_and_each_resolves() {
             );
         }
     }
-    // Default roster: 26 presets. The whole-record-dense feature adds the
-    // eight whole-record presets (conceptual, associative, consensus,
-    // ri_forward, whole_record_baseline, anti_redundant_ri, float-l2,
-    // float-dot) = 34; dense-families adds ppmi/lsa/nmf_forward and
-    // anti_redundant_lsa/nmf on top = 39.
-    // LSA presets (`lsa_forward`, `anti_redundant_lsa`) are dark without the
-    // `lsa` feature (ruling 2026-09-07) — they are NOT part of the `dense-families` roster.
-    let lsa_presets = ["lsa_forward", "anti_redundant_lsa"];
-    let other_family_presets = ["ppmi_forward", "nmf_forward", "anti_redundant_nmf"];
-    let whole_record_presets = ["conceptual", "associative", "consensus", "ri_forward",
-                                "whole_record_baseline", "anti_redundant_ri", "float-l2", "float-dot"];
-    #[cfg(all(feature = "dense-families", feature = "lsa"))]
+    // Default roster: 26 presets (base) + 7 whole-record (conceptual, associative,
+    // consensus, ri_forward, anti_redundant_ri, float-l2, float-dot) + 2 LSA
+    // (lsa_forward, anti_redundant_lsa) = 35. Dense-family presets are retired.
+    let retired_presets = ["ppmi_forward", "nmf_forward", "anti_redundant_nmf"];
     {
-        // dense-families + lsa: 39 presets.
-        assert_eq!(RecallShape::PRESET_NAMES.len(), 39);
-        let _ = (lsa_presets, other_family_presets, whole_record_presets);
-    }
-    #[cfg(all(feature = "dense-families", not(feature = "lsa")))]
-    {
-        // dense-families without lsa: 37 presets (lsa_forward and anti_redundant_lsa absent).
-        assert_eq!(RecallShape::PRESET_NAMES.len(), 37);
-        for dark in lsa_presets {
-            assert!(!RecallShape::PRESET_NAMES.contains(&dark), "{dark} is dark without lsa");
-            assert!(RecallShape::preset(dark).is_none());
+        assert_eq!(RecallShape::PRESET_NAMES.len(), 35);
+        for retired in retired_presets {
+            assert!(!RecallShape::PRESET_NAMES.contains(&retired), "{retired} is retired (dense families removed)");
+            assert!(RecallShape::preset(retired).is_none());
         }
-        let _ = (other_family_presets, whole_record_presets);
-    }
-    #[cfg(all(feature = "whole-record-dense", not(feature = "dense-families")))]
-    {
-        assert_eq!(RecallShape::PRESET_NAMES.len(), 34);
-        let family_presets: &[&str] = &["ppmi_forward", "lsa_forward", "nmf_forward", "anti_redundant_lsa", "anti_redundant_nmf"];
-        for dark in family_presets {
-            assert!(!RecallShape::PRESET_NAMES.contains(dark), "{dark} is dark without dense-families");
-            assert!(RecallShape::preset(dark).is_none());
-        }
-        let _ = whole_record_presets;
-    }
-    #[cfg(not(feature = "whole-record-dense"))]
-    {
-        assert_eq!(RecallShape::PRESET_NAMES.len(), 26);
-        let all_dark: &[&str] = &["ppmi_forward", "lsa_forward", "nmf_forward",
-                                   "anti_redundant_lsa", "anti_redundant_nmf",
-                                   "conceptual", "associative", "consensus", "ri_forward",
-                                   "whole_record_baseline", "anti_redundant_ri", "float-l2", "float-dot"];
-        for dark in all_dark {
-            assert!(!RecallShape::PRESET_NAMES.contains(dark), "{dark} is dark without whole-record-dense");
-            assert!(RecallShape::preset(dark).is_none());
-            assert!(RecallShape::preset_description(dark).is_empty());
-        }
-        let _ = (lsa_presets, other_family_presets, whole_record_presets);
     }
     // `cross_encoder` is reserved (sheet §8), not implemented: absent from the
     // roster and unresolvable, so the tool rejects it as unknown.
@@ -123,26 +83,15 @@ fn no_encoder_skips_the_stage_through_signal_encoder_only() {
 fn precise_amplifies_lexical_and_field_and_narrows_frontier() {
     let s = RecallShape::preset("precise").unwrap();
     assert!(s.weight("bm25") > 1.0);
-    #[cfg(feature = "dense-families")]
-    assert!(s.weight(RecallShape::DENSE_FDC) > 1.0);
     assert!(s.weight("dense") > 1.0);
     // Narrow frontier = floor.
     assert_eq!(s.effective_frontier_k(200), RecallShape::FRONTIER_K_FLOOR);
 }
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn conceptual_amplifies_distributional_and_damps_keyword() {
     let s = RecallShape::preset("conceptual").unwrap();
     assert!(s.weight(RecallShape::DENSE_RANDOM_INDEXING) > 1.0);
-    #[cfg(feature = "dense-families")]
-    {
-        assert!(s.weight(RecallShape::DENSE_PPMI) > 1.0);
-        // DENSE_LSA is dark unless the `lsa` feature is on (ruling 2026-09-07).
-        #[cfg(feature = "lsa")]
-        assert!(s.weight(RecallShape::DENSE_LSA) > 1.0);
-        assert!(s.weight(RecallShape::DENSE_NMF) > 1.0);
-    }
     // bm25 damped below neutral but not excluded.
     assert!(s.weight("bm25") < 1.0 && s.weight("bm25") > 0.0);
 }
@@ -161,8 +110,6 @@ fn broad_forwards_all_lanes_and_widens_frontier() {
 fn lexical_zeroes_the_vector_lanes() {
     let s = RecallShape::preset("lexical").unwrap();
     assert!(s.weight("bm25") > 1.0);
-    #[cfg(feature = "dense-families")]
-    assert!(s.weight(RecallShape::DENSE_FDC) > 1.0);
     // The vector lanes are EXCLUDED (==0), not merely absent.
     assert_eq!(s.weight("dense"), 0.0);
     assert_eq!(s.weight("hamming"), 0.0);
@@ -172,56 +119,32 @@ fn lexical_zeroes_the_vector_lanes() {
 fn not_lexical_zeroes_keyword_and_field() {
     let s = RecallShape::preset("not_lexical").unwrap();
     assert_eq!(s.weight("bm25"), 0.0);
-    #[cfg(feature = "dense-families")]
-    assert_eq!(s.weight(RecallShape::DENSE_FDC), 0.0);
     // A lane it does not name stays neutral.
     assert_eq!(s.weight("locus"), 1.0);
 }
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn associative_amplifies_ri_and_nmf_and_widens() {
     let s = RecallShape::preset("associative").unwrap();
     assert!(s.weight(RecallShape::DENSE_RANDOM_INDEXING) > 1.0);
-    #[cfg(feature = "dense-families")]
-    assert!(s.weight(RecallShape::DENSE_NMF) > 1.0);
     assert_eq!(s.effective_frontier_k(64), RecallShape::FRONTIER_K_CEILING);
 }
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn consensus_forwards_every_dense_signal_and_narrows() {
     let s = RecallShape::preset("consensus").unwrap();
     for key in RecallShape::DENSE_SIGNALS {
         assert!(s.weight(key) > 0.0, "{key} should be forwarded, not excluded");
     }
-    #[cfg(feature = "dense-families")]
-    assert!(s.weight(RecallShape::DENSE_FDC) > 0.0);
     assert_eq!(s.effective_frontier_k(200), RecallShape::FRONTIER_K_FLOOR);
 }
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn forward_presets_isolate_one_dense_signal() {
     // ri_forward amplifies RI and EXCLUDES the other distributional siblings.
     let s = RecallShape::preset("ri_forward").unwrap();
     assert!(s.weight(RecallShape::DENSE_RANDOM_INDEXING) > 1.0);
-    #[cfg(feature = "dense-families")]
-    {
-        assert_eq!(s.weight(RecallShape::DENSE_PPMI), 0.0);
-        assert_eq!(s.weight(RecallShape::DENSE_NMF), 0.0);
-        // DENSE_LSA and lsa_forward are dark unless the `lsa` feature is on (ruling 2026-09-07).
-        #[cfg(feature = "lsa")]
-        {
-            assert_eq!(s.weight(RecallShape::DENSE_LSA), 0.0);
-            // lsa_forward isolates LSA.
-            let s = RecallShape::preset("lsa_forward").unwrap();
-            assert!(s.weight(RecallShape::DENSE_LSA) > 1.0);
-            assert_eq!(s.weight(RecallShape::DENSE_RANDOM_INDEXING), 0.0);
-        }
-    }
-    // RI is the only live family without dense-families: nothing to exclude.
-    #[cfg(not(feature = "dense-families"))]
+    // RI and LSA are both live; ri_forward excludes the LSA sibling.
     assert_eq!(s.lane_weights.len(), 1);
 }
 
@@ -244,18 +167,7 @@ fn matrix_column_presets_amplify_their_column() {
 #[test]
 fn anti_redundant_inverts_fdc_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant").unwrap();
-    #[cfg(feature = "dense-families")]
-    {
-        // FDC dense lane is anti-similar (farthest-neighbour direction).
-        assert!(s.is_anti_similar(RecallShape::DENSE_FDC));
-        // DENSE_LSA is dark unless the `lsa` feature is on (ruling 2026-09-07).
-        #[cfg(feature = "lsa")]
-        assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
-        // FDC lane weight stays at 1.0 — anti_similar flag flips direction, not magnitude.
-        assert_eq!(s.weight(RecallShape::DENSE_FDC), 1.0);
-    }
     // FDC is dark: nothing is inverted, the suppression and narrow frontier remain.
-    #[cfg(all(feature = "whole-record-dense", not(feature = "dense-families")))]
     assert!(s.anti_similar_lanes.is_empty());
     // BM25 and Hamming are suppressed so lexical near-duplicates cannot dominate.
     assert!(s.weight("bm25") < 0.0);
@@ -287,7 +199,6 @@ fn session_hybrid_amplifies_bm25_dense_temporal() {
     );
 }
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn leave_one_out_is_reachable_by_zeroing_a_dense_lane() {
     // The documented leave-one-out pattern: take a forward shape and zero ONE
@@ -295,21 +206,12 @@ fn leave_one_out_is_reachable_by_zeroing_a_dense_lane() {
     let base = RecallShape::preset("consensus").unwrap();
     let mut weights = base.lane_weights.clone();
     // DENSE_LSA is dark unless the `lsa` feature is on (ruling 2026-09-07).
-    #[cfg(feature = "lsa")]
     {
         weights.insert(RecallShape::DENSE_LSA.to_string(), 0.0);
         let ablated = RecallShape::new(weights, base.frontier_k);
         assert_eq!(ablated.weight(RecallShape::DENSE_LSA), 0.0);
         assert!(ablated.weight(RecallShape::DENSE_PPMI) > 0.0);
     }
-    #[cfg(all(feature = "dense-families", not(feature = "lsa")))]
-    {
-        weights.insert(RecallShape::DENSE_RANDOM_INDEXING.to_string(), 0.0);
-        let ablated = RecallShape::new(weights, base.frontier_k);
-        assert_eq!(ablated.weight(RecallShape::DENSE_RANDOM_INDEXING), 0.0);
-        assert!(ablated.weight(RecallShape::DENSE_PPMI) > 0.0);
-    }
-    #[cfg(not(feature = "dense-families"))]
     {
         weights.insert(RecallShape::DENSE_RANDOM_INDEXING.to_string(), 0.0);
         let ablated = RecallShape::new(weights, base.frontier_k);
@@ -320,7 +222,6 @@ fn leave_one_out_is_reachable_by_zeroing_a_dense_lane() {
 
 // --- Per-signal anti-similarity presets ---
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn anti_redundant_ri_inverts_ri_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant_ri").unwrap();
@@ -340,7 +241,6 @@ fn anti_redundant_ri_inverts_ri_and_suppresses_bm25_hamming() {
 }
 
 // anti_redundant_lsa is dark unless the `lsa` feature is on (ruling 2026-09-07).
-#[cfg(feature = "lsa")]
 #[test]
 fn anti_redundant_lsa_inverts_lsa_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant_lsa").unwrap();
@@ -354,21 +254,6 @@ fn anti_redundant_lsa_inverts_lsa_and_suppresses_bm25_hamming() {
     assert!(!RecallShape::preset_description("anti_redundant_lsa").is_empty());
 }
 
-#[cfg(feature = "dense-families")]
-#[test]
-fn anti_redundant_nmf_inverts_nmf_and_suppresses_bm25_hamming() {
-    let s = RecallShape::preset("anti_redundant_nmf").unwrap();
-    assert!(s.is_anti_similar(RecallShape::DENSE_NMF));
-    // DENSE_LSA is dark unless the `lsa` feature is on (ruling 2026-09-07).
-    #[cfg(feature = "lsa")]
-    assert!(!s.is_anti_similar(RecallShape::DENSE_LSA));
-    assert!(!s.is_anti_similar(RecallShape::DENSE_FDC));
-    assert_eq!(s.weight(RecallShape::DENSE_NMF), 1.0);
-    assert!(s.weight("bm25") < 0.0);
-    assert!(s.weight("hamming") < 0.0);
-    assert_eq!(s.effective_frontier_k(200), RecallShape::FRONTIER_K_FLOOR);
-    assert!(!RecallShape::preset_description("anti_redundant_nmf").is_empty());
-}
 
 // --- Multi-column matrix presets ---
 
@@ -381,7 +266,6 @@ fn temporal_connection_amplifies_temporal_and_co_occurrence() {
     // No lanes excluded or anti-similar — purely additive over balanced.
     assert_eq!(s.weight("locus"), 1.0);
     assert_eq!(s.weight("bm25"), 1.0);
-    #[cfg(feature = "whole-record-dense")]
     assert!(s.anti_similar_lanes.is_empty());
     // No frontier override.
     assert!(s.frontier_k.is_none());
@@ -397,7 +281,6 @@ fn field_preference_amplifies_field_fit_and_preference() {
     // No lanes excluded or anti-similar.
     assert_eq!(s.weight("locus"), 1.0);
     assert_eq!(s.weight("temporal"), 1.0);
-    #[cfg(feature = "whole-record-dense")]
     assert!(s.anti_similar_lanes.is_empty());
     assert!(s.frontier_k.is_none());
     assert!(!RecallShape::preset_description("field_preference").is_empty());
@@ -466,24 +349,6 @@ fn frontier_k_out_of_range_is_clamped_by_effective_frontier_k() {
 
 // --- Float-lane metric presets ---
 
-/// The audition baseline: every held whole-record signal at 1.0 over the
-/// default frontier; the fusion equals this build's `None` shape.
-#[cfg(feature = "whole-record-dense")]
-#[test]
-fn whole_record_baseline_forwards_every_whole_record_signal_at_one() {
-    let s = RecallShape::preset("whole_record_baseline").unwrap();
-    for key in RecallShape::DENSE_SIGNALS {
-        assert_eq!(s.weight(key), 1.0);
-    }
-    #[cfg(feature = "dense-families")]
-    assert_eq!(s.weight(RecallShape::DENSE_FDC), 1.0);
-    assert_eq!(s.weight("bm25"), 1.0);
-    assert!(s.frontier_k.is_none());
-    assert!(s.anti_similar_lanes.is_empty());
-    assert!(!RecallShape::preset_description("whole_record_baseline").is_empty());
-}
-
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn float_l2_sets_float_metric_and_leaves_defaults() {
     let s = RecallShape::preset("float-l2").unwrap();
@@ -501,7 +366,6 @@ fn float_l2_sets_float_metric_and_leaves_defaults() {
     assert!(!RecallShape::preset_description("float-l2").is_empty());
 }
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn float_dot_sets_float_metric_and_leaves_defaults() {
     let s = RecallShape::preset("float-dot").unwrap();

@@ -1,4 +1,3 @@
-#if MOOTX01_WHOLE_RECORD_DENSE
 import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
@@ -17,4 +16,3 @@ func makeScratchStorage() throws -> any Storage {
         estateID: UUID(),
         backend: .sqlite(url: url, busyTimeout: 5.0)))
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

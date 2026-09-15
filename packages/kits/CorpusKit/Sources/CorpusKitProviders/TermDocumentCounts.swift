@@ -1,20 +1,20 @@
 // TermDocumentCounts.swift
 //
 // Shared term-document count builder used by every distributional-semantics
-// provider in CorpusKitProviders (LSA, NMF, Random Indexing, PPMI).
+// provider in CorpusKitProviders (Random Indexing and LSA).
 //
 // ## What this type owns
 //
 //   - Tokenization via the canonical `defaultKeywordTokens` function (for
 //     the text-consuming providers) or acceptance of an already-tokenized
-//     term sequence (for the term-consuming providers, RI and PPMI).
+//     term sequence (for the term-consuming provider, RI).
 //   - Vocabulary construction in ENCOUNTER ORDER: terms are assigned
 //     integer indices as they are first seen across the training sequence.
 //     The order is deterministic for a fixed document sequence. This
-//     property is a correctness invariant — the downstream SVD and NMF
-//     factorizations depend on stable column indices.
+//     property is a correctness invariant — the downstream SVD
+//     factorization depends on stable column indices.
 //   - Raw per-document term-frequency counts: tfCounts[docIdx][termIdx]
-//     (LSA and NMF only).
+//     (LSA only).
 //   - Per-term document-frequency counts: dfCounts[termIdx] = number of
 //     documents that contain the term at least once. Every distributional
 //     provider derives its IDF weights from these through the ONE smoothed
@@ -22,8 +22,8 @@
 //
 // ## What this type does NOT own
 //
-//   - Matrix orientation (documents×terms for LSA, terms×documents for NMF).
-//   - Factorization (SVD for LSA, NMF-ALS for NMF).
+//   - Matrix orientation (documents×terms for LSA).
+//   - Factorization (SVD for LSA).
 //   - Pooling (see DistributionalPooling.swift).
 //
 // ## Rust port
@@ -91,7 +91,7 @@ public struct TermDocumentCounts {
     public private(set) var tfCounts: [[Int: Int]]
 
     /// Document frequency: dfCounts[termIdx] = number of documents containing term.
-    /// LSA uses this for IDF weighting. NMF ignores it.
+    /// LSA uses this for IDF weighting.
     public private(set) var dfCounts: [Int: Int]
 
     // MARK: - Initialiser
@@ -105,7 +105,7 @@ public struct TermDocumentCounts {
     /// Reconstruct a count builder from a known vocabulary and document
     /// count, WITHOUT re-tokenizing any text (the deserialization path).
     ///
-    /// LSA and NMF read only `vocab` (term → index, for query fold-in) and
+    /// LSA reads only `vocab` (term → index, for query fold-in) and
     /// `documentCount` (for the `documentEmbedding(at:)` range check) from a
     /// finalized provider — the raw per-document TF counts are training-phase
     /// scratch not needed for embedding. A deserialized provider therefore
@@ -125,7 +125,7 @@ public struct TermDocumentCounts {
     }
 
     /// Reconstruct the document-frequency table of a term-consuming provider
-    /// (RI, PPMI) from persisted counts: term → df, plus the document count.
+    /// (RI) from persisted counts: term → df, plus the document count.
     ///
     /// Terms receive indices in ascending UTF-8 byte order of the term — the
     /// order the counts codec writes them in — so the restored table is a
@@ -220,7 +220,7 @@ public struct TermDocumentCounts {
     /// Fold one ALREADY-TOKENIZED document into the vocabulary and the
     /// document-frequency table, without retaining a TF row.
     ///
-    /// This is the entry point for the term-consuming providers (RI, PPMI),
+    /// This is the entry point for the term-consuming provider (RI),
     /// whose `train(terms:window:)` receives one document's term sequence per
     /// call. Each distinct term counts once toward `dfCounts` no matter how
     /// often it repeats in the document; a document with no terms is not

@@ -32,6 +32,8 @@
 use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
+use engram_lib::Engram;
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin,
@@ -95,18 +97,34 @@ fn matrix_aware_request(query: Option<&str>) -> GLKRecallRequest {
     }
 }
 
-/// One-hot-ish direction keyed on token count, the same inference the
-/// raw-reporting fixture uses, so the dense lane orders the drawers without ties.
-fn minilm_monotonic_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MiniLM {
-        inference: Box::new(|tokens: &[i32]| {
-            let theta = tokens.len() as f32 * 0.018;
-            let mut v = vec![0.0_f32; 384];
-            v[0] = theta.cos();
-            v[1] = theta.sin();
-            Ok(v)
-        }),
+/// One-hot-ish direction keyed on word count so the dense lane orders the
+/// drawers without ties. Word count is a close proxy for token count for
+/// the simple test sentences used here. Replaces the removed
+/// `EmbeddingModelConfig::MiniLM { inference: }` case.
+struct MonotonicProvider;
+
+impl EmbeddingProvider for MonotonicProvider {
+    fn model_id(&self) -> &str {
+        "test-monotonic-v1"
     }
+    fn model_version(&self) -> &str {
+        "1.0.0"
+    }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> {
+        Ok(Engram::ZERO)
+    }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let word_count = text.split_whitespace().count();
+        let theta = word_count as f32 * 0.018;
+        let mut v = vec![0.0_f32; 384];
+        v[0] = theta.cos();
+        v[1] = theta.sin();
+        Ok(v)
+    }
+}
+
+fn minilm_monotonic_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(MonotonicProvider) }
 }
 
 /// The twenty drawer bodies, oldest first. Twin of the Swift `textEstateContents`.
@@ -206,10 +224,7 @@ fn matrix_aware_profile_reads_the_lane_max_final_on_text_estate() {
     // Three supply lanes (locus, bm25, dense) with the whole-record lane;
     // sixteen candidates carry all three bits and four carry two:
     // (16 * 3 + 4 * 2) / (20 * 3). Without it, two lanes: (16 * 2 + 4) / (20 * 2).
-    #[cfg(feature = "whole-record-dense")]
     assert!((profile.signal_agreement - 56.0 / 60.0).abs() < 1e-5, "{d}");
-    #[cfg(not(feature = "whole-record-dense"))]
-    assert!((profile.signal_agreement - 36.0 / 40.0).abs() < 1e-5, "{d}");
     // The top 16 by `final` is the sixteen query drawers, one source mask.
     assert!((profile.redundancy - 1.0).abs() < 1e-6, "{d}");
     // Locus column: twenty ramp values, normalised to i / 19; population

@@ -12,23 +12,20 @@
 //
 // The semantics are PLANTED deterministically. CorpusKit's default
 // deterministic provider hashes text, so its float vectors are not
-// semantically meaningful; instead this test drives a `.miniLM` corpus with
-// an injected inference closure that returns CONTROLLED 384-d vectors. The
-// closure recognises each planted phrase by a distinctive token id (computed
-// up front with the same DeterministicTokenizer the provider uses) and
-// returns a pre-assigned concept vector:
+// semantically meaningful; instead this test drives the corpus with a planted
+// `FloatSimHashEmbeddingProvider` whose inference returns CONTROLLED 384-d
+// vectors. The inference recognises each planted phrase by a distinctive
+// marker word and returns a pre-assigned concept vector:
 //   - the QUERY and the ANSWER get near-parallel vectors (high cosine), even
 //     though they share almost no content words, so the dense lane pulls the
 //     answer toward the query;
 //   - the two DISTRACTORS get orthogonal vectors, so the dense lane pushes
 //     them away.
-// The binary SimHash engram (and therefore the BM25 / Hamming lanes) is
-// driven by the words, where query↔answer overlap is near zero — so the
-// pure-lexical `text` composition cannot rank the answer first. Only the
-// dense cosine separates them.
+// The BM25 lane is driven by the words, where query↔answer overlap is near
+// zero — so the pure-lexical `text` composition cannot rank the answer first.
+// Only the dense cosine separates them.
 
-// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
-#if MOOTX01_WHOLE_RECORD_DENSE
+// Uses the whole-record float lane sidecar.
 import Testing
 import Foundation
 import GeniusLocusKit
@@ -75,24 +72,21 @@ struct DenseFusedSemanticPairTests {
         return v
     }
 
-    // Distinctive token ids the corpus's internal tokenizer
-    // (CorpusDefaultTokenizer, FNV-1a over the model vocab) assigns to a marker
-    // word in each planted phrase. Captured empirically from the live tokenizer
-    // for this exact vocab (minilm-v6, vocabSize 30522) so the inference closure
-    // can recognise which phrase it is embedding and return the planted concept
-    // vector. The query and the answer map to concept 0 (near-parallel cosine);
-    // the two distractors map to orthogonal concepts 1 and 2.
-    private static let queryMarkerID: Int32 = 21071   // "how" — query only
-    private static let answerMarkerID: Int32 = 21210  // "weighty" — answer only
-    private static let distractor1MarkerID: Int32 = 29296 // distractor-budget only
-    private static let distractor2MarkerID: Int32 = 9991  // distractor-fence only
+    // The marker word each planted phrase carries and nothing else does:
+    // the query and the answer map to concept 0 (near-parallel cosine); the
+    // two distractors map to orthogonal concepts 1 and 2.
+    private static let queryMarker = "how"            // query only
+    private static let answerMarker = "weighty"       // answer only
+    private static let distractor1Marker = "budget"   // distractor-budget only
+    private static let distractor2Marker = "fence"    // distractor-fence only
 
-    /// Build the inference closure: recognise each planted phrase by a
-    /// distinctive token id and return the matching concept vector. The query
-    /// and answer share concept 0 (near-parallel, high cosine) despite almost
-    /// no shared words; the distractors get orthogonal concepts. Any unplanted
-    /// text gets a neutral block.
-    private static func makeInference() -> @Sendable ([Int32]) async throws -> [Float] {
+    /// Build the planted provider: recognise each planted phrase by its marker
+    /// word and return the matching concept vector. The query and answer share
+    /// concept 0 (near-parallel, high cosine) despite almost no shared words;
+    /// the distractors get orthogonal concepts. Any unplanted text gets a
+    /// neutral block. `embed()` projects the same vector through FloatSimHash,
+    /// so the Hamming lane sees the planted geometry too.
+    private static func makePlantedProvider() -> FloatSimHashEmbeddingProvider {
         // Query and answer share concept 0; a slight lean on an answer-only
         // coordinate keeps them near-parallel (cosine ≈ 0.997) rather than
         // identical, exercising a real cosine ranking rather than an exact tie.
@@ -103,18 +97,22 @@ struct DenseFusedSemanticPairTests {
             v[7] = 0.95
             return v
         }()
-        let qID = queryMarkerID, aID = answerMarkerID
-        let d1ID = distractor1MarkerID, d2ID = distractor2MarkerID
+        let q = queryMarker, a = answerMarker
+        let d1 = distractor1Marker, d2 = distractor2Marker
 
-        return { tokens in
-            let set = Set(tokens)
-            if set.contains(qID)  { return queryVec }
-            if set.contains(aID)  { return answerVec }
-            if set.contains(d1ID) { return conceptVector(1) }
-            if set.contains(d2ID) { return conceptVector(2) }
-            // Unplanted text (e.g. the supportsFloat "x" probe): a neutral block.
-            return conceptVector(4)
-        }
+        return FloatSimHashEmbeddingProvider(
+            modelID: "test-planted-v1",
+            modelVersion: "1.0.0",
+            projectionSeed: 0x506C_616E_7465_6431,   // "Planted1"
+            inference: { text in
+                let words = Set(text.split(separator: " ").map(String.init))
+                if words.contains(q)  { return queryVec }
+                if words.contains(a)  { return answerVec }
+                if words.contains(d1) { return conceptVector(1) }
+                if words.contains(d2) { return conceptVector(2) }
+                // Unplanted text (e.g. the supportsFloat "x" probe): a neutral block.
+                return conceptVector(4)
+            })
     }
 
     /// Open a SQLite-backed estate and capture the provided `contents` into the
@@ -134,14 +132,14 @@ struct DenseFusedSemanticPairTests {
             storage: storage,
             owner: OwnerCredentials(ownerIdentifier: "dense-fused-semantic-test"))
 
-        // .miniLM corpus with the planted inference closure: the float lane's
-        // pooled vector is the controlled concept vector, while the binary
-        // engram and BM25 lane are still driven by the phrase's words.
+        // The planted provider rides in a pass-through `.lsa` slot: the float
+        // lane's vector is the controlled concept vector, while the BM25 lane
+        // is still driven by the phrase's words.
         let corpusStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: Self.makeInference())])
+            models: [.lsa(provider: Self.makePlantedProvider())])
         let vsStorage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
@@ -246,4 +244,3 @@ struct DenseFusedSemanticPairTests {
         }
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

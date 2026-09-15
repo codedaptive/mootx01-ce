@@ -18,8 +18,7 @@
 // INTELLECTUS LOCK is not required here: these tests do not toggle Intellectus
 // and assert only on the returned GLKRecallResult, not telemetry counters.
 
-// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
-#if MOOTX01_WHOLE_RECORD_DENSE
+// Whole-record float lane tests.
 import Testing
 import Foundation
 import LocusKit
@@ -91,16 +90,13 @@ struct DenseLaneSingleProviderTests {
         let (kit, handle, drawers) = try await openEstateWithDrawers(
             [content], owner: "single-provider-owner")
 
-        // One float-capable signal. inference keys off the first token so distinct
-        // content embeds to distinct vectors.
+        // One float-capable signal. The provider keys off the first word so
+        // distinct content embeds to distinct vectors.
         let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusKit.CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: { tokens in
-                let v = Float((tokens.first ?? 0) % 7 + 1) / 7.0
-                return Array(repeating: v, count: 384)
-            })]
+            models: [.lsa(provider: FirstWordAxisProvider(modelID: "minilm-v6"))]
         )
         try await corpus.ingest(content, contentID: drawers[0].id, now: t0)
         await kit.registerCorpus(corpus, for: handle)
@@ -123,9 +119,9 @@ struct DenseLaneSingleProviderTests {
 @Suite("§2 Dense per-signal — N>1 consensus across two float signals", .serialized)
 struct DenseLaneConsensusTests {
 
-    /// Build a two-provider corpus (miniLM + mpnet) over two drawers, both float-
-    /// capable so both signals rank both drawers. The inference functions are
-    /// engineered so:
+    /// Build a two-provider corpus (minilm-v6 + mpnet-base-v2 slots) over two
+    /// drawers, both float-capable so both signals rank both drawers. The
+    /// providers are engineered so:
     ///   - drawer CONSENSUS is ranked HIGH by BOTH dense signals (strong cross-
     ///     signal agreement → large consensus boost);
     ///   - drawer SINGLE is ranked high by ONE signal but lower by the other (weak
@@ -135,8 +131,8 @@ struct DenseLaneConsensusTests {
     /// above the single-agreement drawer (the consensus property).
     @Test("a drawer with strong cross-signal agreement ranks at/above a weak-agreement drawer")
     func consensusDrawerOutranksSingleSignalDrawer() async throws {
-        // Distinct first tokens drive distinct embeddings. The query shares its
-        // leading token region with the consensus doc under both signals. The
+        // Distinct first words drive distinct embeddings. The query shares its
+        // first word with the consensus doc under both signals. The
         // single-signal doc is captured FIRST and the consensus doc LAST, so the
         // locus lane (byCaptureTimeDesc) and the dense consensus AGREE on ordering
         // — the dense per-signal fan-out then provides the per-signal provenance
@@ -150,37 +146,19 @@ struct DenseLaneConsensusTests {
         let singleID = drawers[0].id
         let consensusID = drawers[1].id
 
-        // miniLM: aligns the query with BOTH docs (so miniLM ranks both), but the
-        // consensus doc more closely. mpnet: aligns the query ONLY with the
-        // consensus doc, and embeds the single doc to an orthogonal direction.
-        // Both providers return 384-d/768-d unit-ish vectors keyed off the first
-        // token so the cosine ordering is deterministic and reproducible.
+        // "minilm-v6" (FirstWordAxisProvider): aligns the query with BOTH docs
+        // through the shared component, and with the consensus doc more closely
+        // because they share a first word. "mpnet-base-v2" (TwoAxisProvider):
+        // aligns the query ONLY with the consensus doc ("alpha…" leads odd,
+        // "zeta…" leads even) and embeds the single doc orthogonally. Both are
+        // keyed off the text so the cosine ordering is deterministic.
         let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
             estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusKit.CorpusContentEngine(
             standaloneOn: corpusStorage,
             models: [
-                .miniLM(inference: { tokens in
-                    // miniLM dimension 384. Encode along axis chosen by first token
-                    // parity so both docs land in the query's half-space.
-                    let lead = tokens.first ?? 0
-                    var v = Array(repeating: Float(0), count: 384)
-                    v[Int(abs(lead)) % 384] = 1.0
-                    v[0] += 0.5   // shared component pulls everything toward the query
-                    return v
-                }),
-                .mpNet(inference: { tokens in
-                    // mpnet dimension 768. The "alpha" lead token (consensus/query)
-                    // maps to axis 1; everything else maps to a far axis so only the
-                    // consensus doc aligns with the query under mpnet.
-                    let lead = tokens.first ?? 0
-                    var v = Array(repeating: Float(0), count: 768)
-                    // Consensus + query share the leading token, so they collide on
-                    // axis 1; the single doc's lead token routes to a distant axis.
-                    let axis = (Int(abs(lead)) % 2 == 0) ? 1 : 400
-                    v[axis] = 1.0
-                    return v
-                })
+                .lsa(provider: FirstWordAxisProvider(modelID: "minilm-v6")),
+                .lsa(provider: TwoAxisProvider(modelID: "mpnet-base-v2")),
             ]
         )
         try await corpus.ingest(consensusContent, contentID: consensusID, now: t0)
@@ -223,4 +201,3 @@ struct DenseLaneConsensusTests {
         }
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

@@ -17,7 +17,6 @@
 //   §false-on-miss  recomposeDenseVector returns false (no throw) when the
 //       content ID has no record in the source.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
 import Testing
 import Foundation
 import EngramLib
@@ -201,4 +200,3 @@ struct RecomposeDenseVectorTests {
         }
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

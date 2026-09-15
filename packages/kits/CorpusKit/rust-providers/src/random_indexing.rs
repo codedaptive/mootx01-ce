@@ -48,8 +48,7 @@
 //!   `train`     — accumulate context vectors AND the per-term document
 //!                 frequency (one call = one document).
 //!   `finalize`  — fit the IDF table and the corpus-mean direction from the
-//!                 accumulated counts. Required before embedding, the same
-//!                 rule PPMI has always had.
+//!                 accumulated counts. Required before embedding.
 //!   `embed` / `embed_float` / `embed_pair` — pool through the fitted basis.
 //!
 //! ## Projection seed
@@ -535,8 +534,8 @@ impl RandomIndexingProvider {
             return (None, 0);
         }
         // corpus_kit::default_keyword_tokens is the single canonical keyword
-        // tokenizer shared by all distributional providers (RI, PPMI, LSA,
-        // NMF) and by BM25; parity with Swift's `defaultKeywordTokens`.
+        // tokenizer shared by all distributional providers (RI, LSA)
+        // and by BM25; parity with Swift's `defaultKeywordTokens`.
         let terms = corpus_kit::default_keyword_tokens(text);
         if terms.is_empty() {
             return (None, 0);

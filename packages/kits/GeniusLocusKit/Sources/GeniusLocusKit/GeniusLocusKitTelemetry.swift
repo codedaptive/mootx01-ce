@@ -74,9 +74,8 @@ enum GLKMetricName {
     /// Tagged: `estate_id`, `verb`.
     static let verbError = "geniuslocus.estate.verb_error"
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     /// The whole-record dense float lane was dark for a recall query
-    /// (WholeRecordDense build only).
+    /// (whole-record float lane).
     ///
     /// Emitted by Step 4.5 of the RecallDirector when a held signal's
     /// per-signal outcome is anything other than `.hits`. The `reason` tag
@@ -84,7 +83,6 @@ enum GLKMetricName {
     /// `vocabMiss`, or `storeError`; `model_id` names the signal.
     /// Tagged: `estate_id`, `reason`, `model_id`.
     static let denseLaneDark = "glk.recall.dense_lane_dark"
-#endif
 
     // MARK: — Stage-degradation counters (P1 fail-loud degradation contract)
 

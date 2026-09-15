@@ -45,7 +45,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// The default recall ensemble (RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on).
+// The default recall ensemble (RI then LSA).
 // Lives in the providers
 // crate because it NEWs the concrete providers; this crate is downstream of it.
 use corpus_kit_providers::default_ensemble;
@@ -1021,7 +1021,7 @@ fn wire_postgres_semantic_recall(
 /// shared connection.
 ///
 /// Recall ensemble is the deterministic signals (`default_ensemble()`:
-/// RI/PPMI/NMF/FDC; plus LSA when the `lsa` feature is on) — reproducible
+/// RI then LSA) — reproducible
 /// across Swift/Rust ports, no CoreML.
 /// Matches `provision`'s default and the Swift `AriaMCPMain.swift` Lane D wiring
 /// (`CorpusEnsemble.defaultEnsemble()`).

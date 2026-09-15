@@ -128,8 +128,7 @@ extension NeuronKit {
                 .init(.hamming, weight: CompositeDistance.defaultAlphaFingerprint),
             ]),
             ]
-#if MOOTX01_WHOLE_RECORD_DENSE
-            // --- T2 / T5 semantic: the whole-record float lane (WholeRecordDense
+            // --- T2 / T5 semantic: the whole-record float lane (
             // build only). The `dense` signal carries the cosine over the pooled
             // float embedding, which is scale-invariant, so an answer statement
             // ranks above a near-duplicate of the question. dense leads; text is
@@ -147,7 +146,6 @@ extension NeuronKit {
                 .init(.dense, weight: 1.0),
                 .init(.text, weight: 0.3),
             ]), at: slot)
-#endif
             return grid
         }()
 
