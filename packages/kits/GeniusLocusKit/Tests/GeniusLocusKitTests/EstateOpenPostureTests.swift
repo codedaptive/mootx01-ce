@@ -369,7 +369,7 @@ struct EstateOpenPostureTests {
         // Absent manifest, absent database: plaintext, nothing refused.
         #expect(try EstateOpenPosture.resolve(for: record).posture == .newPlaintextDeclared)
         // A manifest carrying a redirect key: refused, typed, with the catalog's detail inside.
-        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z","path":"/elsewhere"}"#
+        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z","path":"/elsewhere"}"#
             .write(to: record.manifestURL, atomically: true, encoding: .utf8)
         var thrown: EstateOpenPosture.Error?
         do { _ = try EstateOpenPosture.resolve(for: record) } catch let e as EstateOpenPosture.Error { thrown = e }
@@ -378,13 +378,13 @@ struct EstateOpenPostureTests {
         }
         #expect(thrown?.description.contains("manifest refused") == true)
         // A manifest for another estate: refused too.
-        try #"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
+        try #"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
             .write(to: record.manifestURL, atomically: true, encoding: .utf8)
         thrown = nil
         do { _ = try EstateOpenPosture.resolve(for: record) } catch let e as EstateOpenPosture.Error { thrown = e }
         guard case .manifestRefused? = thrown else { Issue.record("foreign name: \(String(describing: thrown))"); return }
         // A correct manifest declaring plaintext: read.
-        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
+        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
             .write(to: record.manifestURL, atomically: true, encoding: .utf8)
         #expect(try EstateOpenPosture.manifestDeclaresPlaintext(record))
         // No manifest but a symlinked database: refused by the same gate.
