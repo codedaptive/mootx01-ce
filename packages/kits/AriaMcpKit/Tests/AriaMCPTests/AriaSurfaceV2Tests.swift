@@ -150,6 +150,36 @@ struct AriaSurfaceV2Tests {
         result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
     }
 
+    @Test func distilledGetUsesAttributedOracleAcrossLegacyAndV2SingleAndBatch() async throws {
+        #expect(RecallDistillation.converter == .intentSpanV23Attributed)
+        let vectors = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../../libs/ContextDistillLib/Tests/ContextDistillLibTests/Vectors/debug7-intent-span-v23-attributed.jsonl")
+        let sample = try #require(String(contentsOf: vectors, encoding: .utf8).split(separator: "\n").last)
+        let oracle = try #require(JSONValue.parse(Data(sample.utf8)).objectValue)
+        let original = try #require(oracle["original"]?.stringValue)
+        let expected = try #require(oracle["ai_text"]?.stringValue)
+        #expect(oracle["applied_enrichment_trailer"] == .string(""))
+        #expect(expected.unicodeScalars.count > 512)
+        #expect(expected != original)
+        #expect(expected != AriaV2Envelope.compactText(original))
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        let filed = try await dispatcher.dispatch(name: "moot_file_memory", arguments: .object([
+            "content": .string(original), "subject": .string("Attributed distillation oracle"), "location": .string("converter-parity")]))
+        let id = try #require(filed.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["memory_id"]?.stringValue)
+        for batch in [false, true] {
+            let args: [String: JSONValue] = [batch ? "memory_ids" : "memory_id": batch ? .array([.string(id)]) : .string(id), "depth": .string("distilled")]
+            let result = try await dispatcher.dispatch(name: "moot_memory_get", arguments: .object(args))
+            let row = try #require(result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue)
+            #expect(row["distilled"] == .string(expected))
+            #expect(row["content"] == nil)
+            // Legacy reads use Swift's stored uppercase UUID spelling.
+            let storedID = try #require(UUID(uuidString: id)).uuidString
+            let legacy = try await dispatcher.runMemoryGet([batch ? "ids" : "id": batch ? .array([.string(storedID)]) : .string(storedID), "depth": .string("distilled")])
+            #expect(firstText(legacy).contains(expected))
+        }
+        try await kit.close(handle)
+    }
+
     private func fixtureURL() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
