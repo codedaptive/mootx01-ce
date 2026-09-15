@@ -63,6 +63,7 @@ pub mod governor_topology_adapter;
 pub mod http_server;
 pub mod interface_tools;
 pub mod recall_skim;
+pub mod recall_distillation;
 pub mod jsonrpc;
 pub mod memory_adapter;
 pub mod recall_discrimination;
