@@ -14,8 +14,9 @@
 //!      before.
 //!   2. Idempotence: a second run deletes nothing, releases nothing and
 //!      leaves the stamp at V1_7.
-//!   3. The format values are pinned: CURRENT is V1_8, and V1_7 keeps its
-//!      (1, 7) identity, above V1_6 and below CURRENT.
+//!   3. The format values are pinned: V1_7 keeps its (1, 7) identity, above
+//!      V1_6 and below CURRENT.
+
 //!   4. On a SQLite estate the `.vec` sidecar is rewritten by the capsule and
 //!      a fresh store loads it without a rebuild.
 //!   5. V1_5-stamped estate: the chain runs the 1.5 → 1.6 capsule and then
@@ -247,8 +248,9 @@ fn capsule_is_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn current_format_is_v1_8() {
-    assert_eq!(EstateFormatVersion::CURRENT, EstateFormatVersion::V1_8);
+fn format_values_are_pinned() {
+    // The capsule stamps V1_7; later capsules carry the estate on to
+    // `EstateFormatVersion::CURRENT`, which sits above V1_7.
     assert_eq!(EstateFormatVersion::V1_7, EstateFormatVersion { major: 1, minor: 7 });
     assert!(EstateFormatVersion::V1_6 < EstateFormatVersion::V1_7);
     assert!(EstateFormatVersion::V1_7 < EstateFormatVersion::CURRENT);

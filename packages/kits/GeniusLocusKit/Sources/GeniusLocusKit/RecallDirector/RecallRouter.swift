@@ -20,19 +20,33 @@ struct RecallRoute: Sendable {
     let transform: @Sendable (GLKRecallRequest) -> GLKRecallRequest
 }
 
-/// Route 1 — cross-encoder strict-transcript routing.
+/// Route 1 — cross-encoder conversation routing.
 ///
 /// - Preference: `cross_encoder_routing` estate-manifest key, absent = on.
 /// - Predicate: `isConversationQuestion` — the question carries a quoted
 ///   phrase, a speaker cue or a conversation reference.
-/// - Transform: set `rerankDirective = .strictTranscript()`.
+/// - Transform: set `rerankDirective = .apply(reason: crossEncoderRouteReason)`
+///   — the degradable directive, never the transcript operation's fail-closed
+///   `.strictTranscript()`.
+///
+/// The degradable directive reranks the head when the stage can run and, when
+/// it cannot, reports the degrade reason and leaves the ordinary lane order
+/// standing. `.strictTranscript()` fails closed (an empty strict pool returns
+/// zero rows) and belongs to the `moot_memory_recall_transcript` operation
+/// alone: a routed ordinary question — one that merely trips a cue such as
+/// "meeting" — must never lose results to it.
 ///
 /// Mirrors Rust `CROSS_ENCODER_ROUTE` (recall_router.rs).
 let crossEncoderRoute = RecallRoute(
     preferenceKey: "cross_encoder_routing",
     predicate: isConversationQuestion,
-    transform: { $0.replacing(rerankDirective: .strictTranscript()) }
+    transform: { $0.replacing(rerankDirective: .apply(reason: crossEncoderRouteReason)) }
 )
+
+/// Diagnostic code Route 1 writes into its directive; the stage echoes it in
+/// the recall report so a reader can tell a routed rerank from one an operation
+/// asked for. Shared with the Rust twin (`CROSS_ENCODER_ROUTE_REASON`).
+let crossEncoderRouteReason = "route:cross_encoder_routing"
 
 /// The ordered route list the director applies once per scored recall.
 /// `applyRecallRoutes` fires the first entry whose preference is on and whose

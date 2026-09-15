@@ -1506,7 +1506,8 @@ pub struct GLKRecallResult {
 
     /// The preference key of the recall route that transformed this request,
     /// or `None` when no route fired. Day one: `"cross_encoder_routing"` when
-    /// Route 1 applied `strict_transcript`; `None` for all other recalls.
+    /// Route 1 applied its degradable rerank directive; `None` for all other
+    /// recalls.
     /// Mirrors Swift `GLKRecallResult.route`.
     pub route: Option<String>,
 }

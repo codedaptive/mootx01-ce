@@ -88,6 +88,16 @@ mod fact_extraction_setting_migration;
 #[cfg(feature = "migration-v1-7-to-v1-8")]
 pub use fact_extraction_setting_migration::*;
 
+// GLK 1.8 → 1.9 capsule: seeds the five remaining preferences `"on"` on
+// populated estates that carry no value for the key and creates the
+// `recall_ratings` table (parity with the Swift GLKMigrationV1_8ToV1_9
+// target).
+#[cfg(feature = "migration-v1-8-to-v1-9")]
+mod preference_seed_migration;
+
+#[cfg(feature = "migration-v1-8-to-v1-9")]
+pub use preference_seed_migration::*;
+
 use genius_locus_kit::estate_format::{EstateFormatError, EstateFormatStore, EstateFormatVersion};
 use std::sync::Arc;
 
@@ -236,7 +246,7 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
 /// historical stamp between the compiled floor and the current format. The
 /// gate is the last capsule in the chain: a build without it cannot reach
 /// the current format, whatever older capsules it compiled.
-#[cfg(feature = "migration-v1-7-to-v1-8")]
+#[cfg(feature = "migration-v1-8-to-v1-9")]
 fn run_compiled_chain(
     coordinator: &mut genius_locus_kit::coordinator::EstateCoordinator,
     handle: &genius_locus_kit::handle::EstateHandle,
@@ -306,12 +316,24 @@ fn run_compiled_chain(
             })?;
     }
     // The 1.7 -> 1.8 capsule: seed `fact_extraction = "on"` when absent and
-    // write the V1_8 stamp, the last write of the chain (I-27). `found` is
-    // below CURRENT here, so the capsule always applies.
-    coordinator.run_fact_extraction_setting_migration(handle, now_millis)
+    // write the V1_8 stamp (I-27).
+    #[cfg(feature = "migration-v1-7-to-v1-8")]
+    if found < EstateFormatVersion::V1_8 {
+        coordinator.run_fact_extraction_setting_migration(handle, now_millis)
+            .map_err(|error| {
+                MigrationChainError::Capsule(format!(
+                    "fact-extraction-setting migration: {error:?}"
+                ))
+            })?;
+    }
+    // The 1.8 -> 1.9 capsule: seed the five remaining preferences "on" when
+    // absent, create recall_ratings and write the V1_9 stamp, the last write
+    // of the chain (I-28). `found` is below CURRENT here, so the capsule
+    // always applies.
+    coordinator.run_preference_seed_migration(handle, now_millis)
         .map_err(|error| {
             MigrationChainError::Capsule(format!(
-                "fact-extraction-setting migration: {error:?}"
+                "preference-seed migration: {error:?}"
             ))
         })?;
     Ok(())
@@ -320,7 +342,7 @@ fn run_compiled_chain(
 /// No compiled chain reaches the current format, so a historical estate
 /// cannot be served by this build (the Swift catalog's
 /// `noHistoricalMigrationsCompiled` branch).
-#[cfg(not(feature = "migration-v1-7-to-v1-8"))]
+#[cfg(not(feature = "migration-v1-8-to-v1-9"))]
 fn run_compiled_chain(
     _coordinator: &mut genius_locus_kit::coordinator::EstateCoordinator,
     _handle: &genius_locus_kit::handle::EstateHandle,
@@ -339,7 +361,7 @@ fn run_compiled_chain(
 pub fn compiled_floor() -> Option<EstateFormatVersion> {
     #[cfg(feature = "migration-v1-0-to-v1-1")]
     {
-        // Floor covers the 1.0→1.1, 1.4→1.5, 1.5→1.6, 1.6→1.7 and 1.7→1.8 capsules.
+        // Floor covers the 1.0→1.1, 1.4→1.5, 1.5→1.6, 1.6→1.7, 1.7→1.8 and 1.8→1.9 capsules.
         return Some(EstateFormatVersion::V1_0);
     }
     #[cfg(all(
@@ -347,7 +369,7 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // The 1.4→1.5, 1.5→1.6, 1.6→1.7 and 1.7→1.8 capsules are compiled. They
+        // The 1.4→1.5, 1.5→1.6, 1.6→1.7, 1.7→1.8 and 1.8→1.9 capsules are compiled. They
         // serve every stamp from 1.1 up: nothing separates 1.1, 1.2, 1.3 and 1.4
         // any more.
         return Some(EstateFormatVersion::V1_1);
@@ -358,7 +380,7 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // The 1.5→1.6 column-drop, 1.6→1.7 vacuum and 1.7→1.8 seed capsules are compiled.
+        // The 1.5→1.6 column-drop, 1.6→1.7 vacuum, 1.7→1.8 seed and 1.8→1.9 seed capsules are compiled.
         return Some(EstateFormatVersion::V1_5);
     }
     #[cfg(all(
@@ -368,7 +390,7 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // The 1.6→1.7 vacuum and 1.7→1.8 seed capsules are compiled.
+        // The 1.6→1.7 vacuum, 1.7→1.8 seed and 1.8→1.9 seed capsules are compiled.
         return Some(EstateFormatVersion::V1_6);
     }
     #[cfg(all(
@@ -379,15 +401,28 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-0-to-v1-1")
     ))]
     {
-        // Only the 1.7→1.8 fact-extraction-setting seed capsule is compiled.
+        // The 1.7→1.8 fact-extraction-setting seed and 1.8→1.9 preference-seed capsules are compiled.
         return Some(EstateFormatVersion::V1_7);
+    }
+    #[cfg(all(
+        feature = "migration-v1-8-to-v1-9",
+        not(feature = "migration-v1-7-to-v1-8"),
+        not(feature = "migration-v1-6-to-v1-7"),
+        not(feature = "migration-v1-5-to-v1-6"),
+        not(feature = "migration-v1-4-to-v1-5"),
+        not(feature = "migration-v1-0-to-v1-1")
+    ))]
+    {
+        // Only the 1.8→1.9 preference-seed capsule is compiled.
+        return Some(EstateFormatVersion::V1_8);
     }
     #[cfg(all(
         not(feature = "migration-v1-0-to-v1-1"),
         not(feature = "migration-v1-4-to-v1-5"),
         not(feature = "migration-v1-5-to-v1-6"),
         not(feature = "migration-v1-6-to-v1-7"),
-        not(feature = "migration-v1-7-to-v1-8")
+        not(feature = "migration-v1-7-to-v1-8"),
+        not(feature = "migration-v1-8-to-v1-9")
     ))]
     {
         None
