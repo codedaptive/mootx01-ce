@@ -159,13 +159,12 @@ struct AriaV2ConnectedRecallParityTests {
             })
         }
 
-        let estate = try await kit.estate(for: handle)
         let tunnel = TunnelCaptureFrame(
             sourceWing: tunnelWing, sourceRoom: tunnelWing,
             targetWing: tunnelWing, targetRoom: tunnelWing,
             label: "shared v2 connected-recall parity tunnel", addedBy: "aria-mcp-tests",
             sourceDrawerId: target, targetDrawerId: anchor, kind: .references)
-        _ = try await estate.capture(tunnel)
+        _ = try await kit.captureTunnel(handle, tunnel)
 
         func recall(_ filter: String) async throws -> JSONValue {
             try await dispatcher.dispatch(

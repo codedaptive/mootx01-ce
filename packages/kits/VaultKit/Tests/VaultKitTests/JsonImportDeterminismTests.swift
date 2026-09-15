@@ -80,9 +80,8 @@ struct JsonImportDeterminismTests {
                 ],
                 hydrationLevel: .full,
                 limit: 1_000_000))
-        let estate = try await kit.estate(for: handle)
-        let nodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: drawers.map(\.parentNodeId))
+        let nodeNames = try await kit.resolveNodeNames(
+            handle, parentNodeIds: drawers.map(\.parentNodeId))
         var lineageByRowID: [String: UUID] = [:]
         var lines: [String] = []
 

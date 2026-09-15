@@ -87,32 +87,31 @@ struct AriaV2MemoryListProductionSnapshotProviderTests {
         let storage = InMemoryStorage(configuration: .init(estateID: UUID(), backend: .inMemory))
         let kit = GeniusLocusKit()
         let handle = try await kit.open(storage: storage, owner: .init(ownerIdentifier: "provider-test"))
-        let estate = try await kit.estate(for: handle)
-        _ = try await estate.capture(CaptureFrame(
+        _ = try await kit.capture(handle, CaptureFrame(
             content: "public record", channel: .typed, room: "Inbox", latticeAnchor: .udc("004"),
             addedBy: "test", embeddingModelID: "test-model", sourceType: .federationAggregate,
             exportability: .public_, wing: "Memory", subject: "Public subject"
         ))
-        _ = try await estate.capture(CaptureFrame(
+        _ = try await kit.capture(handle, CaptureFrame(
             content: "subject debt", channel: .typed, room: "Inbox", latticeAnchor: .udc("004"),
             addedBy: "test", embeddingModelID: "test-model", exportability: .public_, wing: "Memory"
         ))
-        _ = try await estate.capture(CaptureFrame(
+        _ = try await kit.capture(handle, CaptureFrame(
             content: "restricted record", channel: .typed, room: "Inbox", latticeAnchor: .udc("004"),
             addedBy: "test", embeddingModelID: "test-model", sensitivity: .restricted,
             exportability: .public_, wing: "Memory"
         ))
-        _ = try await estate.capture(CaptureFrame(
+        _ = try await kit.capture(handle, CaptureFrame(
             content: "elevated provenance control", channel: .typed, room: "Other", latticeAnchor: .udc("004"),
             addedBy: "test", embeddingModelID: "test-model", provenanceSensitivity: .elevated,
             exportability: .public_, wing: "Memory", subject: "Elevated provenance control"
         ))
-        _ = try await estate.capture(CaptureFrame(
+        _ = try await kit.capture(handle, CaptureFrame(
             content: "restricted provenance hidden", channel: .typed, room: "Inbox", latticeAnchor: .udc("004"),
             addedBy: "test", embeddingModelID: "test-model", provenanceSensitivity: .restricted,
             exportability: .public_, wing: "Memory", subject: "Restricted provenance hidden"
         ))
-        _ = try await estate.capture(CaptureFrame(
+        _ = try await kit.capture(handle, CaptureFrame(
             content: "secret provenance hidden", channel: .typed, room: "Inbox", latticeAnchor: .udc("004"),
             addedBy: "test", embeddingModelID: "test-model", provenanceSensitivity: .secret,
             exportability: .public_, wing: "Memory", subject: "Secret provenance hidden"

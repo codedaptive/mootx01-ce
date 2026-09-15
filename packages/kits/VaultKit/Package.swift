@@ -9,10 +9,11 @@
 // wiki.
 //
 // Layering: VaultKit sits ABOVE GeniusLocusKit (the verb/composition
-// layer). It consumes the GLK verb surface (`capture`, `recall`,
-// `recallTunnels`, `estate(for:)`) and LocusKit value types through
-// their public products only — it modifies no substrate primitive,
-// schema, bitmap, or enum. FDC classification on import is a soft,
+// layer). It consumes GLK's handle-scoped capture, batch capture, recall,
+// tunnel recall, node-name resolution, diary, reindex, encode-speed, and
+// tombstone reads/verbs, plus LocusKit value types through their public
+// products only — it modifies no substrate primitive, schema, bitmap, or enum.
+// FDC classification on import is a soft,
 // feature-flagged dependency on EideticLib: when `lookup` resolves, the
 // live FDC anchor is used; otherwise the deterministic fallback UDC
 // "000" lands the drawer with provenance intact (no fakery either way).

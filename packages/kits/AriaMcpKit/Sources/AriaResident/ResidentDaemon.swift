@@ -466,10 +466,9 @@ public enum AriaResident {
             let drawers = try await kit.allDrawers(in: handle)
             // Resolve parentNodeIds to display names for per-wing iteration.
             // Drawer no longer carries stored wing/room after node-tree integrity.
-            let estate = try await kit.estate(for: handle)
             let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
-            let nodeNames = try await estate.resolveNodeNames(
-                parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let nodeNames = try await kit.resolveNodeNames(
+                handle, parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 // Date() is permitted here — ResidentDaemon is the ARIA MCP boundary,

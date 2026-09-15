@@ -342,15 +342,14 @@ public extension GeniusLocusKit {
 
     // MARK: - estate(for:)
 
-    /// Reach the live `LocusKit.Estate` actor for a handle.
+    /// Resolve the live `LocusKit.Estate` actor inside the composition layer.
     ///
-    /// This is the per-handle access point. Callers use the returned
-    /// estate to invoke LocusKit verbs (`capture`, `recall`, etc.)
-    /// directly against the addressed estate. The coordinator does
-    /// not mediate verb calls; it only routes by handle.
+    /// GLK's implementation uses this routing helper behind its public verbs.
+    /// Consumers outside the module address an estate through those verbs and
+    /// handle-scoped reads; they cannot obtain the underlying estate actor.
     ///
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
-    func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
+    internal func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
         guard let estate = registry[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
