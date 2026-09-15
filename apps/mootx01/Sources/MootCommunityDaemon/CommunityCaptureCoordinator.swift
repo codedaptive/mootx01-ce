@@ -8,13 +8,11 @@
 //   • moot_community_capture_choices  — enumerate destinations + default policy
 //   • moot_community_capture          — validate, persist, and return outcome
 //
-// The coordinator opens its own estate connection (same pattern as
-// CommunityEstateLifecycleCoordinator) and manages:
+// The coordinator uses the daemon host's one open estate and manages:
 //
-//   1. Estate access:   CommunityEstateHost opens the estate.sqlite in the
-//                       layout directory. The Estate is held open for the
-//                       lifetime of the coordinator (not re-opened on each
-//                       call) to avoid connection-per-call overhead.
+//   1. Estate access:   CommunityEstateHost supplies GeniusLocusKit and its
+//                       open EstateHandle; GLK verbs preserve the one
+//                       connection without exposing a raw estate.
 //
 //   2. Capture records: Successful captures are stored as LocusKit Drawers
 //                       in the destination room (wing derived from the
@@ -53,6 +51,7 @@ import Foundation
 import MootProductIdentity
 import OSLog
 import AriaMCP
+import GeniusLocusKit
 import LocusKit
 
 private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.Capture")
@@ -144,7 +143,7 @@ public actor CommunityCaptureCoordinator: Sendable {
     /// moot_community_estate_create) AND pre-existing empty estates (estates
     /// created via raw LocusKit, migrations, or daemon versions that pre-date
     /// this fix). Seeding is idempotent: subsequent calls find the room in
-    /// listRooms() and skip the write path entirely.
+    /// GLK `listRooms(in:)` and skip the write path entirely.
     ///
     /// If the estate cannot be opened, returns an empty destinations array
     /// and a sentinel defaultPolicy with destinationID="" — the choices
@@ -152,8 +151,8 @@ public actor CommunityCaptureCoordinator: Sendable {
     public func captureChoices() async -> JSONValue {
         let destinations: [CaptureDestination]
         do {
-            let estate = try await requireEstate()
-            var rooms = try await estate.listRooms()
+            let handle = try await requireHandle()
+            var rooms = try await host.kit.listRooms(in: handle)
 
             // If the estate has no rooms, seed the private default capture inbox
             // ("personal/capture") to guarantee a valid default destination.
@@ -164,14 +163,14 @@ public actor CommunityCaptureCoordinator: Sendable {
             // or raw LocusKit opens that never seeded). The estate_create path
             // would miss pre-existing empties; a lazy seed here catches all cases.
             //
-            // WHY IDEMPOTENT: once the sentinel drawer exists, listRooms() returns
+            // WHY IDEMPOTENT: once the sentinel drawer exists, GLK listRooms(in:) returns
             // "personal/capture" and the `rooms.isEmpty` guard is false. Subsequent
             // calls take the normal read-only path — no duplicate writes possible.
             // Across coordinator restarts, the room persists in estate SQLite.
             if rooms.isEmpty {
-                try await seedDefaultCaptureInbox(in: estate)
+                try await seedDefaultCaptureInbox(kit: host.kit, handle: handle)
                 // Re-read rooms so the newly-created room appears in the list.
-                rooms = try await estate.listRooms()
+                rooms = try await host.kit.listRooms(in: handle)
                 log.info("capture_choices: seeded default inbox — estate now has \(rooms.count, privacy: .public) room(s)")
             }
 
@@ -244,8 +243,8 @@ public actor CommunityCaptureCoordinator: Sendable {
             }
 
             do {
-                let estate = try await requireEstate()
-                guard let storedDrawer = try await estate.allDrawers()
+                let handle = try await requireHandle()
+                guard let storedDrawer = try await host.kit.allDrawers(in: handle)
                     .first(where: { $0.id == existing.recordID }) else {
                     log.error("capture: ledger record missing from estate for requestID \(requestKey, privacy: .public)")
                     return CaptureOutcome.failed(reason: "unexpected-failure").toJSONValue()
@@ -257,7 +256,7 @@ public actor CommunityCaptureCoordinator: Sendable {
                     ).toJSONValue()
                 }
 
-                let rooms = try await estate.listRooms()
+                let rooms = try await host.kit.listRooms(in: handle)
                 let destination = destinations(from: rooms)
                     .first(where: { $0.id == existing.destinationID })
                     ?? destinationFromID(existing.destinationID)
@@ -286,10 +285,10 @@ public actor CommunityCaptureCoordinator: Sendable {
 
         // 2. destination must exist in the current estate.
         let allDestinations: [CaptureDestination]
-        let estate: Estate
+        let handle: EstateHandle
         do {
-            estate = try await requireEstate()
-            let rooms = try await estate.listRooms()
+            handle = try await requireHandle()
+            let rooms = try await host.kit.listRooms(in: handle)
             allDestinations = destinations(from: rooms)
         } catch {
             log.error("capture: estate access failed: \(error, privacy: .public)")
@@ -335,7 +334,7 @@ public actor CommunityCaptureCoordinator: Sendable {
 
         // ── Ledger-miss recovery (F10) ───────────────────────────────────────
         //
-        // The crash window: estate.capture() succeeds but writeLedger() never
+        // The crash window: GLK capture succeeds but writeLedger() never
         // runs (process killed, power loss). On retry the ledger has no entry
         // for this requestID, so the idempotency check above already missed.
         //
@@ -352,7 +351,7 @@ public actor CommunityCaptureCoordinator: Sendable {
         let addedByPrefix = "moot_community_capture/\(requestKey)"
         let addedByMarker = recoveryMarker(requestKey: requestKey, arguments: arguments)
         do {
-            let allDrawers = try await estate.allDrawers()
+            let allDrawers = try await host.kit.allDrawers(in: handle)
             if let recovered = allDrawers.first(where: {
                 $0.addedBy == addedByPrefix || $0.addedBy.hasPrefix(addedByPrefix + "/v2/")
             }) {
@@ -411,7 +410,7 @@ public actor CommunityCaptureCoordinator: Sendable {
         // exportEligible maps to AdjectiveExportability; lanEligible is ledger-only.
         //
         // addedBy encodes the requestKey so a subsequent ledger-miss recovery
-        // can locate this drawer by querying estate.allDrawers() (F10 fix).
+        // can locate this drawer through GLK's handle-scoped allDrawers verb (F10 fix).
         let frame = CaptureFrame(
             content: arguments.content,
             channel: .actuator,   // MCP-driven capture uses the actuator channel
@@ -427,10 +426,10 @@ public actor CommunityCaptureCoordinator: Sendable {
 
         let drawer: Drawer
         do {
-            // ORDERING (F10): estate.capture() commits BEFORE writeLedger().
+            // ORDERING (F10): GLK capture commits BEFORE writeLedger().
             // A crash between these two calls is survivable via ledger-miss
             // recovery (the addedByMarker query above finds the drawer on retry).
-            drawer = try await estate.capture(frame)
+            drawer = try await host.kit.capture(handle, frame)
         } catch {
             log.error("capture: drawer write failed: \(error, privacy: .public)")
             return CaptureOutcome.failed(reason: "unexpected-failure").toJSONValue()
@@ -477,19 +476,19 @@ public actor CommunityCaptureCoordinator: Sendable {
     ///
     /// Any error from the posture, the storage backend or GeniusLocusKit
     /// propagates to the caller without wrapping — no silent fallback.
-    private func requireEstate() async throws -> Estate {
+    private func requireHandle() async throws -> EstateHandle {
         guard host.databaseExists else {
-            log.error("capture requireEstate: estate database not found at \(self.estateURL.path, privacy: .public)")
+            log.error("capture requireHandle: estate database not found at \(self.estateURL.path, privacy: .public)")
             throw CommunityDaemonError.estateAbsent(estateURL)
         }
-        return try await host.estate()
+        return try await host.handle()
     }
 
     // MARK: - Default inbox seeding
 
     /// Seed the private default capture inbox into a brand-new (empty) estate.
     ///
-    /// Called by `captureChoices()` when `estate.listRooms()` returns empty.
+    /// Called by `captureChoices()` when GLK `listRooms(in:)` returns empty.
     /// Captures a single system-initialization sentinel drawer into the
     /// "personal/capture" wing/room. LocusKit's capture path creates wing
     /// and room nodes on demand (EstateVerbs.captureBatch's createNode calls),
@@ -503,14 +502,14 @@ public actor CommunityCaptureCoordinator: Sendable {
     ///   - channel: .actuator        (MCP-agent-driven origin)
     ///
     /// This is NOT a user-visible note — it is an implementation artifact that
-    /// establishes the room so `listRooms()` has something to enumerate.
+    /// establishes the room so GLK `listRooms(in:)` has something to enumerate.
     /// The sentinel content marks it as system-origin so diagnostic tools
     /// can distinguish it from user captures.
     ///
     /// Errors propagate to the caller (`captureChoices`), which logs them and
     /// falls back to the empty-destinations path (fail-open for the read-only
     /// choices endpoint).
-    private func seedDefaultCaptureInbox(in estate: Estate) async throws {
+    private func seedDefaultCaptureInbox(kit: GeniusLocusKit, handle: EstateHandle) async throws {
         // The sentinel frame uses the same defaults as a private user capture:
         //   - UDC 007 = "Media. Books. Recreation" — the general capture anchor
         //     used throughout CommunityCaptureCoordinator for user captures.
@@ -529,7 +528,7 @@ public actor CommunityCaptureCoordinator: Sendable {
             exportability: .private_,
             wing: "personal"
         )
-        _ = try await estate.capture(frame)
+        _ = try await kit.capture(handle, frame)
     }
 
     // MARK: - Destination helpers

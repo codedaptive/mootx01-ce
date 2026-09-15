@@ -3,7 +3,7 @@
 // Manifest-backed implementations of the dreaming and maintenance policy
 // stores. These satisfy the daemon persistence seams by
 // reading and writing the estate manifest THROUGH the public substrate
-// interface (`GeniusLocusKit.estate(for:)` → `LocusKit.Estate.meta/setMeta`),
+// interface (`GeniusLocusKit.meta(in:key:)` / `setMeta(in:key:value:)`),
 // so policy, bandit, and daemon cycle state survive a process restart.
 //
 // Why this lives in NeuronKit, not GeniusLocusKit: the policy-store protocols
@@ -70,15 +70,14 @@ private let neuronKitManifestEncoder: JSONEncoder = {
     return e
 }()
 
-/// Shared estate-manifest JSON load/save over the public `Estate` meta surface.
+/// Shared estate-manifest JSON load/save over GeniusLocusKit's handle-scoped meta verbs.
 /// A present-but-undecodable value returns nil (fail-soft: the daemon falls back
 /// to its defaults rather than crashing on a manifest written by a newer schema).
 private enum EstateManifestCodec {
     static func load<T: Decodable>(
         _ type: T.Type, key: String, handle: EstateHandle, kit: GeniusLocusKit
     ) async throws -> T? {
-        let estate = try await kit.estate(for: handle)
-        guard let json = try await estate.meta(key: key),
+        guard let json = try await kit.meta(in: handle, key: key),
               let data = json.data(using: .utf8)
         else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
@@ -87,10 +86,9 @@ private enum EstateManifestCodec {
     static func save<T: Encodable>(
         _ value: T, key: String, handle: EstateHandle, kit: GeniusLocusKit
     ) async throws {
-        let estate = try await kit.estate(for: handle)
         let data = try neuronKitManifestEncoder.encode(value)
         guard let json = String(data: data, encoding: .utf8) else { return }
-        try await estate.setMeta(key: key, value: json)
+        try await kit.setMeta(in: handle, key: key, value: json)
     }
 }
 

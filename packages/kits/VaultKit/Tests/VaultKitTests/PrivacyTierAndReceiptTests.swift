@@ -434,8 +434,7 @@ struct PrivacyTierAndReceiptTests {
     private func resolveNames(
         _ drawer: Drawer, kit: GeniusLocusKit, handle: EstateHandle
     ) async throws -> (wing: String, room: String) {
-        let estate = try await kit.estate(for: handle)
-        let all = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        let all = try await kit.resolveNodeNames(handle, parentNodeIds: [drawer.parentNodeId])
         return all[drawer.parentNodeId] ?? (wing: "", room: "")
     }
 

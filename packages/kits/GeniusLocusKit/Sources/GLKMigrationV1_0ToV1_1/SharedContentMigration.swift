@@ -462,8 +462,7 @@ public extension GeniusLocusKit {
             throw SharedContentMigrationError.storageFailure(
                 state: .discovered, reason: "no storage registered for estate")
         }
-        let estateObj = try estate(for: handle)
-        let source = LocusDrawerCorpusContentSource(estate: estateObj)
+        let source = try await LocusDrawerCorpusContentSource(kit: self, handle: handle)
         let wiredFingerprint = CorpusContentEngine.configurationFingerprint(
             mode: .attached, models: embeddingModels)
         try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
