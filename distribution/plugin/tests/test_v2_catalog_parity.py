@@ -115,8 +115,6 @@ _PROSE_IDENTIFIER_ALLOWLIST = {
     "retryable": "error-envelope recovery field named in SKILL.md recovery guidance; "
                  "no tool outputSchema in the fixtures declares it",
     "mootx01": "the binary and Homebrew formula name (mootx01-start.md)",
-    "full": "a valid enum value of the moot_memory_get `depth` parameter; "
-            "it is a depth level name, not a schema property key",
 }
 # Hook-protocol fields written by moot_hooks.py that are never tool arguments.
 _HOOK_PROTOCOL_FIELDS = frozenset({"decision", "reason", "fired", "compacted", "stop_nagged"})
@@ -468,17 +466,24 @@ def _unread_brace_objects(path: str, catalog: dict) -> list[str]:
 
 def _catalog_field_union(catalog: dict) -> set[str]:
     """Every tool's inputSchema.properties keys, plus every `properties` key
-    found at any depth of every tool's outputSchema."""
+    and every string `enum` member found at any depth of every tool's
+    inputSchema and outputSchema. Enum members count because prose names
+    allowed values (a preset, a depth level) in the same backticked form as
+    argument keys, and a value the contract declares is resolved, not prose
+    drift."""
     union = set()
     for entry in catalog.values():
         union |= set(_schema_properties(entry))
-        stack = [entry.get("outputSchema")]
+        stack = [entry.get("inputSchema") or entry.get("input_schema"), entry.get("outputSchema")]
         while stack:
             node = stack.pop()
             if isinstance(node, dict):
                 props = node.get("properties")
                 if isinstance(props, dict):
                     union |= set(props.keys())
+                members = node.get("enum")
+                if isinstance(members, list):
+                    union |= {m for m in members if isinstance(m, str)}
                 stack.extend(node.values())
             elif isinstance(node, list):
                 stack.extend(node)
