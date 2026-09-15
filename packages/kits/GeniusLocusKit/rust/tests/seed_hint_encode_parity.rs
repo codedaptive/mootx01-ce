@@ -131,9 +131,15 @@ fn seed_hint_fresh_estate_drains_to_zero() {
         "the 7 seeded hints must stay indexed after the drain"
     );
     let statuses = coord.drain_statuses(&handle).expect("drain_statuses");
+    // The seeded hints are drawers with content and bit 28 clear, so the
+    // fact_extraction row-debt lane is owed by construction until a dreaming
+    // cycle pays it; every encode-side lane settles.
     assert!(
-        statuses.iter().all(|s| !s.is_draining()),
-        "every drain lane settles on a fresh drained estate: {statuses:?}"
+        statuses
+            .iter()
+            .filter(|s| s.name != genius_locus_kit::DrainStatus::FACT_EXTRACTION_NAME)
+            .all(|s| !s.is_draining()),
+        "every encode-side drain lane settles on a fresh drained estate: {statuses:?}"
     );
 }
 

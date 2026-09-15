@@ -96,8 +96,12 @@ struct SeedHintEncodeTests {
         // The encode drain itself is also settled.
         let statuses = try await kit.drainStatuses(handle)
         #expect(DrainStatus.encodeSettled(statuses))
-        #expect(statuses.allSatisfy { !$0.isDraining },
-                "every drain lane settles on a fresh drained estate: \(statuses)")
+        // The seeded hints are drawers with content and bit 28 clear, so the
+        // fact_extraction row-debt lane is owed by construction until a
+        // dreaming cycle pays it; every encode-side lane settles.
+        #expect(statuses.filter { $0.name != DrainStatus.factExtractionName }
+                    .allSatisfy { !$0.isDraining },
+                "every encode-side drain lane settles on a fresh drained estate: \(statuses)")
     }
 
     @Test("a registered span encoder exposes true row debt without changing the corpus finisher gate")
