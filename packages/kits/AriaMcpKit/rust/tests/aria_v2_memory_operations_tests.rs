@@ -11,7 +11,7 @@ use aria_mcp::{
     sensitivity_grant_ledger::SensitivityGrantLedger,
     surfaced_recall_ledger::SurfacedRecallLedger,
     v2::{
-        core_memory::{run_file_memory, run_memory_get, run_memory_search, V2CompactMemory, V2CoreMemoryDependencies, V2CoreMemoryOperation, V2CoreMemoryService, V2Exportability, V2FiledMemory, V2FileMemoryRequest, V2FetchArguments, V2FetchReference, V2Memory, V2MemoryAuthorization, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext, V2MemorySearchRequest, V2MemoryClock, V2MemorySearchResult, V2Placement, FILE_MEMORY_TOOL, MEMORY_GET_TOOL},
+        core_memory::{execute_memory_search, run_file_memory, run_memory_get, V2CompactMemory, V2CoreMemoryDependencies, V2CoreMemoryOperation, V2CoreMemoryService, V2Exportability, V2FiledMemory, V2FileMemoryRequest, V2FetchArguments, V2FetchReference, V2Memory, V2MemoryAuthorization, V2MemoryFailure, V2MemoryGetRequest, V2MemoryOperationContext, V2MemorySearchRequest, V2MemoryClock, V2MemorySearchResult, V2Placement, FILE_MEMORY_TOOL, MEMORY_GET_TOOL},
         operation::V2OperationEffect,
         render::V2ResultMeta,
     },
@@ -51,7 +51,8 @@ fn decoders_are_strict_and_preserve_typed_request_fields() {
 #[test]
 fn direct_typed_service_calls_project_compact_rows_and_record_surface() {
     let fake = Fake::default();
-    let result = run_memory_search(&arguments(json!({"query":"typed search","limit":1})), &dependencies(&fake)).unwrap();
+    let req = V2MemorySearchRequest::decode(&arguments(json!({"query":"typed search","limit":1}))).unwrap();
+    let result = execute_memory_search(req, &dependencies(&fake)).unwrap();
     assert_eq!(fake.searches.lock().unwrap().len(), 1);
     assert_eq!(result["structuredContent"]["data"]["results"].as_array().unwrap().len(), 1);
     assert_eq!(result["structuredContent"]["data"]["results"][0]["memory_id"], "a0b1c2d3-e4f5-4678-9012-3456789abcde");
@@ -99,7 +100,7 @@ fn file_memory_compact_text_carries_uuid() {
     assert_eq!(uuid_str, uuid_str.to_lowercase(), "UUID in compact text must be lowercase canonical");
 }
 
-/// Calls `run_memory_search` directly with a `Fake` whose `search_memories`
+/// Calls `execute_memory_search` directly with a `Fake` whose `search_memories`
 /// returns rows carrying a 600-char subject and a 513-emoji context, then
 /// asserts that the serialization loop in `execute_memory_search` caps both at
 /// 512 scalars.  The loop added `compact_text` to the subject branch to match
@@ -122,13 +123,11 @@ fn compact_row_subject_and_context_are_both_capped_at_512_scalars() {
     assert_eq!(long_subject.chars().count(), 600, "precondition: subject is 600 chars");
 
     // Fake.search_memories returns rows with a 600-char subject (and emoji context).
-    // run_memory_search passes them through the serialization loop which must apply
+    // execute_memory_search processes them through the serialization loop which must apply
     // compact_text to subject (and already did so for context).
     let fake = Fake::default();
-    let result = run_memory_search(
-        &arguments(json!({"query": "compact-512-form", "limit": 1})),
-        &dependencies(&fake),
-    ).unwrap();
+    let req = V2MemorySearchRequest::decode(&arguments(json!({"query": "compact-512-form", "limit": 1}))).unwrap();
+    let result = execute_memory_search(req, &dependencies(&fake)).unwrap();
 
     let rows = result["structuredContent"]["data"]["results"]
         .as_array()
