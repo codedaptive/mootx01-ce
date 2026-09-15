@@ -29,8 +29,13 @@ fn main() -> ExitCode {
 
     match command {
         Command::Version => {
-            // Must print an identical line to the Swift port's `versionDisplay`.
+            // The first line matches Swift `versionDisplay`; the following lines
+            // identify the product paths that select each library converter.
+            let hydration = genius_locus_kit::DISTILLATION_CONVERTER;
+            let recall = aria_mcp::recall_distillation::CONVERTER;
             println!("{} ({})", mootx01_cli::CURRENT_VERSION, mootx01_cli::RELEASE_DATE);
+            println!("converter hydration {} {}", hydration.id(), hydration.converter_version());
+            println!("converter recall {} {}", recall.id(), recall.converter_version());
             ExitCode::from(exit::OK)
         }
         Command::Help => {
