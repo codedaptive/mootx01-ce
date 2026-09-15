@@ -69,6 +69,7 @@ struct FactExtractionDutyTests {
 
         let estate = try await kit.estate(for: handle)
         let fact = try #require(try await estate.allKGFacts().first)
+        #expect(UUID(uuidString: fact.id) != nil)
         #expect(fact.sourceDrawerID == drawer.id)
         #expect(fact.evidenceQuote == source)
         #expect(fact.evidenceStart == 0 && fact.evidenceEnd == source.unicodeScalars.count)

@@ -345,12 +345,14 @@ fn fact_semantic_key(fact: &KGFact) -> String {
 }
 
 fn distilled_fact_id(source_id: &str, recipe_id: &str, semantic_key: &str) -> String {
-    substrate_kernel::sha256::hash(
+    let digest = substrate_kernel::sha256::hash(
         format!("distilled-fact-v1|{source_id}|{recipe_id}|{semantic_key}").as_bytes(),
-    )
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect()
+    );
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }
 
 fn source_digest(source: &str) -> String {

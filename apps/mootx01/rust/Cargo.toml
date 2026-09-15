@@ -25,6 +25,10 @@ description = "mootx01 — ARIA MCP server and estate management CLI (Rust verti
 name = "mootx01"
 path = "src/main.rs"
 
+[[bin]]
+name = "moot-nuextract-worker"
+path = "src/bin/moot_nuextract_worker.rs"
+
 [lib]
 name = "mootx01_cli"
 path = "src/lib.rs"
@@ -100,6 +104,7 @@ corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
 # through genius-locus-kit; naming them keeps the upgrade wiring explicit.
 synapsekit = { path = "../../../packages/kits/SynapseKit/rust" }
 substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust" }
+fact-extraction-kit-providers = { path = "../../../packages/kits/FactExtractionKit/rust-providers", features = ["candle"] }
 # corpus-kit-providers: the span-encode backfill and the upgrade steps use
 # the encoder factory and BASIS_FORMAT_VERSION directly. Already in the
 # product graph via aria-mcp; naming it directly keeps the commands plain
