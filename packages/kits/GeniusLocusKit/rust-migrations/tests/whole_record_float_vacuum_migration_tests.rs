@@ -14,15 +14,20 @@
 //!      before.
 //!   2. Idempotence: a second run deletes nothing, releases nothing and
 //!      leaves the stamp at V1_7.
-//!   3. The format value is pinned: CURRENT is V1_7.
+//!   3. The format values are pinned: CURRENT is V1_8, and V1_7 keeps its
+//!      (1, 7) identity, above V1_6 and below CURRENT.
 //!   4. On a SQLite estate the `.vec` sidecar is rewritten by the capsule and
 //!      a fresh store loads it without a rebuild.
 //!   5. V1_5-stamped estate: the chain runs the 1.5 → 1.6 capsule and then
-//!      this one, ending at V1_7 (gated on feature = "migration-v1-5-to-v1-6").
+//!      this one, ending at CURRENT (gated on feature = "migration-v1-5-to-v1-6").
 //!   6. StorageUnavailable: an unregistered handle returns the error variant.
 //!   7. With the `whole-record-dense` feature an estate whose manifest names a
 //!      whole-record provider keeps its rows and is still stamped V1_7; the
 //!      span encoder value vacuums like the default ensemble.
+//!   8. V1_7-stamped estate: the chain's `found < V1_7` guard skips this
+//!      capsule, so the float rows, the graph row and the lane-1 claim survive
+//!      the chain and the estate still ends at CURRENT (gated on
+//!      feature = "migration-v1-7-to-v1-8", which compiles the chain).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -204,8 +209,9 @@ fn v1_6_estate_loses_float_and_graph_rows_and_keeps_the_rest() {
     assert_eq!(kind_count(&storage, 2), 2);
     assert_eq!(graph_count(&storage), 0);
     assert_eq!(claim_lanes(&storage), vec![0]);
+    // The 1.6→1.7 capsule stamps V1_7; these assertions pin the capsule's own output,
+    // not the chain's final stamp (which would be CURRENT after all capsules run).
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(ordered_ids(&storage), before);
 }
 
@@ -232,6 +238,7 @@ fn capsule_is_idempotent() {
     assert_eq!(kind_count(&storage, 0), 2);
     assert_eq!(kind_count(&storage, 2), 2);
     assert_eq!(claim_lanes(&storage), vec![0]);
+    // The 1.6→1.7 capsule stamps V1_7 (not the chain's CURRENT).
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
 }
 
@@ -240,10 +247,11 @@ fn capsule_is_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn current_format_is_v1_7() {
-    assert_eq!(EstateFormatVersion::CURRENT, EstateFormatVersion::V1_7);
+fn current_format_is_v1_8() {
+    assert_eq!(EstateFormatVersion::CURRENT, EstateFormatVersion::V1_8);
     assert_eq!(EstateFormatVersion::V1_7, EstateFormatVersion { major: 1, minor: 7 });
     assert!(EstateFormatVersion::V1_6 < EstateFormatVersion::V1_7);
+    assert!(EstateFormatVersion::V1_7 < EstateFormatVersion::CURRENT);
 }
 
 // ---------------------------------------------------------------------------
@@ -291,11 +299,12 @@ fn sqlite_estate_sidecar_is_rebuilt_and_loads_without_a_rebuild() {
     assert_eq!(after, before);
     assert_eq!(fresh.sidecar_rebuild_count(), 0, "the sidecar the capsule wrote is current");
     assert_eq!(kind_count(&storage, 1), 0);
+    // The 1.6→1.7 capsule stamps V1_7 (not the chain's CURRENT).
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
 }
 
 // ---------------------------------------------------------------------------
-// §5 Chain from V1_5 ends at V1_7
+// §5 Chain from V1_5 ends at CURRENT
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "migration-v1-5-to-v1-6")]
@@ -306,7 +315,7 @@ fn v1_5_estate_runs_both_capsules_to_current() {
     coord
         .run_migration_chain(&handle, NOW, Vec::new())
         .expect("chain from v1_5");
-    assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
+    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(kind_count(&storage, 1), 0);
     assert_eq!(graph_count(&storage), 0);
     assert_eq!(kind_count(&storage, 0), 2);
@@ -359,6 +368,7 @@ fn whole_record_provider_in_the_manifest_keeps_the_rows() {
     assert_eq!(kind_count(&storage, 1), 2);
     assert_eq!(graph_count(&storage), 1);
     assert_eq!(claim_lanes(&storage), vec![0, 1]);
+    // The 1.6→1.7 capsule stamps V1_7 (not the chain's CURRENT).
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
 }
 
@@ -372,5 +382,33 @@ fn span_encoder_in_the_manifest_still_vacuums() {
     let report = coord.run_whole_record_float_vacuum_migration(&handle, NOW).unwrap();
     assert!(report.vacuumed);
     assert_eq!(kind_count(&storage, 1), 0);
+    // The 1.6→1.7 capsule stamps V1_7 (not the chain's CURRENT).
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
+}
+
+// ---------------------------------------------------------------------------
+// §8 Chain from V1_7 skips this capsule: the rows survive
+// ---------------------------------------------------------------------------
+
+/// The chain runs this capsule only when `found < V1_7`. An estate stamped
+/// exactly V1_7 carries the rows the capsule would delete, so their survival
+/// is what shows the guard skipped it: without the guard the kind 1 count
+/// drops to 0, the graph row goes and the lane-1 claim is released, and each
+/// of those assertions goes red.
+#[cfg(feature = "migration-v1-7-to-v1-8")]
+#[test]
+fn v1_7_estate_keeps_the_rows_because_the_chain_skips_the_capsule() {
+    use genius_locus_kit_migrations::MigrationChainExt;
+    let (mut coord, handle, storage) = make_estate(EstateFormatVersion::V1_7);
+    let before = ordered_ids(&storage);
+    coord
+        .run_migration_chain(&handle, NOW, Vec::new())
+        .expect("chain from V1_7");
+    assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
+    assert_eq!(kind_count(&storage, 1), 2, "the guard kept the float rows");
+    assert_eq!(graph_count(&storage), 1, "the guard kept the graph row");
+    assert_eq!(claim_lanes(&storage), vec![0, 1], "the guard kept the lane-1 claim");
+    assert_eq!(kind_count(&storage, 0), 2);
+    assert_eq!(kind_count(&storage, 2), 2);
+    assert_eq!(ordered_ids(&storage), before);
 }

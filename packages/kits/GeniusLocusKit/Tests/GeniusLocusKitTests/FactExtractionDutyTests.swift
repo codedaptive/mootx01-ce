@@ -7,7 +7,7 @@ import PersistenceKitInMemory
 import Testing
 @testable import GeniusLocusKit
 
-@Suite("Distilled fact extraction duty", .serialized)
+@Suite("Source-grounded fact extraction duty", .serialized)
 struct FactExtractionDutyTests {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -49,7 +49,7 @@ struct FactExtractionDutyTests {
         let drawer = try await capture(kit, handle, content: source)
         let model = spec()
         let extractor = ClosureFactExtractor(spec: model) { request in
-            #expect(request.distilledText.contains("Jack"))
+            #expect(request.sourceText.contains("Jack"))
             #expect(!request.eligibleSourceSpans.isEmpty)
             return FactExtractionResponse(
                 sourceDigest: request.sourceDigest,
@@ -182,5 +182,37 @@ struct FactExtractionDutyTests {
         let history = try await estate.allKGFactsIncludingRetired()
         #expect(history.count == 3)
         #expect(history.contains(where: { $0.id == oldMachineID }))
+    }
+
+    @Test("source-exact chunking reaches a fact beyond the first model window")
+    func extractsTailFactFromOriginalBody() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-original-body")
+        let factText = "Jack's birthday is June 20th."
+        let source = String(repeating: "Background material. ", count: 40) + factText
+        let drawer = try await capture(kit, handle, content: source)
+        let model = FactExtractorModelSpec(
+            providerID: "test-provider", modelID: "nuextract-test",
+            modelVersion: "q8", schemaVersion: "kgfact-extraction-v1",
+            extractorKind: .specializedModel, maximumInputCharacters: 700,
+            maximumFactsPerSource: 8)
+        let extractor = ClosureFactExtractor(spec: model) { request in
+            let candidates = request.sourceText.contains(factText) ? [FactCandidate(
+                subject: "Jack", predicate: "birthday", object: "June 20th",
+                evidenceQuote: factText, confidence: 0.97)] : []
+            return FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion,
+                candidates: candidates)
+        }
+        _ = try await kit.activateFactExtractor(
+            extractor, recipeID: "nuextract-original-body-v1", for: handle)
+
+        let report = try await kit.runFactExtractionBatch(handle, now: now)
+        #expect(report.completedSources == 1)
+        #expect(report.factsFiled == 1)
+        let fact = try #require(try await kit.estate(for: handle).allKGFacts().first)
+        #expect(fact.sourceDrawerID == drawer.id)
+        #expect(fact.evidenceQuote == factText)
     }
 }

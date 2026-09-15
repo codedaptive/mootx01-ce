@@ -2,9 +2,10 @@
 //
 // One-shot, re-runnable backfill that populates `kg_facts.searchProjection`
 // and `kg_facts.searchProjectionVersion` for rows the v19 → v20 migration
-// added those columns to. Before the v19 → v20 extraction columns hop, rows
-// had no projection and were invisible to FactFirstRecall's hard guard
-// (which excludes any fact with an empty searchProjection).
+// added those columns to. A fact with an empty `searchProjection` is
+// invisible to any consumer that filters on the projection (the contract:
+// a row must carry a non-empty, current-version projection to participate
+// in fact-search results).
 //
 // Run ONLY by `mootx01 upgrade` — Bob's ruling makes upgrade the sole
 // migration vehicle: no detection or prompting lives anywhere else (not

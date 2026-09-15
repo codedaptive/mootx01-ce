@@ -174,4 +174,37 @@ fn a_chain_that_returns_ok_leaves_the_estate_current() {
             .expect("the 1.6 -> 1.7 capsule runs on an in-memory estate");
         assert_eq!(read_stamp(&storage), Some(EstateFormatVersion::CURRENT));
     }
+    // An estate stamped exactly V1_7 ends at CURRENT with `fact_extraction`
+    // seeded: the seeded key is what shows the chain invoked the 1.7 -> 1.8
+    // capsule rather than stamping on its own. Whether the chain skipped the
+    // 1.6 -> 1.7 vacuum on the way is not observable on this bare fixture;
+    // that guard is gated by whole_record_float_vacuum_migration_tests §8.
+    #[cfg(feature = "migration-v1-7-to-v1-8")]
+    {
+        let (mut coord, handle, storage) = make_estate(Some(EstateFormatVersion::V1_7));
+        let before = coord
+            .estate_for(&handle)
+            .expect("estate_for")
+            .meta(EstateCoordinator::FACT_EXTRACTION_META_KEY)
+            .expect("meta");
+        assert!(before.is_none(), "precondition: key absent before the chain runs");
+        coord
+            .run_migration_chain(&handle, NOW, default_ensemble())
+            .expect("the 1.7 -> 1.8 capsule runs on a V1_7 estate");
+        assert_eq!(
+            read_stamp(&storage),
+            Some(EstateFormatVersion::CURRENT),
+            "V1_7 -> chain -> CURRENT",
+        );
+        let seeded = coord
+            .estate_for(&handle)
+            .expect("estate_for")
+            .meta(EstateCoordinator::FACT_EXTRACTION_META_KEY)
+            .expect("meta");
+        assert_eq!(
+            seeded.as_deref(),
+            Some("on"),
+            "the chain ran the 1.7 -> 1.8 capsule, which seeds the key"
+        );
+    }
 }
