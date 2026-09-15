@@ -265,4 +265,16 @@ public struct GLKRecallRequest: Sendable {
             frontierK: frontierK, anomalousFilter: anomalousFilter,
             subSpanScoring: subSpanScoring, rerankDirective: rerankDirective)
     }
+
+    /// This request with `rerankDirective` replaced and every other field kept.
+    /// The recall router uses it to apply a route's transform without altering
+    /// any other caller-specified parameter.
+    func replacing(rerankDirective: RerankDirective?) -> GLKRecallRequest {
+        GLKRecallRequest(
+            frame: frame, mode: mode, scoring: scoring, limit: limit, fallback: fallback,
+            queryText: queryText, traceLimit: traceLimit, origin: origin,
+            recallShape: recallShape, door: door, composition: composition,
+            frontierK: frontierK, anomalousFilter: anomalousFilter,
+            subSpanScoring: subSpanScoring, rerankDirective: rerankDirective)
+    }
 }
