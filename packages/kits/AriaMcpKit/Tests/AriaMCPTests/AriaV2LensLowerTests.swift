@@ -453,8 +453,7 @@ struct PartialCueModeTests {
             latticeAnchor: .udc("530"), addedBy: "partial-cue-mode-tests",
             embeddingModelID: "test-model-v1",
             subject: "partial cue row contract subject"))
-        let estate = try await kit.estate(for: handle)
-        _ = try await estate.setSSCFacts(expectedSSCFacts, for: peer.id)
+        _ = try await kit.setSSCFacts(in: handle, expectedSSCFacts, for: peer.id)
 
         let service = AriaV2LensLowerService(
             authority: AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle),
@@ -832,9 +831,8 @@ struct PartialCueModeTests {
             wing: "b6p-wing"))
 
         // Two outbound tunnels from hub make it the highest-centrality node.
-        let estate = try await kit.estate(for: handle)
         for spokeID in [s1.id, s2.id] {
-            _ = try await estate.capture(TunnelCaptureFrame(
+            _ = try await kit.captureTunnel(handle, TunnelCaptureFrame(
                 sourceWing: "b6p-wing", sourceRoom: "b6p-room",
                 targetWing: "b6p-wing", targetRoom: "b6p-room",
                 label: "relates", addedBy: "prov-keystones-tests",

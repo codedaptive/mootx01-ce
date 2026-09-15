@@ -58,13 +58,12 @@ struct LensToolsTests {
         _ kit: GeniusLocusKit, _ handle: EstateHandle,
         wing: String, src: String, tgt: String
     ) async throws {
-        let estate = try await kit.estate(for: handle)
         let frame = TunnelCaptureFrame(
             sourceWing: wing, sourceRoom: "r",
             targetWing: wing, targetRoom: "r",
             label: "relates", addedBy: "lens-tests",
             sourceDrawerId: src, targetDrawerId: tgt, kind: .references)
-        _ = try await estate.capture(frame)
+        _ = try await kit.captureTunnel(handle, frame)
     }
 
     private func text(_ result: JSONValue) throws -> String {
@@ -379,8 +378,7 @@ struct LensToolsTests {
         content: String, room: String,
         sensitivity: AdjectiveSensitivity
     ) async throws -> Drawer {
-        let estate = try await kit.estate(for: handle)
-        return try await estate.capture(CaptureFrame(
+        return try await kit.capture(handle, CaptureFrame(
             content: content,
             channel: .typed,
             room: room,
@@ -846,8 +844,8 @@ extension LensToolsTests {
     /// Value-equality gate: `moot_lens_trust_synthesis` dense rows carry the
     /// drawer's actual subject, bestSpan and eventTime for admissible drawers.
     ///
-    /// Expected values are derived independently from the drawer itself (via
-    /// the estate) using the same field mapping `AriaV2LensLower.trustData`
+    /// Expected values are derived independently from the drawer itself via
+    /// GLK's handle-scoped read, using the same field mapping `AriaV2LensLower.trustData`
     /// applies, then compared field-by-field against the dispatch response.
     /// Non-nil assertions are not sufficient — only value equality proves the
     /// gate is not trivially satisfied by a sentinel like "-".
@@ -865,10 +863,9 @@ extension LensToolsTests {
         // AriaV2LensLower.trustData uses the shared composer helpers:
         // noSubjectMarker for absent subjects, normalizeValue for bestSpan
         // (matching Rust result_composer.rs NO_SUBJECT_MARKER + normalize_value).
-        let estate = try await kit.estate(for: handle)
         // Full hydration mirrors the lens lower path: structured returns content == ""
         // (spec §7.3), so the expected bestSpan must be derived from a full fetch.
-        let fetched = try await estate.getDrawers(ids: [id], hydrationLevel: .full)
+        let fetched = try await kit.getDrawers(in: handle, ids: [id], hydrationLevel: .full)
         let drawer = try #require(fetched.first, "captured drawer must be retrievable from estate")
         let expectedSubject = drawer.subject ?? ResultComposer.noSubjectMarker
         let rawSpan = ResultComposer.normalizeValue(drawer.content)
@@ -921,10 +918,9 @@ extension LensToolsTests {
         // Derive expected values from the stored hub drawer using the shared
         // composer helpers: noSubjectMarker for absent subjects, normalizeValue
         // for bestSpan. Matches Rust NO_SUBJECT_MARKER + normalize_value.
-        let estate = try await kit.estate(for: handle)
         // Full hydration mirrors the lens lower path: structured returns content == ""
         // (spec §7.3), so the expected bestSpan must be derived from a full fetch.
-        let fetched = try await estate.getDrawers(ids: [hubID], hydrationLevel: .full)
+        let fetched = try await kit.getDrawers(in: handle, ids: [hubID], hydrationLevel: .full)
         let hubDrawer = try #require(fetched.first, "hub drawer must be retrievable from estate")
         let expectedSubject = hubDrawer.subject ?? ResultComposer.noSubjectMarker
         let rawSpan = ResultComposer.normalizeValue(hubDrawer.content)
@@ -1023,8 +1019,7 @@ extension LensToolsTests {
             try await addTunnel(kit, handle, wing: "vault", src: hubID, tgt: spokeID)
         }
         // Now restrict the hub. Tunnels retain Normal sensitivity (set at capture time).
-        let estate = try await kit.estate(for: handle)
-        try await estate.mutate(rowID: hubID, kind: .correctSensitivity(.restricted))
+        try await kit.mutate(handle, MutateFrame(rowID: hubID, kind: .correctSensitivity(.restricted)))
 
         let result = try await dispatcher.dispatch(
             name: "moot_lens_keystones",

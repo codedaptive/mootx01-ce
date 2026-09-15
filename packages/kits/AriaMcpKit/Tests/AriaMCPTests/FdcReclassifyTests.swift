@@ -59,19 +59,16 @@ struct FdcReclassifyTests {
     }
 
     private func storedCode(_ kit: GeniusLocusKit, _ handle: EstateHandle, id: String) async throws -> String {
-        let estate = try await kit.estate(for: handle)
-        let drawer = try #require((try await estate.allDrawers()).first { $0.id == id })
+        let drawer = try #require((try await kit.allDrawers(in: handle)).first { $0.id == id })
         return drawer.udcCode
     }
 
     private func storedDrawer(_ kit: GeniusLocusKit, _ handle: EstateHandle, id: String) async throws -> Drawer {
-        let estate = try await kit.estate(for: handle)
-        return try #require((try await estate.allDrawers()).first { $0.id == id })
+        try #require((try await kit.allDrawers(in: handle)).first { $0.id == id })
     }
 
     private func fdcFloor(_ kit: GeniusLocusKit, _ handle: EstateHandle) async throws -> String? {
-        let estate = try await kit.estate(for: handle)
-        return try await estate.meta(key: Self.fdcFloorKey)
+        try await kit.meta(in: handle, key: Self.fdcFloorKey)
     }
 
     // Extract content[0].text from a v2 envelope response for compact-text
@@ -373,8 +370,7 @@ struct FdcReclassifyTests {
         let missingData = try data(missing)
         #expect(missingData["fdc_recalculation"] == .string("missing"))
 
-        let estate = try await kit.estate(for: handle)
-        try await estate.setMeta(key: Self.fdcFloorKey, value: "classifier:old")
+        try await kit.stampFDCRecalculationFloor(handle, value: "classifier:old")
         let stale = try await dispatcher.dispatch(
             name: "moot_estate_status", arguments: .object([:]))
         let staleData = try data(stale)

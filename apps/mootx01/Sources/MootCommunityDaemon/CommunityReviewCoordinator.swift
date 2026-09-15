@@ -5,9 +5,8 @@
 // ARCHITECTURE
 // ────────────────────────────────────────────────────────────────────────
 // This actor owns the review-state.json sidecar and mediates all review
-// mutations. It opens its own estate connection (same lazy-open pattern
-// as CommunityCaptureCoordinator) for reading drawers and applying
-// reversible actions.
+// mutations. It uses the daemon host's open handle and GLK verbs for reading
+// drawers and applying reversible actions.
 //
 // SIDECAR: review-state.json
 // ────────────────────────────────────────────────────────────────────────
@@ -70,6 +69,7 @@ import Foundation
 import MootProductIdentity
 import OSLog
 import AriaMCP
+import GeniusLocusKit
 import LocusKit
 
 private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootCommunityDaemon.Review")
@@ -178,8 +178,8 @@ public actor CommunityReviewCoordinator: Sendable {
     public func reviewSession(kind: ReviewKind, now: Date) async -> JSONValue {
         let drawers: [Drawer]
         do {
-            let estate = try await requireEstate()
-            drawers = try await estate.allDrawers()
+            let handle = try await requireHandle()
+            drawers = try await host.kit.allDrawers(in: handle)
         } catch {
             log.error("review_session: estate access failed: \(error, privacy: .public)")
             return ReviewSessionOutcome.blocked(reason: "daemon-blocked").toJSONValue()
@@ -260,8 +260,8 @@ public actor CommunityReviewCoordinator: Sendable {
         // 2. Validate that the actionID belongs to this session.
         let drawers: [Drawer]
         do {
-            let estate = try await requireEstate()
-            drawers = try await estate.allDrawers()
+            let handle = try await requireHandle()
+            drawers = try await host.kit.allDrawers(in: handle)
         } catch {
             log.error("review_apply: estate access failed: \(error, privacy: .public)")
             return ReviewActionOutcome.failed(reason: "unexpected-failure").toJSONValue()
@@ -338,8 +338,8 @@ public actor CommunityReviewCoordinator: Sendable {
         // 2. Validate actionID belongs to this session.
         let drawers: [Drawer]
         do {
-            let estate = try await requireEstate()
-            drawers = try await estate.allDrawers()
+            let handle = try await requireHandle()
+            drawers = try await host.kit.allDrawers(in: handle)
         } catch {
             log.error("review_reverse: estate access failed: \(error, privacy: .public)")
             return ReviewActionOutcome.failed(reason: "unexpected-failure").toJSONValue()
@@ -410,10 +410,10 @@ public actor CommunityReviewCoordinator: Sendable {
         // 2 & 3. Validate groupID and choiceID against the session's duplicate groups.
         // Returns the validated group (needed for step 6) and which choice was selected.
         let drawers: [Drawer]
-        let estate: Estate
+        let handle: EstateHandle
         do {
-            estate = try await requireEstate()
-            drawers = try await estate.allDrawers()
+            handle = try await requireHandle()
+            drawers = try await host.kit.allDrawers(in: handle)
         } catch {
             log.error("review_resolve_duplicate: estate access failed: \(error, privacy: .public)")
             return ReviewActionOutcome.failed(reason: "unexpected-failure").toJSONValue()
@@ -447,9 +447,8 @@ public actor CommunityReviewCoordinator: Sendable {
         //
         // Choice 0 ("Keep the newer record and archive the older one."): archive older only.
         // Choice 1 ("Merge content into the newer record and archive the older one."):
-        //   ideally merges the older drawer's content into the newer before archiving, but
-        //   Estate.mutate() is internal to LocusKit. Both choices produce the same archive
-        //   effect here; content merge is deferred pending a public mutation API.
+        //   this review path currently records the same archive effect as choice 0;
+        //   content merge is not implemented in the duplicate-resolution semantics.
         let olderDrawerIDs = group.recordIDs.dropFirst()
         for drawerID in olderDrawerIDs {
             // Drawer IDs are stored in the estate as the raw UUID().uuidString format
@@ -459,11 +458,14 @@ public actor CommunityReviewCoordinator: Sendable {
             // drawer exists. Pass the Swift UUID's .uuidString directly.
             let drawerIDStr = drawerID.uuidString  // uppercase — matches the stored format
             do {
-                let outcome = try await estate.archiveDrawer(
-                    id: drawerIDStr,
-                    reason: "duplicate-resolution",
+                let outcome = try await host.kit.expunge(
+                    handle,
+                    ExpungeFrame(rowID: drawerIDStr, reason: "duplicate-resolution", confirmation: true),
                     now: now
                 )
+                // Retain the existing partial-refusal behavior: the GLK outcome
+                // is logged, then the sidecar is marked resolved below. Callers
+                // receive no separate partial-resolution outcome from this API.
                 log.debug("review_resolve_duplicate: archived drawerID=\(drawerIDStr, privacy: .public) choiceIndex=\(choiceIndex, privacy: .public) outcome=\(String(describing: outcome), privacy: .public)")
             } catch {
                 log.error("review_resolve_duplicate: archive failed drawerID=\(drawerIDStr, privacy: .public) error=\(error, privacy: .public)")
@@ -536,17 +538,17 @@ public actor CommunityReviewCoordinator: Sendable {
 
     // MARK: - Estate access
 
-    /// The shared estate, opened by the host on first use.
+    /// The shared estate handle, opened by the host on first use.
     ///
     /// Fail-closed: throws `CommunityDaemonError.estateAbsent` if the record's
     /// database does not exist, so a review call never creates the estate as
     /// a side effect and the lifecycle `needsCreation` gate holds (F11 fix).
-    private func requireEstate() async throws -> Estate {
+    private func requireHandle() async throws -> EstateHandle {
         guard host.databaseExists else {
-            log.error("review requireEstate: estate database not found at \(self.estateURL.path, privacy: .public)")
+            log.error("review requireHandle: estate database not found at \(self.estateURL.path, privacy: .public)")
             throw CommunityDaemonError.estateAbsent(estateURL)
         }
-        return try await host.estate()
+        return try await host.handle()
     }
 
     // MARK: - Sidecar persistence

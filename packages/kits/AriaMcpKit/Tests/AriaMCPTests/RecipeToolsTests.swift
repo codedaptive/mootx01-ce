@@ -344,13 +344,12 @@ struct RecipeToolsTests {
         // Keep drawers and tunnel in the requested wing: location names the
         // room, not the wing. Direct capture keeps this fixture focused on
         // walk hydration, matching Rust's direct capture_tunnel fixture.
-        let estate = try await kit.estate(for: handle)
         let tunnelFrame = TunnelCaptureFrame(
             sourceWing: "recipe-tests", sourceRoom: "recipe-tests",
             targetWing: "recipe-tests", targetRoom: "recipe-tests",
             label: "g1 walk gate test link", addedBy: "aria-mcp-tests",
             sourceDrawerId: anchor, targetDrawerId: target, kind: .references)
-        _ = try await estate.capture(tunnelFrame)
+        _ = try await kit.captureTunnel(handle, tunnelFrame)
 
         // CONTROL: unrestricted filter must reach the target through the walk.
         // If this fails the fixture is broken, not the gate.

@@ -77,9 +77,8 @@ public enum PartialCueRecall {
 
         // Fingerprint families seeded by the estate uuid so the four
         // blocks are computed consistently for every drawer in this call.
-        let estate = try await kit.estate(for: handle)
         let families = EstateFingerprintFamilies(
-            estateUUID: await estate.estateUUID.uuidString)
+            estateUUID: handle.estateUUID.uuidString)
 
         // Compute fingerprints; pull out the anchor; key the rest by a
         // fresh per-call UUID (the primitive's row key) mapped back to

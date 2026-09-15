@@ -448,7 +448,7 @@ the AutonomicGovernor (in NeuronKit, started by the AriaResident host) drives.
 
 *Estate management:*
 - `open(storage:owner:)` → `EstateHandle`
-- `close(_:)`, `estate(for:)`, `openEstateCount`
+- `close(_:)`, `openEstateCount`; consumers read and write through handle-scoped GLK APIs. Raw estate resolution is internal to GeniusLocusKit.
 
 *Nine verbs (unified surface)* — every verb is a legal lexicon target; status
 reflects the live dispatch behavior asserted by
@@ -672,4 +672,4 @@ Build status reflects functional tests only.
 
 ---
 
-*Last updated: 2026-06-06 (full kit-status reconcile: added ObserverSink + VaultKit; corrected LatticeLib/LocusKit/GeniusLocusKit/NeuronKit to Built Swift+Rust per the v1.0 parity-complete sweep; fixed the IntellectusLib off-path note to the lock-free atomic gate).*
+*Last updated: 2026-09-15 (estate accessor lockdown: removed raw estate resolution from the public lifecycle listing).*

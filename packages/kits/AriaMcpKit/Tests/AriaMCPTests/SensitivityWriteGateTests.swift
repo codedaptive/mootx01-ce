@@ -318,8 +318,9 @@ struct SensitivityWriteGateTests {
     /// sensitivity does not revoke it.
     ///
     /// Drive: create `AriaV2MemoryMutations` with a fresh `GeniusLocusKit` that
-    /// has no estates open.  `gatedStoredMemoryID` calls `freshKit.estate(for:
-    /// handle)`, which throws `GeniusLocusKitError.estateNotOpen` — a non-
+    /// has no estates open.  `gatedStoredMemoryID` calls
+    /// `freshKit.getDrawers(in: handle, ids:hydrationLevel:)`, which throws
+    /// `GeniusLocusKitError.estateNotOpen` — a non-
     /// MemoryNotFoundError.
     ///
     /// Pre-fix failure (the bug): the non-NotFound error fell through to the
@@ -336,8 +337,9 @@ struct SensitivityWriteGateTests {
         // Seed a normal row to obtain a valid UUID.
         let normal = try await seed("resolution-failure dereference probe", in: handle, kit: kit)
 
-        // A fresh kit with no estate open.  kit.estate(for: handle) throws
-        // GeniusLocusKitError.estateNotOpen — a non-NotFound resolution failure.
+        // A fresh kit with no estate open.  kit.getDrawers(in: handle,
+        // ids:hydrationLevel:) throws GeniusLocusKitError.estateNotOpen — a
+        // non-NotFound resolution failure.
         let freshKit = GeniusLocusKit()
 
         let ledger = TrackingMemoryUsageLedger()
