@@ -204,6 +204,9 @@ pub mod preferences {
 /// Dispatch queue labels.
 pub mod queues {
     pub const ARIA_HTTP_ACCEPT: &str = "com.mootx01.aria-mcp.http.accept";
+    /// Stable name for the raw-read thread in the Swift HTTP transport; mirrored
+    /// here so the fixture parity gate holds. The Rust port has no such thread.
+    pub const ARIA_HTTP_RAW_READ: &str = "com.mootx01.aria-mcp.raw-read";
     pub const MANAGER_CONTROL_CHANNEL_ACCEPT: &str = "com.mootx01.mgr.control-channel.accept";
     pub const MANAGER_HTTP_READ_API_ACCEPT: &str = "com.mootx01.mgr.http-read-api.accept";
     pub const LAN_DISCOVERY: &str = "com.mootx01.lan-discovery";
@@ -230,6 +233,26 @@ pub mod settings {
         /// `None` means absent in the file; the consumer should use
         /// `<config-dir>/moot-mgr/stats.sqlite` as the default.
         pub daemon_stats_store: Option<String>,
+
+        // ---- fact_extraction block (config.json top-level key) ----
+        // Four Rust-port paths from `fact_extraction.*`. The two Swift-only
+        // keys (`coreai_asset`, `coreai_tokenizer`) are parsed by the Swift
+        // port and ignored here. An absent or empty value produces `None` —
+        // the same fail-quiet contract as `daemon_stats_store`.
+
+        /// Absolute path to the `moot-nuextract-worker` binary
+        /// (`fact_extraction.worker_executable` in config.json).
+        pub fact_extraction_worker_executable: Option<String>,
+        /// Absolute path to the GGUF model file
+        /// (`fact_extraction.gguf` in config.json).
+        pub fact_extraction_gguf: Option<String>,
+        /// Absolute path to the tokenizer file
+        /// (`fact_extraction.tokenizer` in config.json).
+        pub fact_extraction_tokenizer: Option<String>,
+        /// Model version string used to derive the activation recipe ID so
+        /// switching models automatically clears extraction debt estate-wide
+        /// (`fact_extraction.model_version` in config.json).
+        pub fact_extraction_model_version: Option<String>,
     }
 
     /// Load settings from `<config_dir>/config.json`.
@@ -257,14 +280,44 @@ pub mod settings {
             Ok(v) => v,
             Err(_) => return ProductSettings::default(),
         };
-        // `daemon.stats_store` is the only key in this version.
         let daemon_stats_store = root
             .get("daemon")
             .and_then(|d| d.get("stats_store"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
-        ProductSettings { daemon_stats_store }
+
+        // `fact_extraction.*` — four Rust-port paths. `coreai_asset` and
+        // `coreai_tokenizer` are Swift-only and silently ignored here.
+        let fe = root.get("fact_extraction");
+        let fact_extraction_worker_executable = fe
+            .and_then(|fe| fe.get("worker_executable"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let fact_extraction_gguf = fe
+            .and_then(|fe| fe.get("gguf"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let fact_extraction_tokenizer = fe
+            .and_then(|fe| fe.get("tokenizer"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let fact_extraction_model_version = fe
+            .and_then(|fe| fe.get("model_version"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+
+        ProductSettings {
+            daemon_stats_store,
+            fact_extraction_worker_executable,
+            fact_extraction_gguf,
+            fact_extraction_tokenizer,
+            fact_extraction_model_version,
+        }
     }
 
     /// Write the default `config.json` when the `daemon.stats_store` key is
@@ -353,6 +406,80 @@ pub mod settings {
             std::fs::create_dir_all(&dir).ok();
             let s = load_from_file(&dir, "no_such_file.json");
             assert!(s.daemon_stats_store.is_none());
+        }
+
+        // ---- fact_extraction block tests ----
+
+        /// All four Rust-port paths present and non-empty — all four fields populated.
+        #[test]
+        fn parse_settings_fact_extraction_all_present() {
+            let json = r#"{
+                "fact_extraction": {
+                    "coreai_asset": "/swift-only.aimodel",
+                    "coreai_tokenizer": "/swift-only-tok",
+                    "worker_executable": "/usr/local/bin/moot-nuextract-worker",
+                    "gguf": "/models/nuextract.gguf",
+                    "tokenizer": "/models/tokenizer.json",
+                    "model_version": "q8-2026-09-14"
+                }
+            }"#;
+            let s = parse_settings(json);
+            assert_eq!(
+                s.fact_extraction_worker_executable.as_deref(),
+                Some("/usr/local/bin/moot-nuextract-worker"),
+                "worker_executable must be parsed"
+            );
+            assert_eq!(
+                s.fact_extraction_gguf.as_deref(),
+                Some("/models/nuextract.gguf"),
+                "gguf must be parsed"
+            );
+            assert_eq!(
+                s.fact_extraction_tokenizer.as_deref(),
+                Some("/models/tokenizer.json"),
+                "tokenizer must be parsed"
+            );
+            assert_eq!(
+                s.fact_extraction_model_version.as_deref(),
+                Some("q8-2026-09-14"),
+                "model_version must be parsed"
+            );
+            // Swift-only keys do not appear in ProductSettings.
+            assert!(s.daemon_stats_store.is_none());
+        }
+
+        /// Absent `fact_extraction` block — all four fields are `None`.
+        #[test]
+        fn parse_settings_fact_extraction_absent_block_is_none() {
+            let json = r#"{"daemon":{"stats_store":"/s"}}"#;
+            let s = parse_settings(json);
+            assert!(s.fact_extraction_worker_executable.is_none(), "absent block → None");
+            assert!(s.fact_extraction_gguf.is_none(), "absent block → None");
+            assert!(s.fact_extraction_tokenizer.is_none(), "absent block → None");
+            assert!(s.fact_extraction_model_version.is_none(), "absent block → None");
+        }
+
+        /// Empty string for any path value is treated as absent (`None`),
+        /// matching the fail-quiet contract of `daemon_stats_store`.
+        #[test]
+        fn parse_settings_fact_extraction_empty_string_is_none() {
+            let json = r#"{
+                "fact_extraction": {
+                    "worker_executable": "",
+                    "gguf": "/models/nuextract.gguf",
+                    "tokenizer": "/models/tokenizer.json",
+                    "model_version": "q8-2026-09-14"
+                }
+            }"#;
+            let s = parse_settings(json);
+            assert!(
+                s.fact_extraction_worker_executable.is_none(),
+                "empty worker_executable must be None"
+            );
+            // The other three are still present.
+            assert!(s.fact_extraction_gguf.is_some());
+            assert!(s.fact_extraction_tokenizer.is_some());
+            assert!(s.fact_extraction_model_version.is_some());
         }
     }
 

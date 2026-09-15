@@ -163,7 +163,7 @@ mod tests {
     fn refresh_refuses_to_overwrite_a_manifest_it_could_not_read() {
         let record = scratch_record("refused");
         std::fs::create_dir_all(&record.directory).unwrap();
-        let rogue = r#"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2020-01-01T00:00:00Z","path":"/elsewhere"}"#;
+        let rogue = r#"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2020-01-01T00:00:00Z","path":"/elsewhere"}"#;
         std::fs::write(record.manifest_path(), rogue).unwrap();
         let refused = refresh(&record, EstateFormatVersion::CURRENT, EstateManifestEncryption::Encrypted, 1_788_825_600_000);
         match refused {
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(record.manifest_path()).unwrap(), rogue, "the refused file is untouched");
         // A foreign name is refused the same way; the declaration helper reads it as no declaration.
         std::fs::write(record.manifest_path(),
-            r#"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2020-01-01T00:00:00Z"}"#).unwrap();
+            r#"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2020-01-01T00:00:00Z"}"#).unwrap();
         assert!(matches!(refresh(&record, EstateFormatVersion::CURRENT, EstateManifestEncryption::Encrypted, 0),
                          Err(EstateCatalogError::UnreadableEstateManifest { .. })));
         assert!(!declares_plaintext(&record));

@@ -1518,6 +1518,20 @@ public extension GeniusLocusKit {
     /// migration required.
     static var modesConfigMetaKey: String { "modes_config" }
 
+    /// The estate-manifest key carrying the USER-OWNED fact-extraction toggle:
+    /// the plain string `"on"` or `"off"`. Read back via
+    /// `GeniusLocusKit.provisionedFactExtraction(for:)`.
+    ///
+    /// Default is ON — absent key means `.on`. This inverts the fail-quiet
+    /// contract of the other members of this family, where absent means nil
+    /// or the spec default. Here the absent default IS on: ON is the ruled
+    /// product behaviour for this feature. See `FactExtractionSetting` for
+    /// the full rationale.
+    ///
+    /// Seeded on populated estates through the 1.7 → 1.8 migration capsule
+    /// (GENIUSLOCUSKIT_SPEC I-27); no migration is required for a fresh estate.
+    static var factExtractionMetaKey: String { "fact_extraction" }
+
     /// Read the provisioned door-selection config, or `.default` when the
     /// manifest carries none. Malformed JSON or an unknown scoring string
     /// both degrade to `.default` (scoring = `.matrixAware`) so a bad

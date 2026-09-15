@@ -319,13 +319,22 @@ pub fn run(
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
                 });
+            // Signal 14 (FactExtractionDutySignal): activate the NuExtract
+            // worker and wire the cycle when the estate setting is On and the
+            // model assets are present. `None` from `build_fact_extraction_cycle`
+            // is not an error — most installs carry no model on disk.
+            let fact_extraction_cycle = build_fact_extraction_cycle(
+                &coord_for_hnsw,
+                handle_for_hnsw,
+                None, // production: resolves the product default config dir
+            );
             match governor.register_default_standing_signals(
                 "minilm-v6",
                 SystemTime::now(),
                 Some(hunt_cycle),
                 Some(anomaly_cycle),
                 Some(span_encode_cycle),
-                None, // fact extraction remains harness-first until qualified
+                fact_extraction_cycle,
             ) {
                 Ok(registered) => {
                     eprintln!(
@@ -544,6 +553,213 @@ fn parse_max_body_bytes(banner: &str) -> usize {
         }
     }
 }
+
+// ---- Fact-extraction cycle (signal 14) ----------------------------------------
+
+/// Batch limit per dreaming tick for fact-extraction signal 14.
+///
+/// 20 sources covers the typical burst for a single active user per governor
+/// tick without blocking the governor for longer than a few seconds. Larger
+/// backlogs are cleared across successive ticks, matching the Swift resident's
+/// behaviour. Raising this constant is the only tuning lever — no runtime
+/// setting is needed.
+const FACT_EXTRACTION_BATCH_LIMIT: usize = 20;
+
+/// Activate an already-built fact extractor and return the signal-14 cycle
+/// closure, or `None` when the estate setting is `Off`.
+///
+/// This is the testable seam for signal 14. It holds:
+///   1. The estate setting decision (`Off` → `None`).
+///   2. The `activate_fact_extractor` call (derives recipe ID from the extractor
+///      spec, clears stale extraction debt when the recipe changes).
+///   3. The cycle closure construction.
+///
+/// Called by `build_fact_extraction_cycle` in production after the
+/// `NuExtractWorkerClient` is built. Called directly by tests with a stub
+/// `FactExtractor` so the decision and activation path can be driven without
+/// real model assets on disk.
+///
+/// `runtime.rs:326` always calls `build_fact_extraction_cycle`, never this
+/// function directly.
+///
+/// A test that deletes the `Some` return in this function, removes the
+/// `activate_fact_extractor` call, or breaks the cycle closure goes red on the
+/// GSS-14b On-path gate in `fact_extraction_cycle_tests.rs`.
+pub fn activate_and_build_extraction_cycle(
+    extractor: Arc<dyn fact_extraction_kit::contract::FactExtractor>,
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: genius_locus_kit::EstateHandle,
+) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
+    // Gate: Off means the user explicitly disabled extraction; no activation.
+    let setting = {
+        let coord_guard = coord.lock().ok()?;
+        coord_guard
+            .provisioned_fact_extraction(&handle)
+            .ok()?
+    };
+    if setting == genius_locus_kit::coordinator::FactExtractionSetting::Off {
+        return None;
+    }
+
+    // Derive the recipe ID from the extractor's spec. Format is the cross-port
+    // contract: "<provider_id>:<model_id>:<model_version>", identical to the
+    // Swift twin. A recipe change clears bit 28 on all drawers estate-wide so
+    // the full corpus is re-extracted against the new model.
+    let spec = extractor.spec();
+    let recipe_id = format!("{}:{}:{}", spec.provider_id, spec.model_id, spec.model_version);
+
+    // Activate the extractor. A changed recipe clears bit 28 on all drawers
+    // estate-wide so the full corpus is re-extracted against the new model. A
+    // registration failure logs and degrades gracefully — the daemon continues
+    // serving without signal 14.
+    {
+        let mut coord_guard = match coord.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!(
+                    "AriaResident: coordinator lock poisoned activating fact extractor: {e}; \
+                     signal 14 inactive"
+                );
+                return None;
+            }
+        };
+        match coord_guard.activate_fact_extractor(Arc::clone(&extractor), &recipe_id, &handle) {
+            Ok(cleared) => {
+                if cleared > 0 {
+                    eprintln!(
+                        "AriaResident: fact extractor activated (recipe changed, \
+                         {cleared} drawers cleared for re-extraction)"
+                    );
+                } else {
+                    eprintln!(
+                        "AriaResident: fact extractor activated (same recipe, \
+                         0 drawers cleared)"
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "AriaResident: activate_fact_extractor failed: {e:?}; signal 14 inactive"
+                );
+                return None;
+            }
+        }
+    }
+
+    // Build the cycle closure that `register_default_standing_signals` schedules
+    // as signal 14. Returns `facts_filed as i64` per the standing-signal
+    // contract. The coordinator Arc is cloned into the closure; the Mutex
+    // serializes access so dreaming ticks are safe.
+    let fact_coord = Arc::clone(coord);
+    let fact_handle = handle;
+    let cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(move || {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        match fact_coord.lock() {
+            Ok(coord) => coord
+                .run_fact_extraction_batch(&fact_handle, FACT_EXTRACTION_BATCH_LIMIT, now_ms)
+                .map(|r| r.facts_filed as i64)
+                .map_err(|e| format!("{e:?}")),
+            Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+        }
+    });
+    Some(cycle)
+}
+
+/// Decide whether fact-extraction signal 14 should run for `handle`, and if so
+/// build the worker client, activate, and return the cycle closure.
+///
+/// Three cases:
+/// - Estate setting `Off` → `None`. No activation. Today's behaviour exactly.
+/// - Estate setting `On`, all four config.json paths present and the worker
+///   binary reachable → activate via `activate_and_build_extraction_cycle` and
+///   return `Some(cycle)` for argument 6 of `register_default_standing_signals`.
+/// - Estate setting `On` but any path missing or the worker binary unreachable
+///   → log and return `None`. This is the common case on most installs: the
+///   daemon continues serving, signal 14 is inactive. Missing assets are NOT
+///   an error.
+///
+/// `config_dir` accepts `None` in production (resolves the product default
+/// configuration directory) and `Some(path)` in tests so no real config.json
+/// is touched. This keeps the decision and the production call site in sync —
+/// the server path calls this function; tests drive the same function.
+///
+/// Activation and cycle construction delegate to `activate_and_build_extraction_cycle`.
+pub fn build_fact_extraction_cycle(
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: genius_locus_kit::EstateHandle,
+    config_dir: Option<&std::path::Path>,
+) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
+    // Step 1: read the estate-level opt-out setting. Off means user has
+    // explicitly disabled extraction; skip config loading entirely.
+    let setting = {
+        let coord_guard = coord.lock().ok()?;
+        coord_guard
+            .provisioned_fact_extraction(&handle)
+            .ok()?
+    };
+    if setting == genius_locus_kit::coordinator::FactExtractionSetting::Off {
+        return None;
+    }
+
+    // Step 2: resolve the configuration directory and load the four Rust-port
+    // paths from config.json. Swift-only keys (coreai_asset, coreai_tokenizer)
+    // are already ignored by the Rust settings parser.
+    let owned_dir;
+    let dir: &std::path::Path = match config_dir {
+        Some(p) => p,
+        None => {
+            owned_dir = moot_product_identity::storage::configuration_directory();
+            &owned_dir
+        }
+    };
+    let settings = moot_product_identity::settings::load(dir);
+    let (worker_exe, gguf, tokenizer, model_version) = match (
+        settings.fact_extraction_worker_executable,
+        settings.fact_extraction_gguf,
+        settings.fact_extraction_tokenizer,
+        settings.fact_extraction_model_version,
+    ) {
+        (Some(w), Some(g), Some(t), Some(v)) => (w, g, t, v),
+        _ => {
+            // One or more paths absent — this is expected on installs that
+            // have not provisioned a model. Signal 14 stays inactive.
+            eprintln!(
+                "AriaResident: fact extraction On but config.json is missing \
+                 one or more fact_extraction paths; signal 14 inactive"
+            );
+            return None;
+        }
+    };
+
+    // Step 3: build the worker client. Fails quietly when the binary or model
+    // files are unreadable (validate() checks that each path is a regular file).
+    let config = fact_extraction_kit_providers::NuExtractWorkerConfig::tiny_v1_5(
+        &worker_exe,
+        &gguf,
+        &tokenizer,
+        &model_version,
+    );
+    let client = match fact_extraction_kit_providers::NuExtractWorkerClient::new(config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "AriaResident: NuExtract worker unavailable (signal 14 inactive): {e}"
+            );
+            return None;
+        }
+    };
+
+    // Step 4: delegate activation and cycle construction to the testable seam.
+    // `activate_and_build_extraction_cycle` re-reads the estate setting (it is
+    // the authoritative gate) and calls `activate_fact_extractor`.
+    let client: Arc<dyn fact_extraction_kit::contract::FactExtractor> = Arc::new(client);
+    activate_and_build_extraction_cycle(client, coord, handle)
+}
+
+// -------------------------------------------------------------------------------
 
 /// Build the user-visible error line for a TCP bind failure.
 ///

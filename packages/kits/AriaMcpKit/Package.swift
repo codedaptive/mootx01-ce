@@ -137,6 +137,10 @@ let package = Package(
         // AriaMCP calls ContextDistiller().distill(DistillationInput(original:), converter:)
         // at read time. Lib→kit layering (upstream → downstream), no inversion.
         .package(name: "ContextDistillLib", path: "../../libs/ContextDistillLib"),
+        // FactExtractionKit: AriaResident holds a (any FactExtractor)? in ResidentConfig
+        // and drives activateFactExtractor + runFactExtractionBatch at estate open.
+        // App → kit layering (downstream→upstream), no inversion.
+        .package(name: "FactExtractionKit", path: "../FactExtractionKit"),
     ],
     targets: [
         .target(
@@ -212,6 +216,10 @@ let package = Package(
                 // VaultKit is already a package-level dep (AriaMCP target); this
                 // adds the direct product reference for the AriaResident target.
                 .product(name: "VaultKit", package: "VaultKit"),
+                // FactExtractionKit: ResidentConfig carries a (any FactExtractor)?
+                // and runResidentDaemon activates it at estate open when the estate's
+                // fact_extraction setting is on. App → kit layering, no inversion.
+                .product(name: "FactExtractionKit", package: "FactExtractionKit"),
             ],
             path: "Sources/AriaResident",
             swiftSettings: [
@@ -273,6 +281,20 @@ let package = Package(
                 "AriaResident",
                 .product(name: "ObserverSink", package: "ObserverSink"),
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
+                // FactExtractionKitProviders: ClosureFactExtractor drives the
+                // decision function in FactExtractionActivationTests without
+                // a real model.
+                .product(name: "FactExtractionKitProviders", package: "FactExtractionKit"),
+                // GeniusLocusKit + LocusKit + InMemory: FactExtractionActivationTests
+                // spins up an in-memory estate to exercise the live-activation
+                // path of resolveFactExtractionCycle (setting=.on, extractor present).
+                // LocusKit provides OwnerCredentials; PersistenceKit provides
+                // EstateConfiguration; PersistenceKitInMemory provides InMemoryStorage.
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],
             path: "Tests/AriaResidentTests"
         ),

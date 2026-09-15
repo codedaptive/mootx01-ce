@@ -105,7 +105,6 @@ pub mod migration;
 pub mod node_topology;
 pub mod substrate_node_topology_provider;
 pub mod recall;
-pub mod fact_first_recall;
 pub mod recall_explainer;
 pub mod span_rerank;
 // The retrieval-time cross-encoder stage (fusion rule, span selection,
