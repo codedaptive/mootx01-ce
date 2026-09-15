@@ -440,6 +440,57 @@ struct ComposerConformanceTests {
         }
     }
 
+    // MARK: - Column-structure gate (ENC-W6B)
+
+    /// Pins the six-column S1 and five-column S2 row grammar by position.
+    ///
+    /// Uses distinct, recognisable literals that contain no U+00B7 separator so
+    /// that a split on " · " gives exactly the expected field count and the exact
+    /// value at every index. The score literal "0.8500" is written by hand to pin
+    /// the %.4f format — the test must not compute it with the same expression
+    /// the emitter uses.
+    ///
+    /// A re-added adornment column at index 4 would shift eventTime to index 5
+    /// and fail both the count assertion and the positional assertion for [4].
+    @Test func s1RowHasSixColumnsWithEventTimeAtIndexFour() throws {
+        let id        = "11111111-1111-1111-1111-111111111111"
+        let subject   = "SUBJECT-LITERAL"
+        let bestSpan  = "BESTSPAN-LITERAL"
+        let sscFacts  = "SSCFACTS-LITERAL"
+        let eventTime = "2026-09-14T12:00:00Z"
+        let score     = 0.85 as Double
+
+        let row = CandidateRowData(
+            id: id,
+            subject: subject,
+            bestSpan: bestSpan,
+            sscFacts: sscFacts,
+            eventTime: eventTime,
+            score: score
+        )
+
+        // S1: six columns
+        let s1 = ResultComposer.renderS1Row(row)
+        let s1Fields = s1.components(separatedBy: " \u{00B7} ")
+        #expect(s1Fields.count == 6, "S1 row must have exactly 6 columns; got \(s1Fields.count): \(s1)")
+        #expect(s1Fields[0] == id,        "S1[0] must be the UUID")
+        #expect(s1Fields[1] == subject,   "S1[1] must be the subject")
+        #expect(s1Fields[2] == bestSpan,  "S1[2] must be bestSpan")
+        #expect(s1Fields[3] == sscFacts,  "S1[3] must be sscFacts")
+        #expect(s1Fields[4] == eventTime, "S1[4] must be eventTime (not an adornment)")
+        #expect(s1Fields[5] == "0.8500",  "S1[5] must be score formatted to %.4f")
+
+        // S2: five columns, no score
+        let s2 = ResultComposer.renderS2Row(row)
+        let s2Fields = s2.components(separatedBy: " \u{00B7} ")
+        #expect(s2Fields.count == 5, "S2 row must have exactly 5 columns; got \(s2Fields.count): \(s2)")
+        #expect(s2Fields[0] == id,        "S2[0] must be the UUID")
+        #expect(s2Fields[1] == subject,   "S2[1] must be the subject")
+        #expect(s2Fields[2] == bestSpan,  "S2[2] must be bestSpan")
+        #expect(s2Fields[3] == sscFacts,  "S2[3] must be sscFacts")
+        #expect(s2Fields[4] == eventTime, "S2[4] must be eventTime (not an adornment)")
+    }
+
     // MARK: - Test entry point
 
     /// Drives every fixture case through the composer and verifies both the text

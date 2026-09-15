@@ -552,3 +552,67 @@ fn all_fixture_cases() {
         verify_case(tc);
     }
 }
+
+// ─── column-structure gate (ENC-W6B) ─────────────────────────────────────────
+
+/// Pins the six-column S1 and five-column S2 row grammar by position.
+///
+/// Uses distinct, recognisable literals that contain no U+00B7 separator so
+/// that a split on " · " gives exactly the expected field count and the exact
+/// value at every index. The score literal "0.8500" is written by hand to pin
+/// the %.4f format — the test must not compute it with the same expression
+/// the emitter uses.
+///
+/// A re-added adornment column at index 4 would shift eventTime to index 5
+/// and fail both the count assertion and the positional assertion for [4].
+#[test]
+fn s1_row_has_six_columns_with_event_time_at_index_four() {
+    let id         = "11111111-1111-1111-1111-111111111111".to_string();
+    let subject    = "SUBJECT-LITERAL".to_string();
+    let best_span  = "BESTSPAN-LITERAL".to_string();
+    let ssc_facts  = "SSCFACTS-LITERAL".to_string();
+    let event_time = "2026-09-14T12:00:00Z".to_string();
+    let score      = 0.85_f64;
+
+    let row = CandidateRowData {
+        id: id.clone(),
+        subject: Some(subject.clone()),
+        best_span: Some(best_span.clone()),
+        ssc_facts: Some(ssc_facts.clone()),
+        event_time: event_time.clone(),
+        score: Some(score),
+        room: None,
+        retrieval_source: None,
+        distilled: None,
+        representation: None,
+        tier: None,
+        estate_id: None,
+        content: None,
+        extents: None,
+        exemplars: None,
+    };
+
+    // S1: six columns
+    let s1 = result_composer::render_s1_row(&row);
+    let sep = " \u{00B7} ";
+    let s1_fields: Vec<&str> = s1.split(sep).collect();
+    assert_eq!(s1_fields.len(), 6,
+        "S1 row must have exactly 6 columns; got {}: {}", s1_fields.len(), s1);
+    assert_eq!(s1_fields[0], id,        "S1[0] must be the UUID");
+    assert_eq!(s1_fields[1], subject,   "S1[1] must be the subject");
+    assert_eq!(s1_fields[2], best_span, "S1[2] must be bestSpan");
+    assert_eq!(s1_fields[3], ssc_facts, "S1[3] must be sscFacts");
+    assert_eq!(s1_fields[4], event_time, "S1[4] must be eventTime (not an adornment)");
+    assert_eq!(s1_fields[5], "0.8500",  "S1[5] must be score formatted to %.4f");
+
+    // S2: five columns, no score
+    let s2 = result_composer::render_s2_row(&row);
+    let s2_fields: Vec<&str> = s2.split(sep).collect();
+    assert_eq!(s2_fields.len(), 5,
+        "S2 row must have exactly 5 columns; got {}: {}", s2_fields.len(), s2);
+    assert_eq!(s2_fields[0], id,         "S2[0] must be the UUID");
+    assert_eq!(s2_fields[1], subject,    "S2[1] must be the subject");
+    assert_eq!(s2_fields[2], best_span,  "S2[2] must be bestSpan");
+    assert_eq!(s2_fields[3], ssc_facts,  "S2[3] must be sscFacts");
+    assert_eq!(s2_fields[4], event_time, "S2[4] must be eventTime (not an adornment)");
+}
