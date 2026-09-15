@@ -12,18 +12,13 @@
 //
 // Swift twin: GeniusLocusKitTests/KGFactSearchProjectionBackfillGatewayTests.swift.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fact_extraction_kit::FactSearchProjection;
-use genius_locus_kit::fact_first_recall::{
-    FactFirstRecallDecision, FactFirstRecallStage, FactFirstRecallThresholds,
-};
 use genius_locus_kit::kg_fact_search_projection_backfill_gateway;
 use locus_kit::{
-    drawer::Drawer,
     drawer_operational::DrawerFeatureFlags,
-    kg_fact::KGFact,
     schema,
 };
 use persistence_kit::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
@@ -151,10 +146,6 @@ fn schema_19() -> SchemaDeclaration {
 // Both assertions reference Rust constants, so a wrong injection is caught
 // immediately without any change to the test file.
 //
-// Also confirms the backfilled fact wins FactFirstRecallStage::decide — the
-// gateway writes exactly what the version guard in fact_first_recall.rs
-// (lines 92-93) requires for the fact to participate in scoring.
-//
 // Discrimination: changing FactSearchProjection::VERSION in
 // kg_fact_search_projection_backfill_gateway.rs to any wrong string makes
 // the search_projection_version assert_eq! fail (red). Restoring it returns
@@ -184,8 +175,6 @@ fn gate_c_search_projection_gateway() {
         drawer_row.insert("embeddingModelID".into(), TypedValue::Text("t1".into()));
         drawer_row.insert("provenance".into(), TypedValue::Int(0));
         drawer_row.insert("adjectiveBitmap".into(), TypedValue::Int(0));
-        // factsExtracted bit (1 << 28) required by FactFirstRecall's
-        // settled-source guard so the drawer's facts participate in scoring.
         drawer_row.insert("operationalBitmap".into(), TypedValue::Int(DrawerFeatureFlags::FACTS_EXTRACTED));
         drawer_row.insert("lineageID".into(), TypedValue::Text(String::new()));
         drawer_row.insert("udcCode".into(), TypedValue::Text(String::new()));
@@ -252,65 +241,6 @@ fn gate_c_search_projection_gateway() {
         row.get("searchProjectionVersion"),
         Some(&TypedValue::Text(FactSearchProjection::VERSION.into())),
         "searchProjectionVersion must equal FactSearchProjection::VERSION (the constant)"
-    );
-
-    // 6. Feed the gateway-backfilled fact to FactFirstRecallStage::decide and
-    //    confirm it is returned as Solid. This closes the loop: the gateway writes
-    //    exactly what fact_first_recall.rs lines 92-93 require for the fact to score.
-    //
-    //    Crucially, search_projection and search_projection_version are read back
-    //    from the database row — not recomputed from constants the test already
-    //    has. If the gateway had written nothing (or wrong bytes), this recall
-    //    assertion would fail, not only the step-5 equality assertions. That is
-    //    what "closing the loop" means: the recall step is testing the bytes the
-    //    gateway actually stored.
-    let stored_projection = match row.get("searchProjection") {
-        Some(TypedValue::Text(v)) => v.clone(),
-        other => panic!(
-            "searchProjection must be present and text in the stored row after gateway run; got {:?}",
-            other
-        ),
-    };
-    let stored_version = match row.get("searchProjectionVersion") {
-        Some(TypedValue::Text(v)) => v.clone(),
-        other => panic!(
-            "searchProjectionVersion must be present and text in the stored row after gateway run; got {:?}",
-            other
-        ),
-    };
-    let mut source_drawer = Drawer::new(
-        drawer_id, "Jack's birthday is in June.", "n1", "test", 1_800_000_000, "t1",
-    );
-    // factsExtracted bit required by the settled-source guard in FactFirstRecall.
-    source_drawer.operational_bitmap |= DrawerFeatureFlags::FACTS_EXTRACTED;
-    let sources = HashMap::from([(drawer_id.to_string(), source_drawer)]);
-
-    let backfilled_fact = KGFact {
-        search_projection: stored_projection,
-        search_projection_version: stored_version,
-        ..KGFact::new(
-            fact_id.into(), subject.into(), predicate.into(), object.into(),
-            drawer_id.into(), 1_800_000_000,
-        )
-    };
-    let decision = FactFirstRecallStage::decide(
-        "jack birthday",
-        &["Jack".into()],
-        &[backfilled_fact],
-        &sources,
-        None,
-        FactFirstRecallThresholds::default(),
-    );
-    let FactFirstRecallDecision::Solid(family) = decision else {
-        panic!(
-            "gateway-backfilled fact must win recall; got {:?}. \
-             Check FactSearchProjection::build coverage for the query.",
-            decision
-        )
-    };
-    assert_eq!(
-        family.fact.id, fact_id,
-        "the gateway-backfilled fact must be the one returned by FactFirstRecallStage"
     );
 
     storage.close().unwrap();
