@@ -32,7 +32,7 @@ struct PreferenceCommand: AsyncParsableCommand {
         abstract: "Read or set an estate-wide preference.",
         discussion: """
         Keys: \(EstatePreferenceKey.allCases.map(\.rawValue).joined(separator: ", "))
-        Values: on, off. A key that has never been set reads as on.
+        Values: on, off for the switches; fact_extractor takes nuextract or apple. A key that has never been set reads as its default (on; nuextract for fact_extractor).
         """,
         subcommands: [
             PreferenceListCommand.self,
@@ -158,7 +158,7 @@ struct PreferenceSetCommand: AsyncParsableCommand {
     @Argument(help: "Preference key. One of: \(allowedKeyList).")
     var key: String
 
-    @Argument(help: "New value: on or off.")
+    @Argument(help: "New value: on or off (fact_extractor: nuextract or apple).")
     var value: String
 
     @Option(name: .long, help: "Estate to write: a registered name, or a pathname to attach a transient estate. Default: the active estate.")
@@ -166,8 +166,10 @@ struct PreferenceSetCommand: AsyncParsableCommand {
 
     func run() async throws {
         let key = try preferenceKey(self.key)
-        guard let value = EstatePreferenceValue(rawValue: self.value) else {
-            throw ValidationError("invalid value '\(self.value)' for '\(key.rawValue)'; allowed: on, off")
+        guard let value = EstatePreferenceValue(rawValue: self.value),
+              key.allowedValues.contains(value) else {
+            let allowed = key.allowedValues.map(\.rawValue).joined(separator: ", ")
+            throw ValidationError("invalid value '\(self.value)' for '\(key.rawValue)'; allowed: \(allowed)")
         }
         // Print what the estate holds after the write, not what was asked for,
         // so the output is the read-back proof the value landed.
