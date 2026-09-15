@@ -67,10 +67,11 @@ reported and never automatically erase estate memories.
 The next chapter is MOOTx01-App: one native product across iOS, iPadOS, and
 macOS.
 
-1.1 ships through release candidates. The first candidate freezes the memory
-core so its benchmark numbers describe the release you install, and the app,
-`moot-mgr`, and installers finish while those benchmarks run. Anything below is
-direction, and it is renegotiated against what the candidates show.
+1.1 ships through release candidates. The benchmarks run against the first
+candidate so their numbers describe the release you install, and the app,
+`moot-mgr`, and installers finish in later candidates while those benchmarks
+run. Anything below is direction, and it is renegotiated against what the
+candidates show.
 
 ### One Mac, one resident estate
 
