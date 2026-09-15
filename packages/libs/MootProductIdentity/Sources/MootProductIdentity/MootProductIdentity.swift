@@ -276,6 +276,9 @@ public enum MootProductIdentity {
     /// only in a debugger or a crash report.
     public enum Queues {
         public static let ariaHTTPAccept = product("aria-mcp.http.accept")
+        /// Stable name for the raw-read thread in the HTTP transport. Used by the
+        /// test gate to assert the read is NOT running on the shared pool.
+        public static let ariaHTTPRawRead = product("aria-mcp.raw-read")
         public static let managerControlChannelAccept = product("mgr.control-channel.accept")
         public static let managerHTTPReadAPIAccept = product("mgr.http-read-api.accept")
         public static let lanDiscovery = product("lan-discovery")
@@ -290,8 +293,23 @@ public enum MootProductIdentity {
     /// consumers read through this type so a single edit to `config.json` is
     /// reflected by every component.
     ///
-    /// JSON shape: `{"daemon": {"stats_store": "<absolute-path>"}}`. Additional
-    /// top-level keys may be added in future versions; unknown keys are ignored.
+    /// JSON shape (all keys are optional; unknown keys are silently ignored):
+    /// ```json
+    /// {
+    ///   "daemon": { "stats_store": "<absolute-path>" },
+    ///   "fact_extraction": {
+    ///     "coreai_asset":     "<absolute path to a .aimodel directory>",
+    ///     "coreai_tokenizer": "<absolute path to a tokenizer file>",
+    ///     "model_version":    "<string>"
+    ///   }
+    /// }
+    /// ```
+    /// `coreai_asset` and `coreai_tokenizer` point to CoreAI NuExtract model
+    /// files on the host. `model_version` is a free-form version string baked
+    /// into the extractor's recipe ID so changing the model clears extraction
+    /// debt estate-wide. All three resolve to `nil` when absent or empty.
+    /// The three Rust-only keys (`gguf`, `tokenizer`, `worker_executable`)
+    /// that share the same `fact_extraction` object are silently ignored here.
     public struct Settings: Sendable {
 
         /// The name of the settings file inside the configuration directory.
@@ -308,6 +326,23 @@ public enum MootProductIdentity {
         /// the platform-default path (`<config-dir>/moot-mgr/stats.sqlite`).
         /// An empty string in the file is treated the same as absent.
         public let daemonStatsStore: String?
+
+        // MARK: Fact-extraction resolved values (Swift / Apple port only)
+
+        /// Absolute path to the CoreAI NuExtract `.aimodel` directory
+        /// (`fact_extraction.coreai_asset`). `nil` when the key is absent or empty.
+        public let factExtractionCoreAIAsset: String?
+
+        /// Absolute path to the CoreAI NuExtract tokenizer file
+        /// (`fact_extraction.coreai_tokenizer`). `nil` when the key is absent or empty.
+        public let factExtractionCoreAITokenizer: String?
+
+        /// Model-version string baked into the recipe ID
+        /// (`fact_extraction.model_version`). `nil` when the key is absent or empty.
+        /// Changing this value clears bit-28 extraction debt estate-wide on the
+        /// next activation (a recipe-ID change triggers the LocusKit registry
+        /// transaction that resets the debt).
+        public let factExtractionModelVersion: String?
 
         // MARK: Loading
 
@@ -329,14 +364,32 @@ public enum MootProductIdentity {
                 let data = try? Data(contentsOf: url),
                 let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else {
-                return Settings(daemonStatsStore: nil)
+                return Settings(
+                    daemonStatsStore: nil,
+                    factExtractionCoreAIAsset: nil,
+                    factExtractionCoreAITokenizer: nil,
+                    factExtractionModelVersion: nil)
             }
             let daemon = root["daemon"] as? [String: Any]
             let statsStore = daemon?["stats_store"] as? String
             // Treat an empty string the same as absent — a manually-cleared
             // value should not produce an empty path string downstream.
             let storeOrNil = statsStore.flatMap { $0.isEmpty ? nil : $0 }
-            return Settings(daemonStatsStore: storeOrNil)
+            // Parse fact_extraction sub-object. Rust-only keys (gguf, tokenizer,
+            // worker_executable) live here too; this parser reads only the three
+            // Swift-side keys and ignores the rest.
+            let factExtraction = root["fact_extraction"] as? [String: Any]
+            let coreaiAsset = (factExtraction?["coreai_asset"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            let coreaiTokenizer = (factExtraction?["coreai_tokenizer"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            let modelVersion = (factExtraction?["model_version"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            return Settings(
+                daemonStatsStore: storeOrNil,
+                factExtractionCoreAIAsset: coreaiAsset,
+                factExtractionCoreAITokenizer: coreaiTokenizer,
+                factExtractionModelVersion: modelVersion)
         }
 
         // MARK: Writing
@@ -395,8 +448,16 @@ public enum MootProductIdentity {
 
         // MARK: Private init
 
-        private init(daemonStatsStore: String?) {
+        private init(
+            daemonStatsStore: String?,
+            factExtractionCoreAIAsset: String?,
+            factExtractionCoreAITokenizer: String?,
+            factExtractionModelVersion: String?
+        ) {
             self.daemonStatsStore = daemonStatsStore
+            self.factExtractionCoreAIAsset = factExtractionCoreAIAsset
+            self.factExtractionCoreAITokenizer = factExtractionCoreAITokenizer
+            self.factExtractionModelVersion = factExtractionModelVersion
         }
     }
 }
