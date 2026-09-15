@@ -2247,12 +2247,19 @@ public extension GeniusLocusKit {
     ///
     /// - Parameters:
     ///   - key: the preference to store.
-    ///   - value: the on/off value to store.
+    ///   - value: the value to store; must be in `key.allowedValues`.
     ///   - handle: the estate handle returned by `open` or `provision`.
-    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    /// - Throws: `GeniusLocusKitError.invalidManifest` if `value` is not in
+    ///   `key.allowedValues`; `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func provisionPreference(
         _ key: EstatePreferenceKey, _ value: EstatePreferenceValue, for handle: EstateHandle
     ) async throws {
+        guard key.allowedValues.contains(value) else {
+            let allowed = key.allowedValues.map(\.rawValue).joined(separator: ", ")
+            throw GeniusLocusKitError.invalidManifest(
+                key: key.rawValue,
+                detail: "value '\(value.rawValue)' is not allowed for '\(key.rawValue)'; allowed: \(allowed)")
+        }
         let estate = try estate(for: handle)
         do {
             // The value is a plain string — the rawValue of the enum.
@@ -2266,17 +2273,13 @@ public extension GeniusLocusKit {
         }
     }
 
-    /// Read back a provisioned estate preference, or `.on` when the estate
-    /// carries none.
+    /// Read back a provisioned estate preference, or `key.defaultValue` when
+    /// the estate carries none.
     ///
-    /// Note: absent key means ON, not OFF. ON is the ruled product default
-    /// for every key in this family; the seeding capsules write the value
-    /// explicitly so a later change to the default cannot silently flip an
-    /// estate already in use. A stored value that is neither `"on"` nor
-    /// `"off"` also returns `.on` — the same fail-quiet contract
-    /// `provisionedDoorConfig` applies to unrecognised JSON. Storage errors
-    /// also degrade to `.on` (fail-quiet). Use `provisionPreference(_:_:for:)`
-    /// to write the user's preference.
+    /// Absent key, unrecognised string, value outside `key.allowedValues`, or
+    /// storage error each return `key.defaultValue` (fail-quiet). For the six
+    /// on/off switches the default is `.on`; for `fact_extractor` the default
+    /// is `.nuextract`. Use `provisionPreference(_:_:for:)` to write.
     ///
     /// - Parameters:
     ///   - key: the preference to read.
@@ -2286,11 +2289,13 @@ public extension GeniusLocusKit {
         _ key: EstatePreferenceKey, for handle: EstateHandle
     ) async throws -> EstatePreferenceValue {
         let estate = try estate(for: handle)
-        // meta(key:) returns nil when the key is absent. Absent → `.default`.
-        // An unrecognised string returns nil from rawValue init → `.default`.
+        // meta(key:) returns nil when the key is absent → key.defaultValue.
+        // An unrecognised string returns nil from rawValue init → key.defaultValue.
+        // A value not in key.allowedValues (e.g. reading on/off for fact_extractor) → key.defaultValue.
         guard let raw = try? await estate.meta(key: key.rawValue),
-              let value = EstatePreferenceValue(rawValue: raw)
-        else { return .default }
+              let value = EstatePreferenceValue(rawValue: raw),
+              key.allowedValues.contains(value)
+        else { return key.defaultValue }
         return value
     }
 
