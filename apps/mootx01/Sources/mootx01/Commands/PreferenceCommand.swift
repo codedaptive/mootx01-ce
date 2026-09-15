@@ -59,7 +59,8 @@ private func preferenceKey(_ raw: String) throws -> EstatePreferenceKey {
 
 /// Opens the estate `db` selects (absent: the active estate) for one
 /// operation, runs `body` against the open handle, and closes the kit and
-/// the storage in that order whether or not `body` throws.
+/// the storage in that order whether or not `body` throws. A fresh database
+/// receives the current format stamp and its on-disk estate manifest.
 ///
 /// The open posture (encryption key, plaintext) comes from
 /// `EstateOpenPosture.resolve(for:)`; a transient estate keeps its identity
@@ -69,6 +70,7 @@ private func withOpenEstate<T: Sendable>(
     _ body: (GeniusLocusKit, EstateHandle) async throws -> T
 ) async throws -> T {
     let estate = try EstateOpen.catalog(selecting: db).active
+    let isNewDatabase = !FileManager.default.fileExists(atPath: estate.databaseURL.path)
     let encryption = try EstateOpenPosture.resolve(for: estate).encryption
     let configuration = EstateConfiguration(
         estateID: UUID(),
@@ -89,6 +91,23 @@ private func withOpenEstate<T: Sendable>(
         throw error
     }
     do {
+        if isNewDatabase {
+            // Only a database created by this invocation is stamped current;
+            // existing estate formats advance through `mootx01 upgrade`.
+            let now = Date()
+            try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+            if !FileManager.default.fileExists(atPath: estate.manifestURL.path) {
+                let posture: EstateManifest.Encryption
+                if case .plaintext = encryption.mode { posture = .plaintext } else { posture = .encrypted }
+                let manifest = EstateManifest(
+                    name: estate.name,
+                    schemaVersion: GeniusLocusKitSchema.version,
+                    formatVersion: .current,
+                    encryption: posture,
+                    created: ISO8601DateFormatter().string(from: now))
+                try EstateCatalog.writeManifest(manifest, to: estate)
+            }
+        }
         let result = try await body(kit, handle)
         try await kit.close(handle)
         await storage.close()
