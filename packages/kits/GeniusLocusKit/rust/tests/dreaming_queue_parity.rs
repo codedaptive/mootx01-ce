@@ -13,8 +13,8 @@
 //   5. Payload round-trip: the enqueued DreamingItem contains the surfaced drawer ids.
 //
 // Production path: `EstateCoordinator::recall_scored` with
-// `request.origin = RecallOrigin::External` — called by `run_memory_search` for
-// moot_memory_search, moot_recall_precise, moot_recall_shaped.
+// `request.origin = RecallOrigin::External` — called by the ARIA v2 memory
+// operations for moot_memory_search, moot_recall_precise, moot_recall_shaped.
 //
 // All tests use an InMemory estate so no temp-dir cleanup is needed.
 
@@ -129,7 +129,7 @@ fn t6_r01_external_origin_recall_scored_surfacing_two_or_more_drawers_enqueues_o
     // Capture 3 drawers so recall has content to surface.
     let _captured_ids = capture_drawers(&mut coord, &handle, 3);
 
-    // External-origin scored recall — the production MCP path (run_memory_search).
+    // External-origin scored recall — the production MCP path (moot_memory_search).
     let result = coord
         .recall_scored(&handle, external_recall_request(), NOW_MS)
         .expect("recall_scored");

@@ -6,24 +6,24 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-/// Search-redaction parity fix (Wave 6): `moot_memory_search` must apply the
-/// same sensitivity-aware content-preview redaction on BOTH ports. Before
-/// this fix, Rust's `run_memory_search` redacted the preview for a
-/// PROVENANCE `Sensitivity` (bits 30-35) of Restricted/Secret, while Swift's
-/// `runMemorySearch` always showed the raw 120-char preview regardless of
-/// provenance sensitivity — a pre-existing port divergence flagged during
-/// Wave 4's moot_memory_get work.
+/// `moot_memory_search` provenance gate: a drawer whose PROVENANCE
+/// `Sensitivity` (bits 30-35) is Restricted or Secret is excluded from
+/// `structuredContent.data.results` entirely. The verdict is computed by
+/// `AriaV2GeniusLocusMemoryBackend.provenanceVisible` (normal and elevated
+/// only) and applied by `AriaV2MemoryOperations.search(_:)`, which filters on
+/// `isAuthorized` before building `results`. Normal and elevated rows pass
+/// through with subject and excerpt intact.
 ///
-/// This is deliberately a DIFFERENT axis from `moot_memory_get`'s
-/// containment gate (`AdjectiveSensitivity`, bits 6-11, admits/excludes a
-/// row from results at all). Here every seeded drawer keeps its adjective
-/// sensitivity at the gate-admitting default (`.normal`) so it reliably
-/// surfaces in `result.hits` — the test is isolated to the PREVIEW
-/// redaction, not the containment gate.
+/// This is deliberately a DIFFERENT axis from the adjective-sensitivity
+/// containment gate (`AdjectiveSensitivity`, bits 6-11, applied in the recall
+/// filter chain). Every seeded drawer keeps its adjective sensitivity at the
+/// gate-admitting default (`.normal`) so it reliably reaches the backend hit
+/// list — the test is isolated to provenance exclusion, not the containment
+/// gate.
 ///
 /// `.serialized`: opens live in-memory estates and captures directly via
 /// `kit.capture`, matching MemoryGetTests'/MultiEstateRoutingTests' discipline.
-@Suite("moot_memory_search sensitivity-aware preview redaction", .serialized)
+@Suite("moot_memory_search provenance exclusion", .serialized)
 struct SearchRedactionTests {
 
     // MARK: - Harness
@@ -40,10 +40,10 @@ struct SearchRedactionTests {
     }
 
     /// Seed content directly via `kit.capture`, with full control over the
-    /// PROVENANCE sensitivity axis (bits 30-35) the preview redaction reads —
-    /// distinct from the adjective-axis `sensitivity` param `moot_memory_get`'s
-    /// containment gate checks, which stays `.normal` here (the default) so
-    /// every seeded row is gate-admitted and reaches the preview-formatting code.
+    /// PROVENANCE sensitivity axis (bits 30-35) the provenance gate reads —
+    /// distinct from the adjective axis the recall filter chain checks, which
+    /// stays `.normal` here (the default) so every seeded row is admitted by
+    /// recall and reaches the provenance verdict.
     @discardableResult
     private func seed(
         _ content: String,
@@ -61,8 +61,8 @@ struct SearchRedactionTests {
             embeddingModelID: "test-model-v1",
             provenanceSensitivity: provenanceSensitivity,
             // Subject = capped content: normal/elevated rows surface it in
-            // the dense row; restricted/secret rows get the redaction
-            // marker IN PLACE of it — exactly what this suite pins.
+            // results; restricted/secret rows are excluded from results
+            // altogether — exactly what this suite pins.
             subject: String(content.prefix(120))
         )
         return try await kit.capture(handle, frame)
@@ -74,7 +74,30 @@ struct SearchRedactionTests {
               case let .object(first)? = content.first,
               case let .string(s)? = first["text"]
         else { return "" }
-        return s
+        // v2 compact text is "found N candidate memories"; include subjects and
+        // excerpts from structuredContent.data.results so existing assertions work.
+        var parts = [s]
+        if case let .object(structured)? = obj["structuredContent"],
+           case let .object(data)? = structured["data"],
+           case let .array(results)? = data["results"] {
+            for row in results {
+                if case let .object(r) = row {
+                    if case let .string(subject)? = r["subject"] { parts.append(subject) }
+                    if case let .string(excerpt)? = r["excerpt"] { parts.append(excerpt) }
+                }
+            }
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    /// Rows in `structuredContent.data.results`; empty when the key is absent.
+    private func resultRows(of result: JSONValue) -> [JSONValue] {
+        guard case let .object(obj) = result,
+              case let .object(structured)? = obj["structuredContent"],
+              case let .object(data)? = structured["data"],
+              case let .array(results)? = data["results"]
+        else { return [] }
+        return results
     }
 
     private func searchArgs(_ query: String) -> [String: JSONValue] {
@@ -83,8 +106,8 @@ struct SearchRedactionTests {
 
     // MARK: - Tests
 
-    @Test("Restricted provenance sensitivity redacts the preview")
-    func restrictedSensitivityRedactsPreview() async throws {
+    @Test("Restricted provenance sensitivity excludes the row from results")
+    func restrictedProvenanceIsExcludedFromResults() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "search-redaction-owner")
         let handle = try await openEstate(in: kit, owner: owner)
@@ -96,16 +119,24 @@ struct SearchRedactionTests {
             provenanceSensitivity: .restricted, in: handle, kit: kit
         )
 
-        let result = try await dispatcher.runMemorySearch(searchArgs("search-redaction-restricted-marker"))
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(searchArgs("search-redaction-restricted-marker")))
         let body = text(of: result)
-        #expect(body.contains("[sensitivity: restricted — content redacted]"),
-                "restricted provenance sensitivity must redact the preview; got: \(body)")
+        // provenanceVisible admits normal and elevated only, so the restricted
+        // row is dropped from `results` by the isAuthorized filter in
+        // AriaV2MemoryOperations.search(_:). Positive half: results is empty.
+        // Negative half: the raw content is absent from every field returned.
+        #expect(resultRows(of: result).isEmpty,
+                "a restricted-provenance row must be excluded from results; got: \(body)")
         #expect(!body.contains("classified payload details"),
-                "raw content must never leak through a restricted preview; got: \(body)")
+                "raw content must never appear in results for a restricted-provenance row; got: \(body)")
+        // The count is taken after the exclusion, as in the Rust port, so the
+        // header cannot reveal that a hidden row matched.
+        #expect(body.contains("found 0 candidate memories"),
+                "the count must not include the excluded row; got: \(body)")
     }
 
-    @Test("Secret provenance sensitivity redacts the preview")
-    func secretSensitivityRedactsPreview() async throws {
+    @Test("Secret provenance sensitivity excludes the row from results")
+    func secretProvenanceIsExcludedFromResults() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "search-redaction-owner")
         let handle = try await openEstate(in: kit, owner: owner)
@@ -117,12 +148,14 @@ struct SearchRedactionTests {
             provenanceSensitivity: .secret, in: handle, kit: kit
         )
 
-        let result = try await dispatcher.runMemorySearch(searchArgs("search-redaction-secret-marker"))
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(searchArgs("search-redaction-secret-marker")))
         let body = text(of: result)
-        #expect(body.contains("[sensitivity: secret — content access requires explicit grant]"),
-                "secret provenance sensitivity must redact the preview; got: \(body)")
+        // Same provenanceVisible verdict as the restricted case: secret is
+        // outside the admitted set, so the row never reaches `results`.
+        #expect(resultRows(of: result).isEmpty,
+                "a secret-provenance row must be excluded from results; got: \(body)")
         #expect(!body.contains("top secret payload details"),
-                "raw content must never leak through a secret preview; got: \(body)")
+                "raw content must never appear in results for a secret-provenance row; got: \(body)")
     }
 
     @Test("Normal provenance sensitivity shows the raw preview (unchanged)")
@@ -138,7 +171,7 @@ struct SearchRedactionTests {
             provenanceSensitivity: .normal, in: handle, kit: kit
         )
 
-        let result = try await dispatcher.runMemorySearch(searchArgs("search-redaction-normal-marker"))
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(searchArgs("search-redaction-normal-marker")))
         let body = text(of: result)
         #expect(body.contains("ordinary unclassified content"),
                 "normal sensitivity must show the raw preview, unchanged; got: \(body)")
@@ -158,7 +191,7 @@ struct SearchRedactionTests {
             provenanceSensitivity: .elevated, in: handle, kit: kit
         )
 
-        let result = try await dispatcher.runMemorySearch(searchArgs("search-redaction-elevated-marker"))
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object(searchArgs("search-redaction-elevated-marker")))
         let body = text(of: result)
         #expect(body.contains("bulk export tier content"),
                 "elevated sensitivity must show the raw preview, unchanged; got: \(body)")
