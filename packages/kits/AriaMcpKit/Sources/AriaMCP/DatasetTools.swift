@@ -321,10 +321,9 @@ enum DatasetTools {
         handle: EstateHandle
     ) async throws -> JSONValue {
         let datasetID = try directDatasetID(arguments, tool: "moot_dataset_query")
-        let estate = try await kit.estate(for: handle)
         let drawer: Drawer
         do {
-            drawer = try await estate.resolveActiveDatasetHandle(datasetId: datasetID)
+            drawer = try await kit.resolveActiveDatasetHandle(in: handle, datasetId: datasetID)
         } catch {
             throw DirectFailure.datasetUnavailable
         }
@@ -366,10 +365,9 @@ enum DatasetTools {
         handle: EstateHandle
     ) async throws -> JSONValue {
         let datasetID = try directDatasetID(arguments, tool: "moot_dataset_stats")
-        let estate = try await kit.estate(for: handle)
         let drawer: Drawer
         do {
-            drawer = try await estate.resolveActiveDatasetHandle(datasetId: datasetID)
+            drawer = try await kit.resolveActiveDatasetHandle(in: handle, datasetId: datasetID)
         } catch {
             throw DirectFailure.datasetUnavailable
         }

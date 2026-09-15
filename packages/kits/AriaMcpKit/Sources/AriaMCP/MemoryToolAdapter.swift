@@ -145,9 +145,8 @@ extension ToolDispatcher {
     /// matching the path.
     private func findMemDrawer(_ path: String) async throws -> Drawer? {
         let room = memRoomForPath(path)
-        let estate = try await kit.estate(for: handle)
-        let all = try await estate.allDrawers(hydrationLevel: .full, limit: nil)
-        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
+        let all = try await kit.allDrawers(in: handle, hydrationLevel: .full, limit: nil)
+        let nodeNames = try await kit.resolveNodeNames(handle, parentNodeIds: all.map(\.parentNodeId))
         return all.first {
             isMemoryAdapterVisible($0)
             && nodeNames[$0.parentNodeId]?.wing == memoryAdapterWing
@@ -157,9 +156,8 @@ extension ToolDispatcher {
 
     /// List all active, normally recallable drawers in the adapter wing.
     private func listMemDrawers() async throws -> [(drawer: Drawer, room: String)] {
-        let estate = try await kit.estate(for: handle)
-        let all = try await estate.allDrawers(hydrationLevel: .structured, limit: nil)
-        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: all.map(\.parentNodeId))
+        let all = try await kit.allDrawers(in: handle, hydrationLevel: .structured, limit: nil)
+        let nodeNames = try await kit.resolveNodeNames(handle, parentNodeIds: all.map(\.parentNodeId))
         return all.compactMap { d -> (Drawer, String)? in
             guard isMemoryAdapterVisible(d),
                   let names = nodeNames[d.parentNodeId],

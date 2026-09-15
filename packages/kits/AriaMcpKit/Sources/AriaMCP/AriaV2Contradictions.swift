@@ -483,11 +483,10 @@ public struct AriaV2ContradictionsService: Sendable {
             try [memoryUUID(candidate.sourceMemoryID), memoryUUID(candidate.targetMemoryID)]
         })
         let storageIDs = memoryIDs.flatMap(AriaV2ArgumentDecoder.storageIdentitySpellings)
-        let estate = try await kit.estate(for: handle)
         let frame = RecallFrame(
             filterChain: [.currentlyBelieve, .trustworthy, .sensitivityAtMost(.elevated)],
             hydrationLevel: .full)
-        let loaded = try await estate.getDrawers(
+        let loaded = try await kit.getDrawers(in: handle, 
             ids: storageIDs, matchingFrame: frame, hydrationLevel: .full).admissible
         var byID: [String: Drawer] = [:]
         for drawer in loaded {

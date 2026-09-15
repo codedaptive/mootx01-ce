@@ -701,7 +701,6 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
 
     public func get(_ request: AriaV2MemoryGetRequest, context: AriaV2MemoryOperationContext) async throws -> [AriaV2MemoryRecord] {
         try validateEstate(request.estateID, context: context)
-        let estate = try await kit.estate(for: handle)
         // Swift-authored drawers use UUID.uuidString while Rust-authored
         // portable estates use canonical lowercase. Public v2 references are
         // lowercase, so look up both valid storage spellings without changing
@@ -710,7 +709,7 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         var filters: [Filter] = [.sensitivityAtMost(context.maximumSensitivity)]
         if context.exportableOnly { filters.append(.exportable) }
         let frame = RecallFrame(filterChain: filters, hydrationLevel: .full)
-        let loaded = try await estate.getDrawers(ids: ids, matchingFrame: frame, hydrationLevel: .full)
+        let loaded = try await kit.getDrawers(in: handle, ids: ids, matchingFrame: frame, hydrationLevel: .full)
         var records: [AriaV2MemoryRecord] = []
         for drawer in loaded.admissible {
             let authorized = Self.provenanceVisible(drawer.provenance)
@@ -737,7 +736,7 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             // tunnels on the full-record path (ToolDispatch.swift:2568-2579).
             let tunnels: [AriaV2TunnelRow]
             if request.depth == .full {
-                tunnels = try await loadTunnels(for: drawer, estate: estate, ceiling: context.maximumSensitivity)
+                tunnels = try await loadTunnels(for: drawer, ceiling: context.maximumSensitivity)
             } else {
                 tunnels = []
             }
@@ -782,11 +781,11 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
     /// Sensitivity: tunnel must be at or below `ceiling`; far-endpoint drawer
     /// (when present and found in the estate) must also be at or below `ceiling`.
     /// A nil far-endpoint (room-level connection) passes through without a drawer check.
-    private func loadTunnels(for drawer: Drawer, estate: Estate, ceiling: AdjectiveSensitivity) async throws -> [AriaV2TunnelRow] {
+    private func loadTunnels(for drawer: Drawer, ceiling: AdjectiveSensitivity) async throws -> [AriaV2TunnelRow] {
         // Active lifecycle + tombstonedAt == nil filtered at the SQL layer via
         // activeTunnelsFrom/To (LocusKit.Estate L947, L955).
-        let fromTunnels = try await estate.activeTunnelsFrom(drawerId: drawer.id)
-        let toTunnels = try await estate.activeTunnelsTo(drawerId: drawer.id)
+        let fromTunnels = try await kit.activeTunnels(in: handle, from: drawer.id)
+        let toTunnels = try await kit.activeTunnels(in: handle, to: drawer.id)
 
         // Deduplicate in case a self-referential tunnel appears in both lists.
         var seen = Set<String>()
@@ -811,7 +810,7 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             let isOutgoing = tunnel.sourceDrawerId == drawer.id
             return isOutgoing ? tunnel.targetDrawerId : tunnel.sourceDrawerId
         }
-        let endpointDrawers = (try? await estate.getDrawers(ids: Array(Set(farIDs)), hydrationLevel: .structured)) ?? []
+        let endpointDrawers = (try? await kit.getDrawers(in: handle, ids: Array(Set(farIDs)), hydrationLevel: .structured)) ?? []
         let visibleEndpointIDs = Set(endpointDrawers.filter { $0.adjectiveSensitivity.rawValue <= ceiling.rawValue }.map(\.id))
 
         return capped.compactMap { tunnel -> AriaV2TunnelRow? in
