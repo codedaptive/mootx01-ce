@@ -78,7 +78,20 @@ struct ImpatientCaptureTests {
               case let .object(first)? = content.first,
               case let .string(s)? = first["text"]
         else { return "" }
-        return s
+        // v2 compact text is "found N candidate memories"; include subjects and
+        // excerpts from structuredContent.data.results so existing assertions work.
+        var parts = [s]
+        if case let .object(structured)? = obj["structuredContent"],
+           case let .object(data)? = structured["data"],
+           case let .array(results)? = data["results"] {
+            for row in results {
+                if case let .object(r) = row {
+                    if case let .string(subject)? = r["subject"] { parts.append(subject) }
+                    if case let .string(excerpt)? = r["excerpt"] { parts.append(excerpt) }
+                }
+            }
+        }
+        return parts.joined(separator: "\n")
     }
 
     /// An impatient file_memory is IMMEDIATELY searchable — no drain wait.
@@ -95,9 +108,9 @@ struct ImpatientCaptureTests {
         ])
 
         // No awaitEncodeDrain — impatient encoded inline. Search must find it.
-        let result = try await dispatcher.runMemorySearch([
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object([
             "query": .string("peregrine falcon raptor"),
-        ])
+        ]))
         #expect(text(of: result).contains("peregrine falcon"),
             "impatient-filed memory must be immediately searchable; got: \(text(of: result))")
     }
@@ -118,9 +131,9 @@ struct ImpatientCaptureTests {
         // Regular mode encodes in the background — wait for the encode queue.
         try await kit.awaitEncodeDrain(for: handle)
 
-        let result = try await dispatcher.runMemorySearch([
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object([
             "query": .string("volcanic rock basalt"),
-        ])
+        ]))
         #expect(text(of: result).contains("basalt obsidian"),
             "regular-filed memory must be searchable after the encode queue drains; got: \(text(of: result))")
     }
