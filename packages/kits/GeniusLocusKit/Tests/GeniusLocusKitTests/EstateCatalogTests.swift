@@ -349,7 +349,7 @@ struct EstateCatalogTests {
         let read = try EstateCatalog.readManifest(of: record)
         #expect(read == written)
         #expect(read.fileVersion == EstateManifest.currentFileVersion)
-        #expect(read.formatVersion == .v1_7)
+        #expect(read.formatVersion == .current)
         // Nothing else appears in the estate directory or its parent.
         #expect(try FileManager.default.contentsOfDirectory(atPath: record.directory.path) == ["estate.json"])
         #expect(try FileManager.default.contentsOfDirectory(atPath: record.directory.deletingLastPathComponent().path) == ["barnone"])
@@ -384,14 +384,14 @@ struct EstateCatalogTests {
         let manifestURL = dir.appendingPathComponent("estate.json")
 
         // A manifest for a different estate: refused.
-        try #"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
+        try #"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
             .write(to: manifestURL, atomically: true, encoding: .utf8)
         var thrown: EstateCatalogError?
         do { _ = try EstateCatalog.open(selecting: dir.path) } catch let e as EstateCatalogError { thrown = e }
         guard case .unreadableEstateManifest? = thrown else { Issue.record("other name: \(String(describing: thrown))"); return }
 
         // The right name but an extra key that could redirect: refused.
-        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z","path":"/elsewhere"}"#
+        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z","path":"/elsewhere"}"#
             .write(to: manifestURL, atomically: true, encoding: .utf8)
         thrown = nil
         do { _ = try EstateCatalog.open(selecting: dir.path) } catch let e as EstateCatalogError { thrown = e }
@@ -400,7 +400,7 @@ struct EstateCatalogTests {
         }
 
         // A correct manifest: attached.
-        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
+        try #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2026-09-08T00:00:00Z"}"#
             .write(to: manifestURL, atomically: true, encoding: .utf8)
         #expect(try EstateCatalog.open(selecting: dir.path).active.name == "scratch")
 

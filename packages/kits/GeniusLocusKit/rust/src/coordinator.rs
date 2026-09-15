@@ -1207,6 +1207,57 @@ impl ModesManifest {
     fn default_coaching_calls() -> usize { 25 }
 }
 
+// FactExtractionSetting
+// ---------------------------------------------------------------------------
+
+/// The fact-extraction toggle governing whether a future consumer runs
+/// extraction on ingested drawers. No consumer reads this setting yet.
+/// Stored as `"on"` or `"off"` under the estate manifest key
+/// `"fact_extraction"`. Mirrors Swift `GeniusLocusKit.FactExtractionSetting`.
+///
+/// Default is `On` — an absent key or an unrecognised string returns `On`.
+/// This inverts the fail-quiet contract of the other members of this family:
+/// `On` is the ruled product behaviour for this feature, not a record of
+/// prior production state.
+///
+/// Seeded as `"on"` on populated estates through the 1.7 → 1.8 migration
+/// capsule (GENIUSLOCUSKIT_SPEC I-27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactExtractionSetting {
+    /// Fact extraction is enabled (the default when no value is stored).
+    On,
+    /// Fact extraction is disabled; when a consumer reads this setting,
+    /// it will skip extraction.
+    Off,
+}
+
+impl Default for FactExtractionSetting {
+    /// Absent key and unrecognised strings both resolve to `On`.
+    fn default() -> Self { Self::On }
+}
+
+impl FactExtractionSetting {
+    /// The stored string for this value. Mirrors Swift `rawValue`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// Decode a stored string. Returns `None` for unrecognised values —
+    /// callers fall back to `FactExtractionSetting::default()`. Mirrors
+    /// the Swift `init(rawValue:)` fallible initialiser convention.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
 /// What an estate holds for the cross encoder once an apply has been tried.
 /// Mirrors Swift `PairScorerSlot` (CrossEncoderActivation.swift).
 pub(crate) enum PairScorerSlot {
@@ -4478,6 +4529,69 @@ impl EstateCoordinator {
             .ok()
             .flatten()
             .and_then(|json| serde_json::from_str::<ModesManifest>(&json).ok())
+            .unwrap_or_default())
+    }
+
+    /// The estate-manifest key carrying the USER-OWNED fact-extraction toggle:
+    /// the plain string `"on"` or `"off"`. Read back via
+    /// `provisioned_fact_extraction`. Mirrors Swift
+    /// `GeniusLocusKit.factExtractionMetaKey` (RecallDirector.swift).
+    ///
+    /// Default is ON — absent key means `On`. ON is the ruled product
+    /// behaviour for this feature; the capsule seeds the value explicitly so
+    /// a later change to the default cannot silently flip an estate already
+    /// in use.
+    ///
+    /// Seeded as `"on"` on populated estates through the 1.7 → 1.8 migration
+    /// capsule (GENIUSLOCUSKIT_SPEC I-27); no migration is required for a fresh
+    /// estate.
+    pub const FACT_EXTRACTION_META_KEY: &str = "fact_extraction";
+
+    /// Provision the USER-OWNED fact-extraction toggle on an estate:
+    /// stored as the plain string `"on"` or `"off"` under `"fact_extraction"`.
+    ///
+    /// An absent key is treated as `On` when read back. The 1.7 → 1.8
+    /// migration capsule seeds `"on"` on populated estates so the key is
+    /// physically present and a later default change cannot flip an estate
+    /// already in use.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionFactExtraction(_:for:)`.
+    pub fn provision_fact_extraction(
+        &self,
+        handle: &EstateHandle,
+        setting: FactExtractionSetting,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // The value is a plain string — no JSON encoding needed.
+        estate
+            .set_meta(Self::FACT_EXTRACTION_META_KEY, setting.as_str())
+            .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "provisionFactExtraction".to_string(),
+                reason: format!("provision_fact_extraction set_meta failed: {e:?}"),
+            }))
+    }
+
+    /// Read back the provisioned fact-extraction toggle, or `On` when the
+    /// estate carries none.
+    ///
+    /// Note: absent key means ON, not OFF. ON is the ruled product default
+    /// for this feature; the capsule seeds the value explicitly so a later
+    /// default change cannot flip an estate already in use. An unrecognised
+    /// string also returns `On` — the same fail-quiet contract
+    /// `provisioned_door_config` applies to unrecognised JSON. Storage errors
+    /// degrade to `On` (fail-quiet); use `provision_fact_extraction` to write.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.provisionedFactExtraction(for:)`.
+    pub fn provisioned_fact_extraction(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<FactExtractionSetting, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        Ok(estate
+            .meta(Self::FACT_EXTRACTION_META_KEY)
+            .ok()
+            .flatten()
+            .and_then(|s| FactExtractionSetting::from_str(&s))
             .unwrap_or_default())
     }
 

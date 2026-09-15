@@ -109,7 +109,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// identity second (correctness migration), projection backfill third
     /// (restores recall visibility for pre-v20 facts), shared-content reclaim
     /// fourth (VACUUM-backed, most I/O), whole-record vacuum fifth (the first
-    /// estate open of the sequence, so the 1.6 to 1.7 capsule runs and reports
+    /// estate open of the sequence, so the migration chain runs and reports
     /// here), ssc facts sixth, dense pooling convergence seventh (retrains
     /// stale-format provider bases before any other step opens the corpus),
     /// span encode eighth (needs the registry row and the corpus wired), vector
@@ -652,11 +652,12 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     /// Populate `kg_facts.searchProjection` and
     /// `kg_facts.searchProjectionVersion` for rows that the v19 → v20
-    /// migration added those columns to. Before this backfill those rows
-    /// were invisible to FactFirstRecall's hard guard (which excludes any
-    /// fact with an empty searchProjection). `mootx01 upgrade` is the ONLY
-    /// migration vehicle (Bob's ruling) — no detection or prompting lives
-    /// anywhere else.
+    /// migration added those columns to. A fact with an empty
+    /// `searchProjection` is invisible to any consumer that filters on the
+    /// projection (the contract: a row must carry a non-empty, current-version
+    /// projection to participate in fact-search results). `mootx01 upgrade`
+    /// is the ONLY migration vehicle (Bob's ruling) — no detection or
+    /// prompting lives anywhere else.
     ///
     /// Idempotent: rows whose searchProjectionVersion already matches are
     /// skipped. A second run over a fully-projected estate reports scanned: 0
@@ -940,16 +941,18 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     /// Vacuum the whole-record float rows (`vectors` kind 1) and the
     /// `hnsw_graph` rows nothing serves any more (GENIUSLOCUSKIT_SPEC I-26).
-    /// The 1.6 to 1.7 capsule does the work inside `GLKMigrationCatalog.prepare`
-    /// when the estate opens (it also rebuilds the binary sidecar and releases
-    /// the float representation claim), so this step counts the rows before
-    /// the open, opens the estate through GeniusLocusKit, counts again, and
-    /// returns the freed pages to the filesystem with a VACUUM when anything
-    /// was deleted. It runs after the shared-content reclaim and before the
-    /// ssc facts backfill: the first estate open of the sequence, so the
-    /// capsule's work is reported here and every later step finds the estate
-    /// at 1.7. Idempotent: a vacuumed estate deletes nothing and skips the
-    /// VACUUM. Twin of the Rust `run_whole_record_vacuum`.
+    /// The 1.6 to 1.7 and 1.7 to 1.8 capsules do the work inside
+    /// `GLKMigrationCatalog.prepare` when the estate opens (the 1.6 to 1.7
+    /// capsule also rebuilds the binary sidecar and releases the float
+    /// representation claim; the 1.7 to 1.8 capsule seeds fact_extraction),
+    /// so this step counts the rows before the open, opens the estate through
+    /// GeniusLocusKit, counts again, and returns the freed pages to the
+    /// filesystem with a VACUUM when anything was deleted. It runs after the
+    /// shared-content reclaim and before the ssc facts backfill: the first
+    /// estate open of the sequence, so the capsules' work is reported here
+    /// and every later step finds the estate at 1.8. Idempotent: a vacuumed
+    /// estate deletes nothing and skips the VACUUM. Twin of the Rust
+    /// `run_whole_record_vacuum`.
     ///
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
     /// Returns `true` on success or when there is nothing to vacuum.
@@ -985,8 +988,9 @@ struct UpgradeCommand: AsyncParsableCommand {
                     owner: owner,
                     identityKeyStore: Self.identityKeyStore(for: estate)
                 )
-                // The chain runs the 1.6 to 1.7 capsule on an estate that has
-                // not taken it yet; closing the estate closes its connection.
+                // The chain runs the 1.6 to 1.7 and 1.7 to 1.8 capsules on
+                // an estate that has not taken them yet; closing the estate
+                // closes its connection.
                 _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
                 try await kit.close(handle)
                 let after = try await Self.wholeRecordRowCounts(configuration: configuration)
@@ -1001,7 +1005,9 @@ struct UpgradeCommand: AsyncParsableCommand {
                 if floatRows + graphRows == 0 {
                     print("  ✓ whole-record vacuum: nothing to reclaim")
                 } else {
-                    print("  ✓ whole-record vacuum: \(floatRows) float row(s), \(graphRows) graph row(s) deleted; \(reclaimedBytes) bytes returned to filesystem")
+                    print("  ✓ whole-record vacuum: \(floatRows) float row(s), "
+                        + "\(graphRows) graph row(s) deleted; "
+                        + "\(reclaimedBytes) bytes returned to filesystem")
                 }
                 return true
             } catch {

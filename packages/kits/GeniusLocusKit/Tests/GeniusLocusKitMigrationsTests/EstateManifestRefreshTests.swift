@@ -70,7 +70,7 @@ struct EstateManifestRefreshTests {
         let record = try scratchRecord()
         defer { cleanup(record) }
         try FileManager.default.createDirectory(at: record.directory, withIntermediateDirectories: true)
-        let rogue = #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2020-01-01T00:00:00Z","path":"/elsewhere"}"#
+        let rogue = #"{"fileVersion":1,"name":"scratch","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2020-01-01T00:00:00Z","path":"/elsewhere"}"#
         try rogue.write(to: record.manifestURL, atomically: true, encoding: .utf8)
         var thrown: EstateCatalogError?
         do {
@@ -82,7 +82,7 @@ struct EstateManifestRefreshTests {
         }
         #expect(try String(contentsOf: record.manifestURL, encoding: .utf8) == rogue, "the refused file is untouched")
         // A foreign name is refused the same way; the declaration helper reads it as no declaration.
-        try #"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":7},"encryption":"plaintext","created":"2020-01-01T00:00:00Z"}"#
+        try #"{"fileVersion":1,"name":"other","schemaVersion":1,"formatVersion":{"major":1,"minor":8},"encryption":"plaintext","created":"2020-01-01T00:00:00Z"}"#
             .write(to: record.manifestURL, atomically: true, encoding: .utf8)
         #expect(throws: EstateCatalogError.self) {
             _ = try EstateManifestRefresh.refresh(estate: record, format: .current, encryption: .encrypted, now: Date(timeIntervalSince1970: 0))

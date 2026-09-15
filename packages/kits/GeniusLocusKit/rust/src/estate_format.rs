@@ -11,7 +11,7 @@ use persistence_kit::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Serialised as `{"major": 1, "minor": 7}`: the shape the estate manifest
+/// Serialised as `{"major": 1, "minor": 8}`: the shape the estate manifest
 /// (`estate.json`) records and the Swift port's synthesized Codable writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EstateFormatVersion {
@@ -48,7 +48,13 @@ impl EstateFormatVersion {
     /// migration catalog, the binary sidecar is rebuilt and the float
     /// representation claim is released; a fresh estate is born without them.
     pub const V1_7: Self = Self { major: 1, minor: 7 };
-    pub const CURRENT: Self = Self::V1_7;
+    /// Format 1.8: the fact-extraction toggle (`fact_extraction` manifest key)
+    /// is seeded as `"on"` on every populated estate through the migration
+    /// catalog, so the on-by-default ruling is recorded per estate rather than
+    /// inferred from an absent key, and an operator's opt-out survives a later
+    /// change to the default.
+    pub const V1_8: Self = Self { major: 1, minor: 8 };
+    pub const CURRENT: Self = Self::V1_8;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

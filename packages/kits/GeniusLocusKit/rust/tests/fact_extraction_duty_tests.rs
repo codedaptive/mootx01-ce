@@ -36,7 +36,7 @@ impl FactExtractor for FakeExtractor {
             model_id: self.spec.model_id.clone(),
             model_version: self.spec.model_version.clone(),
             schema_version: self.spec.schema_version.clone(),
-            candidates: if self.empty {
+            candidates: if self.empty || (self.grounded && !request.source_text.contains(SOURCE)) {
                 vec![]
             } else {
                 vec![FactCandidate {
@@ -282,4 +282,33 @@ fn recipe_replacement_retires_machine_fact_but_preserves_manual_fact() {
     let history = store.all_kg_facts_including_retired().unwrap();
     assert_eq!(history.len(), 3);
     assert!(history.iter().any(|fact| fact.id == old_machine_id));
+}
+
+#[test]
+fn source_exact_chunking_reaches_a_fact_beyond_the_first_model_window() {
+    let (mut coordinator, handle, store) = open();
+    let source = format!("{}{}", "Background material. ".repeat(40), SOURCE);
+    let drawer_id = capture(&coordinator, &handle, &source);
+    let mut bounded_spec = spec();
+    bounded_spec.maximum_input_characters = 700;
+    coordinator
+        .activate_fact_extractor(
+            Arc::new(FakeExtractor {
+                spec: bounded_spec,
+                empty: false,
+                grounded: true,
+            }),
+            "nuextract-original-body-v1",
+            &handle,
+        )
+        .unwrap();
+
+    let report = coordinator
+        .run_fact_extraction_batch(&handle, 16, NOW)
+        .unwrap();
+    assert_eq!(report.completed_sources, 1);
+    assert_eq!(report.facts_filed, 1);
+    let fact = &store.all_kg_facts().unwrap()[0];
+    assert_eq!(fact.source_drawer_id, drawer_id);
+    assert_eq!(fact.evidence_quote, SOURCE);
 }
