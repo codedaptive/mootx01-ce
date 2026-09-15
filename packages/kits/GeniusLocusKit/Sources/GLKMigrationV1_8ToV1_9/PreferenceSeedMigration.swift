@@ -93,7 +93,7 @@ public extension GeniusLocusKit {
         for key in Self.preferenceSeedKeys {
             let existing: String?
             do {
-                existing = try await estate(for: handle).meta(key: key.rawValue)
+                existing = try await meta(in: handle, key: key.rawValue)
             } catch {
                 throw PreferenceSeedMigrationError.storageUnavailable(
                     reason: "\(key.rawValue) key read failed: \(error)")
