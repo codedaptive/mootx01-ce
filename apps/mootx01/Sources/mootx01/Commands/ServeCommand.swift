@@ -499,17 +499,28 @@ struct ServeCommand: AsyncParsableCommand {
             // The master switch and selected provider are estate-owned. A
             // transient benchmark estate reads only its own optional config;
             // registered estates read the product configuration directory.
-            let factExtractionSetting = try? await kit.provisionedPreference(
-                .factExtraction, for: handle)
-            let factExtractorSetting = try? await kit.provisionedPreference(
-                .factExtractor, for: handle)
+            // `provisionedPreference` returns the key's default for an absent
+            // value, so the only error it can raise is a storage error; that
+            // error is fatal here and never substituted with a default, because
+            // a daemon running on defaults it was never configured with would
+            // silently misreport what the estate asked for.
             let factSettingsDirectory = estate.kind == .registered
                 ? EstateCatalog.configurationDirectory : estate.directory
-            let factExtractor: (any FactExtractor)? = FactExtractorBuilder.build(
-                masterSetting: factExtractionSetting ?? .off,
-                extractorSetting: factExtractorSetting ?? .nuextract,
-                settingsDirectory: factSettingsDirectory,
-                workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+            let factExtractor: (any FactExtractor)?
+            do {
+                let factExtractionSetting = try await kit.provisionedPreference(
+                    .factExtraction, for: handle)
+                let factExtractorSetting = try await kit.provisionedPreference(
+                    .factExtractor, for: handle)
+                factExtractor = FactExtractorBuilder.build(
+                    masterSetting: factExtractionSetting,
+                    extractorSetting: factExtractorSetting,
+                    settingsDirectory: factSettingsDirectory,
+                    workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+            } catch {
+                Logging.stderr.log("mootx01 serve fatal: fact-extraction preference read failed: \(error)")
+                throw ExitCode.failure
+            }
 
             let config = AriaResident.ResidentConfig(
                 port: port,
