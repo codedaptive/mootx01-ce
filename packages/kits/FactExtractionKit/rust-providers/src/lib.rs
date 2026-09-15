@@ -9,6 +9,8 @@ pub mod worker_client;
 
 #[cfg(feature = "candle")]
 pub mod candle_nuextract;
+#[cfg(feature = "candle")]
+pub mod worker_command;
 
 pub use protocol::{NuExtractArchitecture, WorkerRequest, WorkerResponse, PROTOCOL_VERSION};
 pub use worker_client::{NuExtractWorkerClient, NuExtractWorkerConfig};
