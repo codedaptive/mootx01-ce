@@ -37,11 +37,15 @@ pub fn recall_ratings_schema_declaration() -> SchemaDeclaration {
 }
 
 /// The preference keys the 1.8 → 1.9 capsule seeds: every key except
-/// `FactExtraction`, which the 1.7 → 1.8 capsule already seeded.
+/// `FactExtraction` (seeded by the 1.7 → 1.8 capsule) and `FactExtractor`
+/// (absent reads as `Nuextract`; no seeding capsule for the extractor choice).
 pub fn preference_seed_keys() -> Vec<EstatePreferenceKey> {
     EstatePreferenceKey::ALL
         .into_iter()
-        .filter(|key| *key != EstatePreferenceKey::FactExtraction)
+        .filter(|key| {
+            *key != EstatePreferenceKey::FactExtraction
+                && *key != EstatePreferenceKey::FactExtractor
+        })
         .collect()
 }
 
