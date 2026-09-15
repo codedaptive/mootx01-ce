@@ -328,6 +328,107 @@ pub fn run(
                 handle_for_hnsw,
                 None, // production: resolves the product default config dir
             );
+            // Signal 11 (ConsolidationSignal) and the contradiction sweep are
+            // preference-gated: each cycle is built only when the estate's
+            // switch is not Off, and `None` registers no signal at all.
+            let consolidation_cycle =
+                build_consolidation_cycle(&coord_for_hnsw, handle_for_hnsw);
+            let contradiction_sweep_cycle =
+                build_contradiction_sweep_cycle(&coord_for_hnsw, handle_for_hnsw);
+            // Maintenance family (maintenance-daemon, decay-sweep,
+            // by-reference-validity): each drives one category of the
+            // governor's own maintenance engine and registers only while the
+            // estate's `maintenance` preference is not Off. An unreadable
+            // preference registers nothing, the same posture as the two
+            // sweeps above. The governor tick does not pump the engine; these
+            // signals are its only drive.
+            let maintenance_on = read_estate_preference(
+                &coord_for_hnsw,
+                &handle_for_hnsw,
+                genius_locus_kit::EstatePreferenceKey::Maintenance,
+            )
+            .map(|setting| setting != genius_locus_kit::EstatePreferenceValue::Off)
+            .unwrap_or(false);
+            let (maintenance_cycle, decay_cycle, by_reference_cycle) = if maintenance_on {
+                (
+                    Some(governor.maintenance_tombstone_cycle()),
+                    Some(governor.maintenance_decay_cycle()),
+                    Some(governor.maintenance_by_reference_cycle()),
+                )
+            } else {
+                (None, None, None)
+            };
+            // Adaptive-recall trio (temporal-causality-fold, training-daemon,
+            // end-of-day-tournament): the hourly T-population fold, the hourly
+            // training-daemon tick over the coordinator's matrix tier, and the
+            // daily tournament that folds the day's recall traces into
+            // `recall_ratings`. Registered only while
+            // the estate's `adaptive_recall` preference is not Off; an
+            // unreadable preference registers nothing, the same posture as
+            // the maintenance family above. Each fire locks the coordinator
+            // and reads the wall clock once, like the other resident cycles.
+            let adaptive_recall_on = read_estate_preference(
+                &coord_for_hnsw,
+                &handle_for_hnsw,
+                genius_locus_kit::EstatePreferenceKey::AdaptiveRecall,
+            )
+            .map(|setting| setting != genius_locus_kit::EstatePreferenceValue::Off)
+            .unwrap_or(false);
+            let (fold_cycle, training_cycle, tournament_cycle) = if adaptive_recall_on {
+                let fold_coord = Arc::clone(&coord_for_hnsw);
+                let fold_handle = handle_for_hnsw;
+                let fold_cycle: Arc<dyn Fn() -> Result<(), String> + Send + Sync> =
+                    Arc::new(move || {
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        match fold_coord.lock() {
+                            Ok(mut coord) => coord
+                                .run_temporal_causality_fold(&fold_handle, now_ms)
+                                .map_err(|e| format!("{e:?}")),
+                            Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+                        }
+                    });
+                let training_coord = Arc::clone(&coord_for_hnsw);
+                let training_handle = handle_for_hnsw;
+                let training_cycle: Arc<dyn Fn() -> Result<String, String> + Send + Sync> =
+                    Arc::new(move || {
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64;
+                        match training_coord.lock() {
+                            Ok(mut coord) => coord
+                                .run_training_tick(&training_handle, now_ms)
+                                .map_err(|e| format!("{e:?}")),
+                            Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+                        }
+                    });
+                let tournament_coord = Arc::clone(&coord_for_hnsw);
+                let tournament_handle = handle_for_hnsw;
+                let tournament_cycle: Arc<
+                    dyn Fn() -> Result<
+                            genius_locus_kit::brain::end_of_day_tournament::TournamentReport,
+                            String,
+                        > + Send
+                        + Sync,
+                > = Arc::new(move || {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    match tournament_coord.lock() {
+                        Ok(coord) => coord
+                            .end_of_day_tournament(&tournament_handle, now_ms)
+                            .map_err(|e| format!("{e:?}")),
+                        Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+                    }
+                });
+                (Some(fold_cycle), Some(training_cycle), Some(tournament_cycle))
+            } else {
+                (None, None, None)
+            };
             match governor.register_default_standing_signals(
                 "minilm-v6",
                 SystemTime::now(),
@@ -335,6 +436,14 @@ pub fn run(
                 Some(anomaly_cycle),
                 Some(span_encode_cycle),
                 fact_extraction_cycle,
+                consolidation_cycle,
+                contradiction_sweep_cycle,
+                maintenance_cycle,
+                decay_cycle,
+                by_reference_cycle,
+                fold_cycle,
+                training_cycle,
+                tournament_cycle,
             ) {
                 Ok(registered) => {
                     eprintln!(
@@ -594,10 +703,10 @@ pub fn activate_and_build_extraction_cycle(
     let setting = {
         let coord_guard = coord.lock().ok()?;
         coord_guard
-            .provisioned_fact_extraction(&handle)
+            .provisioned_preference(&handle, genius_locus_kit::EstatePreferenceKey::FactExtraction)
             .ok()?
     };
-    if setting == genius_locus_kit::coordinator::FactExtractionSetting::Off {
+    if setting == genius_locus_kit::EstatePreferenceValue::Off {
         return None;
     }
 
@@ -668,6 +777,105 @@ pub fn activate_and_build_extraction_cycle(
     Some(cycle)
 }
 
+/// Read one on/off estate preference through the coordinator. `None` when
+/// the lock is poisoned or the read fails; the caller treats `None` as Off
+/// so a preference that cannot be read never schedules its signal.
+fn read_estate_preference(
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: &genius_locus_kit::EstateHandle,
+    key: genius_locus_kit::EstatePreferenceKey,
+) -> Option<genius_locus_kit::EstatePreferenceValue> {
+    let coord_guard = coord.lock().ok()?;
+    coord_guard.provisioned_preference(handle, key).ok()
+}
+
+/// Build the consolidation-sweep cycle (signal 11) for `handle`, or `None`
+/// when the estate's `consolidation` preference is `Off` (or unreadable).
+/// Each fire runs one bounded `consolidation_sweep_report` pass under the
+/// default `ConsolidationConfig` with no candidate-limit override; the
+/// sweep persists its vague drawers itself and the closure returns only the
+/// report. Mirrors the Swift resident's `consolidationCycle` wiring.
+pub fn build_consolidation_cycle(
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: genius_locus_kit::EstateHandle,
+) -> Option<
+    Arc<
+        dyn Fn() -> Result<
+                genius_locus_kit::brain::consolidation_cycle::ConsolidationSweepReport,
+                String,
+            > + Send
+            + Sync,
+    >,
+> {
+    let setting = read_estate_preference(
+        coord,
+        &handle,
+        genius_locus_kit::EstatePreferenceKey::Consolidation,
+    )?;
+    if setting == genius_locus_kit::EstatePreferenceValue::Off {
+        return None;
+    }
+    let sweep_coord = Arc::clone(coord);
+    Some(Arc::new(move || {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        match sweep_coord.lock() {
+            Ok(coord) => coord
+                .consolidation_sweep_report(
+                    &handle,
+                    now_ms,
+                    &genius_locus_kit::brain::consolidation_cycle::ConsolidationConfig::default(),
+                    None,
+                )
+                .map_err(|e| format!("{e:?}")),
+            Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+        }
+    }))
+}
+
+/// Build the contradiction-sweep cycle for `handle`, or `None` when the
+/// estate's `contradiction_sweep` preference is `Off` (or unreadable). Each
+/// fire runs one `propose_conflict_tunnels` pass under the resident's
+/// embedding model ("minilm-v6"), a 50-row probe limit and a lexical top-k
+/// of 10; the pass persists its tunnels itself and the closure returns only
+/// the report. Mirrors the Swift resident's `contradictionSweepCycle` wiring.
+pub fn build_contradiction_sweep_cycle(
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: genius_locus_kit::EstateHandle,
+) -> Option<
+    Arc<
+        dyn Fn() -> Result<
+                genius_locus_kit::brain::conflict_projection_sweep::ConflictTunnelProposalReport,
+                String,
+            > + Send
+            + Sync,
+    >,
+> {
+    let setting = read_estate_preference(
+        coord,
+        &handle,
+        genius_locus_kit::EstatePreferenceKey::ContradictionSweep,
+    )?;
+    if setting == genius_locus_kit::EstatePreferenceValue::Off {
+        return None;
+    }
+    let sweep_coord = Arc::clone(coord);
+    Some(Arc::new(move || {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        match sweep_coord.lock() {
+            Ok(coord) => coord
+                .propose_conflict_tunnels(&handle, "minilm-v6", 50, 10, now_ms)
+                .map_err(|e| format!("{e:?}")),
+            Err(e) => Err(format!("coordinator lock poisoned: {e}")),
+        }
+    }))
+}
+
 /// Decide whether fact-extraction signal 14 should run for `handle`, and if so
 /// build the worker client, activate, and return the cycle closure.
 ///
@@ -697,10 +905,10 @@ pub fn build_fact_extraction_cycle(
     let setting = {
         let coord_guard = coord.lock().ok()?;
         coord_guard
-            .provisioned_fact_extraction(&handle)
+            .provisioned_preference(&handle, genius_locus_kit::EstatePreferenceKey::FactExtraction)
             .ok()?
     };
-    if setting == genius_locus_kit::coordinator::FactExtractionSetting::Off {
+    if setting == genius_locus_kit::EstatePreferenceValue::Off {
         return None;
     }
 

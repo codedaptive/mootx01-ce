@@ -1253,7 +1253,10 @@ mod tests {
         // The file carries the shared shape: sorted keys, formatVersion as an object.
         let text = fs::read_to_string(record.manifest_path()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["formatVersion"], serde_json::json!({"major": 1, "minor": 8}));
+        assert_eq!(value["formatVersion"], serde_json::json!({
+            "major": EstateFormatVersion::CURRENT.major,
+            "minor": EstateFormatVersion::CURRENT.minor,
+        }));
         let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, ["created", "encryption", "fileVersion", "formatVersion", "name", "schemaVersion"]);
         // Nothing else appears in the estate directory or its parent.

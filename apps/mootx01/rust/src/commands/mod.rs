@@ -19,6 +19,8 @@ pub mod enable;
 pub mod harness_memory;
 pub mod install;
 pub mod botlink;
+/// `preference` — the user-owned on/off estate switches, read and written through the estate manifest.
+pub mod preference;
 pub mod proxy;
 pub mod query;
 pub mod serve;
@@ -43,6 +45,7 @@ pub fn dispatch(command: Command) -> ExitCode {
             purge,
         } => uninstall::run(target, location, yes, purge),
         Command::Db(sub) => db::run(sub),
+        Command::Preference(sub) => preference::run(sub),
         Command::Status => status::run(),
         Command::Query { verb, db, json, args } => query::run(verb, db, json, args),
         Command::BotLink { sub, http, db } => botlink::run(sub, http, db),
