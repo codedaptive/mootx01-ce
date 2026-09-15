@@ -54,11 +54,10 @@ fn load_fixture_compositions() -> Vec<String> {
     fixture.composition_names
 }
 
-/// Compositions the benchmarker fixture lists that this build gates out.
-/// `dense-fused` reads the whole-record float column and compiles only with
-/// the `whole-record-dense` feature (ruling 2026-09-07).
+/// Compositions the benchmarker fixture lists that are not active in this build.
+/// All whole-record float compositions are now always-on; no compositions are gated out.
 fn gated_compositions() -> Vec<String> {
-    if cfg!(feature = "whole-record-dense") { vec![] } else { vec!["dense-fused".to_string()] }
+    vec![]
 }
 
 /// The fixture names this build is expected to resolve.

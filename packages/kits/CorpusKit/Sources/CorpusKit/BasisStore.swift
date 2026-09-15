@@ -1,7 +1,7 @@
 // BasisStore.swift
 //
 // Persistence for a trained embedding provider's serialized basis blob. The "trained brain" of a distributional provider
-// (RI/PPMI/LSA/NMF) is a versioned byte blob produced by the basis codec
+// (RI/LSA) is a versioned byte blob produced by the basis codec
 // via `TrainableEmbeddingBasis.serializeBasis()`. This store persists that
 // blob so the dense lane is trained-ready immediately after a process
 // restart, without re-running training on every open.
@@ -31,7 +31,7 @@
 //
 //   - model_id / model_version: the basis is only valid for the exact
 //     provider it was trained for. A blob trained under "corpus-ri-v1"
-//     must never be loaded into a provider keyed "corpus-ppmi-v1" — the
+//     must never be loaded into a provider keyed "corpus-lsa-v1" — the
 //     codec magic would reject it, but keying the row by (modelID,
 //     modelVersion) makes the load query unambiguous and matches the same
 //     (modelID, modelVersion) tuple every vector row is keyed under.

@@ -44,8 +44,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// Vector rows the RI slot writes per item: the engram row always; the float
-/// row (vector_index 1) only with the `whole-record-dense` feature.
-const LANES_PER_ITEM: usize = if cfg!(feature = "whole-record-dense") { 2 } else { 1 };
+/// row (vector_index 1).
+const LANES_PER_ITEM: usize = 2;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -260,8 +260,7 @@ fn c1_two_reindex_passes_advance_generation_and_leave_reclaim_rows() {
     );
 
     // In standalone mode the RI slot writes a binary row (vector_index=0) per
-    // item, plus a float row (vector_index=1) with the whole-record-dense
-    // feature. No prior gen-0 RI rows existed (index_content skips untrained
+    // item, plus a float row (vector_index=1) from the whole-record float lane. No prior gen-0 RI rows existed (index_content skips untrained
     // slots), so every row is serving gen-1 with nothing pending-reclaim.
     let rows1 = vector_row_count(&*storage, RI_MODEL_ID);
     assert_eq!(

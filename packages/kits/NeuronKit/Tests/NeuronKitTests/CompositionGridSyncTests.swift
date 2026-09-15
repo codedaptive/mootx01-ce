@@ -65,14 +65,9 @@ private func loadFixtureCompositions() throws -> [String] {
 
 /// Compositions the benchmarker fixture lists that this build gates out.
 /// `dense-fused` reads the whole-record float column and compiles only under
-/// the WholeRecordDense trait (ruling 2026-09-07); the benchmarker keeps the
-/// column name for its WholeRecordDense arms.
+/// the whole-record float lane; the benchmarker column name is preserved for continuity.
 private let gatedCompositions: Set<String> = {
-#if MOOTX01_WHOLE_RECORD_DENSE
     []
-#else
-    ["dense-fused"]
-#endif
 }()
 
 // MARK: - tests

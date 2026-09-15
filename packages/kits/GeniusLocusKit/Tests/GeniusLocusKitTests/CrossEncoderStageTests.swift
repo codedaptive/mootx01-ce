@@ -200,10 +200,7 @@ struct CrossEncoderStageDirectorTests {
         let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusKit.CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: { tokens in
-                let v = Float((tokens.first ?? 0) % 7 + 1) / 7.0
-                return Array(repeating: v, count: 384)
-            })])
+            models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))])
         for i in 0..<200 {
             let padding = (0..<(i % 9 + 1)).map { "filler\($0 + i)" }.joined(separator: " ")
             let baseContent = i % 4 == 0

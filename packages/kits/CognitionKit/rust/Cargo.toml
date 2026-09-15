@@ -75,7 +75,3 @@ name = "cognitionkit_telemetry_tests"
 path = "tests/cognitionkit_telemetry_tests.rs"
 
 [features]
-# whole-record-dense: turns on the whole-record float lane in genius-locus-kit
-# and neuron-kit (twin of the Swift package trait `WholeRecordDense`). Off by
-# default (ruling 2026-09-07). No cognition-kit source is gated.
-whole-record-dense = ["genius-locus-kit/whole-record-dense", "neuron-kit/whole-record-dense"]

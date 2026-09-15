@@ -35,13 +35,9 @@ import CorpusKitProviders
 @testable import CorpusKit
 
 /// Vector rows the RI slot writes per item: the engram row always; the float
-/// row (vectorIndex 1) only in the WholeRecordDense build.
+/// row (vectorIndex 1) via the whole-record float lane.
 private let vectorLanesPerItem: Int = {
-#if MOOTX01_WHOLE_RECORD_DENSE
     2
-#else
-    1
-#endif
 }()
 
 // MARK: - Helpers
@@ -176,7 +172,7 @@ struct ShadowSwapCorpusTests {
             "c1 pass1: serving_generation must be 1 after first reindex (shadow gen 1 published)")
 
         // In standalone mode the RI slot writes a binary row (vectorIndex=0) per
-        // item, plus a float row (vectorIndex=1) in the WholeRecordDense build.
+        // item, plus a float row (vectorIndex=1) via the whole-record float lane.
         // No prior gen-0 RI rows existed (indexContent skips untrained slots), so
         // every row is serving gen-1 with nothing pending-reclaim.
         let rows1 = try await vectorRowCount(storage: storage, modelID: modelID)

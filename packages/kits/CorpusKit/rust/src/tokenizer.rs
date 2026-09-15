@@ -1,5 +1,5 @@
 //! Tokenizer trait. Concrete implementations (BERT WordPiece for
-//! MiniLM and mpnet, SentencePiece for EmbeddingGemma, and the
+//! the MiniLM span encoder and the
 //! `DeterministicTokenizer` test stub) live in the sibling
 //! `corpus-kit-providers` crate -- matches Swift's split between
 //! `CorpusKit` and `CorpusKitProviders`. Core `corpus-kit` ships the trait

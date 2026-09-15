@@ -42,13 +42,9 @@ import CorpusKitProviders
 @testable import CorpusKit
 
 /// Vector rows the RI slot writes per item: the engram row always; the float
-/// row (vectorIndex 1) only in the WholeRecordDense build.
+/// row (vectorIndex 1) via the whole-record float lane.
 private let vectorLanesPerItem: Int = {
-#if MOOTX01_WHOLE_RECORD_DENSE
     2
-#else
-    1
-#endif
 }()
 
 // MARK: - Helpers (file-private; not reused from ShadowSwapCorpusTests)

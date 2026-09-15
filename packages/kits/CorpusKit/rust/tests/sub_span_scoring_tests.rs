@@ -32,7 +32,7 @@ use corpus_kit::{
     content_digest, sub_span_scoring, SubSpanBudget, CorpusContentChangeBatch, CorpusContentConfiguration,
     CorpusContentEngine, CorpusContentId, CorpusContentRecord, CorpusContentSource,
     CorpusContentStore, CorpusDocumentStore, CorpusKitError, CorpusIndexUnitPolicy, CorpusOperatingMode,
-    EmbeddingModelConfig, NamedInferenceFn,
+    EmbeddingModelConfig,
 };
 use corpus_kit::Corpus;
 use engram_lib::Engram;
@@ -181,7 +181,7 @@ fn in_memory_storage() -> Arc<dyn Storage> {
 }
 
 fn make_engine(
-    inference: NamedInferenceFn,
+    provider: Box<dyn EmbeddingProvider + Send + Sync>,
 ) -> (CorpusContentEngine, Arc<CorpusDocumentStore>) {
     let storage = in_memory_storage();
     let config =
@@ -191,27 +191,38 @@ fn make_engine(
         .migrate(&corpus_kit::standalone_declaration(false))
         .expect("migrate standalone profile");
     let store = Arc::new(CorpusDocumentStore::new(Arc::clone(&storage)));
+    // CandleNL carries any EmbeddingProvider without a trainable basis —
+    // the right structural choice for test stubs after MiniLM was retired.
     let engine = CorpusContentEngine::open(
         Arc::clone(&storage),
         config,
         Arc::clone(&store) as Arc<dyn CorpusContentSource>,
-        vec![EmbeddingModelConfig::MiniLM { inference }],
+        vec![EmbeddingModelConfig::CandleNL { provider }],
     )
     .expect("open engine");
     (engine, store)
 }
 
-/// One-hot 384-d directional inference: token sums map to distinct directions.
-/// Mirrors Swift `directionalModel()` and `directional_inference()` in
-/// `discrimination_signal_tests.rs`.
-fn directional_inference() -> NamedInferenceFn {
-    Box::new(|tokens: &[i32]| {
+/// One-hot 384-d directional provider: Unicode-scalar sum maps each text to
+/// a distinct direction. Mirrors Swift `DirectionalFloatProvider`.
+struct DirectionalProvider;
+
+impl EmbeddingProvider for DirectionalProvider {
+    fn model_id(&self) -> &str { "test-directional-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> {
+        // The Hamming lane uses the binary engram; return zero (no discrimination)
+        // so only the float lane's one-hot cosine drives sub-span scoring.
+        Ok(Engram::ZERO)
+    }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        if text.is_empty() { return Ok(vec![]); }
         let mut v = vec![0.0_f32; 384];
-        let sum: i32 = tokens.iter().fold(0i32, |a, t| a.wrapping_add(*t));
+        let sum = text.chars().fold(0i32, |a, c| a.wrapping_add(c as i32));
         let slot = ((sum % 384 + 384) % 384) as usize;
         v[slot] = 1.0;
         Ok(v)
-    })
+    }
 }
 
 // ── §1: sub_span_ranges — deterministic segmentation ─────────────────────────
@@ -531,7 +542,7 @@ fn score_uses_effective_dense_text() {
 /// (doc2, orthogonal direction).
 #[test]
 fn engine_score_sub_spans_returns_scored_results() {
-    let (engine, store) = make_engine(directional_inference());
+    let (engine, store) = make_engine(Box::new(DirectionalProvider));
     store.put("alpha alpha alpha", "doc1", NOW_MS).unwrap();
     store.put("omega omega omega", "doc2", NOW_MS).unwrap();
 
@@ -551,7 +562,7 @@ fn engine_score_sub_spans_returns_scored_results() {
 
 #[test]
 fn engine_score_sub_spans_absent_candidate_omitted() {
-    let (engine, store) = make_engine(directional_inference());
+    let (engine, store) = make_engine(Box::new(DirectionalProvider));
     store.put("alpha alpha alpha", "present", NOW_MS).unwrap();
 
     let results = engine.score_sub_spans("alpha alpha alpha", &["present", "nonexistent"], SubSpanBudget::DEFAULT);
@@ -570,17 +581,19 @@ fn engine_score_sub_spans_absent_candidate_omitted() {
 #[test]
 fn corpus_score_sub_spans_chunk_path_returns_results() {
     let storage = in_memory_storage();
+    // CandleNL carries any EmbeddingProvider — same structural role as the
+    // retired MiniLM case. DirectionalProvider maps text to a one-hot 384-d slot.
     let corpus = Corpus::open(
         Arc::clone(&storage),
-        EmbeddingModelConfig::MiniLM {
-            inference: directional_inference(),
+        EmbeddingModelConfig::CandleNL {
+            provider: Box::new(DirectionalProvider),
         },
     )
     .expect("Corpus::open must succeed");
 
-    // Use the SAME text as the query for source1 so the token-sum hash
-    // lands on the same one-hot slot. directional_inference maps token sums
-    // to slots, so a 3-alpha source and a 3-alpha query share a slot → cosine 1.0.
+    // Use the SAME text as the query for source1 so the Unicode-scalar sum
+    // lands on the same one-hot slot, giving cosine 1.0 for source1 and
+    // cosine 0.0 for source2 (different slot, orthogonal).
     corpus
         .ingest("alpha alpha alpha", "source1", NOW_MS)
         .unwrap();
