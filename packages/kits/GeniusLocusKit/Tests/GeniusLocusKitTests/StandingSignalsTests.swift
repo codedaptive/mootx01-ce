@@ -219,34 +219,20 @@ struct StandingSignalsTests {
     }
 
     @Test
-    func maintenanceSignalEmitsForbiddenComboPlusCandidateAndDiagnostic() async throws {
+    func maintenanceSignalRunsInjectedCycleAndReportsTombstoneCount() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
-            spec: MaintenanceSignal.defaultSpec(),
+            spec: MaintenanceSignal.spec(maintenanceCycle: { _ in 2 }),
             cadence: MaintenanceSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
         #expect(report.name == "maintenance-daemon")
-        #expect(report.emissionCount == 3,
-            "maintenance emits one propose + one mutate-candidate (routed through propose) + one diagnostic")
-        #expect(report.recentOutcomes.count == 3)
+        #expect(report.emissionCount == 1, "one diagnostic per fire; proposals come from the engine's sink")
         assertNoRouteFailures(report.recentOutcomes)
-        // Two propose-routed outcomes (the discipline-violation
-        // proposal AND the mutate-candidate which §11.1 routes
-        // through propose) plus one diagnostic record. Since propose
-        // is now live, scaffold targets produce routeFailed — all three
-        // outcome forms count as "reached the propose verb."
-        let proposeCount = report.recentOutcomes.filter { outcome in
-            switch outcome {
-            case .routed(let v), .routedButVerbStubbed(let v): return v == "propose"
-            case .routeFailed(let v, _): return v == "propose"
-            default: return false
-            }
-        }.count
-        #expect(proposeCount == 2)
         #expect(report.recentDiagnostics.count == 1)
-        #expect(report.recentDiagnostics.first?.title == "maintenance.scan.summary")
+        #expect(report.recentDiagnostics.first?.title == "maintenance-daemon.complete")
+        #expect(report.recentDiagnostics.first?.detail.contains("2 tombstone candidate(s)") == true)
     }
 
     @Test
@@ -353,87 +339,63 @@ struct StandingSignalsTests {
     }
 
     @Test
-    func decaySweepSignalEmitsMutateCandidateRoutedThroughPropose() async throws {
+    func decaySweepSignalRunsInjectedCycleAndReportsDecayCount() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
-            spec: DecaySweepSignal.defaultSpec(),
+            spec: DecaySweepSignal.spec(decayCycle: { _ in 3 }),
             cadence: DecaySweepSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
         #expect(report.name == "decay-sweep")
-        #expect(report.emissionCount == 2,
-            "decay-sweep emits one mutate-candidate (routed through propose) + one diagnostic")
+        #expect(report.emissionCount == 1, "one diagnostic per fire; proposals come from the engine's sink")
         assertNoRouteFailures(report.recentOutcomes)
-        // The mutate-candidate routes through propose per §11.1, so the route
-        // outcome verb is "propose". Since propose is now live, scaffold targets
-        // produce routeFailed — all three forms confirm the propose verb was reached.
-        let firstOutcome = report.recentOutcomes[0]
-        switch firstOutcome {
-        case .routed(let v), .routedButVerbStubbed(let v):
-            #expect(v == "propose")
-        case .routeFailed(let v, _):
-            #expect(v == "propose")
-        default:
-            Issue.record("expected propose routing for decay candidate, got \(firstOutcome)")
-        }
+        #expect(report.recentDiagnostics.count == 1)
+        #expect(report.recentDiagnostics.first?.title == "decay-sweep.complete")
+        #expect(report.recentDiagnostics.first?.detail.contains("3 decay candidate(s)") == true)
     }
 
     @Test
-    func byReferenceValiditySignalEmitsProposeAndDiagnostic() async throws {
+    func byReferenceValiditySignalRunsInjectedCycleAndReportsDriftCount() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
-            spec: ByReferenceValiditySignal.defaultSpec(),
+            spec: ByReferenceValiditySignal.spec(byReferenceCycle: { _ in 1 }),
             cadence: ByReferenceValiditySignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
         #expect(report.name == "by-reference-validity")
-        #expect(report.emissionCount == 2)
+        #expect(report.emissionCount == 1, "one diagnostic per fire; proposals come from the engine's sink")
         assertNoRouteFailures(report.recentOutcomes)
-        // Since propose is now live, scaffold targets produce routeFailed;
-        // all outcome forms count as "reached the propose verb."
-        let proposeCount = report.recentOutcomes.filter { outcome in
-            switch outcome {
-            case .routed(let v), .routedButVerbStubbed(let v): return v == "propose"
-            case .routeFailed(let v, _): return v == "propose"
-            default: return false
-            }
-        }.count
-        #expect(proposeCount == 1, "byReference emits one propose per fire")
         #expect(report.recentDiagnostics.count == 1)
-        #expect(report.recentDiagnostics.first?.title == "by_reference.validation.summary")
+        #expect(report.recentDiagnostics.first?.title == "by-reference-validity.complete")
+        #expect(report.recentDiagnostics.first?.detail.contains("1 drift(s)") == true)
     }
 
     @Test
-    func endOfDayTournamentSignalEmitsProposeAndDiagnostic() async throws {
+    func endOfDayTournamentSignalRunsInjectedCycleAndReportsCounts() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
-            spec: EndOfDayTournamentSignal.defaultSpec(),
+            spec: EndOfDayTournamentSignal.spec(tournamentCycle: { _ in
+                TournamentReport(contests: 2, ratedDrawers: 3)
+            }),
             cadence: EndOfDayTournamentSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
         #expect(report.name == "end-of-day-tournament")
-        #expect(report.emissionCount == 2)
+        #expect(report.emissionCount == 1, "one diagnostic per fire; ratings are written by the cycle")
         assertNoRouteFailures(report.recentOutcomes)
-        // Since propose is now live, scaffold targets produce routeFailed;
-        // all outcome forms count as "reached the propose verb."
-        let proposeCount = report.recentOutcomes.filter { outcome in
-            switch outcome {
-            case .routed(let v), .routedButVerbStubbed(let v): return v == "propose"
-            case .routeFailed(let v, _): return v == "propose"
-            default: return false
-            }
-        }.count
-        #expect(proposeCount == 1)
-        #expect(report.recentDiagnostics.first?.title == "tournament.end_of_day.summary")
+        #expect(report.recentDiagnostics.count == 1)
+        #expect(report.recentDiagnostics.first?.title == "end-of-day-tournament.complete")
+        #expect(report.recentDiagnostics.first?.detail.contains("contests=2 ratedDrawers=3") == true)
     }
 
     // MARK: - Training signal
 
-    /// Assert that the training signal is in the default name set
-    /// and that a tick invokes TrainingDaemon.runOnce. The daemon is configured
+    /// Assert that the training signal is in the preference-gated name set
+    /// (it registers behind `.adaptiveRecall`) and that a tick invokes
+    /// TrainingDaemon.runOnce. The daemon is configured
     /// with a zero threshold so the gate is always open; the test verifies the
     /// pipeline ran (liveRowCount > 0 after a capture log) even though the
     /// signal was fired through the scheduler rather than called directly.
@@ -441,10 +403,10 @@ struct StandingSignalsTests {
     func trainingSignalFiresTrainingDaemonRunOnce() async throws {
         let (kit, handle) = try await openOneEstate()
 
-        // Assert the signal name is in the canonical default set so the test
-        // would fail if the signal were ever removed from the registry.
-        #expect(GeniusLocusKit.defaultStandingSignalNames.contains(TrainingSignal.signalName),
-            "TrainingSignal must be in the default standing signal names")
+        // Assert the signal name is in the canonical preference-gated set so
+        // the test would fail if the signal were ever removed from the registry.
+        #expect(GeniusLocusKit.preferenceGatedStandingSignalNames.contains(TrainingSignal.signalName),
+            "TrainingSignal must be in the preference-gated standing signal names")
 
         // Set up mutable boxes — the spec closure must be @Sendable so it
         // captures reference-typed boxes, not inout bindings.
@@ -533,19 +495,19 @@ struct StandingSignalsTests {
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, vectorStore: emptyStore, now: t0)
 
-        // brain-layer governor ownership added TrainingSignal as signal 9; the contradiction
-        // scout (hunter background half) is signal 10; P3a added AnomalySweepSignal
-        // as signal 12; ENCODER_RERANK_CONTRACT §10 added SpanEncodeSignal as signal 13.
-        // Signal 8's slot is empty: the
-        // distilled rendering is computed inline at read time, so no sweep signal
-        // exists for it. Distilled fact extraction is signal 14.
-        // Any future addition must update this count and extend defaultStandingSignalNames.
-        #expect(registered.count == 13, "all thirteen standing signals register")
+        // Six always-on signals: signal 8's slot is empty (the distilled
+        // rendering is computed inline at read time) and the eight
+        // preference-gated signals (consolidation sweep, contradiction
+        // sweep, maintenance-daemon, decay-sweep, by-reference-validity,
+        // temporal-causality-fold, training-daemon, end-of-day-tournament)
+        // are absent because no live cycle was passed. Any future always-on
+        // addition must update this count and extend defaultStandingSignalNames.
+        #expect(registered.count == 6, "all six always-on standing signals register")
         #expect(
             Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        #expect(reports.count == 13)
+        #expect(reports.count == 6)
         for spec in reports {
             #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")
@@ -556,6 +518,57 @@ struct StandingSignalsTests {
         // status report.
         let names = Set(reports.map { $0.name })
         #expect(names == Set(GeniusLocusKit.defaultStandingSignalNames))
+    }
+
+    @Test
+    func preferenceGatedSignalsRegisterOnlyWithLiveCycles() async throws {
+        struct Unfired: Error {}
+        let emptyStore = try await makeEmptyVectorStore()
+
+        // nil cycles (the host's `.off` path): neither gated signal
+        // registers, and neither name sits in the always-on list.
+        let (kit, handle) = try await openOneEstate()
+        let withoutCycles = try await kit.registerDefaultStandingSignals(
+            in: handle, vectorStore: emptyStore, now: t0)
+        #expect(withoutCycles[ConsolidationSignal.signalName] == nil)
+        #expect(withoutCycles[ContradictionSweepSignal.signalName] == nil)
+        #expect(withoutCycles[MaintenanceSignal.signalName] == nil)
+        #expect(withoutCycles[DecaySweepSignal.signalName] == nil)
+        #expect(withoutCycles[ByReferenceValiditySignal.signalName] == nil)
+        #expect(withoutCycles[TemporalCausalitySignal.signalName] == nil)
+        #expect(withoutCycles[TrainingSignal.signalName] == nil)
+        #expect(withoutCycles[EndOfDayTournamentSignal.signalName] == nil)
+        for name in GeniusLocusKit.preferenceGatedStandingSignalNames {
+            #expect(!GeniusLocusKit.defaultStandingSignalNames.contains(name))
+        }
+
+        // Live cycles (the host's non-.off path): both register by name.
+        // Registration never invokes a cycle, so a throwing closure is
+        // enough to prove the wiring.
+        let (kit2, handle2) = try await openOneEstate()
+        let withCycles = try await kit2.registerDefaultStandingSignals(
+            in: handle2, vectorStore: emptyStore,
+            consolidationCycle: { _ in throw Unfired() },
+            contradictionSweepCycle: { _ in throw Unfired() },
+            maintenanceCycle: { _ in throw Unfired() },
+            decayCycle: { _ in throw Unfired() },
+            byReferenceCycle: { _ in throw Unfired() },
+            foldCycle: { _ in throw Unfired() },
+            trainingCycle: { _ in throw Unfired() },
+            tournamentCycle: { _ in throw Unfired() },
+            now: t0)
+        #expect(withCycles[ConsolidationSignal.signalName] != nil)
+        #expect(withCycles[ContradictionSweepSignal.signalName] != nil)
+        #expect(withCycles[MaintenanceSignal.signalName] != nil)
+        #expect(withCycles[DecaySweepSignal.signalName] != nil)
+        #expect(withCycles[ByReferenceValiditySignal.signalName] != nil)
+        #expect(withCycles[TemporalCausalitySignal.signalName] != nil)
+        #expect(withCycles[TrainingSignal.signalName] != nil)
+        #expect(withCycles[EndOfDayTournamentSignal.signalName] != nil)
+        #expect(
+            Set(withCycles.keys)
+                == Set(GeniusLocusKit.defaultStandingSignalNames
+                    + GeniusLocusKit.preferenceGatedStandingSignalNames))
     }
 
     @Test

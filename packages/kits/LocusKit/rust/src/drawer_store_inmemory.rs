@@ -125,6 +125,7 @@ const T_SOURCE_CATALOG: &str = "source_catalog";
 const T_DIARY: &str = "diary";
 const T_MANIFEST: &str = "manifest";
 const T_RECALL_TRACE: &str = "recall_trace";
+const T_RECALL_RATINGS: &str = crate::recall_rating::RECALL_RATINGS_TABLE;
 
 /// The structured (no-blob) column projection for the `drawers` table: every
 /// drawer column EXCEPT `content`. Used by `all_drawers_bounded_projected` so a
@@ -4830,6 +4831,75 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.len())
     }
 
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        // One upsert per rating keyed on `drawer_id` (the ledger's primary
+        // key): the row store's dialect-neutral upsert renders INSERT OR
+        // REPLACE on SQLite and INSERT ... ON CONFLICT DO UPDATE on Postgres.
+        // An empty slice is a no-op. Mirrors Swift `DrawerStore.upsertRecallRatings`.
+        if ratings.is_empty() {
+            return Ok(());
+        }
+        ensure_recall_ratings_table(self.storage.as_ref())?;
+        let conflict_columns = vec!["drawer_id".to_string()];
+        for rating in ratings {
+            self.storage
+                .row_store()
+                .upsert(T_RECALL_RATINGS, recall_rating_values(rating), &conflict_columns)
+                .map_err(map_storage_err)?;
+        }
+        Ok(())
+    }
+
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        // One point read per id, in the caller's order; ids without a row
+        // are absent from the result. Mirrors Swift `DrawerStore.recallRatings(ids:)`.
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A read never writes. When the schema ledger carries no row for the
+        // rating declaration's kit id the table has never been created
+        // (neither the 1.8 → 1.9 capsule nor an upsert has run), so no drawer
+        // holds a rating and the read returns empty without creating the
+        // table. The scorer reads ratings on every matrix-aware recall, and a
+        // frozen estate must stay byte-identical on disk across a pure read.
+        let schema = crate::recall_rating::recall_ratings_schema();
+        if self
+            .storage
+            .current_schema_version_for(&schema.kit_id)
+            .map_err(map_storage_err)?
+            == 0
+        {
+            return Ok(Vec::new());
+        }
+        let mut ratings = Vec::with_capacity(ids.len());
+        for id in ids {
+            let rows = self
+                .storage
+                .row_store()
+                .query(
+                    T_RECALL_RATINGS,
+                    Some(&StoragePredicate::Eq(
+                        Column::new(T_RECALL_RATINGS, "drawer_id"),
+                        TypedValue::Text((*id).to_string()),
+                    )),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            if let Some(row) = rows.first() {
+                ratings.push(recall_rating_from_row(row));
+            }
+        }
+        Ok(ratings)
+    }
+
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
         // COUNT(*) on the drawers table — bypasses all row-decode logic so
         // corrupt rows (e.g. a poison timestamp) are still counted. Used by the
@@ -6595,6 +6665,18 @@ impl DrawerStore for InMemoryDrawerStore {
     fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
         self.inner.count_recall_traces()
     }
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.inner.upsert_recall_ratings(ratings)
+    }
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.inner.recall_ratings(ids)
+    }
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
         self.inner.count_drawer_rows()
     }
@@ -7834,7 +7916,8 @@ fn recall_trace_from_row(row: &StorageRow) -> RecallTraceItem {
     }
 }
 
-/// Decode the `recalledAt` column to its ISO8601 string, tolerating both the
+/// Decode an ISO8601 TEXT timestamp column (`recall_trace.recalledAt`,
+/// `recall_ratings.updated_at`) to its string, tolerating both the
 /// `Text` form (the InMemory backend round-trips the raw string) and the
 /// `Timestamp` form (the SQLite / Postgres backends parse the TEXT column to
 /// epoch seconds on read because the column is declared `.timestamp`, then we
@@ -7848,6 +7931,40 @@ fn recalled_at_string(v: Option<&TypedValue>) -> String {
         Some(TypedValue::Text(s)) => s.clone(),
         Some(TypedValue::Timestamp(secs)) => format_iso8601(*secs),
         _ => String::new(),
+    }
+}
+
+/// Make sure the `recall_ratings` ledger exists before it is written.
+/// Populated estates receive the table from the 1.8 → 1.9 estate-format
+/// capsule; a fresh estate is stamped at the current format without running
+/// that capsule, so the store declares the same table on the first write.
+/// `migrate` is a no-op once the table exists. Only `upsert_recall_ratings`
+/// calls this: a read never creates the table (see `recall_ratings`).
+fn ensure_recall_ratings_table(storage: &dyn Storage) -> Result<(), LocusKitError> {
+    storage
+        .migrate(&crate::recall_rating::recall_ratings_schema())
+        .map_err(map_storage_err)
+}
+
+fn recall_rating_values(
+    rating: &crate::recall_rating::RecallRating,
+) -> BTreeMap<String, TypedValue> {
+    let mut m = BTreeMap::new();
+    m.insert("drawer_id".to_string(), TypedValue::Text(rating.drawer_id.clone()));
+    m.insert("rating".to_string(), TypedValue::Float(rating.rating));
+    m.insert("contests".to_string(), TypedValue::Int(rating.contests));
+    // updated_at is stored as TEXT ISO8601 per the fleet rule; the struct
+    // already carries the string, so no conversion happens here.
+    m.insert("updated_at".to_string(), TypedValue::Text(rating.updated_at.clone()));
+    m
+}
+
+fn recall_rating_from_row(row: &StorageRow) -> crate::recall_rating::RecallRating {
+    crate::recall_rating::RecallRating {
+        drawer_id: string_value_of(row.get("drawer_id")),
+        rating: opt_float_value_of(row.get("rating")).unwrap_or(0.0),
+        contests: i64_value_of(row.get("contests")),
+        updated_at: recalled_at_string(row.get("updated_at")),
     }
 }
 

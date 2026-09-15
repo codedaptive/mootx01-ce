@@ -4,6 +4,10 @@ import AriaMCP
 import CognitionKit
 import FactExtractionKit
 import GeniusLocusKit
+// Scoped import: NeuronKit also exports a `TournamentReport`; the estate
+// tournament returns GeniusLocusKit's, and the `GeniusLocusKit` actor shadows
+// the module name so a qualified spelling cannot reach it.
+import struct GeniusLocusKit.TournamentReport
 import NeuronKit
 import ObserverSink
 import IntellectusLib
@@ -315,7 +319,7 @@ public enum AriaResident {
     ///   - handle: The open estate.
     /// - Returns: A live cycle closure, or `nil` when the signal stays inert.
     static func resolveFactExtractionCycle(
-        setting: FactExtractionSetting,
+        setting: EstatePreferenceValue,
         extractor: (any FactExtractor)?,
         kit: GeniusLocusKit,
         handle: EstateHandle
@@ -539,12 +543,12 @@ public enum AriaResident {
         // correct state.  If the setting read throws (e.g. storage offline
         // during open), treat as .on — the cycle closure will still be nil
         // if no extractor was provisioned, which is the safe inert path.
-        let factExtractionSetting: FactExtractionSetting
+        let factExtractionSetting: EstatePreferenceValue
         do {
-            factExtractionSetting = try await kit.provisionedFactExtraction(for: handle)
+            factExtractionSetting = try await kit.provisionedPreference(.factExtraction, for: handle)
         } catch {
             Logging.stderr.log(
-                "AriaResident: provisionedFactExtraction read failed (\(error)) — defaulting to .on")
+                "AriaResident: provisionedPreference(.factExtraction) read failed (\(error)) — defaulting to .on")
             factExtractionSetting = .on
         }
         let factExtractionCycleClosure = await AriaResident.resolveFactExtractionCycle(
@@ -552,6 +556,106 @@ public enum AriaResident {
             extractor: config.factExtractor,
             kit: kit,
             handle: handle)
+
+        // Consolidation and contradiction-sweep activation: each of these
+        // standing signals registers only while its estate preference is
+        // not .off. A failed read counts as .on, the same posture as fact
+        // extraction above: both sweeps are bounded, cursor-resumable
+        // maintenance work, and a storage hiccup during open must not
+        // silently switch them off.
+        let consolidationSetting: EstatePreferenceValue
+        do {
+            consolidationSetting = try await kit.provisionedPreference(.consolidation, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.consolidation) read failed (\(error)) — defaulting to .on")
+            consolidationSetting = .on
+        }
+        let contradictionSweepSetting: EstatePreferenceValue
+        do {
+            contradictionSweepSetting = try await kit.provisionedPreference(.contradictionSweep, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.contradictionSweep) read failed (\(error)) — defaulting to .on")
+            contradictionSweepSetting = .on
+        }
+        // Live consolidation cycle: one bounded sweep per daily fire under
+        // the production distill function. nil when the switch is .off, so
+        // the scheduler never carries the signal.
+        let consolidationCycleClosure: (@Sendable (Date) async throws -> ConsolidationSweepReport)? =
+            consolidationSetting == .off ? nil : { @Sendable now in
+                try await kit.consolidationSweepReport(
+                    handle: handle,
+                    distillFn: GeniusLocusKit.consolidationDistillFn,
+                    now: now)
+            }
+        // Live contradiction sweep: the typed rule sweep plus the lexical
+        // pass at their default registry/model/probe/top-K parameters.
+        // nil when the switch is .off.
+        let contradictionSweepCycleClosure: (@Sendable (Date) async throws -> ConflictTunnelProposalReport)? =
+            contradictionSweepSetting == .off ? nil : { @Sendable now in
+                try await kit.proposeConflictTunnels(in: handle, now: now)
+            }
+        // Maintenance-family activation: the maintenance-daemon, decay-sweep
+        // and by-reference-validity signals each drive one category of the
+        // governor's maintenance engine (the daemon the governor holds) and
+        // register only while the estate's `.maintenance` preference is not
+        // .off. A failed read counts as .on, the same posture as the sweeps
+        // above. The governor tick does not pump the engine; these signals
+        // are its only drive.
+        let maintenanceSetting: EstatePreferenceValue
+        do {
+            maintenanceSetting = try await kit.provisionedPreference(.maintenance, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.maintenance) read failed (\(error)) — defaulting to .on")
+            maintenanceSetting = .on
+        }
+        let maintenanceDaemon = await governor.maintenance
+        let maintenanceCycleClosure: (@Sendable (Date) async throws -> Int)? =
+            maintenanceSetting == .off ? nil : { @Sendable now in
+                try await maintenanceDaemon.triggerMaintenanceCycle(
+                    now: now, categories: [.tombstone]).tombstoneCandidates
+            }
+        let decayCycleClosure: (@Sendable (Date) async throws -> Int)? =
+            maintenanceSetting == .off ? nil : { @Sendable now in
+                try await maintenanceDaemon.triggerMaintenanceCycle(
+                    now: now, categories: [.decay]).decayCandidates
+            }
+        let byReferenceCycleClosure: (@Sendable (Date) async throws -> Int)? =
+            maintenanceSetting == .off ? nil : { @Sendable now in
+                try await maintenanceDaemon.triggerMaintenanceCycle(
+                    now: now, categories: [.byReference]).byReferenceDrifts
+            }
+
+        // Adaptive-recall activation: the temporal-causality-fold and
+        // training-daemon signals keep the matrix tier learning from the
+        // audit log, and the end-of-day-tournament signal folds the day's
+        // recall traces into recall_ratings; all three register only while
+        // the estate's `.adaptiveRecall` preference is not .off. A failed
+        // read counts as .on, the same posture as the sweeps above: each is
+        // a bounded pass over a recent tail, and a storage hiccup during
+        // open must not silently switch them off.
+        let adaptiveRecallSetting: EstatePreferenceValue
+        do {
+            adaptiveRecallSetting = try await kit.provisionedPreference(.adaptiveRecall, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.adaptiveRecall) read failed (\(error)) — defaulting to .on")
+            adaptiveRecallSetting = .on
+        }
+        let foldCycleClosure: (@Sendable (Date) async throws -> Void)? =
+            adaptiveRecallSetting == .off ? nil : { @Sendable now in
+                try await kit.runTemporalCausalityFold(handle, now: now)
+            }
+        let trainingCycleClosure: (@Sendable (Date) async throws -> String)? =
+            adaptiveRecallSetting == .off ? nil : { @Sendable now in
+                try await kit.runTrainingTick(handle, now: now)
+            }
+        let tournamentCycleClosure: (@Sendable (Date) async throws -> TournamentReport)? =
+            adaptiveRecallSetting == .off ? nil : { @Sendable now in
+                try await kit.endOfDayTournament(handle, now: now)
+            }
 
         if let vectorStore = vectorStore {
             do {
@@ -585,9 +689,17 @@ public enum AriaResident {
                     // non-nil when setting=.on AND an extractor is provisioned;
                     // nil (inert default) when setting=.off or no extractor.
                     factExtractionCycle: factExtractionCycleClosure ?? { _ in 0 },
+                    consolidationCycle: consolidationCycleClosure,
+                    contradictionSweepCycle: contradictionSweepCycleClosure,
+                    maintenanceCycle: maintenanceCycleClosure,
+                    decayCycle: decayCycleClosure,
+                    byReferenceCycle: byReferenceCycleClosure,
+                    foldCycle: foldCycleClosure,
+                    trainingCycle: trainingCycleClosure,
+                    tournamentCycle: tournamentCycleClosure,
                     now: Date()
                 )
-                Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults)")
+                Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults; consolidation=\(consolidationSetting.rawValue) contradictionSweep=\(contradictionSweepSetting.rawValue) maintenance=\(maintenanceSetting.rawValue))")
             } catch {
                 Logging.stderr.log("AriaResident standing-signal registration failed (governor will benign-skip signalTick): \(error)")
             }
