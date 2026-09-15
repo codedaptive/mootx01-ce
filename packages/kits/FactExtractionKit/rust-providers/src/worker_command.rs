@@ -18,9 +18,11 @@ struct Configuration {
     spec: FactExtractorModelSpec,
 }
 
-/// Run the framed NuExtract worker protocol from process arguments and stdio.
-/// Both worker binaries call this one implementation.
-pub fn run_from_env() -> Result<(), String> {
+/// Run the framed NuExtract worker protocol: the configuration comes from the
+/// process arguments (`std::env::args`, never environment variables) and the
+/// frames flow over stdin/stdout. Both worker binaries call this one
+/// implementation.
+pub fn run_from_args() -> Result<(), String> {
     let config = parse_arguments(std::env::args().skip(1))?;
     let mut extractor = CandleNuExtract::load(
         &config.gguf,
