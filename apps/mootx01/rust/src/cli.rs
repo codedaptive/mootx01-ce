@@ -405,6 +405,24 @@ fn take_value(it: &mut Args, flag: &str) -> Result<String, UsageError> {
         .ok_or_else(|| UsageError(format!("Error: '{flag}' requires a value.")))
 }
 
+/// Take a positional such as an estate name, where a flag is never a valid
+/// value. `--help` / `-h` in that position yields `HelpFor(help_for)`, any
+/// other dash-prefixed token is an error, and a missing token reports
+/// `usage`. Without this, `db create --help` took the flag as the name and
+/// provisioned an estate called `--help` in the product data directory.
+fn take_positional(
+    it: &mut Args,
+    usage: &str,
+    help_for: &'static str,
+) -> Result<Result<String, Command>, UsageError> {
+    match it.next() {
+        None => Err(UsageError(format!("Error: '{usage}' requires a value."))),
+        Some(a) if a == "--help" || a == "-h" => Ok(Err(Command::HelpFor(help_for))),
+        Some(a) if a.starts_with('-') => Err(unexpected(a, usage)),
+        Some(a) => Ok(Ok(a.to_string())),
+    }
+}
+
 fn parse_serve(it: &mut Args) -> Result<Command, UsageError> {
     let (mut db, mut http, mut frozen, mut in_memory) = (None, None, false, false);
     while let Some(a) = it.next() {
@@ -580,7 +598,10 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
     };
     match sub {
         "create" => {
-            let value = take_value(it, "db create <name>|<dir>/<name>")?;
+            let value = match take_positional(it, "db create <name>|<dir>/<name>", "db")? {
+                Ok(v) => v,
+                Err(help) => return Ok(help),
+            };
             // create takes flags, so it parses a flag loop rather than
             // expect_help_or_end: --no-encrypt is the same opt-out shape
             // as `install --no-encrypt`.
@@ -595,14 +616,20 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
             Ok(Command::Db(DbCommand::Create { value, no_encrypt }))
         }
         "register" => {
-            let value = take_value(it, "db register <name>|<dir>/<name>")?;
+            let value = match take_positional(it, "db register <name>|<dir>/<name>", "db")? {
+                Ok(v) => v,
+                Err(help) => return Ok(help),
+            };
             if let Some(h) = expect_help_or_end(it, "db")? {
                 return Ok(h);
             }
             Ok(Command::Db(DbCommand::Register { value }))
         }
         "unregister" => {
-            let name = take_value(it, "db unregister <name>")?;
+            let name = match take_positional(it, "db unregister <name>", "db")? {
+                Ok(v) => v,
+                Err(help) => return Ok(help),
+            };
             if let Some(h) = expect_help_or_end(it, "db")? {
                 return Ok(h);
             }
@@ -615,14 +642,20 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
             Ok(Command::Db(DbCommand::List))
         }
         "open" => {
-            let name = take_value(it, "db open <name>")?;
+            let name = match take_positional(it, "db open <name>", "db")? {
+                Ok(v) => v,
+                Err(help) => return Ok(help),
+            };
             if let Some(h) = expect_help_or_end(it, "db")? {
                 return Ok(h);
             }
             Ok(Command::Db(DbCommand::Open { name }))
         }
         "delete" => {
-            let name = take_value(it, "db delete <name>")?;
+            let name = match take_positional(it, "db delete <name>", "db")? {
+                Ok(v) => v,
+                Err(help) => return Ok(help),
+            };
             let mut yes = false;
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -1580,6 +1613,11 @@ mod tests {
         assert_eq!(p(&["db", "unregister", "work"]).unwrap(),
                    Command::Db(DbCommand::Unregister { name: "work".into() }));
         assert!(p(&["db", "create", "work", "--bogus"]).is_err());
+        // A flag in the name position is help or an error, never an estate name.
+        assert_eq!(p(&["db", "create", "--help"]).unwrap(), Command::HelpFor("db"));
+        assert_eq!(p(&["db", "register", "-h"]).unwrap(), Command::HelpFor("db"));
+        assert_eq!(p(&["db", "delete", "--help"]).unwrap(), Command::HelpFor("db"));
+        assert!(p(&["db", "create", "--no-encrypt"]).is_err());
         assert_eq!(p(&["db", "list"]).unwrap(), Command::Db(DbCommand::List));
         assert_eq!(p(&["db", "open", "work"]).unwrap(),
                    Command::Db(DbCommand::Open { name: "work".into() }));
