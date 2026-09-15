@@ -15,6 +15,10 @@
 //      only while a producer is registered.
 //   4. "span_encode" — drawers whose bit 27 is clear, rendered only while
 //      an encoder is active for the estate.
+//   5. "fact_extraction" — drawers whose bit 28 (facts extracted for the
+//      active recipe) is clear. Always rendered: a caller settling an
+//      estate needs to know extraction is finished even when no extractor
+//      is registered, so the detail names the missing extractor instead.
 //
 // There is no distillation drain: the distilled rendering is computed
 // inline at read time (Encoder Rerank contract sheet §9), so no row ever
@@ -102,6 +106,17 @@ public struct DrainStatus: Sendable, Equatable {
     /// corpus finisher does not own the standing span duty.
     public static let spanEncodeName = "span_encode"
 
+    /// Canonical name of the fact-extraction row-debt lane. `pending` is
+    /// `Estate.countFactExtractionDebt()` — drawers whose bit 28 (facts
+    /// extracted for the active recipe) is clear. Always rendered, extractor
+    /// or not: a caller settling an estate (the benchmark bulk build, a
+    /// `mootx01 dream` loop) reads this lane to learn whether extraction is
+    /// finished, and an absent lane would read as "nothing owed". `in_flight`
+    /// is 0 — extraction is a bounded batch inside a dreaming cycle, never a
+    /// queued job. Non-gating for `encodeSettled`, like every row-debt lane.
+    /// Twin of Rust `DrainStatus::FACT_EXTRACTION_NAME`.
+    public static let factExtractionName = "fact_extraction"
+
     /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
     /// detached `mootx01 drain` finisher may exit and release the encode
     /// DrainLease, and a stdio serve need not spawn one.
@@ -124,11 +139,14 @@ extension GeniusLocusKit {
     /// currently runs, for AI/operator monitoring (the `moot_drain_status`
     /// tool and the `mootx01 query drain_status` CLI surface).
     ///
-    /// Today the only drain is the corpus encode/ingest drain: it reports the
-    /// queue depth (pending + in-flight encode jobs) and, as detail, the live
-    /// encoded-chunk count so forward progress is visible while the queue
-    /// drains. A bare LocusKit estate with no Corpus registered runs no encode
-    /// drain, so its list is empty.
+    /// The lanes, in report order: `corpus_encode` (queue depth plus the live
+    /// encoded-chunk count as detail; present only when a Corpus is
+    /// registered), `dreaming` (present only when the queue is mounted),
+    /// `subject_backfill` and `span_encode` (row debt; present only while
+    /// their rider is registered), and `fact_extraction` (row debt owed to
+    /// the active recipe; always present so a caller can settle an estate on
+    /// it). A bare LocusKit estate with no Corpus registered runs no encode
+    /// drain, so its list carries only the always-present lanes.
     ///
     /// Read-only: assembles the report by OBSERVING each drain's frontiers; it
     /// never claims, drains, or mutates, so it is safe to poll while drains run.
@@ -202,6 +220,24 @@ extension GeniusLocusKit {
                 detail: "model: \(encoder.spec.modelID)"
             ))
         }
+
+        // Drain 5 of N: fact extraction. Row debt — drawers whose bit 28 is
+        // clear for the active recipe — paid down only by the bounded batch
+        // inside a dreaming cycle, so `inFlight` is 0. ALWAYS rendered: this
+        // lane exists so a caller can settle an estate on product state
+        // rather than by running blind dreaming cycles, and an absent lane
+        // would read as "nothing owed". Without a registered extractor the
+        // debt cannot move; the detail says so.
+        let factDebt = try await estate.countFactExtractionDebt()
+        let factDetail = registeredFactExtractor(for: handle) == nil
+            ? "drawers awaiting fact extraction for the active recipe; no extractor registered"
+            : "drawers awaiting fact extraction for the active recipe"
+        statuses.append(DrainStatus(
+            name: DrainStatus.factExtractionName,
+            pending: factDebt,
+            inFlight: 0,
+            detail: factDetail
+        ))
 
         return statuses
     }

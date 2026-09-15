@@ -1478,10 +1478,12 @@ impl Default for EstateCoordinator {
 /// The substrate reports `"corpus_encode"` (the `corpus_ingest_queue`
 /// worker, which encodes captured/imported text into the BM25 + vector lanes
 /// asynchronously and runs the encode rider before each job replies),
-/// `"dreaming"` (the persistent dreaming queue's depth), and the rider-gated
-/// row-eligibility lanes `"subject_backfill"` and `"span_encode"`. There is
-/// no distillation drain: the distilled rendering is computed inline at read
-/// time, so no row ever owes one.
+/// `"dreaming"` (the persistent dreaming queue's depth), the rider-gated
+/// row-eligibility lanes `"subject_backfill"` and `"span_encode"`, and the
+/// always-present row-debt lane `"fact_extraction"` (drawers whose bit 28 is
+/// clear for the active recipe). There is no distillation drain: the
+/// distilled rendering is computed inline at read time, so no row ever owes
+/// one.
 /// `EstateCoordinator::drain_statuses` returns a `Vec<DrainStatus>` so that
 /// when additional drains are added later, each appends its own entry and the
 /// report surfaces all of them with no wire reshape. The list is built from
@@ -1565,6 +1567,17 @@ impl DrainStatus {
     /// while a span encoder is registered for the estate and remains
     /// non-gating for the corpus-only detached finisher.
     pub const SPAN_ENCODE_NAME: &'static str = "span_encode";
+
+    /// Canonical name of the fact-extraction row-debt lane. `pending` is
+    /// `Estate::count_fact_extraction_debt()` — drawers whose bit 28 (facts
+    /// extracted for the active recipe) is clear. Always rendered, extractor
+    /// or not: a caller settling an estate reads this lane to learn whether
+    /// extraction is finished, and an absent lane would read as "nothing
+    /// owed". `in_flight` is 0 — extraction is a bounded batch inside a
+    /// dreaming cycle, never a queued job. Non-gating for `encode_settled`,
+    /// like every row-debt lane. Twin of Swift
+    /// `DrainStatus.factExtractionName`.
+    pub const FACT_EXTRACTION_NAME: &'static str = "fact_extraction";
 
     /// True while the drain has outstanding work on either frontier. False
     /// means idle: everything submitted has been processed.
@@ -2669,7 +2682,9 @@ impl EstateCoordinator {
     /// queue depth (pending + in-flight encode jobs) and, as detail, the live
     /// encoded-chunk count so forward progress is visible while the queue
     /// drains. A bare estate with no Corpus registered runs no encode drain,
-    /// so its list is empty.
+    /// so its list carries only the always-present `fact_extraction` lane
+    /// (drawers still owed extraction for the active recipe) beside any
+    /// mounted or rider-gated lane.
     ///
     /// Read-only: assembles the report by OBSERVING each drain's frontiers; it
     /// never claims, drains, or mutates, so it is safe to poll while drains run.
@@ -2763,6 +2778,30 @@ impl EstateCoordinator {
                 detail: Some(format!("model: {}", encoder.spec().model_id)),
             });
         }
+
+        // Drain 5 of N: fact extraction. Row debt — drawers whose bit 28 is
+        // clear for the active recipe — paid down only by the bounded batch
+        // inside a dreaming cycle, so `in_flight` is 0. ALWAYS rendered: this
+        // lane exists so a caller can settle an estate on product state
+        // rather than by running blind dreaming cycles, and an absent lane
+        // would read as "nothing owed". Without a registered extractor the
+        // debt cannot move; the detail says so. Mirrors the Swift entry.
+        let fact_debt = estate.count_fact_extraction_debt().map_err(|e| {
+            GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("count_fact_extraction_debt: {e:?}"),
+            }
+        })?;
+        let fact_detail = if self.registered_fact_extractor(handle).is_none() {
+            "drawers awaiting fact extraction for the active recipe; no extractor registered"
+        } else {
+            "drawers awaiting fact extraction for the active recipe"
+        };
+        statuses.push(DrainStatus {
+            name: DrainStatus::FACT_EXTRACTION_NAME.to_string(),
+            pending: fact_debt,
+            in_flight: 0,
+            detail: Some(fact_detail.to_string()),
+        });
 
         Ok(statuses)
     }
