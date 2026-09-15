@@ -2235,7 +2235,7 @@ extension ToolDispatcher {
         // recall_provenance removed from payload (logged only); the degradation
         // signal is carried in the composer's ControlSignals.degraded flag.
         // sensitivity_advisory removed from payload (moved to tool description).
-        // fdc/qid columns removed; scores and adornments now travel in S1 rows.
+        // fdc/qid columns removed; scores now travel in S1 rows.
         let shownHits = packaged.level == .l0AnswerOnly
             ? []
             : Array(packagedRows.prefix(50))
