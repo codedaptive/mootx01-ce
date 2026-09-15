@@ -43,17 +43,22 @@ private func makeEstate(
     return (kit, handle, storage)
 }
 
-// MARK: - G1 EstatePreferenceValue enum default
+// MARK: - G1 EstatePreferenceKey defaultValue
 
-@Test("G1: EstatePreferenceValue.default is .on")
-func estatePreferenceValueDefaultIsOn() {
-    // The absent-means-on inversion: the default is .on, not .off.
-    #expect(EstatePreferenceValue.default == .on)
-    #expect(EstatePreferenceValue.default.rawValue == "on")
+@Test("G1: EstatePreferenceKey.defaultValue returns the correct per-key default")
+func estatePreferenceKeyDefaultValue() {
+    // The six on/off switches default to .on; the extractor key defaults to .nuextract.
+    #expect(EstatePreferenceKey.factExtraction.defaultValue == .on)
+    #expect(EstatePreferenceKey.factExtraction.defaultValue.rawValue == "on")
+    #expect(EstatePreferenceKey.factExtractor.defaultValue == .nuextract)
     #expect(EstatePreferenceKey.factExtraction.rawValue == "fact_extraction")
-    // Roundtrip the rawValue initializer.
+    #expect(EstatePreferenceKey.factExtractor.rawValue == "fact_extractor")
+    // Roundtrip the rawValue initializer for on/off.
     #expect(EstatePreferenceValue(rawValue: "on") == .on)
     #expect(EstatePreferenceValue(rawValue: "off") == .off)
+    // Roundtrip for the extractor values.
+    #expect(EstatePreferenceValue(rawValue: "nuextract") == .nuextract)
+    #expect(EstatePreferenceValue(rawValue: "apple") == .apple)
     #expect(EstatePreferenceValue(rawValue: "garbage") == nil)
 }
 
