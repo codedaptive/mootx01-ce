@@ -60,7 +60,7 @@ public protocol SpanInference: Sendable {
 }
 
 /// `SpanInference` over any `EmbeddingProvider` whose `embedFloat` returns
-/// the pooled vector (MiniLM, mpnet, EmbeddingGemma, the NL providers).
+/// the pooled vector (MiniLM, the NL providers).
 ///
 /// Runs `embedFloat` once per text: the provider's own inference seam is
 /// the batch unit, so there is no second batching layer to disagree with

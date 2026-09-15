@@ -32,10 +32,6 @@ migration-v1-6-to-v1-7 = []
 # migration-v1-7-to-v1-8: seeds fact_extraction = "on" when absent (the
 # on-by-default opt-out model) and stamps the v1_8 estate format (I-27).
 migration-v1-7-to-v1-8 = []
-# whole-record-dense: the 1.6 → 1.7 capsule reads the estate manifest and
-# leaves an audition estate's float rows in place. Twin of the Swift
-# GLKMigrationV1_6ToV1_7 target's MOOTX01_WHOLE_RECORD_DENSE define.
-whole-record-dense = ["genius-locus-kit/whole-record-dense", "corpus-kit/whole-record-dense"]
 # Floor features are the consumer-facing cumulative selections: each enables
 # every capsule in the chain from that floor up to current. Floors 1.1 through
 # 1.4 compile the same three capsules: the 1.1 → 1.2 step added a column

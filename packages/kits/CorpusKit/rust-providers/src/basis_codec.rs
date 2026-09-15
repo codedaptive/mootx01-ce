@@ -1,7 +1,7 @@
 //! Shared little-endian binary codec for distributional-provider basis
 //! serialization. Rust mirror of Swift's `BasisCodec.swift`.
-//! One definition, used by all four stateful providers (RandomIndexing,
-//! PPMI, LSA, NMF). This is PROVIDER-FORMAT code, not a math primitive —
+//! One definition, used by both stateful providers (RandomIndexing and
+//! LSA). This is PROVIDER-FORMAT code, not a math primitive —
 //! it lives in `corpus-kit-providers`, never in the substrate.
 //!
 //! ## Why a hand-rolled binary codec rather than serde/JSON

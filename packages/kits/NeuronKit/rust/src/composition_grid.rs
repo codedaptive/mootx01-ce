@@ -27,7 +27,7 @@ pub const DEFAULT_NAME: &str = "text";
 /// signal's contribution; combined and weighted-all compositions test
 /// interactions.
 pub fn all() -> Vec<ReductionComposition> {
-    #[cfg_attr(not(feature = "whole-record-dense"), allow(unused_mut))]
+    #[allow(unused_mut)]
     let mut grid = vec![
         // --- single-signal isolations ---
         ReductionComposition::new("text", vec![WeightedSignal::new(Text)]),
@@ -139,14 +139,10 @@ pub fn all() -> Vec<ReductionComposition> {
             ],
         ),
     ];
-    // The whole-record float lane composition (`whole-record-dense` only): the
-    // `dense` signal carries the cosine over the pooled float embedding; text
-    // breaks near-ties. In the default build precise recall scores with Raw,
-    // where the dense column is never filled, so the composition is compiled
-    // out with the lane. Mirrors Swift `CompositionGrid.all`.
-    // It keeps its declaration slot (before weighted-all) so the benchmarker
-    // fixture order and the grid order agree in that build.
-    #[cfg(feature = "whole-record-dense")]
+    // The whole-record float lane composition: the `dense` signal carries the
+    // cosine over the pooled float embedding; text breaks near-ties.
+    // Mirrors Swift `CompositionGrid.all`. Declared before weighted-all so the
+    // benchmarker fixture order and the grid order agree.
     {
         let slot = grid
             .iter()
@@ -255,7 +251,6 @@ mod tests {
         assert_eq!(before, names.len(), "duplicate composition names in grid");
     }
 
-    #[cfg(feature = "whole-record-dense")]
     #[test]
     fn dense_fused_terms_match_swift() {
         let c = named(Some("dense-fused"));
@@ -282,7 +277,6 @@ mod tests {
 
     #[test]
     fn is_known_recognizes_grid_names() {
-        #[cfg(feature = "whole-record-dense")]
         assert!(is_known("dense-fused"));
         assert!(is_known("text"));
         assert!(!is_known("bogus"));

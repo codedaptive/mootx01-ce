@@ -1,6 +1,6 @@
 // float_lane.rs: the whole-record dense float surface of `CorpusContentEngine`.
 //
-// Compiled only with the `whole-record-dense` feature: the per-signal nearest
+// The per-signal nearest
 // and farthest recall the RecallDirector whole-record lane consumes, the
 // discrimination signal, `recompose_dense_vector`, and the forced-error test
 // seams. Swift twin: CorpusContentEngine+FloatLane.swift.

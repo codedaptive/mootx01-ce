@@ -85,7 +85,7 @@ pub struct PreciseMatch {
 ///
 /// - `composition`: the named reduction composition from `CompositionGrid`
 ///   (e.g. "hamming+tokenExact", "weighted-all"; "dense-fused" only with the
-///   `whole-record-dense` feature). `None` ⇒ the
+///   the whole-record float lane. `None` ⇒ the
 ///   default `text` — the original `query_precision` behavior — so an
 ///   unspecified or unknown name reproduces today's recipe.
 ///

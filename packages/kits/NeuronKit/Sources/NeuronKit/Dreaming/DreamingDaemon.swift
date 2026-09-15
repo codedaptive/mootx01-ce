@@ -845,7 +845,7 @@ public actor DreamingDaemon {
         ))
 
         // ── Auto-reindex step: trigger corpus basis retrain on vocab growth ─
-        // Distributional embedding providers (RI / PPMI / LSA / NMF) freeze
+        // Distributional embedding providers (RI / LSA) freeze
         // their vocabulary at training time. Terms ingested after the last
         // retrain are OOV and produce zero-vectors in the dense lane, silently
         // missing novel content. The growth probe reads the maintained VOCABULARY
@@ -1127,7 +1127,6 @@ public actor DreamingDaemon {
     /// - Parameters:
     ///   - maintenance: the wired maintenance seam, or nil if duty is disabled.
     ///   - now: deterministic timestamp forwarded to `rebuildFloatIndex(now:)`.
-#if MOOTX01_WHOLE_RECORD_DENSE
     private func fireThetaHNSWRebuild(
         maintenance: (any HNSWGraphMaintenance)?,
         now: Date
@@ -1153,7 +1152,6 @@ public actor DreamingDaemon {
             ))
         }
     }
-#endif // MOOTX01_WHOLE_RECORD_DENSE
 
     // MARK: - REM-THETA cycle
 
@@ -1232,12 +1230,10 @@ public actor DreamingDaemon {
             // the no-data early-return path. A stale basis degrades dense recall
             // regardless of whether THETA had anything to consolidate today.
             await fireTheta(retrainHook: thetaRetrainHook, now: now)
-#if MOOTX01_WHOLE_RECORD_DENSE
             // HNSW rebuild fires after the retrain so the graph is built from
             // the freshly re-embedded vectors. Same non-fatal pattern as the
-            // retrain itself. WholeRecordDense build only.
+            // retrain itself.
             await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
-#endif
             // Second persist: capture the updated lastReindexVocab baseline that
             // fireTheta may have advanced above. The first save (before fireTheta)
             // locks in lastThetaRunAt; this save locks in the retrain baseline so
@@ -1352,11 +1348,9 @@ public actor DreamingDaemon {
         // so a retrain failure cannot interfere with the consolidation result
         // or the cycle's persistence step. Failure is logged but non-fatal.
         await fireTheta(retrainHook: thetaRetrainHook, now: now)
-#if MOOTX01_WHOLE_RECORD_DENSE
         // HNSW rebuild fires after the retrain so the graph is built from the
         // freshly re-embedded vectors. Non-fatal; see fireThetaHNSWRebuild.
         await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
-#endif
         // Second persist: capture the updated lastReindexVocab baseline that
         // fireTheta may have advanced above. The first save (before fireTheta)
         // locks in lastThetaRunAt and the consolidation result; this save locks
@@ -1477,13 +1471,12 @@ public actor DreamingDaemon {
         _ = prunedConsolidated  // used by tests; suppress unused-result warning
         _ = prunedCoRecall
 
-        // BETA duties on the maintenance seam. Duty 1 (WholeRecordDense build
+        // BETA duties on the maintenance seam. Duty 1 (whole-record float lane
         // only): compact tombstones accumulated in the float-index graph since
         // the last BETA or THETA cycle. Items updated or deleted between runs
         // leave tombstone slots that waste memory and slightly degrade graph
         // quality (dead edges still occupy neighbour lists). Failure is non-fatal.
         if let m = hnswMaintenance {
-#if MOOTX01_WHOLE_RECORD_DENSE
             do {
                 try await m.compactFloatIndexTombstones(now: now)
                 Intellectus.report(.metric(
@@ -1500,7 +1493,6 @@ public actor DreamingDaemon {
                     ts: now.timeIntervalSince1970
                 ))
             }
-#endif
 
             // BETA HNSW duty 2: reclaim superseded-generation vector rows left
             // 'pending-reclaim' after a shadow swap publish. Deletes vectors +

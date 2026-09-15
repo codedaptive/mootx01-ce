@@ -17,17 +17,16 @@
 //   (d) a fixed-lane exclusion (`bm25`=0) zeroes bm25's column in unionBest.
 //   (e) nil-shape == all-ones-shape is byte-identical in unionBest (back-compat).
 //
-// The inference closures mirror recall_scored_parity.rs's minilm/mpnet configs so
+// The planted providers mirror recall_scored_parity.rs's minilm/mpnet configs so
 // the per-signal cosine ordering is deterministic across the Swift/Rust ports.
 
-// whole-record-dense feature only: the whole-record float lane is a sidecar
-// (ruling 2026-09-07).
-#![cfg(feature = "whole-record-dense")]
+// the whole-record float lane is always active.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
+use engram_lib::Engram;
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallShape,
@@ -42,6 +41,7 @@ use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
 use synapsekit::vector_store::VectorStore;
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 const NOW: i64 = 1_700_000_000;
 const MINILM_ID: &str = "minilm-v6";
@@ -74,33 +74,54 @@ fn cap_frame(content: &str) -> CaptureFrame {
     )
 }
 
-/// A float-capable MiniLM provider (384-d) that ranks BOTH docs (shared component
-/// pulls everything toward the query). Mirrors recall_scored_parity::minilm_config.
-fn minilm_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MiniLM {
-        inference: Box::new(|tokens: &[i32]| {
-            let lead = tokens.first().copied().unwrap_or(0);
-            let mut v = vec![0.0_f32; 384];
-            let axis = (lead.unsigned_abs() as usize) % 384;
-            v[axis] = 1.0;
-            v[0] += 0.5; // shared component pulls everything toward the query
-            Ok(v)
-        }),
+/// First-word one-hot provider (384-d) that ranks BOTH docs: the FNV-1a hash
+/// of the first word picks the axis and a shared component (`v[0] += 0.5`)
+/// pulls everything toward the query. Registered under `MINILM_ID` so the
+/// `dense:minilm-v6` lane key the assertions steer is this provider's.
+struct FirstWordProvider;
+impl EmbeddingProvider for FirstWordProvider {
+    fn model_id(&self) -> &str { MINILM_ID }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let first = text.split_whitespace().next().unwrap_or("");
+        let h = first.bytes().fold(14_695_981_039_346_656_037u64, |a, b| {
+            (a ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
+        });
+        let mut v = vec![0.0_f32; 384];
+        v[(h % 384) as usize] = 1.0;
+        v[0] += 0.5; // shared component pulls everything toward the query
+        Ok(v)
     }
 }
 
-/// A float-capable MPNet provider (768-d) that aligns ONLY the consensus doc
-/// (axis 1) with the query; other lead tokens route to a distant axis.
-fn mpnet_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MPNet {
-        inference: Box::new(|tokens: &[i32]| {
-            let lead = tokens.first().copied().unwrap_or(0);
-            let mut v = vec![0.0_f32; 768];
-            let axis = if (lead.unsigned_abs() as usize) % 2 == 0 { 1 } else { 400 };
-            v[axis] = 1.0;
-            Ok(v)
-        }),
+/// Two-axis provider (384-d) that aligns ONLY the consensus doc with the
+/// query: an odd leading code point ("alpha…", the consensus doc and the
+/// query) routes to axis 1, an even one ("zeta…", the single doc) to a
+/// distant axis. Registered under `MPNET_ID` for the `dense:mpnet-base-v2`
+/// lane key.
+struct TwoAxisProvider;
+impl EmbeddingProvider for TwoAxisProvider {
+    fn model_id(&self) -> &str { MPNET_ID }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let lead = text.chars().next().map(|c| c as u32).unwrap_or(0);
+        let mut v = vec![0.0_f32; 384];
+        let axis = if lead % 2 == 1 { 1 } else { 300 };
+        v[axis] = 1.0;
+        Ok(v)
     }
+}
+
+/// `CandleNL` is the pass-through slot for a host-supplied, non-trainable
+/// provider, which is what both planted providers are.
+fn minilm_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(FirstWordProvider) }
+}
+
+fn mpnet_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(TwoAxisProvider) }
 }
 
 fn corpus_two_provider() -> Arc<CorpusContentEngine> {

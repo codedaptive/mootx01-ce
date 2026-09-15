@@ -10,16 +10,9 @@
 //
 // EmbeddingModel is a CorpusKit-owned enum so the host can select an
 // embedding model without importing SynapseKit or naming EmbeddingProvider.
-// The deterministic default requires no CoreML model bundle; the named
-// model cases (miniLM, mpNet, embeddingGemma) accept a host-supplied
-// inference closure and handle tokenization + projection internally.
-//
-// CorpusKitProviders ships concrete text providers for production use.
-// The Corpus actor's EmbeddingModel.miniLM / .mpNet / .embeddingGemma
-// cases use the same modelID, projectionSeed, and FNV-1a tokenization
-// parameters as CorpusKitProviders — callers that supply a CoreML
-// inference closure through EmbeddingModel get consistent storage keys
-// and can later switch to CorpusKitProviders directly if preferred.
+// The deterministic default requires no CoreML model bundle; distributional
+// providers (RandomIndexing, LSA) capture co-occurrence semantics from the
+// estate's own content during training.
 
 import EngramLib
 import Foundation
@@ -38,8 +31,7 @@ import SynapseKit
 /// CorpusKit OSLog logger (category "CorpusKit").
 ///
 /// Logs store errors so they are never swallowed; in the default build the
-/// callers are the content engine and the span stage, and under the
-/// WholeRecordDense trait the sidecar's `floatNearest` as well.
+/// callers are the content engine, the span stage, and the sidecar's `floatNearest`.
 /// Declared at file scope to avoid repeated Logger construction on the hot path
 /// (Logger init is not free on older OS versions).
 private let corpusLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
@@ -58,11 +50,11 @@ private let corpusLog = Logger(subsystem: MootProductIdentity.Logging.subsystem,
 /// federation requires. It captures surface/lexical signal, not learned
 /// semantic meaning.
 ///
-/// The named model cases (`.miniLM`, `.mpNet`, `.embeddingGemma`) are the
-/// ADDITIVE v1.1 on-device learned semantic lane. They produce richer,
-/// model-dependent vectors for enhanced on-device search but cannot serve
-/// as the federation vector (model weights differ across devices). They do
-/// not replace the deterministic lane; both lanes coexist.
+/// The distributional provider cases (`.randomIndexing`, `.lsa`) are the
+/// ADDITIVE on-device learned semantic lane. They capture co-occurrence
+/// semantics from the estate's own content during training. The MiniLM
+/// encoder lane feeds the span re-rank stage via `CorpusKitProviders`
+/// without a corresponding enum case on this surface.
 public enum EmbeddingModel: Sendable {
 
     /// Permanent, federation-grade deterministic vector provider.
@@ -77,36 +69,6 @@ public enum EmbeddingModel: Sendable {
     /// representation that every version of the system (v1.0 through
     /// any future version) uses for the federation-synchronized lane.
     case deterministic
-
-    /// MiniLM v6 text embedding (384-dim pooled output).
-    ///
-    /// CorpusKit handles FNV-1a tokenization (vocab 30522, max 128
-    /// tokens) and FloatSimHash projection with the canonical MiniLM
-    /// seed. The caller supplies the CoreML inference closure.
-    ///
-    /// - Parameter inference: Takes FNV-1a token ids and returns a
-    ///   pooled 384-element float vector.
-    case miniLM(inference: @Sendable ([Int32]) async throws -> [Float])
-
-    /// MPNet base v2 text embedding (768-dim pooled output).
-    ///
-    /// CorpusKit handles FNV-1a tokenization (vocab 30522, max 128
-    /// tokens) and FloatSimHash projection with the canonical MPNet
-    /// seed.
-    ///
-    /// - Parameter inference: Takes FNV-1a token ids and returns a
-    ///   pooled 768-element float vector.
-    case mpNet(inference: @Sendable ([Int32]) async throws -> [Float])
-
-    /// Embedding-Gemma 300M (768-dim pooled output).
-    ///
-    /// CorpusKit handles FNV-1a tokenization (vocab 256000, max 2048
-    /// tokens) and FloatSimHash projection with the canonical
-    /// EmbeddingGemma seed.
-    ///
-    /// - Parameter inference: Takes FNV-1a token ids and returns a
-    ///   pooled 768-element float vector.
-    case embeddingGemma(inference: @Sendable ([Int32]) async throws -> [Float])
 
     /// Random Indexing distributional-semantics provider.
     ///
@@ -125,23 +87,6 @@ public enum EmbeddingModel: Sendable {
     /// in `CorpusKitProviders` for the full training API.
     case randomIndexing(provider: any EmbeddingProvider & Sendable)
 
-    /// PPMI distributional-semantics provider.
-    ///
-    /// The caller constructs, trains, and finalizes a `PpmiProvider` from
-    /// `CorpusKitProviders`, then passes it here.  Unlike RI, PPMI accumulates
-    /// co-occurrence counts in a first pass and then computes PPMI-weighted
-    /// context sums in a second pass (via `PpmiProvider.finalize()`).
-    ///
-    /// PPMI differs from RI in that each context term's contribution is
-    /// weighted by its PPMI score (max(0, log(P(t,c)/(P(t)·P(c))))).
-    /// Stopword-like co-occurrences are down-weighted toward zero; genuinely
-    /// informative associations dominate.  The distinction is real: it is not
-    /// an alias for `.randomIndexing`.
-    ///
-    /// See honest semantic fusion for the rationale and `PpmiProvider`
-    /// in `CorpusKitProviders` for the full training API.
-    case ppmi(provider: any EmbeddingProvider & Sendable)
-
     /// LSA (Latent Semantic Analysis) distributional-semantics provider.
     ///
     /// The caller constructs and trains an `LsaProvider` (term-document matrix +
@@ -150,40 +95,6 @@ public enum EmbeddingModel: Sendable {
     /// See honest semantic fusion for the rationale and `LsaProvider` in
     /// `CorpusKitProviders` for the full training API.
     case lsa(provider: any EmbeddingProvider & Sendable)
-
-    /// NMF (Non-Negative Matrix Factorization) distributional-semantics provider.
-    ///
-    /// The caller constructs, trains, and finalizes an `NmfProvider` (TF-weighted
-    /// term-document matrix factorized via SubstrateML's NMFAlternatingLeastSquares
-    /// with fixed iteration count for determinism) and passes it here.
-    ///
-    /// Document embeddings are the L2-normalised column vectors of the H factor;
-    /// query embeddings use the pseudo-inverse fold-in formula on W.
-    ///
-    /// See honest semantic fusion for the rationale and `NmfProvider` in
-    /// `CorpusKitProviders` for the full training API.
-    case nmf(provider: any EmbeddingProvider & Sendable)
-
-    /// FDC (Frame Decimal Classification) co-classification provider.
-    ///
-    /// The caller constructs an `FDCProvider` from `CorpusKitProviders` and
-    /// passes it here. The provider is stateless — no training step is required.
-    /// It encodes text to a deterministic float vector derived from the text's
-    /// FDC classification code, such that codes sharing a longer prefix (more
-    /// common ancestors in the FDC taxonomy) have higher cosine similarity.
-    ///
-    /// Unlike the distributional providers (RI/PPMI/LSA/NMF), FDCProvider
-    /// requires no corpus training — it is ready to use immediately. Its recall
-    /// signal reflects taxonomic proximity (class co-membership), not
-    /// co-occurrence. The two signal types complement each other: distributional
-    /// methods are strong on topical neighbours; FDC is strong on categorical siblings.
-    ///
-    /// The float lane is dark (returns `[]`) for texts the FDC engine cannot
-    /// classify (UNRESOLVED). This is the expected opt-out, not an error.
-    ///
-    /// See honest semantic fusion (FDC lattice co-classification) and `FDCProvider`
-    /// in `CorpusKitProviders` for the encoding details.
-    case fdc(provider: any EmbeddingProvider & Sendable)
 
 #if canImport(NaturalLanguage)
     /// Apple NaturalLanguage sentence embedding provider (Swift-only).
@@ -232,7 +143,7 @@ public enum EmbeddingModel: Sendable {
 
     /// The provider this model carries, if the case carries one.
     ///
-    /// The distributional and FDC cases carry an externally-built provider;
+    /// The distributional cases carry an externally-built provider;
     /// the deterministic and named-model cases carry an inference closure (or
     /// nothing) and construct their provider lazily in `makeProvider()`. This
     /// accessor is the join point for the trainable-basis seam: it returns the
@@ -240,18 +151,18 @@ public enum EmbeddingModel: Sendable {
     /// `TrainableEmbeddingBasis` conformance without re-running construction.
     private var carriedProvider: (any EmbeddingProvider & Sendable)? {
         switch self {
-        case .randomIndexing(let p), .ppmi(let p), .lsa(let p), .nmf(let p), .fdc(let p):
+        case .randomIndexing(let p), .lsa(let p):
             return p
-        // The Apple NL cases carry a provider (EmbeddingProvider & Sendable), but like FDC
+        // The Apple NL cases carry a provider (EmbeddingProvider & Sendable), but
         // they are stateless — no TrainableEmbeddingBasis conformance. We return the carried
         // provider here so callers that need the provider instance (e.g. direct inspection)
-        // can obtain it, mirroring the FDC pattern. `isTrainable` will still be false
+        // can obtain it. `isTrainable` will still be false
         // because neither NL provider conforms to TrainableEmbeddingBasis.
 #if canImport(NaturalLanguage)
         case .nlEmbedding(let p), .nlContextualEmbedding(let p):
             return p
 #endif
-        case .deterministic, .miniLM, .mpNet, .embeddingGemma:
+        case .deterministic:
             return nil
         }
     }
@@ -260,10 +171,10 @@ public enum EmbeddingModel: Sendable {
     /// reconstructed from a serialized basis.
     ///
     /// True only when the carried provider conforms to
-    /// `TrainableEmbeddingBasis` (the RI/PPMI/LSA/NMF distributional
-    /// providers). FDC carries a provider but is stateless and does NOT
-    /// conform, so it reports `false`. The deterministic and named-model
-    /// cases carry no provider and report `false`.
+    /// `TrainableEmbeddingBasis` (the RI and LSA distributional providers).
+    /// The Apple NL cases carry a provider that does NOT conform, so they
+    /// report `false`. The deterministic case carries no provider and reports
+    /// `false`.
     ///
     /// This is the capability-detection helper `Corpus` will use (β mission)
     /// before attempting to drive training/serialization through the seam. It
@@ -282,7 +193,7 @@ public enum EmbeddingModel: Sendable {
     /// type's `init(deserializing:)`. CorpusKit core never names the concrete
     /// provider type, so layering (providers → core) is preserved.
     ///
-    /// The deterministic and named-model cases, and the stateless FDC case,
+    /// The deterministic case and the stateless Apple NL cases
     /// have no trained basis to restore and throw `CorpusKitError.notTrainable`
     /// rather than crashing or returning a wrong provider.
     ///
@@ -296,7 +207,7 @@ public enum EmbeddingModel: Sendable {
         guard let trainable = carriedProvider as? TrainableEmbeddingBasis else {
             throw CorpusKitError.notTrainable(
                 "embedding model is not a trainable-basis provider; reconstruction "
-                + "from a serialized basis is only supported for RI/PPMI/LSA/NMF")
+                + "from a serialized basis is only supported for RI/LSA")
         }
         return try trainable.reconstructBasis(from: basis)
     }
@@ -341,7 +252,7 @@ public enum EmbeddingModel: Sendable {
 /// by (modelID, modelVersion) — hold the N providers' rows side by side with
 /// no schema change.
 ///
-/// The single-signal entry points (`recall`, `embed`, and `floatNearest` under the WholeRecordDense trait,
+/// The single-signal entry points (`recall`, `embed`, and `floatNearest`,
 /// `embedFloat`, `modelID`, `supportsFloat`) delegate to the DEFAULT signal —
 /// the first held slot — so existing callers are unaffected. The per-signal
 /// fan-out for recall is exposed additively via `floatNearestPerSignal`, the
@@ -456,10 +367,10 @@ public actor Corpus {
         /// the public surface (sealed-vector principle).
         package var provider: any EmbeddingProvider
         /// The serialized EMPTY (untrained) basis of a trainable provider — the
-        /// from-scratch factory. Non-nil for EVERY trainable slot (RI/PPMI/LSA/
-        /// NMF), whether the slot was built fresh OR restored from a persisted
-        /// basis on open; nil only for non-trainable slots (deterministic / named
-        /// / FDC / NL).
+        /// from-scratch factory. Non-nil for EVERY trainable slot (RI/LSA),
+        /// whether the slot was built fresh OR restored from a persisted
+        /// basis on open; nil only for non-trainable slots (deterministic /
+        /// NL).
         ///
         /// Each training pass (`reindex` and the first-ingest auto-train)
         /// reconstructs a FRESH provider from this empty-basis blob, trains it on
@@ -482,14 +393,14 @@ public actor Corpus {
         /// a fresh trainable provider held SEPARATELY from `provider`. The counts
         /// table is grown by folding each written chunk into this accumulator
         /// (`addToCounts`) and persisted at batch boundaries. It must NOT be the
-        /// serving `provider`: for LSA/NMF, growing the maintained vocabulary
+        /// serving `provider`: for LSA, growing the maintained vocabulary
         /// would desync the serving provider's basis-aligned vocab from its
-        /// frozen SVD/NMF factors. nil for non-trainable slots. `var` because the
+        /// frozen SVD factors. nil for non-trainable slots. `var` because the
         /// on-open path restores persisted counts into it.
         var countsAccumulator: (any TrainableEmbeddingBasis)?
         /// Documents (chunks) folded into `countsAccumulator` — the doc-count
         /// growth anchor persisted alongside the counts blob. Tracked here (not
-        /// read off the provider) so it is uniform across RI/PPMI/LSA/NMF whose
+        /// read off the provider) so it is uniform across RI/LSA whose
         /// providers track document count inconsistently. Restored from the
         /// persisted anchor on open, incremented per folded chunk.
         var countsDocumentCount: Int
@@ -527,7 +438,7 @@ public actor Corpus {
     /// at least one slot. For N=1 this holds exactly one slot.
     package var slots: [ProviderSlot]
     private var hlcGenerator: HLCGenerator
-    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` join (and the sidecar `floatNearest` join under the WholeRecordDense trait).
+    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` join (and the sidecar `floatNearest` join).
     ///
     /// Populated on `init` via a compact `(id, source_id)` projection from the chunks
     /// table (no body text loaded — O(N) row count only). Updated on each `ingest`
@@ -535,13 +446,11 @@ public actor Corpus {
     /// on every open alongside `InvertedIndexStore.open()` so both stay in sync.
     package private(set) var chunkSourceMap: [UUID: String] = [:]
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     /// Test-only: when non-nil, `floatNearest` returns `.storeError(this)` immediately,
     /// bypassing the real vector store. Set via `_testForceFloatStoreError(_:)`.
     /// Never set in production code; documented here so future agents do not mistake
     /// this property for production logic.
     package var _forcedFloatError: Error? = nil
-#endif
 
     // MARK: - Training path decision seam (Part 3, standalone reindex)
 
@@ -850,7 +759,7 @@ public actor Corpus {
     /// restart (the frozen-after-restart fix). The dedicated counts accumulator is
     /// a SEPARATE fresh trainable provider, restored from the persisted counts
     /// table if a row exists; it is held apart from the serving provider so
-    /// growing the maintained vocabulary never desyncs an LSA/NMF serving basis.
+    /// growing the maintained vocabulary never desyncs an LSA serving basis.
     ///
     /// Reconstruction routes through the carried provider's
     /// `TrainableEmbeddingBasis.reconstructBasis(from:)` witness — CorpusKit core
@@ -895,7 +804,7 @@ public actor Corpus {
 
         // The maintained-counts accumulator: a distinct fresh trainable provider,
         // reconstructed from the empty factory, restored from the counts table if
-        // a row exists. Distinct from the serving provider (LSA/NMF desync rule).
+        // a row exists. Distinct from the serving provider (LSA desync rule).
         guard let accumulator = try trainable.reconstructBasis(from: factoryBlob)
             as? any TrainableEmbeddingBasis else {
             throw CorpusKitError.notTrainable(
@@ -1210,14 +1119,7 @@ public actor Corpus {
                         // Single inference pass: embedPair computes the provider's
                         // pooled vector ONCE and returns both the binary engram and
                         // the dense float vector.
-#if MOOTX01_WHOLE_RECORD_DENSE
                         let (engram, floats) = try await fp.provider.embedPair(chunk.text)
-#else
-                        // The default build stores the engram only: the pooled float
-                        // is computed for the projection and dropped (whole-record dense
-                        // rows are a WholeRecordDense sidecar write).
-                        let (engram, _) = try await fp.provider.embedPair(chunk.text)
-#endif
                         // Binary engram row (vectorIndex 0) — always written.
                         rows.append(VectorPayloadInput(
                             itemID: chunk.id.uuidString,
@@ -1227,7 +1129,6 @@ public actor Corpus {
                             modelVersion: fp.provider.modelVersion,
                             filedAt: fp.now
                         ))
-#if MOOTX01_WHOLE_RECORD_DENSE
                         // Float lane (Lane D): vectorIndex 1 (kind=float32), present
                         // only when the provider's float lane is live and the chunk
                         // resolved (`floats` non-empty).
@@ -1241,7 +1142,6 @@ public actor Corpus {
                                 filedAt: fp.now
                             ))
                         }
-#endif
                     }
                     return rows
                 }
@@ -1561,7 +1461,7 @@ public actor Corpus {
         }
 
         // Phase 1b — batch-aware first-basis bootstrap. When a trainable slot
-        // (RI/PPMI/LSA/NMF) still has no persisted basis, train it ONCE on the
+        // (RI/LSA) still has no persisted basis, train it ONCE on the
         // FULL corpus now in the bundle store — every chunk just inserted, not
         // the first item alone. The prior per-item serial fallback trained on
         // item 1's chunks (often a single document), producing a degenerate
@@ -1642,26 +1542,17 @@ public actor Corpus {
                     let nowLocal = itemNows[input.idx]
                     for p in provs {
                         for chunk in input.chunks {
-#if MOOTX01_WHOLE_RECORD_DENSE
                             let (engram, floats) = try await p.provider.embedPair(chunk.text)
-#else
-                            // The default build stores the engram only: the pooled float
-                            // is computed for the projection and dropped (whole-record dense
-                            // rows are a WholeRecordDense sidecar write).
-                            let (engram, _) = try await p.provider.embedPair(chunk.text)
-#endif
                             rows.append(VectorPayloadInput(
                                 itemID: chunk.id.uuidString, vectorIndex: 0,
                                 payload: VectorPayload(engram: engram),
                                 modelID: p.modelID, modelVersion: p.modelVersion, filedAt: nowLocal))
-#if MOOTX01_WHOLE_RECORD_DENSE
                             if !floats.isEmpty {
                                 rows.append(VectorPayloadInput(
                                     itemID: chunk.id.uuidString, vectorIndex: 1,
                                     payload: VectorPayload(floats: floats),
                                     modelID: p.modelID, modelVersion: p.modelVersion, filedAt: nowLocal))
                             }
-#endif
                         }
                     }
                     out.append((input.idx, rows))
@@ -1795,18 +1686,18 @@ public actor Corpus {
 
     /// Retrain the embedding basis on the full corpus and re-embed every chunk.
     ///
-    /// When the configured provider is trainable (RI/PPMI/LSA/NMF), this:
+    /// When the configured provider is trainable (RI/LSA), this:
     ///   1. gathers ALL chunk texts from the BundleStore,
     ///   2. trains the basis on them through the `TrainableEmbeddingBasis` seam
     ///      (`trainOnCorpus(texts:)`, which runs the provider's own
-    ///      train+finalize sequence — RI no finalize, PPMI/LSA/NMF finalize),
+    ///      train+finalize sequence — RI no finalize, LSA finalize),
     ///   3. persists the serialized basis blob (UPSERT, one row per provider
     ///      key) with `now` and the trained chunk count, and
     ///   4. re-embeds every chunk (binary lane v0 + float lane v1) under the
     ///      provider's modelID, REPLACING stale vectors in place (delete-all
     ///      then re-add per chunk — no duplicate rows).
     ///
-    /// When the provider is NOT trainable (deterministic / named-model / FDC),
+    /// When the provider is NOT trainable (deterministic / NL),
     /// no basis is persisted; the chunks are simply (re)embedded so the call is
     /// still a well-defined "refresh the vectors" operation.
     ///
@@ -1845,16 +1736,16 @@ public actor Corpus {
         corpusLog.info(
             "reindex: start — \(chunks.count, privacy: .public) active chunks, \(self.slots.count, privacy: .public) provider slots")
 
-        // Phase 1 — train every trainable slot. Slots that meet the counts-path
-        // guard (PPMI only: finalizeFromCounts == true AND countsDeltaFoldSafe == true
-        // AND population guard passes) are handled serially here from the persisted
-        // counts snapshot — NO corpus text paged. Remaining slots go to a concurrent
-        // task group (corpus path): trainOnCorpus over all chunk texts.
+        // Phase 1 — train every trainable slot. A slot meets the counts-path
+        // guard when finalizeFromCounts == true AND countsDeltaFoldSafe == true
+        // AND the population guard passes; such a slot is handled serially here
+        // from the persisted counts snapshot — NO corpus text paged. Neither
+        // default provider opts in (RI: float accumulation is order-sensitive;
+        // LSA: the counts blob holds no TF rows), so every slot goes to a
+        // concurrent task group (corpus path): trainOnCorpus over all chunk texts.
         //
-        // The concurrent task group is preserved for the corpus-path slots because
-        // LSA's SVD and NMF's ALS dominate wall time; running them in parallel
-        // prevents waiting ΣT(train) on one core. Counts-path slots are serial
-        // (store reads on the actor) but cheap — no SVD, no ALS.
+        // The task group is concurrent because LSA's SVD dominates wall time;
+        // running slots in parallel prevents waiting ΣT(train) on one core.
         // Rust twin: the scoped-thread Phase 1 in `Corpus::reindex`.
         let texts = chunks.map(\.text)
         // Slots that did NOT take the counts path go to the corpus-path task group.
@@ -1881,7 +1772,7 @@ public actor Corpus {
             let foldSafe = fresh.countsDeltaFoldSafe
 
             guard capable else {
-                // LSA/NMF: finalizeFromCounts() == false; corpus re-tokenize required.
+                // LSA: finalizeFromCounts() == false; corpus re-tokenize required.
                 _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
                 trainInputs.append((index, blob, fresh))
                 continue
@@ -1918,7 +1809,7 @@ public actor Corpus {
                 continue
             }
 
-            // Counts path eligible — PPMI slot whose population guard passed.
+            // Counts path eligible — a counts-capable slot whose population guard passed.
             // Flush live accumulators to storage BEFORE restoring so the store reflects
             // the latest state (including any ingest folds since the last batch persist).
             corpusLog.info(
@@ -2028,7 +1919,7 @@ public actor Corpus {
         }
 
         // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained
-        // provider. Non-trainable providers (FDC, deterministic, NL) skip re-embedding:
+        // provider. Non-trainable providers (deterministic, NL) skip re-embedding:
         // their vectors are item-local and invariant to basis retraining — the same
         // embedding function applied to the same text always produces the same vector
         // regardless of which distributional basis the trainable slots carry. Serial
@@ -2209,14 +2100,7 @@ public actor Corpus {
                 for chunk in batch {
                     // Single inference pass: embedPair returns the engram and the
                     // float vector from ONE computation.
-#if MOOTX01_WHOLE_RECORD_DENSE
                     let (engram, floats) = try await prov.embedPair(chunk.text)
-#else
-                    // The default build stores the engram only: the pooled float
-                    // is computed for the projection and dropped (whole-record dense
-                    // rows are a WholeRecordDense sidecar write).
-                    let (engram, _) = try await prov.embedPair(chunk.text)
-#endif
                     rows.append(VectorPayloadInput(
                         itemID: chunk.id.uuidString,
                         vectorIndex: 0,
@@ -2225,7 +2109,6 @@ public actor Corpus {
                         modelVersion: modelVersion,
                         filedAt: filedAt
                     ))
-#if MOOTX01_WHOLE_RECORD_DENSE
                     // Float lane (Lane D): added only when non-empty.
                     if !floats.isEmpty {
                         rows.append(VectorPayloadInput(
@@ -2237,7 +2120,6 @@ public actor Corpus {
                             filedAt: filedAt
                         ))
                     }
-#endif
                 }
                 return rows
             }
@@ -2714,12 +2596,6 @@ public actor Corpus {
 // MARK: - EmbeddingModel → provider construction
 
 extension EmbeddingModel {
-    // Projection seeds match CorpusKitProviders' model-specific seeds so
-    // storage keys are consistent regardless of which surface is used.
-    // Changing a seed re-keys all stored vectors for that model.
-    private static let miniLMSeed: UInt64 = 0x4D49_4E4C_4D5F_7631       // "MINLM_v1"
-    private static let mpNetSeed: UInt64 = 0x4D50_4E45_545F_7631        // "MPNET_v1"
-    private static let embeddingGemmaSeed: UInt64 = 0x454D_4247_4D5F_7631 // "EMBGM_v1"
     // Deterministic seed is CorpusKit-specific; distinct from all model seeds.
     private static let deterministicSeed: UInt64 = 0xC05B_D15C_A15D_1B00
 
@@ -2736,27 +2612,9 @@ extension EmbeddingModel {
             // through unchanged — no further construction needed here.
             return provider
 
-        case .ppmi(let provider):
-            // The caller built, trained, and finalized the PpmiProvider
-            // externally. Pass through unchanged — no further construction
-            // needed here. The finalization step (count → PPMI vectors) must
-            // already have happened before this Corpus is used for recall.
-            return provider
-
         case .lsa(let provider):
             // The caller built and trained the LsaProvider externally (term-
             // document matrix + SVD). Pass through unchanged.
-            return provider
-
-        case .nmf(let provider):
-            // The caller built, trained, and finalized the NmfProvider externally
-            // (TF matrix + NMF factorization via SubstrateML). Pass through unchanged.
-            return provider
-
-        case .fdc(let provider):
-            // The caller constructed an FDCProvider externally. FDCProvider is
-            // stateless (no training required) — the caller just passes it through
-            // to register it as the fusion voter. Pass through unchanged.
             return provider
 
         case .deterministic:
@@ -2784,41 +2642,11 @@ extension EmbeddingModel {
                 }
             )
 
-        case .miniLM(let inference):
-            return CorpusTextProvider(
-                modelID: "minilm-v6",
-                modelVersion: "1.0.0",
-                projectionSeed: EmbeddingModel.miniLMSeed,
-                vocabSize: 30522,
-                maxTokenLen: 128,
-                inference: inference
-            )
-
-        case .mpNet(let inference):
-            return CorpusTextProvider(
-                modelID: "mpnet-base-v2",
-                modelVersion: "1.0.0",
-                projectionSeed: EmbeddingModel.mpNetSeed,
-                vocabSize: 30522,
-                maxTokenLen: 128,
-                inference: inference
-            )
-
-        case .embeddingGemma(let inference):
-            return CorpusTextProvider(
-                modelID: "embedding-gemma-300m",
-                modelVersion: "1.0.0",
-                projectionSeed: EmbeddingModel.embeddingGemmaSeed,
-                vocabSize: 256_000,
-                maxTokenLen: 2048,
-                inference: inference
-            )
-
 #if canImport(NaturalLanguage)
         case .nlEmbedding(let provider):
             // The caller constructed an NLEmbeddingProvider (or a compatible
             // EmbeddingProvider) externally and passes it through here — same
-            // pattern as .fdc(provider:). No further construction needed.
+            // pattern as .randomIndexing(provider:). No further construction needed.
             return provider
 
         case .nlContextualEmbedding(let provider):
@@ -2863,75 +2691,6 @@ struct CorpusDefaultTokenizer: Tokenizer {
             let h = word.utf8.reduce(UInt32(2_166_136_261)) { ($0 ^ UInt32($1)) &* 1_677_619 }
             return Int32(2 + Int(h % vocabRange))
         }
-    }
-}
-
-/// EmbeddingProvider adapter for named model cases (miniLM, mpNet,
-/// embeddingGemma). Tokenizes text using CorpusDefaultTokenizer's FNV-1a
-/// fold, calls the host-supplied CoreML inference closure, and projects
-/// the resulting float vector through FloatSimHash with the model's
-/// canonical seed.
-///
-/// This type is private to CorpusKit; it does not appear on any public
-/// signature. Callers interact only through `EmbeddingModel` cases.
-private struct CorpusTextProvider: EmbeddingProvider {
-    let modelID: String
-    let modelVersion: String
-    let projectionSeed: UInt64
-    private let tokenizer: CorpusDefaultTokenizer
-    let inference: @Sendable ([Int32]) async throws -> [Float]
-
-    init(modelID: String,
-         modelVersion: String,
-         projectionSeed: UInt64,
-         vocabSize: UInt32,
-         maxTokenLen: Int,
-         inference: @escaping @Sendable ([Int32]) async throws -> [Float]) {
-        self.modelID = modelID
-        self.modelVersion = modelVersion
-        self.projectionSeed = projectionSeed
-        self.tokenizer = CorpusDefaultTokenizer(
-            vocabID: modelID,
-            maxTokens: maxTokenLen,
-            vocabSize: vocabSize
-        )
-        self.inference = inference
-    }
-
-    func embed(_ text: String) async throws -> Engram {
-        guard !text.isEmpty else { return Engram.zero }
-        let tokens = tokenizer.tokenize(text)
-        let floats = try await inference(tokens)
-        return FloatSimHash.project(vector: floats, seed: projectionSeed)
-    }
-
-    /// Float lane source (Lane D): the pooled vector this provider's `embed`
-    /// already computes before projecting it to the 256-bit engram. Returning
-    /// it directly feeds the dense float lane's cosine ranking — one inference
-    /// pass, two stored rows. Empty input returns `[]` (no dense direction for
-    /// the empty string), matching the `EmbeddingProvider.embedFloat` contract.
-    /// This is the production float-lane path for the `.miniLM`/`.mpNet`/
-    /// `.embeddingGemma` models; without it those models would have NO float
-    /// lane (the protocol default opts out by throwing).
-    func embedFloat(_ text: String) async throws -> [Float] {
-        guard !text.isEmpty else { return [] }
-        let tokens = tokenizer.tokenize(text)
-        return try await inference(tokens)
-    }
-
-    /// Single-inference override: `embed` and `embedFloat` both tokenize and
-    /// run the same inference pass — `embed` projects the pooled vector to the
-    /// 256-bit engram, `embedFloat` returns it raw. Running both separately
-    /// pays for two inference passes over identical tokens. This computes the
-    /// pooled vector ONCE and returns both the projected engram and the floats,
-    /// halving inference cost on the capture/reembed path. Output is identical
-    /// to calling `embed` and `embedFloat` separately: empty input opts out of
-    /// the float lane (`[]`) and yields `Engram.zero`, matching both methods.
-    func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
-        guard !text.isEmpty else { return (.zero, []) }
-        let tokens = tokenizer.tokenize(text)
-        let floats = try await inference(tokens)
-        return (FloatSimHash.project(vector: floats, seed: projectionSeed), floats)
     }
 }
 

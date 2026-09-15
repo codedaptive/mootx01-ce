@@ -1,6 +1,6 @@
-// float_lane.rs: the whole-record dense float query surface of `Corpus`.
+// float_lane.rs: the whole-record float query surface of `Corpus`.
 //
-// Compiled only with the `whole-record-dense` feature. Holds the observable
+// Holds the observable
 // `FloatLaneOutcome`, the per-query `FloatDiscriminationSignal`, and the
 // nearest / farthest per-signal recall over the stored float rows
 // (vector_index 1). The default build has none of this: the span stage is

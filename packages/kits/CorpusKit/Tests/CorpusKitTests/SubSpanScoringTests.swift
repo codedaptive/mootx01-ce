@@ -131,22 +131,38 @@ private struct MapContentSource: CorpusContentSource, @unchecked Sendable {
 
 // MARK: - Engine helper (CorpusDocumentStore path)
 
+/// Float provider that maps texts to one-hot 384-d vectors by Unicode-scalar-sum
+/// mod 384. Produces the same directionality contract as the original token-sum
+/// implementation, transposed to the string-based EmbeddingProvider interface.
+private struct DirectionalFloatProvider: EmbeddingProvider, @unchecked Sendable {
+    let modelID = "test-directional-v1"
+    let modelVersion = "1.0.0"
+
+    func embed(_ text: String) async throws -> Engram {
+        throw SynapseKitError.embeddingFailed(
+            "DirectionalFloatProvider: embed() not needed for sub-span tests")
+    }
+
+    func embedFloat(_ text: String) async throws -> [Float] {
+        guard !text.isEmpty else { return [] }
+        let sum = text.unicodeScalars.reduce(0) { $0 &+ Int32(bitPattern: $1.value) }
+        let slot = Int((sum % 384 + 384) % 384)
+        var v = [Float](repeating: 0.0, count: 384)
+        v[slot] = 1.0
+        return v
+    }
+}
+
 /// Creates a standalone CorpusContentEngine backed by a CorpusDocumentStore,
 /// using `directionalModel()` for the embedding provider. The engine's
 /// `scoreSubSpans` delegates to SubSpanScoring.score() through
 /// `slots[0].provider`, which is the model's EmbeddingProvider.
 ///
-/// `directionalModel()` maps texts to one-hot 384-d vectors by token-sum
+/// `directionalModel()` maps texts to one-hot 384-d vectors by Unicode-scalar-sum
 /// mod 384. Used in §6a to verify engine delegation, not to reproduce the
 /// rescue scenario (the rescue is demonstrated with FirstTokenRoutingProvider).
 private func directionalModel() -> EmbeddingModel {
-    .miniLM(inference: { tokens in
-        var v = [Float](repeating: 0.0, count: 384)
-        let sum = tokens.reduce(Int32(0), &+)
-        let slot = Int((sum % 384 + 384) % 384)
-        v[slot] = 1.0
-        return v
-    })
+    .lsa(provider: DirectionalFloatProvider())
 }
 
 private func makeEngine(

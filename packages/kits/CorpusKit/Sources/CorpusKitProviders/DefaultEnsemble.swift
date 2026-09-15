@@ -1,13 +1,12 @@
 // DefaultEnsemble.swift — the ONE definition of the default recall ensemble.
 //
-// Measurement (plan 70BC55F3, 2026-09-05): a retrieval-trained sentence encoder
-// reranking BM25's head beat BM25 on two corpora (0.496 vs. 0.470; 0.335 vs.
-// 0.310). The four float families (NMF/PPMI/FDC and the dark LSA) did not earn
-// their cost. The default ensemble is now RI only; the dense families compile
-// only when the DenseFamilies trait is active (MOOTX01_DENSE_FAMILIES). RI
-// stays always-on because its binary fingerprint feeds dreaming, contradiction,
-// and consolidation. LSA is on its own separate switch (MOOTX01_LSA); it is
-// dark and unproven — DenseFamilies does NOT enable it (ruling 2026-09-07).
+// The default ensemble is two signals: Random Indexing (RI) and LSA. Both are
+// always-on; neither requires a trait or feature flag.
+//
+// RI stays because its binary fingerprint feeds dreaming, contradiction, and
+// consolidation. LSA earned its place: paired with RI it improves recall
+// fidelity over RI alone, and its cost is acceptable at the signal count we
+// ship (two providers).
 //
 // ## Why this lives in CorpusKitProviders, not CorpusKit core
 //
@@ -36,57 +35,28 @@ import CorpusKit
 
 /// Factory namespace for CorpusKit's canonical default embedding ensemble.
 ///
-/// `CorpusEnsemble.defaultEnsemble()` is the single definition of the
-/// default recall ensemble. The active set depends on the compile-time switches:
+/// `CorpusEnsemble.defaultEnsemble()` is the single definition of the default
+/// recall ensemble: two signals, RI and LSA, always on.
 ///
-///   - **`MOOTX01_DENSE_FAMILIES` OFF (default):** one signal — RI only.
-///     Measurement showed the dense families add cost without beating BM25+RI.
-///     RI stays because its binary fingerprint feeds dreaming, contradiction,
-///     and consolidation.
-///   - **`MOOTX01_DENSE_FAMILIES` ON (`--traits DenseFamilies`):** four signals
-///     — RI / PPMI / NMF / FDC. LSA is dark on its own switch (MOOTX01_LSA);
-///     DenseFamilies does NOT enable it (ruling 2026-09-07).
-///   - **`MOOTX01_LSA` ON (`--traits LSA`):** five signals — RI / PPMI / LSA /
-///     NMF / FDC. Used for LSA measurement only; the LSA provider is unproven.
+/// - RI (Random Indexing): binary fingerprint, feeds dreaming/contradiction/
+///   consolidation. Required; cannot be removed.
+/// - LSA (Latent Semantic Analysis): improves recall fidelity paired with RI.
+///   Always active alongside RI in the default ensemble.
 public enum CorpusEnsemble {
 
-    /// The default recall ensemble (untrained), gated by `MOOTX01_DENSE_FAMILIES`.
+    /// The default recall ensemble (untrained): RI and LSA, always active.
     ///
-    /// With the switch OFF (default): one provider — `.randomIndexing`.
-    /// With `MOOTX01_DENSE_FAMILIES` ON: four providers — RI, PPMI, NMF, FDC —
-    /// in that fixed canonical order. LSA is excluded; it is on its own switch
-    /// (`MOOTX01_LSA`) and is dark and unproven (ruling 2026-09-07).
-    /// With `MOOTX01_LSA` ON: five providers — RI, PPMI, LSA, NMF, FDC.
-    ///
-    /// `models[0]` (`.randomIndexing`) leads in all cases — it is the DEFAULT
-    /// signal that the Corpus's single-signal entry points delegate to.
+    /// `models[0]` (`.randomIndexing`) leads — it is the DEFAULT signal that the
+    /// Corpus's single-signal entry points delegate to.
     ///
     /// Constructed FRESH each call — see the file header for why a function and
     /// not a shared constant.
     ///
-    /// - Returns: the untrained `EmbeddingModel` cases for the active switch state.
+    /// - Returns: the untrained `EmbeddingModel` cases for the default ensemble.
     public static func defaultEnsemble() -> [EmbeddingModel] {
-#if MOOTX01_DENSE_FAMILIES
-        // Dense families are ON: four signals — RI, PPMI, NMF, FDC.
-        // LSA is on its own separate switch (MOOTX01_LSA); DenseFamilies does
-        // NOT enable it. Enable `--traits LSA` to get the fifth signal.
-        var models: [EmbeddingModel] = [
+        [
             .randomIndexing(provider: RandomIndexingProvider()),
-            .ppmi(provider: PpmiProvider()),
+            .lsa(provider: LsaProvider()),
         ]
-#if MOOTX01_LSA
-        // LSA is on: insert it in the canonical slot (after PPMI, before NMF).
-        models.append(.lsa(provider: LsaProvider()))
-#endif
-        models.append(.nmf(provider: NmfProvider()))
-        models.append(.fdc(provider: FDCProvider()))
-        return models
-#else
-        // Dense families are OFF (default, plan 70BC55F3, 2026-09-05):
-        // NMF/PPMI/FDC (and the dark LSA) did not beat BM25+RI on two corpora.
-        // RI only — its binary fingerprint feeds dreaming, contradiction,
-        // and consolidation and must not be removed.
-        return [.randomIndexing(provider: RandomIndexingProvider())]
-#endif
     }
 }

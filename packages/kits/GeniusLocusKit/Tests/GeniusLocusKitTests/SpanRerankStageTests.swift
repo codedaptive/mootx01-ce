@@ -60,10 +60,7 @@ struct SpanRerankStageTests {
         let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusKit.CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: { tokens in
-                let v = Float((tokens.first ?? 0) % 7 + 1) / 7.0
-                return Array(repeating: v, count: 384)
-            })])
+            models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))])
         for i in 0..<200 {
             // Padding words vary the document length so BM25 scores spread
             // instead of tying; the query terms sit in every fourth drawer.

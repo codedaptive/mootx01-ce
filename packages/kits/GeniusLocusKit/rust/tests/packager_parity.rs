@@ -162,7 +162,6 @@ fn make_result(hits: Vec<RecallHit>) -> GLKRecallResult {
         union_profile: None,
         hits,
         withheld_by_sensitivity: 0,
-        #[cfg(feature = "whole-record-dense")]
         dense_lane_status: None,
         degraded_stages: vec![],
         lane_ranks: std::collections::HashMap::new(),

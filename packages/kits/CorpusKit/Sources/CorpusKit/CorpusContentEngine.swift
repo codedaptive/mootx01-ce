@@ -74,7 +74,7 @@ public enum CorpusPathReason: Equatable, Sendable {
     /// No persisted counts row found for this provider key.
     case noCountsRow
     /// `finalizeFromCounts()` returned false — the provider cannot derive its
-    /// basis from counts alone (LSA, NMF). Corpus re-tokenization is required.
+    /// basis from counts alone (LSA). Corpus re-tokenization is required.
     case notCountsCapable
     /// The pending delta is non-empty but `countsDeltaFoldSafe` is false (RI).
     /// RI is restore-only; a non-empty delta forces the corpus path.
@@ -288,15 +288,10 @@ public actor CorpusContentEngine {
 
     /// The vector lanes this engine writes, claims and deletes per slot:
     /// lane 0 is the 256-bit engram row every build writes; lane 1 is the
-    /// whole-record float row, which exists only in the WholeRecordDense
-    /// build. The default build names lane 0 alone, so a populated estate
+    /// whole-record float row (lane 1). Both lanes are always claimed;
     /// whose float rows the 1.6 to 1.7 capsule vacuumed (and whose lane-1
     /// claim it released) is never re-claimed by `reconcileConfiguredProviders`.
-#if MOOTX01_WHOLE_RECORD_DENSE
     static let claimedLanes: [Int] = [0, 1]
-#else
-    static let claimedLanes: [Int] = [0]
-#endif
 
     /// Reserved checkpoint row recording the last APPLIED feed cursor —
     /// the lane-level cursor a remove records (a removed ID has no
@@ -1013,7 +1008,7 @@ public actor CorpusContentEngine {
             if slotScope == .statelessOnly, slot.freshBasisBlob != nil { return nil }
             if case .slot(let targetModelID) = slotScope,
                slot.provider.modelID != targetModelID { return nil }
-            // Dense-only lane excludes non-trainable providers (FDC, deterministic, NL):
+            // Dense-only lane excludes non-trainable providers (deterministic, NL):
             // their vectors are item-local and unchanged by a basis retrain.
             if laneScope == .dense, slot.freshBasisBlob == nil { return nil }
             // A trainable slot with no trained basis cannot embed yet.
@@ -1053,14 +1048,7 @@ public actor CorpusContentEngine {
                 // the active basis digest. Their vectors are durable — re-embedding
                 // produces the same result at wasted compute cost.
                 if coveredBySlot[target.modelID]?.contains(record.id) == true { continue }
-#if MOOTX01_WHOLE_RECORD_DENSE
                 let (engram, floats) = try await target.provider.embedPair(denseText)
-#else
-                // The default build stores the engram only: the pooled float
-                // is computed for the projection and dropped (whole-record dense
-                // rows are a WholeRecordDense sidecar write).
-                let (engram, _) = try await target.provider.embedPair(denseText)
-#endif
                 if target.writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: record.id, vectorIndex: 0,
@@ -1068,7 +1056,6 @@ public actor CorpusContentEngine {
                         modelID: target.modelID, modelVersion: target.modelVersion,
                         filedAt: now))
                 }
-#if MOOTX01_WHOLE_RECORD_DENSE
                 if !floats.isEmpty {
                     rows.append(VectorPayloadInput(
                         itemID: record.id, vectorIndex: 1,
@@ -1076,7 +1063,6 @@ public actor CorpusContentEngine {
                         modelID: target.modelID, modelVersion: target.modelVersion,
                         filedAt: now))
                 }
-#endif
                 covered.append((record.id, target.modelID, target.basisDigest))
             }
             return PreparedStructuralRecord(
@@ -1452,14 +1438,7 @@ public actor CorpusContentEngine {
                 for (targetIndex, target) in computeTargets.enumerated()
                     where missingSnapshot[targetSlotIndices[targetIndex]]?.contains(record.id) == true
                 {
-#if MOOTX01_WHOLE_RECORD_DENSE
                     let (engram, floats) = try await target.provider.embedPair(denseText)
-#else
-                    // The default build stores the engram only: the pooled float
-                    // is computed for the projection and dropped (whole-record dense
-                    // rows are a WholeRecordDense sidecar write).
-                    let (engram, _) = try await target.provider.embedPair(denseText)
-#endif
                     if target.writeBinary {
                         rows.append(VectorPayloadInput(
                             itemID: record.id, vectorIndex: 0,
@@ -1467,7 +1446,6 @@ public actor CorpusContentEngine {
                             modelID: target.modelID, modelVersion: target.modelVersion,
                             filedAt: now))
                     }
-#if MOOTX01_WHOLE_RECORD_DENSE
                     if !floats.isEmpty {
                         rows.append(VectorPayloadInput(
                             itemID: record.id, vectorIndex: 1,
@@ -1475,7 +1453,6 @@ public actor CorpusContentEngine {
                             modelID: target.modelID, modelVersion: target.modelVersion,
                             filedAt: now))
                     }
-#endif
                     covered.append((record.id, target.modelID, target.basisDigest))
                 }
                 return (rows, covered)
@@ -1953,14 +1930,7 @@ public actor CorpusContentEngine {
                 // lexical text otherwise). BM25 tokenisation above always
                 // uses unit.text (the lexical surface) — the two paths are
                 // kept independent so a nil denseText is a true no-op.
-#if MOOTX01_WHOLE_RECORD_DENSE
                 let (engram, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
-#else
-                // The default build stores the engram only: the pooled float
-                // is computed for the projection and dropped (whole-record dense
-                // rows are a WholeRecordDense sidecar write).
-                let (engram, _) = try await slot.provider.embedPair(unit.effectiveDenseText)
-#endif
                 if writeBinary {
                     rows.append(VectorPayloadInput(
                         itemID: unit.key, vectorIndex: 0,
@@ -1969,7 +1939,6 @@ public actor CorpusContentEngine {
                         modelVersion: slot.provider.modelVersion,
                         filedAt: now))
                 }
-#if MOOTX01_WHOLE_RECORD_DENSE
                 if !floats.isEmpty {
                     rows.append(VectorPayloadInput(
                         itemID: unit.key, vectorIndex: 1,
@@ -1978,7 +1947,6 @@ public actor CorpusContentEngine {
                         modelVersion: slot.provider.modelVersion,
                         filedAt: now))
                 }
-#endif
             }
             covered.append((record.id, slot.provider.modelID, slot.basisDigest))
         }
@@ -2624,8 +2592,8 @@ public actor CorpusContentEngine {
             }
 
             // Guard 3: capability probe — reconstruct a fresh instance and call
-            // finalizeFromCounts(). Returns false for LSA and NMF (they keep the
-            // corpus path and re-tokenize at refactor time — the escape clause
+            // finalizeFromCounts(). Returns false for LSA (it keeps the
+            // corpus path and re-tokenizes at refactor time — the escape clause
             // documented in the design doc §3). finalizeFromCounts() may mutate
             // the probe instance; it is discarded after this guard.
             let capabilityProbe = try job.witness.reconstructBasis(from: job.freshBasisBlob)
@@ -2642,7 +2610,7 @@ public actor CorpusContentEngine {
             // that was admitted after the last publication but is not yet in the base.
             // RI (RandomIndexing): countsDeltaFoldSafe == false because float context
             // vector addition is not associative; a non-empty delta forces corpus path.
-            // PPMI: countsDeltaFoldSafe == true (integer count maps are commutative).
+            // LSA: countsDeltaFoldSafe == false (its counts blob holds no TF rows).
             let allRefs = try await countsStore.references(
                 modelID: job.modelID, modelVersion: job.modelVersion)
             let pendingRefs = allRefs.filter { !$0.isSubsumed }
@@ -3009,13 +2977,13 @@ public actor CorpusContentEngine {
     /// Retrain every trainable slot from scratch on the full active corpus
     /// and re-index every active content row without a serving gap.
     ///
-    /// The operation is a shadow swap: trainable slots (RI, PPMI, LSA, NMF)
+    /// The operation is a shadow swap: trainable slots (RI, LSA)
     /// write new vectors into a shadow generation that is invisible to queries
     /// until the atomic publish at the end. The serving generation remains
     /// readable throughout the build. On publish, VectorStore flips the
     /// serving generation in one transaction and rebuilds the HNSW graph from
     /// the new serving rows inside the same operation. Non-trainable slots
-    /// (FDC binary, stateless) write directly to the serving generation as
+    /// (stateless) write directly to the serving generation as
     /// today; the deferred-index bracket batches their resident-index updates.
     ///
     /// On failure mid-way (any thrown error after beginShadowGeneration and before
@@ -3037,8 +3005,8 @@ public actor CorpusContentEngine {
     ///     float-vector lane. Mirrors `recomposeDenseFloat` but applied corpus-wide.
     public func reindex(now: Date, laneScope: LaneScope = .all) async throws {
         // Identify trainable model IDs: slots whose provider is a TrainableEmbeddingBasis
-        // (RI, PPMI, LSA, NMF). Their new vectors will be written into a shadow
-        // generation and published atomically. FDC and stateless slots are not swapped.
+        // (RI, LSA). Their new vectors will be written into a shadow
+        // generation and published atomically. Stateless slots are not swapped.
         let trainableModelIDs = slots
             .filter { $0.provider is (any TrainableEmbeddingBasis) }
             .map { $0.provider.modelID }
@@ -3079,7 +3047,7 @@ public actor CorpusContentEngine {
             // that the subsequent re-embed pass will use. No vector rows are written here.
             _ = try await trainTrainableSlots(now: now, force: true)
 
-            // Bulk-write bracket for non-trainable model writes (FDC binary, stateless
+            // Bulk-write bracket for non-trainable model writes (stateless
             // slots): defers resident dense-index updates for the O(corpus) pass and
             // publishes once at the end. Trainable-model writes bypass resident structures
             // by VectorStore shadow-write contract (shadow rows never enter the binary lane,
@@ -3536,14 +3504,12 @@ public actor CorpusContentEngine {
         try await claims.releaseAllClaims(consumer: Self.claimsConsumer)
     }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     /// Test-only: when non-nil, the next per-signal float call reports
     /// `.storeError(this)` for the DEFAULT slot (single-use), mirroring the
     /// legacy `Corpus._testForceFloatStoreError` seam so GLK's dark-lane
     /// chain tests exercise the store-error contract. Never set in
     /// production.
     package var _forcedFloatError: Error? = nil
-#endif
 
     /// Test-only ingest failure hook: invoked with the content ID BEFORE the
     /// drain processes a job; a throw simulates a transient index failure so

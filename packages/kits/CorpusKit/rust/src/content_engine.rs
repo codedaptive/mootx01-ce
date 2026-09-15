@@ -60,9 +60,8 @@ use synapsekit::{
 /// The whole-record dense float surface of the engine: per-signal nearest and
 /// farthest recall, the discrimination signal, the float re-embed of one
 /// record and the forced store-error test seams. Compiled only with the
-/// `whole-record-dense` feature. Swift twin:
+/// the whole-record float lane. Swift twin:
 /// Sources/CorpusKitWholeRecordDense/CorpusContentEngine+FloatLane.swift.
-#[cfg(feature = "whole-record-dense")]
 mod float_lane;
 
 /// Range evidence for a standalone passage hit. Never changes result
@@ -254,14 +253,11 @@ pub const CLAIMS_CONSUMER: &str = "corpus";
 
 /// The vector lanes this engine writes, claims and deletes per slot: lane 0
 /// is the 256-bit engram row every build writes; lane 1 is the whole-record
-/// float row, which exists only with the `whole-record-dense` feature. The
+/// float row (the whole-record float lane). The
 /// default build names lane 0 alone, so a populated estate whose float rows
 /// the 1.6 to 1.7 capsule vacuumed (and whose lane-1 claim it released) is
 /// never re-claimed by `reconcile_configured_providers`.
-#[cfg(feature = "whole-record-dense")]
 pub const CLAIMED_LANES: [u32; 2] = [0, 1];
-#[cfg(not(feature = "whole-record-dense"))]
-pub const CLAIMED_LANES: [u32; 1] = [0];
 
 /// Reserved checkpoint row recording the last APPLIED feed cursor.
 pub(crate) const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
@@ -399,10 +395,9 @@ pub struct CorpusContentEngine {
     /// Test-only drain failure-injection hook.
     ingest_failure_hook: Mutex<Option<ContentIngestFailureHook>>,
     /// Test-only single-use forced float store error (default slot).
-    #[cfg(feature = "whole-record-dense")]
     forced_float_error: Mutex<Option<String>>,
     /// Test-only single-use provider opt-out for the default float slot.
-    #[cfg(all(feature = "canonical-test-seams", feature = "whole-record-dense"))]
+    #[cfg(feature = "canonical-test-seams")]
     forced_float_provider_opt_out: AtomicBool,
     /// Test-only training fault seams (crash-boundary suites).
     train_fault_after_model: Mutex<Option<String>>,
@@ -578,9 +573,8 @@ impl CorpusContentEngine {
             on_encoded: Mutex::new(None),
             encode_speed: Mutex::new(EncodeSpeed::Foreground),
             ingest_failure_hook: Mutex::new(None),
-            #[cfg(feature = "whole-record-dense")]
             forced_float_error: Mutex::new(None),
-            #[cfg(all(feature = "canonical-test-seams", feature = "whole-record-dense"))]
+            #[cfg(feature = "canonical-test-seams")]
             forced_float_provider_opt_out: AtomicBool::new(false),
             train_fault_after_model: Mutex::new(None),
             train_fault_before_commit_model: Mutex::new(None),
@@ -1303,9 +1297,7 @@ impl CorpusContentEngine {
                                     })?;
                                 // The default build stores the engram only; the pooled float is
                                 // computed for the projection and dropped (whole-record dense rows
-                                // are a whole-record-dense feature write).
-                                #[cfg(not(feature = "whole-record-dense"))]
-                                let _ = floats;
+                                // are a whole-record float lane write).
                                 if meta.3 {
                                     rows.push(VectorPayloadInput {
                                         item_id: record.id.clone(),
@@ -1316,7 +1308,6 @@ impl CorpusContentEngine {
                                         filed_at_unix_secs: now_millis,
                                     });
                                 }
-                                #[cfg(feature = "whole-record-dense")]
                                 {
                                     if !floats.is_empty() {
                                         rows.push(VectorPayloadInput {
@@ -1941,9 +1932,7 @@ impl CorpusContentEngine {
                     .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
                 // The default build stores the engram only; the pooled float is
                 // computed for the projection and dropped (whole-record dense rows
-                // are a whole-record-dense feature write).
-                #[cfg(not(feature = "whole-record-dense"))]
-                let _ = floats;
+                // are a whole-record float lane write).
                 if write_binary {
                     rows.push(VectorPayloadInput {
                         item_id: key.clone(),
@@ -1954,7 +1943,6 @@ impl CorpusContentEngine {
                         filed_at_unix_secs: now_millis,
                     });
                 }
-                #[cfg(feature = "whole-record-dense")]
                 {
                     if !floats.is_empty() {
                         rows.push(VectorPayloadInput {
@@ -3382,9 +3370,7 @@ impl CorpusContentEngine {
                                             })?;
                                         // The default build stores the engram only; the pooled float is
                                         // computed for the projection and dropped (whole-record dense rows
-                                        // are a whole-record-dense feature write).
-                                        #[cfg(not(feature = "whole-record-dense"))]
-                                        let _ = floats;
+                                        // are a whole-record float lane write).
                                         if meta.4 {
                                             rows.push(VectorPayloadInput {
                                                 item_id: record.id.clone(),
@@ -3395,7 +3381,6 @@ impl CorpusContentEngine {
                                                 filed_at_unix_secs: now_millis,
                                             });
                                         }
-                                        #[cfg(feature = "whole-record-dense")]
                                         {
                                             if !floats.is_empty() {
                                                 rows.push(VectorPayloadInput {
@@ -3522,42 +3507,12 @@ impl CorpusContentEngine {
                         provider.model_version().to_string(),
                         true,
                     ),
-                    EmbeddingModelConfig::Ppmi { provider } => (
-                        provider.model_id().to_string(),
-                        provider.model_version().to_string(),
-                        true,
-                    ),
                     EmbeddingModelConfig::Lsa { provider } => (
                         provider.model_id().to_string(),
                         provider.model_version().to_string(),
                         true,
                     ),
-                    EmbeddingModelConfig::Nmf { provider } => (
-                        provider.model_id().to_string(),
-                        provider.model_version().to_string(),
-                        true,
-                    ),
-                    EmbeddingModelConfig::Fdc { provider } => (
-                        provider.model_id().to_string(),
-                        provider.model_version().to_string(),
-                        false,
-                    ),
-                    // The named text models are constructed with these fixed
-                    // identities in `Corpus::build_slot`; mirrored here so the
-                    // fingerprint never needs the inference seam.
-                    EmbeddingModelConfig::MiniLM { .. } => {
-                        ("minilm-v6".to_string(), "1.0.0".to_string(), false)
-                    }
-                    EmbeddingModelConfig::MPNet { .. } => {
-                        ("mpnet-base-v2".to_string(), "1.0.0".to_string(), false)
-                    }
-                    EmbeddingModelConfig::EmbeddingGemma { .. } => (
-                        "embedding-gemma-300m".to_string(),
-                        "1.0.0".to_string(),
-                        false,
-                    ),
-                    // CandleNL: the provider carries its own model identity;
-                    // read it from the provider box (same as Fdc).
+                    // CandleNL: the provider carries its own model identity.
                     EmbeddingModelConfig::CandleNL { provider } => (
                         provider.model_id().to_string(),
                         provider.model_version().to_string(),
@@ -3620,13 +3575,13 @@ impl CorpusContentEngine {
     /// Retrain every trainable slot from scratch and re-index every active
     /// content row without a serving gap.
     ///
-    /// The operation is a shadow swap: trainable slots (RandomIndexing, PPMI,
-    /// LSA, NMF — identified by having a `fresh_basis_blob`) write new vectors
+    /// The operation is a shadow swap: trainable slots (RandomIndexing and
+    /// LSA — identified by having a `fresh_basis_blob`) write new vectors
     /// into a shadow generation that is invisible to queries until the atomic
     /// publish at the end. The serving generation remains readable throughout
     /// the build. On publish, VectorStore flips the serving generation in one
     /// transaction and rebuilds the HNSW graph from the new serving rows.
-    /// Non-trainable slots (FDC binary, stateless / Deterministic) write
+    /// Non-trainable slots (stateless / Deterministic / CandleNL) write
     /// directly to the serving generation; the deferred-index bracket batches
     /// their resident-index updates.
     ///
@@ -3638,9 +3593,9 @@ impl CorpusContentEngine {
     /// generation remains intact and keeps serving.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
         // Identify trainable model IDs: slots whose fresh_basis_blob is Some
-        // (RandomIndexing, PPMI, LSA, NMF). Their new vectors will be written
+        // (RandomIndexing, LSA). Their new vectors will be written
         // into a shadow generation and published atomically. Non-trainable
-        // (FDC, Deterministic/stateless) slots are not swapped.
+        // (Deterministic/stateless) slots are not swapped.
         let trainable_model_ids: Vec<String> = self
             .slots
             .iter()
@@ -3684,7 +3639,7 @@ impl CorpusContentEngine {
             // that the subsequent re-embed pass will use. No vector rows are written here.
             self.train_trainable_slots(now_millis, true)?;
 
-            // Bulk-write bracket for non-trainable model writes (stateless/FDC slots):
+            // Bulk-write bracket for non-trainable model writes (stateless slots):
             // defers resident dense-index updates for the O(corpus) pass and publishes
             // once at the end. Trainable-model writes bypass resident structures by
             // VectorStore shadow-write contract (shadow rows never enter the binary

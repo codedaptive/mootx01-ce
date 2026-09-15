@@ -1,18 +1,18 @@
 //! Shared term-document count builder used by every distributional-semantics
-//! provider in corpus-kit-providers (LSA, NMF, Random Indexing, PPMI).
+//! provider in corpus-kit-providers (Random Indexing and LSA).
 //!
 //! ## What this module owns
 //!
 //!   - Tokenization via the canonical `corpus_kit::default_keyword_tokens`
 //!     (for the text-consuming providers) or acceptance of an already-
-//!     tokenized term sequence (for the term-consuming providers, RI and PPMI).
+//!     tokenized term sequence (for the term-consuming provider, RI).
 //!   - Vocabulary construction in ENCOUNTER ORDER: terms are assigned
 //!     integer indices as they are first seen across the training sequence.
 //!     Deterministic for a fixed document sequence. This is a correctness
-//!     invariant — the downstream SVD and NMF factorizations depend on
+//!     invariant — the downstream SVD factorization depends on
 //!     stable column indices.
 //!   - Raw per-document term-frequency counts: tf_counts[docIdx][termIdx]
-//!     (LSA and NMF only).
+//!     (LSA only).
 //!   - Per-term document-frequency counts: df_counts[termIdx] = number of
 //!     documents that contain the term at least once. Every distributional
 //!     provider derives its IDF weights from these through the ONE smoothed
@@ -20,8 +20,8 @@
 //!
 //! ## What this module does NOT own
 //!
-//!   - Matrix orientation (documents×terms for LSA, terms×documents for NMF).
-//!   - Factorization (SVD for LSA, NMF-ALS for NMF).
+//!   - Matrix orientation (documents×terms for LSA).
+//!   - Factorization (SVD for LSA).
 //!   - Pooling (see distributional_pooling.rs).
 //!
 //! ## Swift port
@@ -84,7 +84,7 @@ pub struct TermDocumentCounts {
     pub tf_counts: Vec<HashMap<usize, usize>>,
 
     /// Document frequency: df_counts[termIdx] = number of documents containing term.
-    /// LSA uses this for IDF weighting. NMF ignores it.
+    /// LSA uses this for IDF weighting.
     pub df_counts: HashMap<usize, usize>,
 }
 
@@ -101,7 +101,7 @@ impl TermDocumentCounts {
     /// Reconstruct a count builder from a known vocabulary and document
     /// count, WITHOUT re-tokenizing any text (the deserialization path).
     ///
-    /// LSA and NMF read only `vocab` (term → index, for query fold-in) and
+    /// LSA reads only `vocab` (term → index, for query fold-in) and
     /// `document_count()` (for the `document_embedding(doc_idx)` range check)
     /// from a finalized provider — the raw per-document TF counts are
     /// training-phase scratch not needed for embedding. A deserialized
@@ -120,7 +120,7 @@ impl TermDocumentCounts {
     }
 
     /// Reconstruct the document-frequency table of a term-consuming provider
-    /// (RI, PPMI) from persisted counts: term → df, plus the document count.
+    /// (RI) from persisted counts: term → df, plus the document count.
     ///
     /// Terms receive indices in ascending UTF-8 byte order of the term — the
     /// order the counts codec writes them in — so the restored table is a
@@ -218,7 +218,7 @@ impl TermDocumentCounts {
     /// Fold one ALREADY-TOKENIZED document into the vocabulary and the
     /// document-frequency table, without retaining a TF row.
     ///
-    /// Entry point for the term-consuming providers (RI, PPMI), whose `train`
+    /// Entry point for the term-consuming provider (RI), whose `train`
     /// receives one document's term sequence per call. Each distinct term
     /// counts once toward `df_counts` no matter how often it repeats; a
     /// document with no terms is not recorded (same rule as `add_document`).
@@ -294,7 +294,7 @@ impl Default for TermDocumentCounts {
 mod tests {
     use super::*;
 
-    /// The canonical 5-doc mini-corpus shared by LSA, NMF, and this test.
+    /// The canonical 5-doc mini-corpus shared by LSA and this test.
     fn canonical_corpus() -> Vec<&'static str> {
         vec![
             "car engine drive road vehicle",
