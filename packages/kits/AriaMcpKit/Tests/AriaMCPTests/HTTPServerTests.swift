@@ -46,7 +46,7 @@ struct HTTPServerTests {
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
     }
 
-    /// Build a dispatcher and keep direct access to the same estate for seeding.
+    /// Build a dispatcher and retain the same GLK handle for seeding.
     private func makeDispatcherWithEstate() async throws -> (
         dispatcher: ARIA_MCPDispatcher,
         kit: GeniusLocusKit,
@@ -1247,8 +1247,7 @@ struct FirstPartyHTTPLaneTests {
         ]
         for response in responses { #expect(response?.contains("\"isError\":false") == true) }
 
-        let estate = try await kit.estate(for: handle)
-        let persisted = try await estate.allDrawers()
+        let persisted = try await kit.allDrawers(in: handle)
         #expect(persisted.first(where: { $0.id == updateTarget.id })?.subject == "updated through native id")
         #expect(persisted.first(where: { $0.id == withdrawTarget.id })?.state == .withdrawn)
         let erased = try #require(persisted.first(where: { $0.id == eraseTarget.id }))
@@ -1259,7 +1258,7 @@ struct FirstPartyHTTPLaneTests {
         let placement = try #require(try await kit.resolveNodeNames(handle, parentNodeIds: [moved.parentNodeId])[moved.parentNodeId])
         #expect(placement.wing == "Retained Native Wing")
         #expect(placement.room == "new room")
-        #expect(try await estate.getTunnel(id: tunnel.id)?.lifecycle == .active)
+        #expect(try await kit.getTunnel(in: handle, id: tunnel.id)?.lifecycle == .active)
         #expect(try await kit.recallKGFacts(handle).contains(where: { $0.id == fact.id }) == false)
     }
 
@@ -1432,10 +1431,9 @@ struct FirstPartyHTTPLaneTests {
         let review = authenticatedRequest(port: port, session: session, sequence: 3,
             body: #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"moot_review_tunnel","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"tunnel_id":"\#(tunnel.id)","decision":"accept"}}}"#)
         #expect(review?.contains("\"isError\":true") == true)
-        let estate = try await kit.estate(for: handle)
-        #expect(try await estate.allDrawers().first(where: { $0.id == secret.id })?.adjectiveSensitivity == .secret)
+        #expect(try await kit.allDrawers(in: handle).first(where: { $0.id == secret.id })?.adjectiveSensitivity == .secret)
         #expect(try await kit.recallKGFacts(handle).contains(where: { $0.id == fact.id }))
-        #expect(try await estate.getTunnel(id: tunnel.id)?.lifecycle == .proposed)
+        #expect(try await kit.getTunnel(in: handle, id: tunnel.id)?.lifecycle == .proposed)
         let keystones = authenticatedRequest(port: port, session: session, sequence: 4,
             body: #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"moot_lens_keystones","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":{"wing":"\#(LocusKit.defaultWingName)","topK":10,"keystoneOnly":false}}}"#)
         #expect(keystones?.lowercased().contains(secret.id.lowercased()) == false)

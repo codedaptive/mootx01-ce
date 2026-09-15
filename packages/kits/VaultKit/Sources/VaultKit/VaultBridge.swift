@@ -839,9 +839,8 @@ public struct VaultBridge: Sendable {
         )
         // Resolve display names (wing, room) from the node tree in one batch
         // (node-tree integrity: Drawer no longer stores wing/room).
-        let estate = try await kit.estate(for: handle)
-        let nodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: drawers.map(\.parentNodeId))
+        let nodeNames = try await kit.resolveNodeNames(
+            handle, parentNodeIds: drawers.map(\.parentNodeId))
 
         var lineageIDs: Set<UUID> = []
         var wings: Set<String> = []

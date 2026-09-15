@@ -106,8 +106,7 @@ struct VaultBridgeTests {
     private func resolveNames(
         _ drawers: [Drawer], kit: GeniusLocusKit, handle: EstateHandle
     ) async throws -> [String: (wing: String, room: String)] {
-        let estate = try await kit.estate(for: handle)
-        return try await estate.resolveNodeNames(parentNodeIds: drawers.map(\.parentNodeId))
+        return try await kit.resolveNodeNames(handle, parentNodeIds: drawers.map(\.parentNodeId))
     }
 
     /// Resolve display names for a single drawer.
@@ -1699,7 +1698,6 @@ struct VaultBridgeTests {
 
         // Create the _distilled_from provenance tunnel (factoid → source),
         // exactly as DistillationCycle does.
-        let estate = try await kit.estate(for: handle)
         // Resolve display names for the captured drawers.
         let sourceNames = try await resolveNames(sourceDrawer, kit: kit, handle: handle)
         let factoidNames = try await resolveNames(factoidDrawer, kit: kit, handle: handle)
@@ -1715,7 +1713,7 @@ struct VaultBridgeTests {
             kind: .references,
             originClass: .derived
         )
-        _ = try await estate.capture(provenanceFrame)
+        _ = try await kit.captureTunnel(handle, provenanceFrame)
 
         // Export the estate to the vault.
         let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))

@@ -135,7 +135,8 @@ func daemonPreOpenPreservesEstateDataIdentityAndKey() async throws {
     }
 
     let proof = try await host.openEstate()
-    let drawers = try await host.estate().allDrawers()
+    let handle = try await host.handle()
+    let drawers = try await host.kit.allDrawers(in: handle)
 
     #expect(proof.estateIdentifier == seeded.estateID)
     #expect(drawers.contains { $0.id == seeded.drawerID && $0.content == "legacy estate sentinel" })
@@ -269,7 +270,8 @@ func appMigrationReadinessPermitsHelperOpen() async throws {
         readiness: readiness
     )
     let proof = try await host.openEstate()
-    let drawers = try await host.estate().allDrawers()
+    let handle = try await host.handle()
+    let drawers = try await host.kit.allDrawers(in: handle)
 
     #expect(proof.estateIdentifier == seeded.estateID)
     #expect(drawers.contains { $0.id == seeded.drawerID && $0.content == "legacy estate sentinel" })
@@ -291,7 +293,8 @@ func existingCanonicalDoesNotRequireAppReadiness() async throws {
     )
 
     let proof = try await host.openEstate()
-    let drawers = try await host.estate().allDrawers()
+    let handle = try await host.handle()
+    let drawers = try await host.kit.allDrawers(in: handle)
 
     #expect(!readiness.isReady())
     #expect(proof.estateIdentifier == seeded.estateID)
