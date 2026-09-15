@@ -1,15 +1,16 @@
 //! commands/preference.rs — `mootx01 preference <list|get|set>`: the
-//! user-owned estate switches (`EstatePreferenceKey`), each stored in the
-//! estate manifest as the plain string `on` or `off`.
+//! user-owned estate preferences (`EstatePreferenceKey`), each stored in the
+//! estate manifest as a plain string.
 //!
-//!   preference list [--db <value>]                 every key with its value, in `ALL` order
-//!   preference get <key> [--db <value>]            one key's value
-//!   preference set <key> <on|off> [--db <value>]   write a value, print the read-back
+//!   preference list [--db <value>]                         every key with its value, in `ALL` order
+//!   preference get <key> [--db <value>]                    one key's value
+//!   preference set <key> <value> [--db <value>]            write a value, print the read-back
 //!
-//! Every switch is ON unless the manifest holds `off`; an absent or
-//! unrecognised stored value reads as ON. A `set` takes effect without a
-//! daemon restart: each reader (daemon, duty, recall route) consults its key
-//! at fire time, so the next fire after the write sees the new value.
+//! Values: on, off for the switches; fact_extractor takes nuextract or apple.
+//! A key that has never been set reads as its default (on; nuextract for
+//! fact_extractor). A `set` takes effect without a daemon restart: each reader
+//! (daemon, duty, recall route) consults its key at fire time, so the next
+//! fire after the write sees the new value.
 //!
 //! The estate is opened for one operation the same way `mootx01 upgrade`
 //! opens it: the catalog names the estate (`--db` or the active record), a
@@ -126,9 +127,12 @@ fn apply(
         }
         Operation::Set { key, value } => {
             let key = parse_key(key)?;
-            let value = EstatePreferenceValue::from_str(value).ok_or_else(|| {
-                format!("invalid value '{value}' for '{}'; expected on or off", key.as_str())
-            })?;
+            let value = EstatePreferenceValue::from_str(value)
+                .filter(|v| key.allowed_values().contains(v))
+                .ok_or_else(|| {
+                    let allowed: Vec<&str> = key.allowed_values().iter().map(|v| v.as_str()).collect();
+                    format!("invalid value '{value}' for '{}'; allowed: {}", key.as_str(), allowed.join(", "))
+                })?;
             coordinator
                 .provision_preference(handle, key, value)
                 .map_err(|e| format!("could not set '{}': {e:?}", key.as_str()))?;
