@@ -30,13 +30,9 @@ import EngramLib
 @testable import CorpusKit
 
 /// Vector rows the RI slot writes per item: the engram row always; the float
-/// row (vectorIndex 1) only in the WholeRecordDense build.
+/// row (vectorIndex 1) via the whole-record float lane.
 private let vectorLanesPerItem: Int = {
-#if MOOTX01_WHOLE_RECORD_DENSE
     2
-#else
-    1
-#endif
 }()
 
 @Suite("SharedContentCharacterization", .serialized)
@@ -212,7 +208,7 @@ struct SharedContentCharacterizationTests {
             #expect(byTable["corpus_metadata"]?.rowCount == 2)
             #expect(byTable["iix_doclens"]?.rowCount == 2)
             #expect((byTable["iix_termfreqs"]?.rowCount ?? 0) > 0)
-            // Binary engram row per chunk; the WholeRecordDense build also
+            // Binary engram row per chunk; the whole-record float lane also
             // stores a float row per chunk.
             #expect(byTable["vectors"]?.rowCount == 2 * vectorLanesPerItem)
             #expect(byTable["removed_sources"]?.rowCount == 0)

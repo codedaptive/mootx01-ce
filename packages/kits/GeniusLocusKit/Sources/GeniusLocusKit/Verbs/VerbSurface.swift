@@ -2071,8 +2071,7 @@ public extension GeniusLocusKit {
     /// selection.
     ///
     /// An absent key means "use the deterministic default ensemble
-    /// (RI only by default; RI/PPMI/NMF/FDC under DenseFamilies; LSA on its own
-    /// switch, MOOTX01_LSA, and dark by default)." No estate migration is required.
+    /// (RI and LSA, both always on)." No estate migration is required.
     ///
     /// ## Provider model ID contract
     ///
@@ -2115,7 +2114,7 @@ public extension GeniusLocusKit {
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     ///
     /// `package` rather than internal so the 1.6 to 1.7 migration capsule (a
-    /// sibling module) can read the key under the WholeRecordDense trait.
+    /// sibling module) can read the key.
     package func provisionedEmbeddingProvider(for handle: EstateHandle) async throws -> String? {
         let estate = try estate(for: handle)
         // meta(key:) returns nil when the key is absent; an empty string

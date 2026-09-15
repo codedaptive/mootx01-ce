@@ -81,9 +81,8 @@ public extension GeniusLocusKit {
     ///   - owner: Credentials for the new estate's owner.
     ///   - params: Provisioning parameters (name, kind, zoom window, profile, sync mode).
     ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
-    ///     canonical ensemble (`CorpusEnsemble.defaultEnsemble()`: RI only by
-    ///     default; RI / PPMI / NMF / FDC under DenseFamilies; LSA is on its
-    ///     own switch, MOOTX01_LSA, and is dark by default). The Corpus lifecycle
+    ///     canonical ensemble (`CorpusEnsemble.defaultEnsemble()`: RI and LSA,
+    ///     both always on). The Corpus lifecycle
     ///     trains and persists the trainable signals on first ingest / reindex.
     ///     Pass an explicit single-element list (e.g. `[.deterministic]`) only when a caller
     ///     specifically wants one signal. Ignored for `.locusOnly` kind.

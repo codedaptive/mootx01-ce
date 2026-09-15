@@ -1,8 +1,8 @@
 // Tokenizer.swift
 //
 // Tokenization protocol shared by every embedding provider.
-// Concrete tokenizers (BERT WordPiece for MiniLM, BERT WordPiece
-// for mpnet, SentencePiece for EmbeddingGemma) live in
+// Concrete tokenizers (BERT WordPiece for the MiniLM span encoder and
+// the DeterministicTokenizer stub) live in
 // CorpusKitProviders.
 
 import Foundation
@@ -38,7 +38,7 @@ public protocol Tokenizer: Sendable {
 /// of Unicode-alphabetic + ASCII-digit scalars, split on everything else.
 ///
 /// Used by BM25 (via the `Tokenizer.keywordTokens` default below) AND by every
-/// distributional embedding provider (RI/PPMI/LSA/NMF) so the lexical and dense
+/// distributional embedding provider (RI/LSA) so the lexical and dense
 /// lanes can never tokenize differently. Parity with the Rust port's public
 /// `corpus_kit::default_keyword_tokens`. Changing this invalidates the
 /// providers' committed conformance vectors (regenerate on both ports).

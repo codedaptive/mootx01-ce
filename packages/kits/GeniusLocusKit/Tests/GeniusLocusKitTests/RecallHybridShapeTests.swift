@@ -106,16 +106,7 @@ struct RecallHybridShapeTests {
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         return try await CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: { tokens in
-                var v = Array(repeating: Float(0), count: 384)
-                for tok in tokens {
-                    let key = Float(((tok % 251) + 251) % 251 + 1)
-                    for j in 0..<v.count {
-                        v[j] += Foundation.cos(key * (Float(j) + 1.0) * 0.1)
-                    }
-                }
-                return v
-            })]
+            models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))]
         )
     }
 

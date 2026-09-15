@@ -17,9 +17,7 @@
 //       This is the GOLDEN PIN: the same fixture vectors and expectations
 //       as RecallShapeFloatMetricTests (cosine vs l2 vs dot ordering).
 
-// whole-record-dense feature only: the whole-record float lane is a sidecar
-// (ruling 2026-09-07).
-#![cfg(feature = "whole-record-dense")]
+// the whole-record float lane is always active.
 
 use std::collections::HashMap;
 use std::sync::Arc;

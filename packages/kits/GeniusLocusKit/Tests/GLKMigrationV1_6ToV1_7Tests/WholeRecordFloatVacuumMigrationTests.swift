@@ -29,7 +29,7 @@
 //      a fresh store loads it without a rebuild.
 //   6. v1_5-stamped estate: the chain runs the 1.5→1.6 capsule and then this
 //      one, ending at current (gated on the 1.5→1.6 capsule being compiled).
-//   7. Under WholeRecordDense an estate whose manifest names a whole-record
+//   7. An estate whose manifest names a whole-record
 //      provider keeps its rows and is still stamped v1_7; the span encoder
 //      value vacuums like the default ensemble.
 //   8. v1_7-stamped estate: the chain's `found < .v1_7` guard skips this
@@ -265,7 +265,6 @@ struct WholeRecordFloatVacuumMigrationTests {
 
     // MARK: §7 The audition build keeps a whole-record provider's rows
 
-    #if MOOTX01_WHOLE_RECORD_DENSE
     @Test
     func wholeRecordProviderInTheManifestKeepsTheRows() async throws {
         let storage = inMemory()
@@ -290,7 +289,6 @@ struct WholeRecordFloatVacuumMigrationTests {
         #expect(try await kindCount(storage, 1) == 0)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_7)
     }
-    #endif
 
     // MARK: §8 Chain from v1_7 skips this capsule: the rows survive
 
