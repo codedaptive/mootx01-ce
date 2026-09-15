@@ -294,8 +294,7 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
         // Evaluate the upstream-release provider here (async, orientation-only).
         // Not evaluated for other operations — identical rationale as ping above.
         let updateAdvisory = await context.updateAdvisoryProvider?()
-        let estate = try await kit.estate(for: handle)
-        let drawers = try await estate.allDrawers()
+        let drawers = try await kit.allDrawers(in: handle)
         let visible = drawers.filter { $0.tombstonedAt == nil && $0.adjectiveSensitivity.isBulkExportable }
         let active = visible.filter {
             let stateRaw = UInt8($0.adjectiveBitmap & 0x3F)
@@ -306,7 +305,7 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
         // FDC recalculation state: compare the stored floor meta key against
         // the current recalculation version. Reuses the same computation as
         // the retired v1 status renderer. See contract §5.
-        let fdcFloor = try await estate.meta(key: AriaV2GeniusLocusDataMobilityAuthority.fdcRecalcedDataVersionMetaKey)
+        let fdcFloor = try await kit.meta(in: handle, key: AriaV2GeniusLocusDataMobilityAuthority.fdcRecalcedDataVersionMetaKey)
         let fdcRecalculation: String
         if fdcFloor == FDC.recalculationVersion {
             fdcRecalculation = "current"
@@ -350,11 +349,10 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
 
     public func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData {
         try validate(context)
-        let estate = try await kit.estate(for: handle)
-        let drawers = try await estate.allDrawers().filter {
+        let drawers = try await kit.allDrawers(in: handle).filter {
             $0.tombstonedAt == nil && $0.adjectiveSensitivity.isBulkExportable
         }
-        let names = try await estate.resolveNodeNames(parentNodeIds: drawers.map(\.parentNodeId))
+        let names = try await kit.resolveNodeNames(handle, parentNodeIds: drawers.map(\.parentNodeId))
         var counts: [String: [String: Int]] = [:]
         for drawer in drawers {
             let location = names[drawer.parentNodeId]

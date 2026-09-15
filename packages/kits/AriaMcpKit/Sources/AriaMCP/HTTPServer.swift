@@ -1880,9 +1880,8 @@ public struct HTTPServer: Sendable {
         do {
             let kit = tooling.kit
             let handle = tooling.handle
-            let locus = try await kit.estate(for: handle)
 
-            let drawers = try await locus.allDrawers().filter { $0.tombstonedAt == nil }
+            let drawers = try await kit.allDrawers(in: handle).filter { $0.tombstonedAt == nil }
 
             // Group by udcCode; omit empty-string and "000" unclassified sentinels.
             var counts: [String: Int] = [:]

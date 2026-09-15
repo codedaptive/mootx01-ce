@@ -1736,8 +1736,7 @@ extension ToolDispatcher {
         let drawer = try await kit.capture(handle, frame, mode: mode)
         // Resolve the drawer's parentNodeId to a display room name via the
         // node tree (Drawer no longer carries stored wing/room after node-tree integrity).
-        let estate = try await kit.estate(for: handle)
-        let nodeNames = try await estate.resolveNodeNames(
+        let nodeNames = try await kit.resolveNodeNames(handle, 
             parentNodeIds: [drawer.parentNodeId])
         let roomName = nodeNames[drawer.parentNodeId]?.room ?? ""
         var lines = [
@@ -1886,7 +1885,6 @@ extension ToolDispatcher {
         }
         let singleIDMode = rowIDs.count == 1
         let rowID = rowIDs[0]
-        let estate = try await kit.estate(for: handle)
 
         // sensitivity unlock: same grant-ceiling injection as
         // sensitivity unlock: the same containment gate moot_memory_search
@@ -1902,7 +1900,7 @@ extension ToolDispatcher {
             sensitivityCeilingLifted = true
         }
         let frame = RecallFrame(filterChain: filterChain, hydrationLevel: .full)
-        let filtered = try await estate.getDrawers(
+        let filtered = try await kit.getDrawers(in: handle, 
             ids: rowIDs, matchingFrame: frame, hydrationLevel: .full)
         // Provenance-sensitivity redaction boundary for by-id reads: the
         // RecallFrame gate above checks adjective sensitivity (bits 6-11);
@@ -1939,7 +1937,7 @@ extension ToolDispatcher {
         // depth:full (single) → S3 full record via renderS3Record (falls through)
         if !singleIDMode || depthName != "full" {
             // One batched node-name read for room over the admissible rows.
-            let getNodeNames = try await estate.resolveNodeNames(
+            let getNodeNames = try await kit.resolveNodeNames(handle, 
                 parentNodeIds: rowIDs.compactMap { admissibleByID[$0]?.parentNodeId })
 
             // depth:subject — S2 batch-get shape.
@@ -2015,7 +2013,7 @@ extension ToolDispatcher {
                 } else {
                     // depth:full in batch mode — S3 full record per drawer.
                     let names = getNodeNames[d.parentNodeId] ?? (wing: "", room: "")
-                    let allTunnels = try await estate.allTunnels()
+                    let allTunnels = try await kit.allTunnels(in: handle)
                     let linked = allTunnels.filter {
                         ($0.sourceDrawerId == d.id || $0.targetDrawerId == d.id)
                             && $0.tombstonedAt == nil && $0.lifecycle == .active
@@ -2075,9 +2073,9 @@ extension ToolDispatcher {
 
         // Resolve node names and active tunnels for the S3 record.
         // sensitivity_advisory removed from payload (moved to tool description text).
-        let nodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        let nodeNames = try await kit.resolveNodeNames(handle, parentNodeIds: [drawer.parentNodeId])
         let names = nodeNames[drawer.parentNodeId] ?? (wing: "", room: "")
-        let allTunnels = try await estate.allTunnels()
+        let allTunnels = try await kit.allTunnels(in: handle)
         let linked = allTunnels.filter {
             ($0.sourceDrawerId == drawer.id || $0.targetDrawerId == drawer.id)
                 && $0.tombstonedAt == nil && $0.lifecycle == .active
@@ -2157,8 +2155,7 @@ extension ToolDispatcher {
         // idx_kg_facts_subject and idx_kg_facts_sourceDrawer let the engine
         // seek rather than scan when these columns are constrained.
         // predicateExact, objectExact, and the substring query remain in-memory.
-        let estate = try await kit.estate(for: handle)
-        let allFactsRaw = try await estate.kgFacts(
+        let allFactsRaw = try await kit.kgFacts(in: handle, 
             subjectEq: subjectExact,
             sourceDrawerIDEq: sourceExact
         )
@@ -2191,7 +2188,7 @@ extension ToolDispatcher {
         if distinctSourceIDs.isEmpty {
             hiddenSourceIDs = []
         } else {
-            let result = try await estate.getDrawers(
+            let result = try await kit.getDrawers(in: handle, 
                 ids: distinctSourceIDs,
                 matchingFrame: RecallFrame(filterChain: []),
                 hydrationLevel: .structured
