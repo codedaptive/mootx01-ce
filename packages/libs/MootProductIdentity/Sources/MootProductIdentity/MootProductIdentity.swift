@@ -145,12 +145,14 @@ public enum MootProductIdentity {
         /// signed entitlements, as the signature expanded them. Empty for an
         /// unsigned or unentitled process and on platforms without Security.
         public static func signedApplicationGroups() -> [String] {
-            #if canImport(Security)
+            #if os(macOS)
             guard let task = SecTaskCreateFromSelf(nil),
                   let value = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString, nil),
                   let groups = value as? [String] else { return [] }
             return groups
             #else
+            // iOS has no SecTask API; the app-group entitlement is resolved by
+            // the host app, so this reader reports absent.
             return []
             #endif
         }
