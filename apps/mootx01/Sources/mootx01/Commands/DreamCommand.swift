@@ -45,6 +45,7 @@ import PersistenceKitSQLite
 import QueueKit
 import MootInstallerCore
 import MootEstateOpen
+import FactExtractionKit
 import MootFactExtractorActivation
 import Darwin
 
@@ -158,18 +159,29 @@ struct DreamCommand: AsyncParsableCommand {
         // The detached/on-demand finisher owns one bounded Signal 14 pass while
         // the estate is open. This runs before the REM queue gate so fact debt
         // progresses even when no recall-driven dreaming job is pending.
-        let factExtractionSetting = try? await kit.provisionedPreference(
-            .factExtraction, for: handle)
-        let factExtractorSetting = try? await kit.provisionedPreference(
-            .factExtractor, for: handle)
+        // `provisionedPreference` returns the key's default for an absent
+        // value, so the only error it can raise is a storage error; that
+        // error is fatal here and never substituted with a default, because
+        // a pass running on defaults the estate never asked for would
+        // silently extract (or skip extracting) against its configuration.
         let factSettingsDirectory = estate.kind == .registered
             ? EstateCatalog.configurationDirectory : estate.directory
-        if let extractor = FactExtractorBuilder.build(
-            masterSetting: factExtractionSetting ?? .off,
-            extractorSetting: factExtractorSetting ?? .nuextract,
-            settingsDirectory: factSettingsDirectory,
-            workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
-        {
+        let factExtractor: (any FactExtractor)?
+        do {
+            let factExtractionSetting = try await kit.provisionedPreference(
+                .factExtraction, for: handle)
+            let factExtractorSetting = try await kit.provisionedPreference(
+                .factExtractor, for: handle)
+            factExtractor = FactExtractorBuilder.build(
+                masterSetting: factExtractionSetting,
+                extractorSetting: factExtractorSetting,
+                settingsDirectory: factSettingsDirectory,
+                workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+        } catch {
+            Logging.stderr.log("mootx01 dream fatal: fact-extraction preference read failed: \(error)")
+            throw ExitCode.failure
+        }
+        if let extractor = factExtractor {
             let spec = extractor.spec
             let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
             do {
