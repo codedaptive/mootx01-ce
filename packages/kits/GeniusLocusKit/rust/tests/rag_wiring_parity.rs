@@ -286,12 +286,12 @@ fn corpus_lane_emits_drawer_level_associations() {
             Ok(acc)
         },
     );
-    // Fdc is the plain pass-through provider slot (stateless, no training) —
+    // CandleNL is the plain pass-through provider slot (stateless, no training) —
     // the vehicle for injecting the token-bag provider.
     let corpus = Arc::new(
         CorpusContentEngine::standalone_on(
             make_storage(),
-            vec![EmbeddingModelConfig::Fdc { provider: Box::new(provider) }],
+            vec![EmbeddingModelConfig::CandleNL { provider: Box::new(provider) }],
         )
         .expect("CorpusContentEngine::standalone_on"),
     );

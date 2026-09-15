@@ -1,5 +1,7 @@
 #if APPLE_ENCODERS
 // Apple encoder provider — compiled only when the AppleEncoders trait is on.
+// Retained in case Apple improves the NaturalLanguage framework, or for a device class
+// that cannot host a CoreML encoder.
 // Off by default; held for v1.2 iOS and Apple cloud compute. See Package.swift.
 // NLEmbeddingProvider.swift
 //
@@ -16,9 +18,8 @@
 //
 //   item-local: the vector is a pure function of the input text,
 //   computed once on write. No trainable basis, no counts, no shadow
-//   swap machinery. Sits alongside FDCProvider as a stateless,
-//   compute-once-on-write provider (honest semantic fusion extended by
-//   opt-in Apple embedding providers).
+//   swap machinery. Stateless, compute-once-on-write provider in the
+//   opt-in Apple embedding provider family.
 //
 //   float lane: NLEmbedding.vector(for:) returns [Double] with the
 //   underlying sentence-embedding dimension. We cast to [Float] and
@@ -32,8 +33,8 @@
 //
 //   NaturalLanguage is an Apple system framework. It is gated
 //   `#if canImport(NaturalLanguage)` and confined to the Apple layer —
-//   exactly the same pattern as the `.nlTagger` novel-token fallback
-//   in FDCProvider (and in LocusKit's word-class tagger). Rust has no
+//   the same pattern as the `.nlTagger` novel-token fallback used in
+//   LocusKit's word-class tagger. Rust has no
 //   counterpart; both ports remain conformant because the parity
 //   baseline is the classical deterministic providers (bit-identical).
 //   The NL lanes are present/absent per platform; recall fusion already
@@ -74,7 +75,7 @@ import SynapseKit
 ///
 /// Encodes "APNLEMB1" in ASCII bytes. Must not match any other
 /// provider's seed so NL-embedding engrams key to a separate storage
-/// bucket and are never compared against RI, PPMI, FDC, or deterministic
+/// bucket and are never compared against RI, LSA, or deterministic
 /// engrams (per invariant I-4 of CORPUSKIT_SPEC).
 public let nlEmbeddingProjectionSeed: UInt64 = 0x4150_4E4C_454D_4231
 

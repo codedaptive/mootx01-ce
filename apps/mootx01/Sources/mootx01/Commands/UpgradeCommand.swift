@@ -713,8 +713,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     }
 
     /// Bring the trainable provider bases a populated estate carries
-    /// (random-indexing in every build; PPMI, NMF and FDC only in a
-    /// DenseFamilies build; LSA only under its own switch)
+    /// (random-indexing and LSA in every build)
     /// onto the basis format this binary's codec writes. A basis row persisted
     /// under an earlier format version holds vectors pooled the old way; the
     /// corpus opens such a slot untrained and its open-time provider reconcile
@@ -1049,10 +1048,13 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
     }
 
-    /// Models whose vector rows `mootx01 upgrade` reclaims: the dense
-    /// distributional families the Encoder Rerank Program took dark
-    /// (`MOOTX01_DENSE_FAMILIES` off). Their rows serve nothing at 19 or 20.
-    static let retiredDenseFamilyModelIDs = ["lsa-v1", "nmf-v1", "ppmi-v1", "fdc-v1"]
+    /// Models whose vector rows `mootx01 upgrade` reclaims: the three retired
+    /// audition families (NMF, PPMI, FDC). Their rows serve nothing at 19 or 20.
+    ///
+    /// `lsa-v1` is NOT in this set: LSA is the second signal of the default
+    /// ensemble (`CorpusEnsemble.defaultEnsemble()`), so every estate carries
+    /// live `lsa-v1` rows and the reclaim must leave them in place.
+    static let retiredDenseFamilyModelIDs = ["nmf-v1", "ppmi-v1", "fdc-v1"]
 
     /// Reclaim the vector rows nothing serves at schema 20 (ENCODER_RERANK
     /// CONTRACT §12): every row of the retired dense families and every row

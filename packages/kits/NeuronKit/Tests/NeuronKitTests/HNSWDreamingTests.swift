@@ -232,7 +232,6 @@ struct HNSWDreamingTests {
 
     // ── HM-2: THETA consolidation path → rebuild fires ─────────────────────
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("HM-2: rebuildFloatIndex fires once on the THETA consolidation path")
     func hm2_thetaRebuildFiresConsolidationPath() async throws {
         let hnsw = FakeHNSWMaintenance()
@@ -244,13 +243,11 @@ struct HNSWDreamingTests {
         let count = await hnsw.rebuildCount
         #expect(count == 1, "rebuildFloatIndex must fire exactly once per THETA cycle")
     }
-#endif
 
     // ── HM-3: THETA early-return path → rebuild also fires ─────────────────
 
     /// Even when THETA returns early (fewer than 2 used drawers → no consolidation),
     /// fireThetaHNSWRebuild is called at BOTH exit paths of runThetaCycle.
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("HM-3: rebuildFloatIndex fires once on the THETA early-return (no-data) path")
     func hm3_thetaRebuildFiresEarlyReturnPath() async throws {
         let hnsw = FakeHNSWMaintenance()
@@ -264,11 +261,9 @@ struct HNSWDreamingTests {
         let count = await hnsw.rebuildCount
         #expect(count == 1, "rebuildFloatIndex must fire even on the early-return path")
     }
-#endif
 
     // ── HM-4: BETA compact fires ────────────────────────────────────────────
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("HM-4: compactFloatIndexTombstones fires once per BETA cycle")
     func hm4_betaCompactFires() async throws {
         let hnsw = FakeHNSWMaintenance()
@@ -280,7 +275,6 @@ struct HNSWDreamingTests {
         let count = await hnsw.compactCount
         #expect(count == 1, "compactFloatIndexTombstones must fire exactly once per BETA cycle")
     }
-#endif
 
     // ── HM-5: nil maintenance, THETA — no crash ─────────────────────────────
 
@@ -308,7 +302,6 @@ struct HNSWDreamingTests {
 
     // ── HM-7: THETA maintenance throws → non-fatal ──────────────────────────
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("HM-7: THETA maintenance error is non-fatal — cycle result is returned")
     func hm7_thetaMaintenanceFailureNonFatal() async throws {
         let hnsw = FakeHNSWMaintenance(shouldThrow: true)
@@ -323,11 +316,9 @@ struct HNSWDreamingTests {
         let count = await hnsw.rebuildCount
         #expect(count == 0, "throwing maintenance records no successful rebuild calls")
     }
-#endif
 
     // ── HM-8: BETA maintenance throws → non-fatal ───────────────────────────
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("HM-8: BETA maintenance error is non-fatal — nil returned normally")
     func hm8_betaMaintenanceFailureNonFatal() async throws {
         let hnsw = FakeHNSWMaintenance(shouldThrow: true)
@@ -342,7 +333,6 @@ struct HNSWDreamingTests {
         let count = await hnsw.compactCount
         #expect(count == 0, "throwing maintenance records no successful compact calls")
     }
-#endif
 
     // ── HM-9: OMEGA has no HNSW duty ─────────────────────────────────────────
 
@@ -437,11 +427,7 @@ struct HNSWDreamingTests {
 
         let compactCount = await hnsw.compactCount
         let reclaimCount = await hnsw.reclaimCount
-#if MOOTX01_WHOLE_RECORD_DENSE
         #expect(compactCount == 1, "compactFloatIndexTombstones must fire exactly once per BETA")
-#else
-        #expect(compactCount == 0, "compaction is a WholeRecordDense duty; the default build never calls it")
-#endif
         #expect(reclaimCount == 1, "reclaimSupersededGenerations must fire exactly once per BETA")
     }
 

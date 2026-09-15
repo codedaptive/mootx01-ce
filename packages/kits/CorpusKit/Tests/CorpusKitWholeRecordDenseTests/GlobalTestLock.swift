@@ -1,4 +1,3 @@
-#if MOOTX01_WHOLE_RECORD_DENSE
 // GlobalTestLock.swift
 //
 // Process-wide serialisation lock for tests that touch the Intellectus
@@ -97,4 +96,3 @@ actor GlobalTestLock {
         release()
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

@@ -9,16 +9,14 @@
 //! `VectorStore` and `BundleStore` handle their own interior mutability
 //! through `Arc<dyn Storage>`. The struct is `Send + Sync`.
 //!
-//! Platform note: model inference is host-supplied on BOTH ports. The
-//! Swift `EmbeddingModel` cases `miniLM`/`mpNet`/`embeddingGemma` accept
-//! an inference closure (CoreML on Apple); `EmbeddingModelConfig` here
-//! carries the SAME named cases over an inference closure the host wraps
-//! around whatever runtime it chooses on Windows/Linux (the kit bundles
-//! no model weights and links no ML-runtime crate — external deps are
-//! prohibited). The seam payload is identical to Swift: token IDs in,
-//! pooled float vector out. The kit owns the FNV-1a tokenization and the
-//! FloatSimHash projection on both ports; for any shared (text -> pooled
-//! vector) the engram is bit-identical Swift/Rust (SPEC § 8.2).
+//! Platform note: a host-supplied provider rides in `CandleNL` on this port
+//! and in the Apple NL cases on the Swift port; the kit bundles no model
+//! weights and links no ML-runtime crate (external deps are prohibited).
+//! The distributional cases (`RandomIndexing`, `Lsa`) are trained on the
+//! estate's own content and carry their provider. The kit owns the FNV-1a
+//! tokenization and the FloatSimHash projection on both ports; for any
+//! shared (text -> pooled vector) the engram is bit-identical Swift/Rust
+//! (SPEC § 8.2).
 
 use crate::basis_store::{BasisStore, PersistedBasis};
 use crate::corpus_provider_counts_store::CorpusProviderCountsStore;
@@ -64,22 +62,12 @@ use persistence_kit::Storage;
 
 /// The whole-record dense float query surface (nearest and farthest per
 /// signal, the discrimination signal) and its outcome types. Compiled only
-/// with the `whole-record-dense` feature; the default build carries no
+/// via the whole-record float lane.
 /// float query surface and writes no float rows. Swift twin: the
-/// `CorpusKitWholeRecordDense` sidecar target.
-#[cfg(feature = "whole-record-dense")]
+/// The `CorpusKitWholeRecordDense` sidecar target exposes this surface in Swift.
 pub mod float_lane;
-#[cfg(feature = "whole-record-dense")]
 pub use float_lane::{FloatDiscriminationSignal, FloatLaneOutcome};
-#[cfg(feature = "whole-record-dense")]
 pub(crate) use float_lane::discrimination_signal_from_outcome;
-
-/// Host-supplied inference seam for the named model cases: FNV-1a
-/// token IDs in, pooled float vector out. Mirrors the Swift
-/// `EmbeddingModel` cases' `([Int32]) async throws -> [Float]`
-/// closure; synchronous to match the Rust `EmbeddingProvider` trait
-/// (the host adapts any async model pass behind this boundary).
-pub type NamedInferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static>;
 
 /// Selects the embedding model the `Corpus` struct uses internally.
 ///
@@ -99,7 +87,7 @@ pub enum CorpusPathReason {
     /// No persisted counts row exists for this provider generation.
     NoCountsRow,
     /// The provider's `finalize_from_counts()` returned `false` — counts-only
-    /// basis derivation is not supported for this provider type (LSA/NMF).
+    /// basis derivation is not supported for this provider type (LSA).
     NotCountsCapable,
     /// The provider's `counts_delta_fold_safe()` returned `false` and there are
     /// pending (unsubsumed) reference deltas — folding those deltas into a restored
@@ -185,22 +173,6 @@ pub enum EmbeddingModelConfig {
     /// to it with no downcast.
     RandomIndexing { provider: Box<dyn TrainableEmbeddingBasis> },
 
-    /// PPMI distributional-semantics provider.
-    ///
-    /// The caller constructs, trains, and finalizes a `PpmiProvider` from
-    /// `corpus-kit-providers`, then wraps it in a `Box<dyn EmbeddingProvider>`
-    /// and passes it here.  Unlike RI, PPMI requires a two-phase training:
-    /// `train` accumulates counts, `finalize` computes PPMI weights.
-    ///
-    /// PPMI differs from RI: each context term's contribution is weighted by
-    /// `max(0, log(P(t,c)/(P(t)·P(c))))`.  Stopword-like co-occurrences are
-    /// down-weighted toward zero; genuinely informative associations dominate.
-    ///
-    /// See honest semantic fusion and `PpmiProvider` in `corpus-kit-providers`.
-    ///
-    /// Carries a `Box<dyn TrainableEmbeddingBasis>`.
-    Ppmi { provider: Box<dyn TrainableEmbeddingBasis> },
-
     /// LSA (Latent Semantic Analysis) distributional-semantics provider.
     ///
     /// The caller constructs and trains an `LsaProvider` (term-document matrix +
@@ -210,50 +182,6 @@ pub enum EmbeddingModelConfig {
     ///
     /// Carries a `Box<dyn TrainableEmbeddingBasis>`.
     Lsa { provider: Box<dyn TrainableEmbeddingBasis> },
-
-    /// NMF (Non-Negative Matrix Factorization) distributional-semantics provider.
-    ///
-    /// The caller constructs, trains, and finalizes an `NmfProvider` (TF-weighted
-    /// term-document matrix factorized via SubstrateML's NMFAlternatingLeastSquares
-    /// with tolerance=0 for fixed iteration count / bit-identical output) and
-    /// passes it here.
-    ///
-    /// See honest semantic fusion and `NmfProvider` in `corpus-kit-providers`.
-    ///
-    /// Carries a `Box<dyn TrainableEmbeddingBasis>`.
-    Nmf { provider: Box<dyn TrainableEmbeddingBasis> },
-
-    /// FDC (Frame Decimal Classification) co-classification provider.
-    ///
-    /// The caller constructs an `FDCProvider` from `corpus-kit-providers` and
-    /// passes it here as a `Box<dyn EmbeddingProvider>`. The provider is
-    /// stateless — no training step is required. It encodes text to a
-    /// deterministic float vector derived from the text's FDC classification
-    /// code, such that codes sharing a longer prefix (more common ancestors in
-    /// the FDC taxonomy) have higher cosine similarity.
-    ///
-    /// Unlike the distributional providers (RI/PPMI/LSA/NMF), FDCProvider
-    /// requires no corpus training — it is ready to use immediately. The float
-    /// lane is dark (returns `vec![]`) for texts the FDC engine cannot classify
-    /// (UNRESOLVED). This is the expected opt-out, not an error.
-    ///
-    /// See honest semantic fusion (FDC lattice co-classification) and `FDCProvider`
-    /// in `corpus-kit-providers` for the encoding details.
-    Fdc { provider: Box<dyn EmbeddingProvider> },
-
-    /// MiniLM v6 text embedding (384-dim pooled output). The kit
-    /// tokenizes (FNV-1a, vocab 30522, max 128 tokens) and projects
-    /// through FloatSimHash with the canonical MiniLM seed; the host
-    /// closure runs the model pass on the token IDs.
-    MiniLM { inference: NamedInferenceFn },
-
-    /// MPNet base v2 text embedding (768-dim pooled output). FNV-1a
-    /// tokenization (vocab 30522, max 128 tokens), MPNet projection seed.
-    MPNet { inference: NamedInferenceFn },
-
-    /// Embedding-Gemma 300M (768-dim pooled output). FNV-1a tokenization
-    /// (vocab 256000, max 2048 tokens), EmbeddingGemma projection seed.
-    EmbeddingGemma { inference: NamedInferenceFn },
 
     /// Candle NL in-process inference provider (all-MiniLM-L6-v2, 384-dim).
     ///
@@ -271,10 +199,10 @@ pub enum EmbeddingModelConfig {
     ///
     /// GeniusLocusKit's `SharedContentMigration::has_trainable_provider`
     /// check uses a `matches!` pattern that does not name this variant. A
-    /// pure-CandleNL ensemble (no RI/PPMI/LSA/NMF) will be incorrectly
+    /// pure-CandleNL ensemble (no RI/LSA) will be incorrectly
     /// classified as "has trainable provider", causing an over-eager capacity
     /// pre-check. This is benign (false-positive only) and correct for the
-    /// expected use case of adding CandleNL to the default five-signal
+    /// expected use case of adding CandleNL to the default two-signal
     /// ensemble (CANDLE-ADOPT Blast Radius Report §1, INTENTIONALLY_LEFT).
     CandleNL { provider: Box<dyn EmbeddingProvider> },
 }
@@ -283,10 +211,10 @@ impl EmbeddingModelConfig {
     /// Whether this model's provider can be trained on a corpus and
     /// reconstructed from a serialized basis.
     ///
-    /// True only for the distributional cases (RI/PPMI/LSA/NMF), which carry a
-    /// `Box<dyn TrainableEmbeddingBasis>`. FDC carries an embedding provider but
-    /// is stateless and is NOT trainable; the deterministic and named-model
-    /// cases carry no trainable basis. Mirrors Swift's `EmbeddingModel.isTrainable`.
+    /// True only for the distributional cases (RI/LSA), which carry a
+    /// `Box<dyn TrainableEmbeddingBasis>`. The deterministic and
+    /// CandleNL cases carry no trainable basis.
+    /// Mirrors Swift's `EmbeddingModel.isTrainable`.
     ///
     /// Changes no runtime behaviour on its own — it is the capability-detection
     /// helper the Corpus will use (β mission) before driving the seam.
@@ -294,9 +222,7 @@ impl EmbeddingModelConfig {
         matches!(
             self,
             EmbeddingModelConfig::RandomIndexing { .. }
-                | EmbeddingModelConfig::Ppmi { .. }
                 | EmbeddingModelConfig::Lsa { .. }
-                | EmbeddingModelConfig::Nmf { .. }
         )
     }
 
@@ -307,7 +233,7 @@ impl EmbeddingModelConfig {
     /// trait object's `reconstruct_basis` — which delegates to the right concrete
     /// type's `from_serialized_basis` without core naming it.
     ///
-    /// The deterministic and named-model cases, and the stateless FDC case, have
+    /// The deterministic case and the stateless CandleNL case have
     /// no trained basis to restore and return `CorpusKitError::NotTrainable`
     /// rather than panicking or returning a wrong provider. Mirrors Swift's
     /// `EmbeddingModel.reconstruct(from:)`.
@@ -321,33 +247,19 @@ impl EmbeddingModelConfig {
     ) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError> {
         match self {
             EmbeddingModelConfig::RandomIndexing { provider }
-            | EmbeddingModelConfig::Ppmi { provider }
-            | EmbeddingModelConfig::Lsa { provider }
-            | EmbeddingModelConfig::Nmf { provider } => provider.reconstruct_basis(basis),
-            EmbeddingModelConfig::Deterministic
-            | EmbeddingModelConfig::Fdc { .. }
-            | EmbeddingModelConfig::MiniLM { .. }
-            | EmbeddingModelConfig::MPNet { .. }
-            | EmbeddingModelConfig::EmbeddingGemma { .. }
+            | EmbeddingModelConfig::Lsa { provider } => provider.reconstruct_basis(basis),
             // CandleNL carries fixed model weights loaded at provider
             // construction time; there is no corpus-trained basis to
             // reconstruct. Not trainable (CANDLE-ADOPT §1, is_trainable).
+            EmbeddingModelConfig::Deterministic
             | EmbeddingModelConfig::CandleNL { .. } => Err(CorpusKitError::NotTrainable(
                 "embedding model is not a trainable-basis provider; reconstruction \
-                 from a serialized basis is only supported for RI/PPMI/LSA/NMF"
+                 from a serialized basis is only supported for RI/LSA"
                     .to_string(),
             )),
         }
     }
 }
-
-// Model-specific projection seeds. Byte-identical to the Swift
-// `EmbeddingModel` seeds and to CorpusKitProviders' provider seeds, so a
-// vector stored under either surface keys identically. Changing a seed
-// re-keys all stored vectors for that model.
-const MINILM_SEED: u64 = 0x4D49_4E4C_4D5F_7631; // "MINLM_v1"
-const MPNET_SEED: u64 = 0x4D50_4E45_545F_7631; // "MPNET_v1"
-const EMBEDDING_GEMMA_SEED: u64 = 0x454D_4247_4D5F_7631; // "EMBGM_v1"
 
 // Seed is distinct from all model-specific seeds and matches the Swift
 // EmbeddingModel.deterministicSeed for cross-port consistency.
@@ -414,10 +326,10 @@ pub(crate) fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
 /// `&dyn EmbeddingProvider` for the embed surface (stable trait upcasting),
 /// `trainable_mut()` hands back the trainable box for an in-place retrain.
 pub(crate) enum ProviderHandle {
-    /// A trainable distributional provider (RI/PPMI/LSA/NMF). Retains the
+    /// A trainable distributional provider (RI/LSA). Retains the
     /// `TrainableEmbeddingBasis` capability so the corpus can retrain it.
     Trainable(Box<dyn TrainableEmbeddingBasis>),
-    /// A non-trainable provider (deterministic / named-model / FDC). Carries
+    /// A non-trainable provider (deterministic / CandleNL). Carries
     /// only the embed surface; never retrained.
     Plain(Box<dyn EmbeddingProvider>),
 }
@@ -477,7 +389,7 @@ pub(crate) struct ProviderSlot {
     /// The dedicated maintained-counts accumulator for a trainable slot (P3),
     /// held SEPARATELY from `handle` behind its own `Mutex` so it can be folded
     /// through `&self`. `None` for non-trainable slots. It must NOT be the serving
-    /// provider: for LSA/NMF, growing the maintained vocabulary would desync the
+    /// provider: for LSA, growing the maintained vocabulary would desync the
     /// serving provider's basis-aligned vocab from its frozen factors. Mirrors
     /// Swift's `ProviderSlot.countsAccumulator` + `countsDocumentCount`.
     pub(crate) counts: Mutex<Option<CountsState>>,
@@ -494,7 +406,7 @@ pub(crate) struct ProviderSlot {
 
 /// A trainable slot's maintained-counts state: the accumulator plus its
 /// document-count growth anchor. The doc count is tracked here (not read off the
-/// provider) so it is uniform across RI/PPMI/LSA/NMF, whose providers track
+/// provider) so it is uniform across RI/LSA, whose providers track
 /// document count inconsistently. Mirrors the two Swift slot fields.
 pub(crate) struct CountsState {
     pub(crate) accumulator: Box<dyn TrainableEmbeddingBasis>,
@@ -619,7 +531,7 @@ pub struct Corpus {
     /// `forced_float_error` so production builds carry no knowledge of it.
     #[cfg(any(test, feature = "test-seams"))]
     pub(crate) ingest_failure_hook: Mutex<Option<IngestFailureHook>>,
-    #[cfg(all(any(test, feature = "test-seams"), feature = "whole-record-dense"))]
+    #[cfg(any(test, feature = "test-seams"))]
     pub forced_float_error: Mutex<Option<String>>,
     /// Training path decisions recorded per modelID on the last
     /// `reindex` pass. Reset at the start of each pass. External tests
@@ -807,7 +719,7 @@ impl Corpus {
             on_encoded: Mutex::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             ingest_failure_hook: Mutex::new(None),
-            #[cfg(all(any(test, feature = "test-seams"), feature = "whole-record-dense"))]
+            #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
             training_path_decisions: Mutex::new(BTreeMap::new()),
         };
@@ -839,53 +751,13 @@ impl Corpus {
             EmbeddingModelConfig::RandomIndexing { provider } => {
                 ProviderHandle::Trainable(provider)
             }
-            // Ppmi: the caller built, trained, and finalized the PpmiProvider
-            // externally. Retain the trainable box.
-            EmbeddingModelConfig::Ppmi { provider } => ProviderHandle::Trainable(provider),
             // Lsa: the caller built and trained the LsaProvider externally (term-
             // document matrix + Jacobi SVD). Retain the trainable box.
             EmbeddingModelConfig::Lsa { provider } => ProviderHandle::Trainable(provider),
-            // Nmf: the caller built, trained, and finalized the NmfProvider externally
-            // (TF matrix + NMF factorization via SubstrateML, tolerance=0 for
-            // fixed iteration count / bit-identical output). Retain the trainable box.
-            EmbeddingModelConfig::Nmf { provider } => ProviderHandle::Trainable(provider),
-            // Fdc: the caller constructed an FDCProvider externally. FDCProvider is
-            // stateless (no training required) — not trainable.
-            EmbeddingModelConfig::Fdc { provider } => ProviderHandle::Plain(provider),
             // CandleNL: the caller loaded a CandleNLProvider from disk and passed
             // it in as a Box<dyn EmbeddingProvider>. The provider owns its weights;
             // no training step is needed or possible (not trainable).
             EmbeddingModelConfig::CandleNL { provider } => ProviderHandle::Plain(provider),
-            EmbeddingModelConfig::MiniLM { inference } => {
-                ProviderHandle::Plain(Box::new(CorpusTextProvider::new(
-                    "minilm-v6",
-                    "1.0.0",
-                    MINILM_SEED,
-                    30522,
-                    128,
-                    inference,
-                )))
-            }
-            EmbeddingModelConfig::MPNet { inference } => {
-                ProviderHandle::Plain(Box::new(CorpusTextProvider::new(
-                    "mpnet-base-v2",
-                    "1.0.0",
-                    MPNET_SEED,
-                    30522,
-                    128,
-                    inference,
-                )))
-            }
-            EmbeddingModelConfig::EmbeddingGemma { inference } => {
-                ProviderHandle::Plain(Box::new(CorpusTextProvider::new(
-                    "embedding-gemma-300m",
-                    "1.0.0",
-                    EMBEDDING_GEMMA_SEED,
-                    256_000,
-                    2048,
-                    inference,
-                )))
-            }
         };
 
         // Capture the FRESH (untrained) basis factory and build the maintained-
@@ -896,7 +768,7 @@ impl Corpus {
         //   - accumulator: a SEPARATE fresh trainable provider (reconstructed from
         //     the factory, retaining trainability), restored from the counts table
         //     if a row exists. Held apart from the serving handle so growing the
-        //     maintained vocabulary never desyncs an LSA/NMF serving basis.
+        //     maintained vocabulary never desyncs an LSA serving basis.
         let mut fresh_basis_blob: Option<Vec<u8>> = None;
         let mut counts: Option<CountsState> = None;
         if let Some(trainable) = handle.as_trainable() {
@@ -1117,7 +989,7 @@ impl Corpus {
             on_encoded: Mutex::new(None),
             #[cfg(any(test, feature = "test-seams"))]
             ingest_failure_hook: Mutex::new(None),
-            #[cfg(all(any(test, feature = "test-seams"), feature = "whole-record-dense"))]
+            #[cfg(any(test, feature = "test-seams"))]
             forced_float_error: Mutex::new(None),
             training_path_decisions: Mutex::new(BTreeMap::new()),
         };
@@ -1227,7 +1099,7 @@ impl Corpus {
             // Three-state basis decision for trainable providers.
             //
             // The fresh_basis_blob presence is the trainability gate: only
-            // providers that carry a factory blob (LSA, NMF, RI, PPMI) enter
+            // providers that carry a factory blob (RI, LSA) enter
             // the training path. Dense-only and deterministic providers skip
             // directly to fold_in_slots.
             //
@@ -1336,9 +1208,7 @@ impl Corpus {
                                             })?;
                                         // The default build stores the engram only; the pooled float is
                                         // computed for the projection and dropped (whole-record dense rows
-                                        // are a whole-record-dense feature write).
-                                        #[cfg(not(feature = "whole-record-dense"))]
-                                        let _ = floats;
+                                        // are a whole-record float lane write).
                                         // Binary engram row (vector_index=0) — always written.
                                         rows.push(VectorPayloadInput {
                                             item_id: chunk.id.to_string(),
@@ -1348,7 +1218,6 @@ impl Corpus {
                                             model_version: provider.model_version().to_string(),
                                             filed_at_unix_secs: filed_at_secs,
                                         });
-                                        #[cfg(feature = "whole-record-dense")]
                                         {
                                             // Float lane (Lane D): vector_index=1 (kind=float32),
                                             // present only when the provider's float lane is live
@@ -1976,7 +1845,7 @@ impl Corpus {
         }
 
         // Phase 1b — batch-aware first-basis bootstrap (mirror Swift). When a
-        // trainable slot (RI/PPMI/LSA/NMF) still has no persisted basis, train it
+        // trainable slot (RI/LSA) still has no persisted basis, train it
         // ONCE on the FULL corpus now in the bundle store — every chunk just
         // inserted, not the first item alone. The prior per-item serial fallback
         // trained on item 1's chunks (often a single document) → a degenerate
@@ -2087,9 +1956,7 @@ impl Corpus {
                                                 })?;
                                             // The default build stores the engram only; the pooled float is
                                             // computed for the projection and dropped (whole-record dense rows
-                                            // are a whole-record-dense feature write).
-                                            #[cfg(not(feature = "whole-record-dense"))]
-                                            let _ = floats;
+                                            // are a whole-record float lane write).
                                             rows.push(VectorPayloadInput {
                                                 item_id: chunk.id.to_string(),
                                                 vector_index: 0,
@@ -2098,7 +1965,6 @@ impl Corpus {
                                                 model_version: provider.model_version().to_string(),
                                                 filed_at_unix_secs: filed_at_secs,
                                             });
-                                            #[cfg(feature = "whole-record-dense")]
                                             {
                                                 if !floats.is_empty() {
                                                     rows.push(VectorPayloadInput {
@@ -2200,7 +2066,7 @@ impl Corpus {
     /// Retrain the embedding basis on the full corpus and re-embed every chunk.
     ///
     /// Rust mirror of Swift `Corpus.reindex(now:)`. When the provider is
-    /// trainable (RI/PPMI/LSA/NMF):
+    /// trainable (RI/LSA):
     ///   1. gathers ALL chunk texts from the BundleStore,
     ///   2. trains the basis through the `TrainableEmbeddingBasis` seam
     ///      (`train_on_corpus`, which runs the provider's own train+finalize),
@@ -2262,15 +2128,15 @@ impl Corpus {
         //
         // Two paths per slot:
         //
-        //   COUNTS PATH (PPMI only in standalone): available when
+        //   COUNTS PATH: available when
         //     (a) finalizeFromCounts() on a fresh empty instance returns true, AND
-        //     (b) countsDeltaFoldSafe() returns true (PPMI returns true; RI returns
-        //         false because f32 running sums are not commutative, and ingest-
-        //         arrival order cannot be proven equal to activeChunks() order).
+        //     (b) countsDeltaFoldSafe() returns true (RI returns false because f32
+        //         running sums are not commutative, and ingest-arrival order cannot
+        //         be proven equal to activeChunks() order; LSA returns false).
         //   When both hold AND the population guard passes, we restore from the
-        //   persisted counts snapshot without re-reading any corpus text.
-        //
-        //   CORPUS PATH (RI / LSA / NMF always; PPMI when a guard rejects):
+        //   persisted counts snapshot without re-reading any corpus text. Neither
+        //   default provider opts in, so every slot takes the corpus path.
+        //   CORPUS PATH (RI / LSA always; a counts-capable slot when a guard rejects):
         //   Trains a fresh basis on the full active-chunk text snapshot (same as
         //   before this wave). Adds the F-2 heal: rebuilds the counts accumulator
         //   from the same active texts so `persist_maintained_counts` persists an
@@ -2295,9 +2161,9 @@ impl Corpus {
             // Two conditions must BOTH hold for the counts path:
             //   (a) finalizeFromCounts() on an empty fresh instance returns true.
             //       Checked via a throwaway reconstruction so the accumulator is
-            //       not mutated. (PPMI → true; RI → true; LSA/NMF → false.)
+            //       not mutated. (RI → true; LSA → false.)
             //   (b) countsDeltaFoldSafe() returns true.
-            //       (PPMI → true; RI → false — RI fold order is not commutative.)
+            //       (RI → false — RI fold order is not commutative; LSA → false.)
             let (capable, fold_safe, doc_count) = {
                 let guard = slot.counts.lock().map_err(|_| {
                     CorpusKitError::StoreUnavailable(
@@ -2561,7 +2427,7 @@ impl Corpus {
         eprintln!("[corpus] reindex: training complete — bases persisted");
 
         // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained
-        // provider. Non-trainable providers (FDC, deterministic, NL) are skipped for
+        // provider. Non-trainable providers (deterministic, CandleNL) are skipped for
         // re-embedding: their vectors are item-local and invariant to basis retraining
         // — the same embedding function applied to the same text always produces the
         // same vector regardless of which distributional basis the trainable slots
@@ -2801,9 +2667,7 @@ impl Corpus {
                                             })?;
                                         // The default build stores the engram only; the pooled float is
                                         // computed for the projection and dropped (whole-record dense rows
-                                        // are a whole-record-dense feature write).
-                                        #[cfg(not(feature = "whole-record-dense"))]
-                                        let _ = floats;
+                                        // are a whole-record float lane write).
                                         rows.push(VectorPayloadInput {
                                             item_id: chunk.id.to_string(),
                                             vector_index: 0,
@@ -2812,7 +2676,6 @@ impl Corpus {
                                             model_version: model_version_ref.clone(),
                                             filed_at_unix_secs: filed_at_secs,
                                         });
-                                        #[cfg(feature = "whole-record-dense")]
                                         {
                                             if !floats.is_empty() {
                                                 rows.push(VectorPayloadInput {
@@ -3428,108 +3291,3 @@ impl Corpus {
     }
 }
 
-// MARK: - CorpusTextProvider (named model cases)
-
-/// `EmbeddingProvider` adapter for the named `EmbeddingModelConfig`
-/// cases (MiniLM, MPNet, EmbeddingGemma). Rust mirror of Swift's
-/// private `CorpusTextProvider`. Tokenizes text with the model's FNV-1a
-/// vocabulary, runs the host-supplied inference closure on the token
-/// IDs, and projects the resulting float vector through FloatSimHash
-/// with the model's canonical seed.
-///
-/// Private to corpus-kit; it never appears on a public method
-/// signature. Callers select a model through `EmbeddingModelConfig`.
-/// The FNV-1a token fold matches Swift's `CorpusDefaultTokenizer`
-/// (offset basis `2_166_136_261`, prime `1_677_619`, ids in
-/// `[2, vocab_size)`), so for a shared (text -> pooled vector) the
-/// engram is bit-identical to the Swift named-case path.
-struct CorpusTextProvider {
-    model_id: String,
-    model_version: String,
-    projection_seed: u64,
-    /// vocab_size - 2; token ids live in [2, vocab_size).
-    vocab_range: u32,
-    max_tokens: usize,
-    inference: NamedInferenceFn,
-}
-
-impl CorpusTextProvider {
-    fn new(
-        model_id: impl Into<String>,
-        model_version: impl Into<String>,
-        projection_seed: u64,
-        vocab_size: u32,
-        max_tokens: usize,
-        inference: NamedInferenceFn,
-    ) -> Self {
-        CorpusTextProvider {
-            model_id: model_id.into(),
-            model_version: model_version.into(),
-            projection_seed,
-            vocab_range: vocab_size - 2,
-            max_tokens,
-            inference,
-        }
-    }
-
-    /// FNV-1a token fold matching Swift `CorpusDefaultTokenizer.tokenize`.
-    fn tokenize(&self, text: &str) -> Vec<i32> {
-        default_keyword_tokens(text)
-            .iter()
-            .take(self.max_tokens)
-            .map(|word| {
-                let h = word
-                    .bytes()
-                    .fold(2_166_136_261u32, |acc, b| (acc ^ u32::from(b)).wrapping_mul(1_677_619));
-                2 + (h % self.vocab_range) as i32
-            })
-            .collect()
-    }
-}
-
-impl EmbeddingProvider for CorpusTextProvider {
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-    fn model_version(&self) -> &str {
-        &self.model_version
-    }
-    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
-        // Empty-input contract: Engram::ZERO without touching the seam.
-        if text.is_empty() {
-            return Ok(Engram::ZERO);
-        }
-        let tokens = self.tokenize(text);
-        let pooled = (self.inference)(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
-        Ok(float_simhash::project(&pooled, self.projection_seed))
-    }
-
-    /// Float lane source (Lane D): the pooled vector `embed` projects,
-    /// returned unprojected. This is the production float-lane path for
-    /// the named models; without it they would have NO float lane (the
-    /// trait default opts out by erroring). Empty input returns `vec![]`.
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
-        if text.is_empty() {
-            return Ok(Vec::new());
-        }
-        let tokens = self.tokenize(text);
-        (self.inference)(&tokens).map_err(SynapseKitError::EmbeddingFailed)
-    }
-
-    /// Single-inference override: `embed` and `embed_float` both tokenize and
-    /// run the same inference pass — `embed` projects the pooled vector to the
-    /// 256-bit engram, `embed_float` returns it raw. Running both separately
-    /// pays for two inference passes over identical tokens. This computes the
-    /// pooled vector ONCE and returns both the projected engram and the floats,
-    /// halving inference cost on the capture/reembed path. Output is identical
-    /// to calling `embed` and `embed_float` separately: empty input opts out of
-    /// the float lane (`vec![]`) and yields `Engram::ZERO`, matching both.
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
-        if text.is_empty() {
-            return Ok((Engram::ZERO, Vec::new()));
-        }
-        let tokens = self.tokenize(text);
-        let pooled = (self.inference)(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
-        Ok((float_simhash::project(&pooled, self.projection_seed), pooled))
-    }
-}

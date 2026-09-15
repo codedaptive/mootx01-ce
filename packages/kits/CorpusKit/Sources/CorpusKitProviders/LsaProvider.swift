@@ -1,8 +1,5 @@
-#if MOOTX01_LSA
-// LSA provider — compiled only when the LSA trait is on (MOOTX01_LSA).
-// Dark and unproven since 2026-09-07; DenseFamilies does NOT enable it.
-// Enable with `swift test --traits LSA`. See CorpusKit/Package.swift.
-// LsaProvider.swift
+// LsaProvider.swift — Latent Semantic Analysis embedding provider.
+// Part of the default recall ensemble alongside RandomIndexingProvider.
 //
 // Latent Semantic Analysis (LSA / LSI) distributional-semantics
 // embedding provider. Part 2 of the honest semantic fusion honest
@@ -106,8 +103,8 @@ import SynapseKit
 // MARK: - Constants
 
 /// FloatSimHash projection seed for LSA. Encodes "LSA_V1_M" in ASCII.
-/// MUST differ from riProjectionSeed and ppmiProjectionSeed so LSA
-/// engrams key to a separate storage bucket when all three providers
+/// MUST differ from riProjectionSeed so LSA
+/// engrams key to a separate storage bucket when both providers
 /// coexist in one estate. Must not drift from the Rust constant
 /// LSA_PROJECTION_SEED.
 public let lsaProjectionSeed: UInt64 = 0x4C53415F56315F4D
@@ -266,7 +263,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         // factor over a reduced, informative sub-vocabulary so the
         // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
         // (~10^15 ops, infeasible). The reduced vocab is a corpus property
-        // shared with NMF; it is frozen here and drives query projection.
+        // (`ReducedVocab`); it is frozen here and drives query projection.
         // `vocabSize` below is the REDUCED column count — the SVD block that
         // follows is unchanged and keys on it.
         let reduced = selectReducedVocabulary(
@@ -743,4 +740,3 @@ extension LsaProvider: TrainableEmbeddingBasis {
     }
 }
 
-#endif // MOOTX01_LSA
