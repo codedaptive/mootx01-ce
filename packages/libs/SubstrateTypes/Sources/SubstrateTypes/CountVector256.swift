@@ -3,7 +3,7 @@
 // Count-vector over the 256-bit fingerprint space, the stored
 // object for the bundle algebra per
 // bundle algebra and erasure and the scope
-// in docs/analysis/bundle_algebra/SCOPE_MAJORITY_VOTE_TREE_FOLD_2026-05-20.md.
+// in the SCOPE_MAJORITY_VOTE_TREE_FOLD_2026-05-20 bundle-algebra note.
 //
 // For a set of member fingerprints, the count-vector holds, for each
 // of the 256 bit positions, how many members have that bit set

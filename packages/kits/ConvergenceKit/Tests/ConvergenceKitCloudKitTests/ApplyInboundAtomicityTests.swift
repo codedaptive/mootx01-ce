@@ -2,8 +2,8 @@
 //
 // N1 fix verification — CloudKit ApplyInbound.swift.
 //
-// N1 (gap 4 from the P4.5 three-estate convergence harness, docs/analysis
-// fulcrum P4.5): the `.fieldLevelLWW` (and, on inspection, `.lastWriterWinsByHLC`)
+// N1 (gap 4 from the P4.5 three-estate convergence harness, the
+// fulcrum P4.5 analysis): the `.fieldLevelLWW` (and, on inspection, `.lastWriterWinsByHLC`)
 // arms of `applyInbound` committed the application-row VALUE write
 // (`upsertSync`) and the HLC bookkeeping write (`ColumnHLCStore.writeAll` /
 // `SyncMetaStore.writeSyncHLC` / `writeTombstoneHLC`) as two-or-three
