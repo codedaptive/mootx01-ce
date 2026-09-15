@@ -4484,6 +4484,47 @@ impl EstateCoordinator {
     /// No estate migration required.
     pub const MODES_CONFIG_META_KEY: &str = "modes_config";
 
+    /// The estate-manifest key controlling the cross-encoder recall route.
+    /// Values: `"on"` (default when absent) or `"off"`. Absent key, unrecognised
+    /// value, or storage error all read as `true` — ON is the ruled product default.
+    /// Seeded on populated estates in the next `EstateFormat` step alongside the
+    /// consolidation and contradiction keys. Derived from Route 1's preference
+    /// key so the key the manifest read uses and the key the router reports are
+    /// one string by construction. Mirrors Swift
+    /// `RecallDirector.crossEncoderRoutingMetaKey`.
+    pub const CROSS_ENCODER_ROUTING_META_KEY: &str =
+        crate::recall_router::CROSS_ENCODER_ROUTE.preference_key;
+
+    /// Resolve the on/off preference of every route in
+    /// `recall_router::RECALL_ROUTES`, keyed by preference key, for
+    /// `apply_recall_routes`. One manifest read per route, so today exactly one
+    /// read of exactly `CROSS_ENCODER_ROUTING_META_KEY`. Absent key,
+    /// unrecognised value, or storage error all read as `true` — ON is the
+    /// ruled product default and the key is seeded explicitly later, so an
+    /// absent key cannot silently disable a route on an existing estate. The
+    /// manifest row store is RAM-resident, so each read is a dictionary hit,
+    /// not disk I/O.
+    ///
+    /// Mirrors Swift `RecallDirector.provisionedRecallRoutePreferences(estate:)`.
+    pub fn provisioned_recall_route_preferences(
+        &self,
+        handle: &EstateHandle,
+    ) -> BTreeMap<String, bool> {
+        let estate = self.estate_for_verb(handle).ok();
+        crate::recall_router::RECALL_ROUTES
+            .iter()
+            .map(|route| {
+                let on = match estate.as_ref() {
+                    Some(estate) => {
+                        estate.meta(route.preference_key).ok().flatten().as_deref() != Some("off")
+                    }
+                    None => true,
+                };
+                (route.preference_key.to_string(), on)
+            })
+            .collect()
+    }
+
     /// Write the user-owned modes-preference config to the estate manifest.
     ///
     /// Stored as deterministic JSON under `"modes_config"`. AriaMcpKit reads it
@@ -11415,22 +11456,34 @@ impl EstateCoordinator {
         #[cfg(not(any(test, feature = "test-seams")))]
         let forced_embed_error: Option<String> = None;
 
+        // Recall router: consult the route list before reading the directive.
+        // The coordinator resolves each route's estate preference here (the
+        // router itself never touches the estate), then the router walks
+        // `RECALL_ROUTES` against the question's content shape and returns
+        // either the original request or a transformed one (with a directive
+        // applied). A request that already carries a directive is never
+        // re-routed. The estate read is a RAM-resident dictionary hit, not
+        // disk I/O. Mirrors Swift RecallDirector.recall.
+        let route_preferences = self.provisioned_recall_route_preferences(handle);
+        let (routed_request, fired_route_key) = crate::recall_router::apply_recall_routes(
+            request.clone(), &route_preferences);
+
         // Cross-encoder stage (`cross_encoder_stage`): resolve the directive
         // before the lanes run so the lanes' presentation cut can be widened
         // to the stage's pool. The plan (frontier_k) above is computed from
         // the caller's limit and is unchanged, so the candidate pool the lanes
         // score is identical with or without a directive; only the cut is
         // wider, and the caller's limit is re-applied after the stage. A None
-        // or bypass directive leaves `lane_request` equal to `request`.
+        // or bypass directive leaves `lane_request` equal to `routed_request`.
         // Mirrors Swift RecallDirector.recall.
-        let directive = request.rerank_directive.clone();
+        let directive = routed_request.rerank_directive.clone();
         let mut cross_encoder_profile: Option<CrossEncoderProfile> = None;
         let mut cross_encoder_limits: Option<CrossEncoderLimits> = None;
-        let mut lane_request = request.clone();
+        let mut lane_request = routed_request.clone();
         if let Some(d) = directive.as_ref().filter(|d| d.action == RerankAction::Apply) {
             if let Some(profile) = Self::packaged_cross_encoder_profile(&d.profile_id) {
                 let limits = self.provisioned_cross_encoder_limits(handle, &profile);
-                if request.limit < limits.pool {
+                if routed_request.limit < limits.pool {
                     lane_request.limit = limits.pool;
                 }
                 cross_encoder_profile = Some(profile);
@@ -11516,6 +11569,7 @@ impl EstateCoordinator {
                 // the anomalous filter is a pure-hit-set operation, not a recall.
                 query_lattice_anchor: result.query_lattice_anchor,
                 cross_encoder: result.cross_encoder,
+                route: None,
             }
         } else {
             result
@@ -11533,20 +11587,24 @@ impl EstateCoordinator {
         let result = if let Some(directive) = directive.as_ref() {
             let (hits, report, degraded) = self.run_cross_encoder_stage(
                 handle,
-                &request,
+                &routed_request,
                 directive,
                 cross_encoder_profile.as_ref(),
                 cross_encoder_limits,
                 result.hits,
             );
             let mut hits = hits;
-            if lane_request.limit != request.limit {
-                hits.truncate(request.limit);
+            // re-apply the caller's limit when lanes were widened to the pool
+            if lane_request.limit != routed_request.limit {
+                hits.truncate(routed_request.limit);
             }
             let mut degraded_stages = result.degraded_stages;
             if degraded {
                 degraded_stages.push(crate::cross_encoder_stage::DEGRADED_STAGE.to_string());
             }
+            // Store the original caller `request` — `result.request` is what
+            // the caller asked for. The route and cross_encoder fields
+            // communicate what the director did on top of it.
             GLKRecallResult {
                 request: request.clone(),
                 plan: result.plan,
@@ -11559,6 +11617,7 @@ impl EstateCoordinator {
                 lane_ranks: result.lane_ranks,
                 query_lattice_anchor: result.query_lattice_anchor,
                 cross_encoder: Some(report),
+                route: None,
             }
         } else {
             result
@@ -11581,6 +11640,9 @@ impl EstateCoordinator {
         // No SystemTime::now() inside this engine — determinism rule.
         let mut result = result;
         result.withheld_by_sensitivity = withheld_by_sensitivity;
+        // Inject the fired route key so callers can see which route, if any,
+        // transformed this request. None when no route fired (the common case).
+        result.route = fired_route_key;
         if request.origin == RecallOrigin::External {
             // W2.5 Track R(a) — the reward-cycle trace write, re-homed here
             // from the inner locus frame so the traced rows are the hits the
@@ -11728,6 +11790,7 @@ impl EstateCoordinator {
             // Mirrors Swift RecallDirector.locusOnly path (GLKRecallResult.swift §M4).
             query_lattice_anchor: None,
             cross_encoder: None,
+            route: None,
         })
     }
 
@@ -14246,6 +14309,7 @@ impl EstateCoordinator {
             // Callers must read from here; single-derivation doctrine enforced.
             query_lattice_anchor,
             cross_encoder: None,
+            route: None,
         })
     }
 
@@ -14498,6 +14562,7 @@ impl EstateCoordinator {
             // M4: pre-computed anchor — single derivation for this recall path.
             query_lattice_anchor,
             cross_encoder: None,
+            route: None,
         })
     }
 

@@ -1759,6 +1759,12 @@ pub struct GLKRecallResult {
     /// degraded apply also pushes `recall.cross_encoder_degraded` onto
     /// `degraded_stages`. Mirrors Swift `GLKRecallResult.crossEncoder`.
     pub cross_encoder: Option<crate::cross_encoder_stage::CrossEncoderReport>,
+
+    /// The preference key of the recall route that transformed this request,
+    /// or `None` when no route fired. Day one: `"cross_encoder_routing"` when
+    /// Route 1 applied `strict_transcript`; `None` for all other recalls.
+    /// Mirrors Swift `GLKRecallResult.route`.
+    pub route: Option<String>,
 }
 
 impl GLKRecallResult {

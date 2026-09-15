@@ -113,17 +113,29 @@ public extension GeniusLocusKit {
             "RecallDirector: mode=\(request.mode.rawValue, privacy: .public) limit=\(request.limit, privacy: .public) frontierK=\(frontierK, privacy: .public)"
         )
 
+        // Recall router: consult the route list before reading the directive.
+        // The director resolves each route's estate preference here (the
+        // router itself never touches the estate), then the router walks
+        // `recallRoutes` against the question's content shape and returns
+        // either the original request or a transformed one (with a directive
+        // applied). A request that already carries a directive is never
+        // re-routed (the strict-transcript operation keeps its own directive).
+        // The estate read is a RAM-resident dictionary hit, not disk I/O.
+        let routePreferences = await provisionedRecallRoutePreferences(estate: estate)
+        let (routedRequest, firedRouteKey) = applyRecallRoutes(
+            request, preferences: routePreferences)
+
         // Cross-encoder stage (CrossEncoderStage): resolve the directive
         // before the lanes run so the lanes' presentation cut can be widened
         // to the stage's pool. The plan (frontierK) above is computed from the
         // caller's limit and is unchanged, so the candidate pool the lanes
         // score is identical with or without a directive; only the cut is
         // wider, and the caller's limit is re-applied after the stage. A nil
-        // or bypass directive leaves `laneRequest` equal to `request`.
-        let directive = request.rerankDirective
+        // or bypass directive leaves `laneRequest` equal to `routedRequest`.
+        let directive = routedRequest.rerankDirective
         var crossEncoderProfile: CrossEncoderProfile? = nil
         var crossEncoderLimits: CrossEncoderLimits? = nil
-        var laneRequest = request
+        var laneRequest = routedRequest
         if let directive, directive.action == .apply,
            let profile = Self.packagedCrossEncoderProfiles[directive.profileID] {
             // Strict transcript recall uses the frozen product recipe. A
@@ -134,8 +146,8 @@ public extension GeniusLocusKit {
                 : await provisionedCrossEncoderLimits(profile: profile, for: handle)
             crossEncoderProfile = profile
             crossEncoderLimits = limits
-            if request.limit < limits.pool {
-                laneRequest = request.replacing(limit: limits.pool)
+            if routedRequest.limit < limits.pool {
+                laneRequest = routedRequest.replacing(limit: limits.pool)
             }
         }
 
@@ -210,12 +222,15 @@ public extension GeniusLocusKit {
         let result: GLKRecallResult
         if let directive {
             let stage = await runCrossEncoderStage(
-                handle: handle, request: request, directive: directive,
+                handle: handle, request: routedRequest, directive: directive,
                 profile: crossEncoderProfile, limits: crossEncoderLimits, hits: admitted.hits)
-            let widened = laneRequest.limit != request.limit
+            let widened = laneRequest.limit != routedRequest.limit
+            // Store the original caller `request` in the result — `result.request`
+            // is the caller's request as submitted. The route and cross-encoder
+            // fields communicate what the director did on top of it.
             result = admitted.replacing(
                 request: request,
-                hits: widened ? Array(stage.hits.prefix(max(0, request.limit))) : stage.hits,
+                hits: widened ? Array(stage.hits.prefix(max(0, routedRequest.limit))) : stage.hits,
                 degradedStages: stage.degraded
                     ? admitted.degradedStages + [CrossEncoderStage.degradedStage] : nil,
                 crossEncoder: .some(stage.report))
@@ -239,6 +254,11 @@ public extension GeniusLocusKit {
         // (Date() inside sub-engines is forbidden; the verb boundary is the
         // sanctioned entry point, identical to propose/associate).
         var finalResult = result.replacing(withheldBySensitivity: withheldBySensitivity)
+        // Inject the fired route key so callers can see which route, if any,
+        // transformed this request. nil when no route fired (the common case).
+        if let key = firedRouteKey {
+            finalResult = finalResult.replacing(route: key)
+        }
         if request.origin == .external {
             // One wall-clock instant for the trace rows and the dreaming
             // enqueue alike (the verb boundary is the sanctioned Date() site).
@@ -1531,6 +1551,31 @@ public extension GeniusLocusKit {
     /// Seeded on populated estates through the 1.7 → 1.8 migration capsule
     /// (GENIUSLOCUSKIT_SPEC I-27); no migration is required for a fresh estate.
     static var factExtractionMetaKey: String { "fact_extraction" }
+
+    /// The estate-manifest key controlling the cross-encoder recall route.
+    /// Values are `"on"` / `"off"`; absent key reads as `"on"` (ON is the
+    /// ruled product default). Seeded on populated estates in the next
+    /// `EstateFormat` step alongside the consolidation and contradiction keys.
+    /// Derived from Route 1's preference key so the key the manifest read
+    /// uses and the key the router reports are one string by construction.
+    static var crossEncoderRoutingMetaKey: String { crossEncoderRoute.preferenceKey }
+
+    /// Resolve the on/off preference of every route in `recallRoutes`, keyed
+    /// by preference key, for `applyRecallRoutes(_:preferences:)`. One
+    /// manifest read per route, so today exactly one read of exactly
+    /// `crossEncoderRoutingMetaKey`. Absent key, unrecognised value, or
+    /// storage error all read as ON — ON is the ruled product default and
+    /// the key is seeded explicitly later, so an absent key cannot silently
+    /// disable a route on an existing estate. The manifest row store is
+    /// RAM-resident, so each read is a dictionary hit, not disk I/O.
+    func provisionedRecallRoutePreferences(estate: LocusKit.Estate) async -> [String: Bool] {
+        var resolved: [String: Bool] = [:]
+        for route in recallRoutes {
+            let value = try? await estate.meta(key: route.preferenceKey)
+            resolved[route.preferenceKey] = value != "off"
+        }
+        return resolved
+    }
 
     /// Read the provisioned door-selection config, or `.default` when the
     /// manifest carries none. Malformed JSON or an unknown scoring string
