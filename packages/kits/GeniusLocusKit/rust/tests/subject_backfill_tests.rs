@@ -79,6 +79,48 @@ fn dark_lane_default_sweep_refuses_and_lane_absent() {
     );
 }
 
+/// The fact_extraction lane is ALWAYS rendered (extractor or not) and its
+/// pending is the bit-28 row debt, so a caller settles an estate on product
+/// state: draining while drawers are owed, idle once none are. Twin of the
+/// Swift `factExtractionLaneReportsRowDebtWithoutAnExtractor`.
+#[test]
+fn fact_extraction_lane_reports_row_debt_without_an_extractor() {
+    let (coord, handle) = open_estate();
+
+    // Empty estate: lane present, nothing owed, idle.
+    let empty = coord.drain_statuses(&handle).expect("drain_statuses");
+    let empty_lane = empty
+        .iter()
+        .find(|d| d.name == DrainStatus::FACT_EXTRACTION_NAME)
+        .expect("fact_extraction lane must always render");
+    assert_eq!(empty_lane.pending, 0);
+    assert!(!empty_lane.is_draining());
+
+    // Two filed memories, no extractor registered: pending is the debt count
+    // and the detail names the missing extractor.
+    seed_debt(&coord, &handle, 2);
+    {
+        let estate = coord.estate_for(&handle).unwrap();
+        assert_eq!(estate.count_fact_extraction_debt().unwrap(), 2);
+    }
+    let drains = coord.drain_statuses(&handle).expect("drain_statuses");
+    let lane = drains
+        .iter()
+        .find(|d| d.name == DrainStatus::FACT_EXTRACTION_NAME)
+        .expect("fact_extraction lane must always render");
+    assert_eq!(lane.pending, 2, "pending must be the bit-28 row debt: {drains:?}");
+    assert_eq!(lane.in_flight, 0);
+    assert!(lane.is_draining());
+    assert_eq!(
+        lane.detail.as_deref(),
+        Some("drawers awaiting fact extraction for the active recipe; no extractor registered")
+    );
+    assert!(
+        DrainStatus::encode_settled(&drains),
+        "fact row debt must not extend the corpus-only detached finisher"
+    );
+}
+
 #[test]
 fn sweep_drains_debt_with_registered_producer_and_lane_renders() {
     let (mut coord, handle) = open_estate();

@@ -76,6 +76,34 @@ struct SubjectBackfillCycleTests {
                 "subject_backfill lane must not render without a rider: \(drains)")
     }
 
+    /// The fact_extraction lane is ALWAYS rendered (extractor or not) and its
+    /// pending is the bit-28 row debt, so a caller settles an estate on
+    /// product state: draining while drawers are owed, idle once none are.
+    @Test func factExtractionLaneReportsRowDebtWithoutAnExtractor() async throws {
+        let (kit, handle, estate) = try await openEstate(owner: "fact-debt")
+        defer { Task { try? await kit.close(handle) } }
+
+        // Empty estate: lane present, nothing owed, idle.
+        let empty = try await kit.drainStatuses(handle)
+        let emptyLane = try #require(empty.first { $0.name == DrainStatus.factExtractionName })
+        #expect(emptyLane.pending == 0)
+        #expect(!emptyLane.isDraining)
+
+        // Two filed memories, no extractor registered: pending is the debt
+        // count and the detail names the missing extractor.
+        try await seedDebt(kit, handle, count: 2)
+        #expect(try await estate.countFactExtractionDebt() == 2)
+        let drains = try await kit.drainStatuses(handle)
+        let lane = try #require(drains.first { $0.name == DrainStatus.factExtractionName })
+        #expect(lane.pending == 2, "pending must be the bit-28 row debt: \(drains)")
+        #expect(lane.inFlight == 0)
+        #expect(lane.isDraining)
+        #expect(lane.detail
+            == "drawers awaiting fact extraction for the active recipe; no extractor registered")
+        #expect(DrainStatus.encodeSettled(drains),
+                "fact row debt must not extend the corpus-only detached finisher")
+    }
+
     @Test func sweepDrainsDebtWithRegisteredProducerAndLaneRenders() async throws {
         let (kit, handle, estate) = try await openEstate(owner: "sweep-drains")
         defer { Task { try? await kit.close(handle) } }
