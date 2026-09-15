@@ -186,6 +186,33 @@ fn depth_distilled_carries_no_tunnels_key() {
 }
 
 #[test]
+fn depth_distilled_matches_attributed_oracle_for_single_and_batch() {
+    assert_eq!(aria_mcp::recall_distillation::CONVERTER,
+        context_distill_lib::converter::ContextDistillConverter::IntentSpanV23Attributed);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../libs/ContextDistillLib/Tests/ContextDistillLibTests/Vectors/debug7-intent-span-v23-attributed.jsonl");
+    let text = std::fs::read_to_string(path).unwrap();
+    let oracle: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let source = oracle["original"].as_str().unwrap();
+    let expected = oracle["ai_text"].as_str().unwrap();
+    assert_eq!(oracle["applied_enrichment_trailer"], "");
+    assert!(expected.chars().count() > 512);
+    assert_ne!(expected, source);
+    assert_ne!(expected, aria_mcp::v2::render::compact_text(source));
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let filed = call(&dispatcher, "moot_file_memory", json!({"content":source,"subject":"Attributed distillation oracle","location":"converter-parity"}));
+    assert!(is_success(&filed));
+    let id = data(&filed)["memory_id"].as_str().unwrap();
+    for args in [json!({"memory_id":id,"depth":"distilled"}), json!({"memory_ids":[id],"depth":"distilled"})] {
+        let result = call(&dispatcher, "moot_memory_get", args);
+        let row = &data(&result)["memories"][0];
+        assert_eq!(row["distilled"], expected);
+        assert!(row.get("content").is_none());
+    }
+}
+
+#[test]
 fn depth_skim_is_output_only_and_keeps_full_fetch_available() {
     let registry = EstateRegistry::new_inmemory();
     let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);

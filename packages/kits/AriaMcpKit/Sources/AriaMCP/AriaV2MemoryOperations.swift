@@ -1018,7 +1018,7 @@ public struct AriaV2MemoryOperations: Sendable {
     private static func full(_ record: AriaV2MemoryRecord, depth: AriaV2MemoryDepth) -> JSONValue {
         var result: [String: JSONValue] = ["memory_id": .string(id(record.memoryID)), "fetch": fetch(record.memoryID)]
         if let subject = record.subject { result["subject"] = .string(subject) }
-        if depth != .subject { result["distilled"] = .string(AriaV2Envelope.compactText(record.content)) }
+        if depth != .subject { result["distilled"] = .string(RecallDistillation.render(record.content)) }
         if depth == .full {
             result["content"] = .string(record.content)
             result["placement"] = .object(["wing": .string(record.wing), "room": .string(record.room)])
