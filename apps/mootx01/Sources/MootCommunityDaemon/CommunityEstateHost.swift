@@ -10,9 +10,8 @@
 // migration catalog's prepare step runs, the Corpus, VectorStore and encode
 // queue are wired on the same storage, the derived matrix tier is rebuilt and
 // the manifest is refreshed. Every coordinator that needs the estate reaches
-// it through this host: the lifecycle, capture and review coordinators take
-// the LocusKit estate from the open handle, Obsidian sync and transfer take
-// the kit and the handle. One open, one connection, one estate.
+// it through this host: every coordinator takes the kit and the open handle.
+// One open, one connection, one estate.
 //
 // DaemonProvider.activate() step 6 calls openEstate() on whatever
 // EstateLifecycleAuthority it was composed with. This host does NOT acquire
@@ -133,12 +132,6 @@ public actor CommunityEstateHost: EstateLifecycleAuthority {
         _ = try await openEstate()
         guard let openHandle else { throw CommunityDaemonError.estateAbsent(record.databaseURL) }
         return openHandle
-    }
-
-    /// The LocusKit estate behind the open handle, for the coordinators that
-    /// work in LocusKit terms (rooms, drawers, capture, archive).
-    public func estate() async throws -> LocusKit.Estate {
-        try await kit.estate(for: handle())
     }
 
     /// True when the record's database file exists. The lifecycle contract's

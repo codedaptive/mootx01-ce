@@ -2,7 +2,7 @@
 //
 //  / manifest-backed daemon state: the manifest-backed policy stores persist dreaming/maintenance
 // policy, bandit, and daemon cycle state THROUGH the public substrate interface
-// (GeniusLocusKit.estate(for:) → Estate.meta/setMeta). These tests prove the
+// (`kit.meta(in:key:)` reads and `kit.setMeta(in:key:value:)` writes). These tests prove the
 // round-trip through a live estate. Cross-restart durability of the underlying
 // manifest table is proven separately by LocusKit's EstateTests reopen test.
 
