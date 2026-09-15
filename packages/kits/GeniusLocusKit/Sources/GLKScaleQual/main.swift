@@ -116,8 +116,7 @@ q("status.state", status.state?.rawValue ?? "nil")
 q("status.reclaimed_bytes", status.reclaimedBytes ?? -1)
 
 // Post-migration recall qualification.
-let estate = try await kit.estate(for: handle)
-let contentSource = LocusDrawerCorpusContentSource(estate: estate)
+let contentSource = try await LocusDrawerCorpusContentSource(kit: kit, handle: handle)
 let engine = try await CorpusContentEngine(
     storage: storage,
     configuration: CorpusContentConfiguration(mode: .attached, indexUnit: .wholeContent),
@@ -157,7 +156,9 @@ for (i, query) in queries.enumerated() {
       String(format: "%.1f", Date().timeIntervalSince(tQ) * 1000))
     q("recall.q\(i).hits", hits.count)
     if let top = hits.first {
-        let hydrated = (try? await estate.drawerById(rowID: top.id)) != nil
+        let hydrated = (try? await kit.getDrawers(
+            in: handle, ids: [top.id], hydrationLevel: .full
+        ).first) != nil
         q("recall.q\(i).top_score", String(format: "%.3f", top.score))
         q("recall.q\(i).top_hydrates_directly", hydrated)
     }

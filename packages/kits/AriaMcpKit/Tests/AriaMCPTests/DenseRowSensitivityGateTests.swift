@@ -64,9 +64,8 @@ struct DenseRowSensitivityGateTests {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "prov-b-withheld-ep"))
-        let estate = try await kit.estate(for: handle)
 
-        let sourceID = try await estate.capture(CaptureFrame(
+        let sourceID = try await kit.capture(handle, CaptureFrame(
             content: "prov-b source content", channel: .typed, room: "r",
             latticeAnchor: .udc("004"), addedBy: "prov-b",
             embeddingModelID: "test-model-v1",
@@ -74,21 +73,22 @@ struct DenseRowSensitivityGateTests {
         // The canary is placed in both content and subject so that any
         // accidental body leak is caught regardless of which field leaks.
         let canary = "PROV_B_STALE_EDGE_CANARY_40ef72a1"
-        let targetID = try await estate.capture(CaptureFrame(
+        let targetID = try await kit.capture(handle, CaptureFrame(
             content: "prov-b target content \(canary)", channel: .typed, room: "r",
             latticeAnchor: .udc("004"), addedBy: "prov-b",
             embeddingModelID: "test-model-v1",
             subject: "\(canary) prov-b target subject")).id
         // Both drawers are Normal at capture time, so the tunnel inherits
         // Normal adjective sensitivity.
-        _ = try await estate.capture(TunnelCaptureFrame(
+        _ = try await kit.captureTunnel(handle, TunnelCaptureFrame(
             sourceWing: "study", sourceRoom: "r",
             targetWing: "study", targetRoom: "r",
             label: "contradicts", addedBy: "prov-b",
             sourceDrawerId: sourceID, targetDrawerId: targetID, kind: .contradicts))
         // Stale edge: raise target to Restricted after the tunnel exists.
         // The tunnel's bitmap is not updated by correctSensitivity.
-        try await estate.mutate(rowID: targetID, kind: .correctSensitivity(.restricted))
+        try await kit.mutate(handle, MutateFrame(
+            rowID: targetID, kind: .correctSensitivity(.restricted)))
 
         let authority = AriaV2GeniusLocusLensLowerAuthority(kit: kit, handle: handle)
         let service = AriaV2LensLowerService(
@@ -151,11 +151,10 @@ struct DenseRowSensitivityGateTests {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "prov-b-keyinsights-prov"))
-        let estate = try await kit.estate(for: handle)
 
         // Admissible drawer: normal provenance sensitivity (default).
         let admissibleFirstLine = "PROV_B_ADMISSIBLE_LINE_for_keyInsights"
-        let admissibleID = try await estate.capture(CaptureFrame(
+        let admissibleID = try await kit.capture(handle, CaptureFrame(
             content: "\(admissibleFirstLine)\nSecond line of admissible content.",
             channel: .typed, room: "r",
             latticeAnchor: .udc("004"), addedBy: "prov-b",
@@ -169,7 +168,7 @@ struct DenseRowSensitivityGateTests {
         // Provenance-restricted rows ARE recalled (they appear in rankedIDs) but
         // their content MUST NOT contribute to keyInsights.
         let restrictedCanary = "PROV_B_RESTRICTED_CANARY_keyInsights_c3d1a7"
-        let restrictedID = try await estate.capture(CaptureFrame(
+        let restrictedID = try await kit.capture(handle, CaptureFrame(
             content: "\(restrictedCanary)\nSecond line of restricted content.",
             channel: .typed, room: "r",
             latticeAnchor: .udc("004"), addedBy: "prov-b",

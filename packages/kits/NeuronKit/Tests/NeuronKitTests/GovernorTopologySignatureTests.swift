@@ -57,14 +57,15 @@ private func openEstate(owner ownerTag: String) async throws -> (GeniusLocusKit,
 
 // MARK: - Write helpers
 
-/// Capture a drawer via the direct estate path (writes one audit event).
+/// Capture a drawer via the GLK handle verb (writes one audit event).
 @discardableResult
 private func captureDrawer(
-    _ estate: Estate,
+    _ kit: GeniusLocusKit,
+    _ handle: EstateHandle,
     tag: String,
     room: String = "sig-test-room"
 ) async throws -> Drawer {
-    try await estate.capture(CaptureFrame(
+    try await kit.capture(handle, CaptureFrame(
         content: "sig-test-content-\(tag)",
         channel: .typed,
         room: room,
@@ -73,15 +74,16 @@ private func captureDrawer(
         embeddingModelID: "test-model-v1"))
 }
 
-/// Add a tunnel between two drawers via the direct estate path.
+/// Add a tunnel between two drawers via the GLK handle verb.
 /// A tunnel is a bare row insert with NO audit event — only tunnelCount advances.
 @discardableResult
 private func addTunnel(
-    _ estate: Estate,
+    _ kit: GeniusLocusKit,
+    _ handle: EstateHandle,
     srcDrawerID: String? = nil,
     tgtDrawerID: String? = nil
 ) async throws -> Tunnel {
-    try await estate.capture(TunnelCaptureFrame(
+    try await kit.captureTunnel(handle, TunnelCaptureFrame(
         sourceWing: "sig-test-wing",
         sourceRoom: "sig-test-room",
         targetWing: "sig-test-wing",
@@ -130,8 +132,7 @@ struct TopologySignatureProbeTests {
         let before = try await kit.topologyChangeSignature(for: handle)
         #expect(before == "0,0,0")
 
-        let estate = try await kit.estate(for: handle)
-        _ = try await captureDrawer(estate, tag: "alpha")
+        _ = try await captureDrawer(kit, handle, tag: "alpha")
 
         let after = try await kit.topologyChangeSignature(for: handle)
         let parts = after.split(separator: ",")
@@ -153,15 +154,14 @@ struct TopologySignatureProbeTests {
         let (kit, handle) = try await openEstate(owner: "tunnel")
 
         // Capture two drawers (each writes an audit event).
-        let estate = try await kit.estate(for: handle)
-        let d1 = try await captureDrawer(estate, tag: "d1")
-        let d2 = try await captureDrawer(estate, tag: "d2")
+        let d1 = try await captureDrawer(kit, handle, tag: "d1")
+        let d2 = try await captureDrawer(kit, handle, tag: "d2")
 
         let afterDrawers = try await kit.topologyChangeSignature(for: handle)
         let auditBeforeTunnel = Int(afterDrawers.split(separator: ",")[0])!
 
         // Add a tunnel — NO audit event.
-        _ = try await addTunnel(estate, srcDrawerID: d1.id, tgtDrawerID: d2.id)
+        _ = try await addTunnel(kit, handle, srcDrawerID: d1.id, tgtDrawerID: d2.id)
 
         let afterTunnel = try await kit.topologyChangeSignature(for: handle)
         let parts = afterTunnel.split(separator: ",")
@@ -182,8 +182,7 @@ struct TopologySignatureProbeTests {
         let (kit, handle) = try await openEstate(owner: "kgfact")
 
         // Capture a drawer (writes an audit event).
-        let estate = try await kit.estate(for: handle)
-        _ = try await captureDrawer(estate, tag: "base")
+        _ = try await captureDrawer(kit, handle, tag: "base")
 
         let afterDrawer = try await kit.topologyChangeSignature(for: handle)
         let auditBeforeFact = Int(afterDrawer.split(separator: ",")[0])!
@@ -216,14 +215,13 @@ struct GraphCentralityScanSignatureTests {
         let (kit, handle) = try await openEstate(owner: "cscan-store")
 
         // Set up two drawers + one tunnel so scores are non-empty.
-        let estate = try await kit.estate(for: handle)
-        let d1 = try await captureDrawer(estate, tag: "d1")
-        let d2 = try await captureDrawer(estate, tag: "d2")
-        _ = try await addTunnel(estate, srcDrawerID: d1.id, tgtDrawerID: d2.id)
+        let d1 = try await captureDrawer(kit, handle, tag: "d1")
+        let d2 = try await captureDrawer(kit, handle, tag: "d2")
+        _ = try await addTunnel(kit, handle, srcDrawerID: d1.id, tgtDrawerID: d2.id)
 
         try await AutonomicGovernor.graphCentralityScan(kit: kit, handle: handle, now: t0)
 
-        let savedSig = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let savedSig = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
         let currentSig = try await kit.topologyChangeSignature(for: handle)
 
         // Saved sig must equal the composite that was current at scan time.
@@ -246,25 +244,24 @@ struct GraphCentralityScanSignatureTests {
         let (kit, handle) = try await openEstate(owner: "cscan-tunnel")
 
         // Step 1: capture two drawers (audit events fire).
-        let estate = try await kit.estate(for: handle)
-        let d1 = try await captureDrawer(estate, tag: "d1")
-        let d2 = try await captureDrawer(estate, tag: "d2")
+        let d1 = try await captureDrawer(kit, handle, tag: "d1")
+        let d2 = try await captureDrawer(kit, handle, tag: "d2")
 
         // Step 2: first scan — computes centrality, saves sig "2,0,0".
         try await AutonomicGovernor.graphCentralityScan(kit: kit, handle: handle, now: t0)
-        let sigAfterFirstScan = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let sigAfterFirstScan = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
         #expect(sigAfterFirstScan?.split(separator: ",").count == 3,
             "first scan must store a three-part composite signature")
 
         // Step 3: add a tunnel — NO audit event; audit count unchanged.
         // An audit-only watermark would incorrectly see "no change" here.
-        _ = try await addTunnel(estate, srcDrawerID: d1.id, tgtDrawerID: d2.id)
+        _ = try await addTunnel(kit, handle, srcDrawerID: d1.id, tgtDrawerID: d2.id)
 
         // Step 4: second scan — the composite signature detects tunnelCount advancing
         // ("2,0,0" → "2,1,0") and recomputes, updating centralityCount.
         try await AutonomicGovernor.graphCentralityScan(
             kit: kit, handle: handle, now: t0.addingTimeInterval(1))
-        let sigAfterSecondScan = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let sigAfterSecondScan = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
 
         #expect(sigAfterSecondScan != sigAfterFirstScan,
             "centralityCount must update after a tunnel-only change triggers recompute")
@@ -282,12 +279,11 @@ struct GraphCentralityScanSignatureTests {
         let (kit, handle) = try await openEstate(owner: "cscan-kgfact")
 
         // Step 1: capture a drawer (audit event fires).
-        let estate = try await kit.estate(for: handle)
-        _ = try await captureDrawer(estate, tag: "base")
+        _ = try await captureDrawer(kit, handle, tag: "base")
 
         // Step 2: first scan — computes centrality, saves sig "1,0,0".
         try await AutonomicGovernor.graphCentralityScan(kit: kit, handle: handle, now: t0)
-        let sigAfterFirstScan = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let sigAfterFirstScan = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
         #expect(sigAfterFirstScan?.split(separator: ",").count == 3,
             "first scan must store a three-part composite signature")
 
@@ -299,7 +295,7 @@ struct GraphCentralityScanSignatureTests {
         // ("1,0,0" → "1,0,1") and recomputes, updating centralityCount.
         try await AutonomicGovernor.graphCentralityScan(
             kit: kit, handle: handle, now: t0.addingTimeInterval(1))
-        let sigAfterSecondScan = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let sigAfterSecondScan = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
 
         #expect(sigAfterSecondScan != sigAfterFirstScan,
             "centralityCount must update after a KG-fact-only change triggers recompute")
@@ -318,21 +314,20 @@ struct GraphCentralityScanSignatureTests {
 
         // Set up two drawers + a tunnel so the first scan produces non-empty scores
         // (non-empty scores are required for the skip-path to engage on the second tick).
-        let estate = try await kit.estate(for: handle)
-        let d1 = try await captureDrawer(estate, tag: "d1")
-        let d2 = try await captureDrawer(estate, tag: "d2")
-        _ = try await addTunnel(estate, srcDrawerID: d1.id, tgtDrawerID: d2.id)
+        let d1 = try await captureDrawer(kit, handle, tag: "d1")
+        let d2 = try await captureDrawer(kit, handle, tag: "d2")
+        _ = try await addTunnel(kit, handle, srcDrawerID: d1.id, tgtDrawerID: d2.id)
 
         // First scan: computes centrality, saves sig and scores.
         try await AutonomicGovernor.graphCentralityScan(kit: kit, handle: handle, now: t0)
-        let sigAfterFirstScan = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let sigAfterFirstScan = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
 
         // Second scan: nothing changed — signature must be identical, skip path fires.
         // The centralityCount meta key must remain at the same value (skip path does NOT
         // call setMeta; re-reading produces the same string set by the first scan).
         try await AutonomicGovernor.graphCentralityScan(
             kit: kit, handle: handle, now: t0.addingTimeInterval(1))
-        let sigAfterSecondScan = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let sigAfterSecondScan = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
 
         #expect(sigAfterSecondScan == sigAfterFirstScan,
             "centralityCount must be unchanged on a no-op tick (skip path does not update the key)")

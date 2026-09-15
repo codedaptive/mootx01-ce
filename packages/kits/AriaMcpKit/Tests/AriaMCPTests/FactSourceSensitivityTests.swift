@@ -38,8 +38,7 @@ private func captureSource(
     _ kit: GeniusLocusKit, _ handle: EstateHandle,
     sensitivity: AdjectiveSensitivity
 ) async throws -> Drawer {
-    let estate = try await kit.estate(for: handle)
-    return try await estate.capture(CaptureFrame(
+    return try await kit.capture(handle, CaptureFrame(
         content: "source drawer at \(sensitivity)",
         channel: .typed,
         room: "fact-source-sensitivity",

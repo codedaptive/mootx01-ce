@@ -45,6 +45,12 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
         self.estate = estate
     }
 
+    /// Create the source for one open estate without exposing GLK's
+    /// internal raw-estate accessor outside the GeniusLocusKit module.
+    package init(kit: GeniusLocusKit, handle: EstateHandle) async throws {
+        self.estate = try await kit.estate(for: handle)
+    }
+
     /// Resolve the CURRENT canonical record for a Drawer ID. Empty-content
     /// and non-resolving drawers return nil (nothing to index; the engine
     /// clears derived state for a previously-indexed ID that stops

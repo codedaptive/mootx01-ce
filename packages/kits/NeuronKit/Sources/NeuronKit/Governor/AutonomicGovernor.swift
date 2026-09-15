@@ -268,8 +268,9 @@ public actor AutonomicGovernor {
         // adapters. Production persists policy, bandit, and daemon cycle state to
         // the estate manifest so a restart continues from the prior
         // run's state instead of re-discovering and re-proposing — the store reads
-        // and writes THROUGH the public substrate interface (kit.estate(for:) →
-        // Estate.meta/setMeta), keeping NeuronKit's reach B-1-compliant.
+        // and writes THROUGH GeniusLocusKit's handle-scoped meta verbs
+        // (`kit.meta(in:key:)` / `kit.setMeta(in:key:value:)`), keeping
+        // NeuronKit's reach B-1-compliant.
         //
         // AUTO-REINDEX: wire an EstateCorpusGrowthProbe so distributional embedding
         // bases are retrained automatically when corpus growth crosses the threshold.
@@ -746,7 +747,8 @@ public actor AutonomicGovernor {
         // affecting change has occurred since the last scan.
         //
         // Strategy: persist computed scores + a COMPOSITE topology-change signature
-        // to estate.meta. The signature is "\(auditCount),\(tunnelCount),\(kgFactCount)"
+        // through `kit.setMeta(in:key:value:)`. The signature is
+        // "\(auditCount),\(tunnelCount),\(kgFactCount)"
         // — three O(1) COUNT(*) calls that together detect:
         //   - drawer captures    (advance auditCount)
         //   - tunnel-only writes (advance tunnelCount; NO audit event written)
@@ -757,15 +759,14 @@ public actor AutonomicGovernor {
         // The composite signature is the fix. The value format is a change from the
         // old bare-Int format: a stored bare-Int compares unequal to the new
         // composite, causing one recompute on upgrade — safe and correct.
-        let estate = try await kit.estate(for: handle)
-        let savedSig = try await estate.meta(key: NeuronKitManifestKey.centralityCount)
+        let savedSig = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityCount)
         let currentSig = try await kit.topologyChangeSignature(for: handle)
 
         // Composite signature probe: same signature → estate topology unchanged → skip.
         // A nil savedSig (first run) or a format-mismatched old value both compare
         // unequal to currentSig, correctly triggering recompute.
         if savedSig == currentSig,
-           let scoresJSON = try await estate.meta(key: NeuronKitManifestKey.centralityScores),
+           let scoresJSON = try await kit.meta(in: handle, key: NeuronKitManifestKey.centralityScores),
            let scoresData = scoresJSON.data(using: .utf8),
            let cachedScores = try? JSONDecoder().decode([String: Float].self, from: scoresData),
            !cachedScores.isEmpty {
@@ -830,11 +831,10 @@ public actor AutonomicGovernor {
         let finalSig = try await kit.topologyChangeSignature(for: handle)
         if let scoresData = try? JSONEncoder().encode(scores),
            let scoresJSON = String(data: scoresData, encoding: .utf8) {
-            try await estate.setMeta(key: NeuronKitManifestKey.centralityScores, value: scoresJSON)
+            try await kit.setMeta(in: handle, key: NeuronKitManifestKey.centralityScores, value: scoresJSON)
         }
-        try await estate.setMeta(
-            key: NeuronKitManifestKey.centralityCount,
-            value: finalSig)
+        try await kit.setMeta(
+            in: handle, key: NeuronKitManifestKey.centralityCount, value: finalSig)
     }
 
     // MARK: - Preference producer duty
@@ -880,7 +880,7 @@ public actor AutonomicGovernor {
         // audit events exist since the last scan.
         //
         // Strategy (mirrors graphCentralityScan): persist fitted scores + audit-event-
-        // count watermark to estate.meta. On each cadence, check the watermark first
+        // count watermark through `kit.setMeta(in:key:value:)`. On each cadence, check the watermark first
         // (one O(1) COUNT(*) call). When unchanged, re-register the cached preference
         // scores and return immediately — the `preference` recall column keeps serving
         // correct values with zero trace load.
@@ -890,8 +890,7 @@ public actor AutonomicGovernor {
         // unbounded `.distantPast` window. Bradley-Terry fitting over this bounded window
         // keeps the preference model current without O(all-history) RAM growth. The
         // fitted strengths are persisted after each compute so process restarts are free.
-        let estate = try await kit.estate(for: handle)
-        let savedCountRaw = try await estate.meta(key: NeuronKitManifestKey.preferenceCount)
+        let savedCountRaw = try await kit.meta(in: handle, key: NeuronKitManifestKey.preferenceCount)
         let savedCount: Int? = savedCountRaw.flatMap { Int($0) }
 
         // Audit-only watermark — intentionally NOT the composite topology-change
@@ -901,7 +900,7 @@ public actor AutonomicGovernor {
         // composite signature would cause harmless but wasteful spurious recomputes.
         let changed = try await kit.hasAuditGrown(for: handle, since: savedCount)
         if !changed,
-           let scoresJSON = try await estate.meta(key: NeuronKitManifestKey.preferenceScores),
+           let scoresJSON = try await kit.meta(in: handle, key: NeuronKitManifestKey.preferenceScores),
            let scoresData = scoresJSON.data(using: .utf8),
            let cachedScores = try? JSONDecoder().decode([String: Float].self, from: scoresData),
            !cachedScores.isEmpty {
@@ -936,11 +935,10 @@ public actor AutonomicGovernor {
         let currentCount = try await kit.auditEventCount(for: handle)
         if let scoresData = try? JSONEncoder().encode(scores),
            let scoresJSON = String(data: scoresData, encoding: .utf8) {
-            try await estate.setMeta(key: NeuronKitManifestKey.preferenceScores, value: scoresJSON)
+            try await kit.setMeta(in: handle, key: NeuronKitManifestKey.preferenceScores, value: scoresJSON)
         }
-        try await estate.setMeta(
-            key: NeuronKitManifestKey.preferenceCount,
-            value: String(currentCount))
+        try await kit.setMeta(
+            in: handle, key: NeuronKitManifestKey.preferenceCount, value: String(currentCount))
     }
 
     // MARK: - Topology snapshot duty
@@ -972,8 +970,6 @@ public actor AutonomicGovernor {
         previousSnapshotLoader: (@Sendable () async -> Data?)? = nil,
         handler: @Sendable (String, Date, Data, String) async -> Void
     ) async throws -> TopologyInputsToken {
-        let locus = try await kit.estate(for: handle)
-
         // Cheap outer watermark (DoS fix): probe a composite topology-change
         // signature BEFORE loading all drawers, tunnels, and facts — otherwise
         // an attacker who creates many KG facts (with long subjects) forces a
@@ -990,16 +986,16 @@ public actor AutonomicGovernor {
         // produced before). A stored bare-Int value (old format) compares unequal
         // to the new composite string, causing one recompute on upgrade — safe.
         if let previousFingerprint {
-            let savedSig = try await locus.meta(key: NeuronKitManifestKey.topologyCount)
+            let savedSig = try await kit.meta(in: handle, key: NeuronKitManifestKey.topologyCount)
             let currentSig = try await kit.topologyChangeSignature(for: handle)
             if savedSig == currentSig {
                 return TopologyInputsToken(unchangedFingerprint: previousFingerprint)
             }
         }
 
-        let allDrawerRows = try await locus.allDrawers()
-        let allTunnelRows = try await locus.allTunnels()
-        let kgFacts = try await locus.allKGFacts()
+        let allDrawerRows = try await kit.allDrawers(in: handle)
+        let allTunnelRows = try await kit.allTunnels(in: handle)
+        let kgFacts = try await kit.recallKGFacts(handle)
 
         // Dirty check: compute the stable inputs fingerprint BEFORE the expensive
         // work. The fingerprint embeds the coordinate-frame version, so a frame
@@ -1023,7 +1019,7 @@ public actor AutonomicGovernor {
         // seconds reader cannot reconstruct — the audit trail is authoritative there).
         func resolveTombstoneInstant(_ d: Drawer) async throws -> Date? {
             if let at = d.tombstonedAt { return at }
-            let events = try await locus.auditTrail(rowID: d.id)
+            let events = try await kit.auditTrail(in: handle, rowID: d.id)
             guard let event = events.last(where: { $0.verb == RowVerb.tombstone.rawValue })
             else { return nil }
             return Date(timeIntervalSince1970: Double(event.hlc.physicalTime) / 1000.0)
@@ -1133,8 +1129,8 @@ public actor AutonomicGovernor {
         // Re-read AFTER the compute to capture any writes that arrived during the
         // full load — the next cadence will then correctly detect those changes.
         if let sig = try? await kit.topologyChangeSignature(for: handle) {
-            try? await locus.setMeta(
-                key: NeuronKitManifestKey.topologyCount, value: sig)
+            try? await kit.setMeta(
+                in: handle, key: NeuronKitManifestKey.topologyCount, value: sig)
         }
         return token
     }

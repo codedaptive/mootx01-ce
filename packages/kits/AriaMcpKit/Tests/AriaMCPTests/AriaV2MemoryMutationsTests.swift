@@ -89,7 +89,7 @@ struct AriaV2MemoryMutationsTests {
     @Test("erase requires boolean true before the lower expunge")
     func eraseRejectsInvalidConfirmationWithoutExpunging() async throws {
         let fixture = try await makeFixture()
-        let target = try await fixture.estate.capture(frame(content: "must survive rejected erase"))
+        let target = try await fixture.kit.capture(fixture.handle, frame(content: "must survive rejected erase"))
         let memoryID = try #require(UUID(uuidString: target.id))
         let invalidArguments: [JSONValue] = [
             .object(["memory_id": .string(memoryID.uuidString)]),
@@ -106,7 +106,7 @@ struct AriaV2MemoryMutationsTests {
                 #expect(error.code == JSONRPCErrorCode.invalidParams)
             }
 
-            let surviving = (try await fixture.estate.allDrawers()).first { $0.id == target.id }
+            let surviving = (try await fixture.kit.allDrawers(in: fixture.handle)).first { $0.id == target.id }
             #expect(surviving?.tombstonedAt == nil, "invalid confirmation must not reach expunge")
         }
     }
@@ -114,8 +114,8 @@ struct AriaV2MemoryMutationsTests {
     @Test("typed mutation service links and reviews through the GLK tunnel boundary")
     func directlyMutatesLinksAndReviews() async throws {
         let fixture = try await makeFixture()
-        let first = try await fixture.estate.capture(frame(content: "first"))
-        let second = try await fixture.estate.capture(frame(content: "second"))
+        let first = try await fixture.kit.capture(fixture.handle, frame(content: "first"))
+        let second = try await fixture.kit.capture(fixture.handle, frame(content: "second"))
         let firstID = try #require(UUID(uuidString: first.id))
         let secondID = try #require(UUID(uuidString: second.id))
 
@@ -149,13 +149,13 @@ struct AriaV2MemoryMutationsTests {
             "note": .string("approved by typed service"),
         ]))
         #expect(data(review)?["withdrawn"] == .bool(false), "\(review)")
-        let settled = try #require(try await fixture.estate.getTunnel(id: proposed.id))
+        let settled = try #require(try await fixture.kit.getTunnel(in: fixture.handle, id: proposed.id))
         #expect(settled.lifecycle == .active)
         #expect(settled.ext == "{\"reviewedBy\":\"user\"}")
 
         // moot_update_memory content[0].text parity: "Updated memory <id>."  (Swift:320)
         // Twin: Rust mutation_envelope_text_update.
-        let updateTarget = try await fixture.estate.capture(frame(content: "update-target"))
+        let updateTarget = try await fixture.kit.capture(fixture.handle, frame(content: "update-target"))
         let updateTargetID = try #require(UUID(uuidString: updateTarget.id))
         let update = try await fixture.service.update(arguments: .object([
             "memory_id": .string(updateTargetID.uuidString), "mutation": .string("confirm"),
@@ -165,7 +165,7 @@ struct AriaV2MemoryMutationsTests {
 
         // moot_withdraw_memory content[0].text parity: "Withdrew memory <id>."  (Swift:344)
         // Twin: Rust mutation_envelope_text_withdraw.
-        let withdrawTarget = try await fixture.estate.capture(frame(content: "withdraw-target"))
+        let withdrawTarget = try await fixture.kit.capture(fixture.handle, frame(content: "withdraw-target"))
         let withdrawTargetID = try #require(UUID(uuidString: withdrawTarget.id))
         let withdraw = try await fixture.service.withdraw(arguments: .object([
             "memory_id": .string(withdrawTargetID.uuidString),
@@ -175,7 +175,7 @@ struct AriaV2MemoryMutationsTests {
 
         // moot_erase_memory content[0].text parity (full): "Erased memory <id>."  (Swift:365)
         // Twin: Rust mutation_envelope_text_erase_full.
-        let eraseTarget = try await fixture.estate.capture(frame(content: "erase-target"))
+        let eraseTarget = try await fixture.kit.capture(fixture.handle, frame(content: "erase-target"))
         let eraseTargetID = try #require(UUID(uuidString: eraseTarget.id))
         let erase = try await fixture.service.erase(arguments: .object([
             "memory_id": .string(eraseTargetID.uuidString), "confirmation": .bool(true),
@@ -185,7 +185,7 @@ struct AriaV2MemoryMutationsTests {
 
         // moot_move_memory content[0].text parity: "Moved memory <id>."  (Swift:425)
         // Twin: Rust mutation_envelope_text_move.
-        let moveTarget = try await fixture.estate.capture(frame(content: "move-target"))
+        let moveTarget = try await fixture.kit.capture(fixture.handle, frame(content: "move-target"))
         let moveTargetID = try #require(UUID(uuidString: moveTarget.id))
         let move = try await fixture.service.move(arguments: .object([
             "memory_id": .string(moveTargetID.uuidString), "wing": .string("Archive"), "room": .string("Moved"),
@@ -207,13 +207,13 @@ struct AriaV2MemoryMutationsTests {
     func partialEraseEnvelopeTextMatchesSwift() async throws {
         let fixture = try await makeFixture()
         // D1: accepted (audit gate will refuse its tombstone).
-        let d1 = try await fixture.estate.capture(frame(content: "partial-erase-anchor"))
-        try await fixture.estate.mutate(rowID: d1.id, kind: .correctTrust(.canonical))
-        try await fixture.estate.mutate(rowID: d1.id, kind: .accept)
+        let d1 = try await fixture.kit.capture(fixture.handle, frame(content: "partial-erase-anchor"))
+        try await fixture.kit.mutate(fixture.handle, MutateFrame(rowID: d1.id, kind: .correctTrust(.canonical)))
+        try await fixture.kit.mutate(fixture.handle, MutateFrame(rowID: d1.id, kind: .accept))
         // D2: active sibling in the same lineage.
         var d2Frame = frame(content: "partial-erase-sibling")
         d2Frame.lineageID = d1.lineageID
-        let d2 = try await fixture.estate.capture(d2Frame)
+        let d2 = try await fixture.kit.capture(fixture.handle, d2Frame)
         let d2ID = try #require(UUID(uuidString: d2.id))
 
         let result = try await fixture.service.erase(arguments: .object([
@@ -235,15 +235,14 @@ struct AriaV2MemoryMutationsTests {
             memoryID, among: [memoryID.uuidString.lowercased()]) == memoryID.uuidString.lowercased())
     }
 
-    private func makeFixture() async throws -> (kit: GeniusLocusKit, handle: EstateHandle, estate: Estate, service: AriaV2MemoryMutations) {
+    private func makeFixture() async throws -> (kit: GeniusLocusKit, handle: EstateHandle, service: AriaV2MemoryMutations) {
         let storage = InMemoryStorage(configuration: .init(estateID: UUID(), backend: .inMemory))
         let kit = GeniusLocusKit()
         let handle = try await kit.open(storage: storage, owner: .init(ownerIdentifier: "mutation-test"))
-        let estate = try await kit.estate(for: handle)
         let context = AriaV2MemoryOperationContext(
             estateID: handle.estateUUID, callerID: "test-reviewer", serverIdentity: "test-server",
             now: { Date(timeIntervalSince1970: 1_700_000_000) })
-        return (kit, handle, estate, .init(kit: kit, handle: handle, context: context))
+        return (kit, handle, .init(kit: kit, handle: handle, context: context))
     }
 
     private func frame(content: String) -> CaptureFrame {

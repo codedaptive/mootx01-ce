@@ -31,13 +31,12 @@ struct TunnelSuccessorTests {
         _ kit: GeniusLocusKit, _ handle: EstateHandle,
         src: String, tgt: String
     ) async throws {
-        let estate = try await kit.estate(for: handle)
         let frame = TunnelCaptureFrame(
             sourceWing: Self.wing, sourceRoom: "r",
             targetWing: Self.wing, targetRoom: "r",
             label: "leads-to", addedBy: "user",
             sourceDrawerId: src, targetDrawerId: tgt, kind: .references)
-        _ = try await estate.capture(frame)
+        _ = try await kit.captureTunnel(handle, frame)
     }
 
     // CK-TS-1: from the anchor, the more-frequently-tunneled target is

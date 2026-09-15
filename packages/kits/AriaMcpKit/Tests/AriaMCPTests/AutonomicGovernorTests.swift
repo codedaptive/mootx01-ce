@@ -123,8 +123,8 @@ struct AutonomicGovernorTests {
         let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
             let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
-            let estate = try await kit.estate(for: handle)
-            let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let nodeNames = try await kit.resolveNodeNames(
+                handle, parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 // Thread `now` from the handler parameter so telemetry carries the correct timestamp.
@@ -150,8 +150,8 @@ struct AutonomicGovernorTests {
         let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
             let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
-            let estate = try await kit.estate(for: handle)
-            let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let nodeNames = try await kit.resolveNodeNames(
+                handle, parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 // Thread `now` from the handler parameter so telemetry carries the correct timestamp.

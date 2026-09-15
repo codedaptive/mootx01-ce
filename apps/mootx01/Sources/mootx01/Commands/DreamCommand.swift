@@ -280,7 +280,7 @@ struct DreamCommand: AsyncParsableCommand {
             // cycle error above.
             if await kit.subjectProducerPipeline(for: handle) != nil {
                 do {
-                    let debt = try await kit.estate(for: handle).countSubjectDebt()
+                    let debt = try await kit.countSubjectDebt(in: handle)
                     if debt > 0 {
                         // 256 items per cycle: the miniLLM writes subjects subsecond per item;
                         // 32 was far below practical throughput and caused post-upgrade debt

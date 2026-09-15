@@ -35,7 +35,6 @@ struct AriaV2WithheldTests {
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         let handle = try await kit.open(storage: storage, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore(), federate: true)
-        let estate = try await kit.estate(for: handle)
         var ids: [String] = []
         for index in 0..<5 {
             ids.append(try await kit.capture(handle, CaptureFrame(
@@ -44,14 +43,14 @@ struct AriaV2WithheldTests {
                 addedBy: "withheld-v2", embeddingModelID: "test-v1", subject: "probe \(index)")).id)
         }
         for leaf in ids.dropFirst() {
-            _ = try await estate.capture(TunnelCaptureFrame(
+            _ = try await kit.captureTunnel(handle, TunnelCaptureFrame(
                 sourceWing: "study", sourceRoom: "r", targetWing: "study", targetRoom: "r",
                 label: "relates", addedBy: "withheld-v2", sourceDrawerId: ids[0], targetDrawerId: leaf,
                 kind: .references))
         }
         // Stale normal tunnels can name drawers subsequently reclassified.
-        try await estate.mutate(rowID: ids[0], kind: .correctSensitivity(.restricted))
-        try await estate.mutate(rowID: ids[1], kind: .correctSensitivity(.restricted))
+        try await kit.mutate(handle, MutateFrame(rowID: ids[0], kind: .correctSensitivity(.restricted)))
+        try await kit.mutate(handle, MutateFrame(rowID: ids[1], kind: .correctSensitivity(.restricted)))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         func count(_ result: JSONValue) -> Int64? {

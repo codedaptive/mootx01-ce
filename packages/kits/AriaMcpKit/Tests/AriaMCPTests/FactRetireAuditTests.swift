@@ -91,8 +91,7 @@ struct FactRetireAuditTests {
                 "moot_retire_fact must echo the fact_id in structuredContent.data")
 
         // Read the audit trail and check the single row.
-        let estate = try await kit.estate(for: handle)
-        let events = try await estate.auditTrail(rowID: factIDStr)
+        let events = try await kit.auditTrail(in: handle, rowID: factIDStr)
         #expect(events.count == 1, "exactly one audit event for a single retirement")
         let ev = try #require(events.first)
         #expect(ev.verb == "retract",    "audit verb must be 'retract'")
@@ -127,8 +126,7 @@ struct FactRetireAuditTests {
                 "reason":  .string("audit-reason-b"),
             ]))
 
-        let estate = try await kit.estate(for: handle)
-        let events = try await estate.auditTrail(rowID: factIDStr)
+        let events = try await kit.auditTrail(in: handle, rowID: factIDStr)
         #expect(events.count == 1)
         let ev = try #require(events.first)
         #expect(ev.actor == serverID,
@@ -163,8 +161,7 @@ struct FactRetireAuditTests {
                 "fact_id": .string(factIDStr),
             ]))
 
-        let estate = try await kit.estate(for: handle)
-        let events = try await estate.auditTrail(rowID: factIDStr)
+        let events = try await kit.auditTrail(in: handle, rowID: factIDStr)
         #expect(events.count == 1)
         let ev = try #require(events.first)
         #expect(ev.verb == "retract")
