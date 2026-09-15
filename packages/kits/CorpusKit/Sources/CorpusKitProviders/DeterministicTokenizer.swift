@@ -6,8 +6,7 @@
 // punctuation token to a stable hash-folded id in [2, vocabSize)
 // (IDs 0 and 1 are reserved for PAD/UNK; empty input returns padTokenID).
 //
-// The MiniLM, MPNet, and EmbeddingGemma provider initializers already
-// default to DeterministicTokenizer; no further migration is pending.
+// The MiniLM provider initializer defaults to DeterministicTokenizer.
 
 import Foundation
 import CorpusKit

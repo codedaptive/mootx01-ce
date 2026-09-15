@@ -21,7 +21,7 @@
 //!   5. V1_5-stamped estate: the chain runs the 1.5 → 1.6 capsule and then
 //!      this one, ending at CURRENT (gated on feature = "migration-v1-5-to-v1-6").
 //!   6. StorageUnavailable: an unregistered handle returns the error variant.
-//!   7. With the `whole-record-dense` feature an estate whose manifest names a
+//!   7. An estate whose manifest names a
 //!      whole-record provider keeps its rows and is still stamped V1_7; the
 //!      span encoder value vacuums like the default ensemble.
 //!   8. V1_7-stamped estate: the chain's `found < V1_7` guard skips this
@@ -349,7 +349,6 @@ fn unregistered_handle_reports_storage_unavailable() {
 // §7 The audition build keeps a whole-record provider's rows
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn whole_record_provider_in_the_manifest_keeps_the_rows() {
     let (coord, handle, storage) = make_estate(EstateFormatVersion::V1_6);
@@ -372,7 +371,6 @@ fn whole_record_provider_in_the_manifest_keeps_the_rows() {
     assert_eq!(read_stamp(&storage), EstateFormatVersion::V1_7);
 }
 
-#[cfg(feature = "whole-record-dense")]
 #[test]
 fn span_encoder_in_the_manifest_still_vacuums() {
     let (coord, handle, storage) = make_estate(EstateFormatVersion::V1_6);

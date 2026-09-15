@@ -23,7 +23,7 @@
 //      nothing.
 //   3. Stamp the estate format v1_7.
 //
-// Under the WholeRecordDense trait the lane is live again, and an audition
+// The whole-record float lane is live, and an audition
 // estate whose manifest names a whole-record provider (an `embedding_provider`
 // value that is present, non-empty and not the span encoder) keeps its rows:
 // the capsule stamps v1_7 without deleting anything, so the format still
@@ -69,7 +69,7 @@ public struct WholeRecordFloatVacuumMigrationReport: Sendable, Equatable {
     /// CorpusKit representation claims on vector_index 1 released by this run.
     public let claimsReleased: Int
     /// True when the rows were vacuumed (every default-build run); false
-    /// when the WholeRecordDense build found a whole-record provider named
+    /// when a whole-record provider named
     /// in the manifest and left an audition estate's rows in place.
     public let vacuumed: Bool
     /// The estate format the capsule stamped.
@@ -114,7 +114,6 @@ public extension GeniusLocusKit {
                 reason: "no storage registered for estate: \(error)")
         }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
         // The audition build: an estate provisioned with a whole-record
         // provider keeps its float rows. The span encoder is a rerank stage,
         // never a whole-record provider, so "encoder" vacuums like the
@@ -130,7 +129,6 @@ public extension GeniusLocusKit {
             return WholeRecordFloatVacuumMigrationReport(
                 floatRows: 0, graphRows: 0, claimsReleased: 0, vacuumed: false, format: .v1_7)
         }
-#endif
 
         // Step 1: the rows and the sidecar. The store is opened on the estate
         // storage with the conventional sidecar path so the rebuild rewrites

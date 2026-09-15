@@ -7,14 +7,11 @@
 //
 // ── Which providers are retrained ─────────────────────────────────────────
 // This probe triggers `GeniusLocusKit.reindexCorpus`, which retrains whatever
-// providers are registered in the estate's Corpus. With `MOOTX01_DENSE_FAMILIES`
-// OFF (the default, plan 70BC55F3, 2026-09-05), `CorpusEnsemble.defaultEnsemble()`
-// returns RI only — so this probe retrains RI only on estates opened with the
-// default ensemble. With `MOOTX01_DENSE_FAMILIES` ON, all five providers are
-// retrained as before.
+// providers are registered in the estate's Corpus. `CorpusEnsemble.defaultEnsemble()`
+// returns RI and LSA — so this probe retrains both providers on every retrain cycle.
 //
 // ── Design rationale ─────────────────────────────────────────────────────
-// Distributional embedding bases (RI / PPMI / LSA / NMF) train on the
+// Distributional embedding bases (RI / LSA) train on the
 // vocabulary present at first ingest and never grow incrementally — their
 // basis is frozen until an explicit `reindex`. Terms ingested AFTER the
 // last retrain are OOV (out-of-vocabulary) and produce only zero-vectors
@@ -46,7 +43,7 @@ import OSLog
 /// Fractional vocabulary growth required to trigger an auto-reindex.
 ///
 /// The retrain trigger fires on VOCABULARY drift, not raw chunk count:
-/// distributional embeddings (RI / PPMI / LSA / NMF) freeze their vocabulary at
+/// distributional embeddings (RI / LSA) freeze their vocabulary at
 /// training time, so what degrades dense recall is novel TERMS going OOV, not
 /// chunks per se. The maintained counts table (P3) makes the live vocabulary
 /// size a cheap, always-current read, so the gate measures the fraction by which

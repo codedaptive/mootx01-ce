@@ -1,7 +1,3 @@
-#if MOOTX01_LSA
-// LSA test — compiled only when the LSA trait is on (MOOTX01_LSA).
-// Dark and unproven since 2026-09-07; DenseFamilies does NOT enable it.
-// Enable with `swift test --traits LSA`. See CorpusKit/Package.swift.
 // LsaBasisSerializationTests.swift
 //
 // Mission 6a-i: round-trip + cross-port conformance for LSA basis
@@ -182,4 +178,3 @@ struct LsaBasisSerializationTests {
     }
 }
 
-#endif // MOOTX01_LSA

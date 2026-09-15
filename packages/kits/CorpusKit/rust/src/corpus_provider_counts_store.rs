@@ -3,7 +3,7 @@
 //!
 //! Persists a trainable provider's INCREMENTALLY-MAINTAINED statistics
 //! ("counts") — the raw accumulated state a distributional provider
-//! (RI/PPMI/LSA/NMF) builds from the corpus (vocabulary, document-frequencies,
+//! (RI/LSA) builds from the corpus (vocabulary, document-frequencies,
 //! co-occurrence counts, RI context vectors) — as an opaque per-provider blob
 //! plus two cheap, queryable trigger columns. See the Swift file and
 //! the Swift twin for the lifecycle. Standalone CorpusKit may publish the blob
@@ -318,9 +318,9 @@ impl CorpusProviderCountsStore {
     fn model_int(model_id: &str) -> CorpusKitResult<i64> {
         match model_id {
             "random-indexing-v1" => Ok(0),
-            "ppmi-v1" => Ok(1),
+            "ppmi-v1" => Ok(1), // retired family; the bit stays reserved
             "lsa-v1" => Ok(2),
-            "nmf-v1" => Ok(3),
+            "nmf-v1" => Ok(3), // retired family; the bit stays reserved
             other => Err(CorpusKitError::ModelUnavailable(format!(
                 "modelID '{other}' is not in the counts model registry — add it (both ports) \
                  before persisting term payloads for it"
