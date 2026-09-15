@@ -78,10 +78,11 @@ struct UpgradeCommandSourceTests {
         // Retired steps must not come back.
         #expect(!branch.contains("runAdornmentStoreMigration"))
         #expect(!branch.contains("runDistilledRepresentationConvergence"))
-        // The whole-record vacuum is the first estate open after the
-        // shared-content reclaim, so the 1.6 to 1.7 capsule reports there;
-        // the ssc facts backfill follows it; the dense pooling convergence
-        // runs BEFORE the span-encode step, so the latter's estate open never
+        // The whole-record vacuum is the first estate open, so the migration
+        // chain runs and reports there; the shared-content reclaim follows it
+        // and collects the reclaim-pending state the 1.0 → 1.1 capsule leaves;
+        // the ssc facts backfill follows; the dense pooling convergence runs
+        // BEFORE the span-encode step, so the latter's estate open never
         // absorbs the rebuild unreported; the vector reclaim runs last, after
         // the span rows exist.
         let schemaAt = try #require(branch.range(of: "runSchemaUpgrade(estate: estate, home: home)")?.lowerBound)
@@ -91,9 +92,9 @@ struct UpgradeCommandSourceTests {
         let denseAt = try #require(branch.range(of: "await runDensePoolingConvergence(estate: estate, home: home)")?.lowerBound)
         let spanAt = try #require(branch.range(of: "await runSpanEncodeBackfill(estate: estate, home: home)")?.lowerBound)
         let reclaimAt = try #require(branch.range(of: "await runVectorReclaim(estate: estate, home: home)")?.lowerBound)
-        #expect(schemaAt < reclAt && reclAt < vacuumAt && vacuumAt < factsAt && factsAt < denseAt
+        #expect(schemaAt < vacuumAt && vacuumAt < reclAt && reclAt < factsAt && factsAt < denseAt
                 && denseAt < spanAt && spanAt < reclaimAt,
-                "schema → shared-content reclaim → whole-record vacuum → ssc facts → dense pooling → span encode → vector reclaim")
+                "schema → whole-record vacuum → shared-content reclaim → ssc facts → dense pooling → span encode → vector reclaim")
         // A failed step must surface as a non-zero exit for scripted callers.
         #expect(branch.contains("throw ExitCode.failure"))
         // launchd and network calls must NOT appear in the branch.
