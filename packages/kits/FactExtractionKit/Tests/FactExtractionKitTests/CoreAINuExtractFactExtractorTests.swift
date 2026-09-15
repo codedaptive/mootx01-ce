@@ -21,11 +21,14 @@ func nuExtractCodecContract() throws {
 
     #expect(NuExtractFactCodec.prompt(for: request).contains(source))
     let response = try NuExtractFactCodec.response(
-        from: "prefix {\"facts\":[{\"subject\":\"Jack\",\"predicate\":\"birthday\",\"object\":\"June 20th\",\"evidenceQuote\":\"Jack's birthday is June 20th.\",\"confidence\":0.98,\"assertionKind\":\"asserted\",\"searchAliases\":[\"Jack birthday\"]}]} trailing",
+        from: "prefix {\"facts\":[{\"subject\":\"Jack\",\"predicate\":\"birthday\",\"object\":\"June 20th\",\"evidence\":\"jack's birthday is june 20th.\"}]} trailing",
         request: request, spec: spec)
     #expect(response.providerID == spec.providerID)
     #expect(response.candidates.count == 1)
     #expect(response.candidates[0].object == "June 20th")
+    #expect(response.candidates[0].evidenceQuote == source)
+    #expect(response.candidates[0].confidence == 1.0)
+    #expect(response.candidates[0].assertionKind == .asserted)
 
     #expect(throws: FactExtractionError.self) {
         _ = try NuExtractFactCodec.response(
