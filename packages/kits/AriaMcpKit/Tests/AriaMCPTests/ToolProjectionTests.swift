@@ -185,8 +185,3 @@ struct ToolProjectionTests {
 
 }
 
-// MARK: - Tier decomposition reconciliation
-// NOTE: The per-tier helper methods (coreMemoryTools, connectionTools, etc.)
-// reflect the v1 surface structure and do not map to the v2 catalog.
-// The v2 live total is guarded by testTotalToolCount above (80 with vault on).
-// This suite was removed when v2 became the only surface (V2-A migration).

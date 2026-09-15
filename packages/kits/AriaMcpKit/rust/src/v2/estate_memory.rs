@@ -222,14 +222,15 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
 
         // Build the filter chain: sensitivity ceiling first (from context),
         // then the explicit filter arg, then wing and media_type appended.
-        // Mirrors Swift runMemorySearch filter chain construction.
+        // Mirrors the Swift filter chain construction for moot_memory_search.
         let mut filters = context.sensitivity_ceiling
             .map(|v| vec![Filter::SensitivityAtMost(sensitivity(v))])
             .unwrap_or_default();
 
         // Map typed filter to LocusKit Filter. All values have been validated at
-        // decode; no unknown-value errors are possible here. Mirrors Swift
-        // ToolDispatch.decodeFilterChain and dispatch::decode_filter_chain.
+        // decode; no unknown-value errors are possible here. Mirrors the Swift
+        // filter decode in AriaV2GeniusLocusMemoryBackend.search and
+        // dispatch::decode_filter_chain.
         if let Some(f) = request.filter {
             let filter = match f {
                 V2SearchFilter::Unconfirmed   => Filter::Unconfirmed,
@@ -248,7 +249,7 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
         }
 
         // Map typed media_type to DrawerFeatureFlag. Values validated at decode.
-        // Mirrors Swift runMemorySearch media_type decode.
+        // Mirrors the Swift media_type decode for moot_memory_search.
         if let Some(mt) = request.media_type {
             let flag = match mt {
                 V2SearchMediaType::Voice => DrawerFeatureFlags::HAS_VOICE,
@@ -263,7 +264,8 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
 
         // Map typed ordering to LocusKit Ordering. Values validated at decode.
         // "byRelevanceDesc" maps to ByCaptureTimeDesc: the scored unionBest path
-        // already owns final relevance ordering. Mirrors Swift decodeOrdering.
+        // already owns final relevance ordering. Mirrors the Swift ordering
+        // decode in AriaV2GeniusLocusMemoryBackend.search.
         if let Some(ord) = request.ordering {
             frame.ordering = match ord {
                 V2SearchOrdering::ByCaptureTimeDesc | V2SearchOrdering::ByRelevanceDesc => Ordering::ByCaptureTimeDesc,
@@ -379,11 +381,9 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
         // been admitted regardless of any grant, so recording it here would
         // misrepresent "read under grant" as having happened when it did
         // not. Gated on `context.sensitivity_ceiling.is_some()` so a query
-        // with no live grant never emits. Mirrors the v1
-        // `run_memory_search` guard (interface_tools.rs) and Swift
+        // with no live grant never emits. Mirrors Swift
         // `AriaV2GeniusLocusMemoryBackend.search`. Runs on the anchor-excluded
-        // hit list, before the packager, matching v1's placement relative to
-        // its own packager call.
+        // hit list, before the packager.
         if context.sensitivity_ceiling.is_some() {
             let mut coord = estate.coord.lock()
                 .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?;

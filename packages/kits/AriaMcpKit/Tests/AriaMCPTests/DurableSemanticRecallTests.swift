@@ -77,7 +77,20 @@ struct DurableSemanticRecallTests {
               case let .object(first)? = content.first,
               case let .string(s)? = first["text"]
         else { return "" }
-        return s
+        // v2 compact text is "found N candidate memories"; include subjects and
+        // excerpts from structuredContent.data.results so existing assertions work.
+        var parts = [s]
+        if case let .object(structured)? = obj["structuredContent"],
+           case let .object(data)? = structured["data"],
+           case let .array(results)? = data["results"] {
+            for row in results {
+                if case let .object(r) = row {
+                    if case let .string(subject)? = r["subject"] { parts.append(subject) }
+                    if case let .string(excerpt)? = r["excerpt"] { parts.append(excerpt) }
+                }
+            }
+        }
+        return parts.joined(separator: "\n")
     }
 
     /// A fresh temp SQLite path under the system temp dir. The caller removes it.
@@ -107,9 +120,9 @@ struct DurableSemanticRecallTests {
 
         // Impatient ingest is inline — the CorpusBm25/vector lane must surface it
         // immediately. On a bare `open` (no Corpus registered) this returns no hit.
-        let result = try await dispatcher.runMemorySearch([
+        let result = try await dispatcher.dispatch(name: "moot_memory_search", arguments: .object([
             "query": .string("peregrine falcon raptor"),
-        ])
+        ]))
         #expect(text(of: result).contains("peregrine falcon"),
             "durable estate must light semantic recall; got: \(text(of: result))")
     }
@@ -139,9 +152,9 @@ struct DurableSemanticRecallTests {
         let (dispatcher2, kit2, handle2) = try await openDurableEstate(at: path)
         defer { Task { try? await kit2.close(handle2) } }
 
-        let result = try await dispatcher2.runMemorySearch([
+        let result = try await dispatcher2.dispatch(name: "moot_memory_search", arguments: .object([
             "query": .string("volcanic rock basalt"),
-        ])
+        ]))
         #expect(text(of: result).contains("basalt obsidian"),
             "re-opened durable estate must still recall persisted content; got: \(text(of: result))")
     }

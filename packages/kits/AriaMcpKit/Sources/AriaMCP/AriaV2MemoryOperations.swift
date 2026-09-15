@@ -543,7 +543,6 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         // Door/scoring precedence: explicit door > explicit scoring > A1 DoorManifest > matrixAware.
         // 'door=guess' reads the optimizer-provisioned per-corpus DoorManifest.
         // Direct door scoring rawValues bypass the A1 config.
-        // Mirrors the precedence chain in ToolDispatch.runMemorySearch.
         let scoring: GLKRecallScoring
         if let doorStr = request.door {
             switch doorStr {
@@ -567,7 +566,6 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         }
         // Decode ordering. 'byRelevanceDesc' maps to .byCaptureTimeDesc as a tie-break
         // within the scored layer; the final result order is driven by scores, not page order.
-        // Mirrors ToolDispatch.decodeOrdering.
         let ordering: Ordering
         switch request.ordering {
         case "byCaptureTimeDesc": ordering = .byCaptureTimeDesc
@@ -598,15 +596,24 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         ))
         // Exclude the near: anchor from the hit list before the packager so that
         // gate signals (m1 top-margin, m3 span cosine spread) are computed on the
-        // same ranked set the caller receives. Mirrors ToolDispatch.runMemorySearch.
+        // same ranked set the caller receives.
         // RecallHit.id is RowID (String); UUID storage may use upper-case or lower-case
         // spellings, so compare against both canonical forms.
         let anchorIDStrings: Set<String> = anchorID.map {
             Set(AriaV2ArgumentDecoder.storageIdentitySpellings($0))
         } ?? []
-        let filteredHits: [RecallHit] = anchorIDStrings.isEmpty
+        let anchorFilteredHits: [RecallHit] = anchorIDStrings.isEmpty
             ? result.hits
             : result.hits.filter { !anchorIDStrings.contains($0.id) }
+        // Exclude provenance-restricted rows here, before the packager and the
+        // count, so `totalCount` never reveals that a hidden row matched. The
+        // Rust port counts after the same exclusion (`core_memory.rs`,
+        // `result.rows.len()`); a total that counted hidden rows would be a
+        // count oracle for redacted content.
+        let filteredHits: [RecallHit] = anchorFilteredHits.filter { hit in
+            guard let drawer = hit.drawer else { return true }
+            return Self.provenanceVisible(drawer.provenance)
+        }
 
         // record a sensitivityReadUnderGrant audit entry for each hit that
         // was admitted PAST the substrate's own default ceiling specifically
@@ -615,10 +622,10 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         // been admitted regardless of any grant, so recording it here would
         // misrepresent "read under grant" as having happened when it did
         // not. Gated on `context.grantCeiling` being non-nil so a query with
-        // no live grant never emits. Mirrors ToolDispatch.runMemorySearch's
-        // identical guard exactly, including firing unconditionally on
-        // provenance (a v2-only redaction axis memory_search does not gate
-        // on, same as v1).
+        // no live grant never emits. The guard does not consult the provenance
+        // axis: provenance visibility is decided one layer up, in
+        // AriaV2MemoryOperations.search(_:), so a provenance-gated hit that
+        // also carries a restricted/secret adjective still records here.
         if context.grantCeiling != nil {
             for hit in filteredHits {
                 guard let drawer = hit.drawer else { continue }
@@ -634,7 +641,6 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
 
         // answer:always|auto — compose an answer via GroundedSynthesis, then route
         // through GLKResultsPackager. answer:never is the fast path (no gate math).
-        // Mirrors the composition chain in ToolDispatch.runMemorySearch.
         let composedAnswer: String?
         if request.answer != .never {
             let synthFrame = LocusKit.RecallFrame(
@@ -662,9 +668,9 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         // uses the same ranked set the caller sees. The tuning manifest supplies
         // thresholds; .default fills absent keys.
         let tuning = try await kit.provisionedRecallTuning(for: handle)
-        let packagerResult = anchorID != nil
-            ? result.replacing(hits: filteredHits)
-            : result
+        // Always package the filtered list: the anchor exclusion and the
+        // provenance exclusion above both have to reach the count.
+        let packagerResult = result.replacing(hits: filteredHits)
         let packaged = GLKResultsPackager().package(
             result: packagerResult,
             mode: request.answer,
@@ -675,7 +681,8 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
         var records: [(record: AriaV2MemoryRecord, score: Double)] = []
         for hit in filteredHits {
             guard let drawer = hit.drawer else { continue }
-            records.append((try await record(for: drawer, authorized: Self.provenanceVisible(drawer.provenance)), Double(hit.score.final)))
+            // Every remaining hit passed the provenance gate above.
+            records.append((try await record(for: drawer, authorized: true), Double(hit.score.final)))
         }
         return AriaV2SearchResult(
             records: records,
@@ -683,7 +690,7 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             totalCount: packaged.totalCount,
             // Propagate degradation signal from the recall director so the
             // operations layer can emit the "retrieval: degraded" compact text
-            // control line. Mirrors ToolDispatch.runMemorySearch's degraded flag.
+            // control line — present when recall quality was degraded.
             degraded: !result.degradedStages.isEmpty,
             // The span rerank stage's registration, so discrimination can cap
             // a high verdict on a lexical-only ranking. Without this the
