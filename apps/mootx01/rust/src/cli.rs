@@ -1131,17 +1131,17 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 list                                List the registered estates, active first.\n\
             \x20 open <name>                         Make a registered estate the active one (used by serve, drain, dream, query and status).\n\
             \x20 delete <name> [-y]                  Delete a registered estate: its files and its record. Cannot delete the active estate or 'default' (use uninstall --purge).".into(),
-        "preference" => "List or set an estate's on/off preferences.\n\
+        "preference" => "List or set an estate preference.\n\
             \n\
             USAGE: mootx01 preference <list|get|set> [--db <name>|<dir>/<name>]\n\
             \n\
-            Every preference is on unless set to off. A change takes effect without a daemon restart: each reader consults its key when it next fires.\n\
-            Keys: fact_extraction, consolidation, contradiction_sweep, cross_encoder_routing, maintenance, adaptive_recall.\n\
+            Values: on, off for the switches; fact_extractor takes nuextract or apple. A key that has never been set reads as its default (on; nuextract for fact_extractor). A change takes effect without a daemon restart.\n\
+            Keys: fact_extraction, consolidation, contradiction_sweep, cross_encoder_routing, maintenance, adaptive_recall, fact_extractor.\n\
             \n\
             SUBCOMMANDS:\n\
             \x20 list                                Print every preference key with its current value.\n\
             \x20 get <key>                           Print one preference's current value.\n\
-            \x20 set <key> <on|off>                  Set one preference and print the value read back.\n\
+            \x20 set <key> <value>                   Set one preference and print the value read back.\n\
             \n\
             OPTIONS:\n\
             \x20 --db <name>|<dir>/<name>  Estate to act on: a registered name, or <dir>/<name> for a transient estate. Default: the active estate.".into(),

@@ -53,9 +53,10 @@ public enum RecallRatingsSchema {
 public extension GeniusLocusKit {
 
     /// The preference keys the 1.8 → 1.9 capsule seeds: every key except
-    /// `.factExtraction`, which the 1.7 → 1.8 capsule already seeded.
+    /// `.factExtraction` (seeded by the 1.7 → 1.8 capsule) and `.factExtractor`
+    /// (absent reads as `.nuextract`; no seeding capsule for the extractor choice).
     static var preferenceSeedKeys: [EstatePreferenceKey] {
-        EstatePreferenceKey.allCases.filter { $0 != .factExtraction }
+        EstatePreferenceKey.allCases.filter { $0 != .factExtraction && $0 != .factExtractor }
     }
 
     /// Run the GLK 1.8 → 1.9 preference-seed migration for an estate.
