@@ -1,4 +1,5 @@
 //! core/service.rs — service-manager backends (spec §6).
+//! Diagnostics: Linux `journalctl --user -u mootx01`; Windows Event Viewer, Application, source MOOTx01 (fatal exits).
 //!
 //! Pure generators (input → file content string) so the unit contract is
 //! testable on any platform; the register/unregister wiring shells out to
@@ -484,6 +485,9 @@ mod tests {
         assert!(u.contains("ExecStart=/home/u/.mootx01/bin/mootx01 serve --http auto"));
         assert!(u.contains("Restart=on-failure"));
         assert!(u.contains("WantedBy=default.target"));
+        // Inherit systemd's journal stdout and inherited stderr defaults.
+        assert!(!u.contains("StandardOutput="));
+        assert!(!u.contains("StandardError="));
         // Nothing about the estate travels in the unit: the catalog names it.
         assert!(!u.contains("MOOTX01_DATA_DIR"));
         // vault-on baked explicitly
@@ -503,6 +507,8 @@ mod tests {
         assert!(u.contains("After=mootx01.service"));
         assert!(u.contains("Environment=MOOT_MGR_CONTROL_TOKEN=0123456789abcdef0123456789abcdef"));
         assert!(u.contains("ExecStart=/b/moot-mgr serve"));
+        assert!(!u.contains("StandardOutput="));
+        assert!(!u.contains("StandardError="));
     }
 
     #[test]
