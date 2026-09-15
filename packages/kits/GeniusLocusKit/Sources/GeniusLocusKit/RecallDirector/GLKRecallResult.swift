@@ -151,6 +151,11 @@ public struct GLKRecallResult: Sendable {
     /// `degradedStages`.
     public let crossEncoder: CrossEncoderReport?
 
+    /// The preference key of the recall route that transformed this request,
+    /// or nil when no route fired. Day one: `"cross_encoder_routing"` when
+    /// Route 1 applied `.strictTranscript()`; nil for all other recalls.
+    public let route: String?
+
     /// Typed evidence for a strict transcript rerank request. Generic recalls
     /// remain nil and retain the existing cross-encoder report contract.
     public var strictTranscriptRerank: StrictTranscriptRerankOutcome? {
@@ -175,7 +180,8 @@ public struct GLKRecallResult: Sendable {
         degradedStages: [String],
         laneRanks: [String: [String: Int]],
         queryLatticeAnchor: QueryLatticeAnchor.Anchor?,
-        crossEncoder: CrossEncoderReport? = nil
+        crossEncoder: CrossEncoderReport? = nil,
+        route: String? = nil
     ) {
         self.request = request
         self.plan = plan
@@ -187,6 +193,7 @@ public struct GLKRecallResult: Sendable {
         self.laneRanks = laneRanks
         self.queryLatticeAnchor = queryLatticeAnchor
         self.crossEncoder = crossEncoder
+        self.route = route
     }
 #else
     public init(
@@ -198,7 +205,8 @@ public struct GLKRecallResult: Sendable {
         degradedStages: [String],
         laneRanks: [String: [String: Int]],
         queryLatticeAnchor: QueryLatticeAnchor.Anchor?,
-        crossEncoder: CrossEncoderReport? = nil
+        crossEncoder: CrossEncoderReport? = nil,
+        route: String? = nil
     ) {
         self.request = request
         self.plan = plan
@@ -209,22 +217,28 @@ public struct GLKRecallResult: Sendable {
         self.laneRanks = laneRanks
         self.queryLatticeAnchor = queryLatticeAnchor
         self.crossEncoder = crossEncoder
+        self.route = route
     }
 #endif
 
     /// A copy of this result with `request`, `hits`, `degradedStages`,
-    /// `withheldBySensitivity` and/or `crossEncoder` replaced, with every other
-    /// field (including the
-    /// WholeRecordDense lane status, when compiled) carried over. The
-    /// director's filter, cross-encoder, trace-failure and degradation paths
-    /// and the ARIA anchor-exclusion path derive results through this so no
-    /// caller has to spell the trait-dependent field.
+    /// `withheldBySensitivity`, `crossEncoder`, and/or `route` replaced, with
+    /// every other field (including the WholeRecordDense lane status, when
+    /// compiled) carried over. The director's filter, cross-encoder,
+    /// trace-failure and degradation paths and the ARIA anchor-exclusion path
+    /// derive results through this so no caller has to spell the
+    /// trait-dependent field.
+    ///
+    /// `route` uses the double-optional pattern: pass `nil` to keep the
+    /// current value (default), `.some(nil)` to clear it, or `.some("key")`
+    /// to set a new value. This matches the `crossEncoder` parameter.
     public func replacing(
         request: GLKRecallRequest? = nil,
         hits: [RecallHit]? = nil,
         degradedStages: [String]? = nil,
         withheldBySensitivity: Int? = nil,
-        crossEncoder: CrossEncoderReport?? = nil
+        crossEncoder: CrossEncoderReport?? = nil,
+        route: String?? = nil
     ) -> GLKRecallResult {
 #if MOOTX01_WHOLE_RECORD_DENSE
         GLKRecallResult(
@@ -234,7 +248,8 @@ public struct GLKRecallResult: Sendable {
             denseLaneStatus: denseLaneStatus,
             degradedStages: degradedStages ?? self.degradedStages,
             laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
-            crossEncoder: crossEncoder ?? self.crossEncoder)
+            crossEncoder: crossEncoder ?? self.crossEncoder,
+            route: route ?? self.route)
 #else
         GLKRecallResult(
             request: request ?? self.request, plan: plan, unionProfile: unionProfile,
@@ -242,7 +257,8 @@ public struct GLKRecallResult: Sendable {
             withheldBySensitivity: withheldBySensitivity ?? self.withheldBySensitivity,
             degradedStages: degradedStages ?? self.degradedStages,
             laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
-            crossEncoder: crossEncoder ?? self.crossEncoder)
+            crossEncoder: crossEncoder ?? self.crossEncoder,
+            route: route ?? self.route)
 #endif
     }
 }
