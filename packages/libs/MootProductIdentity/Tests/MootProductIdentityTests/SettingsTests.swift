@@ -169,4 +169,57 @@ struct SettingsTests {
         #expect(settings.daemonStatsStore == defaultPath,
                 "second seedDefaultsIfAbsent must leave the seeded value intact")
     }
+
+    // MARK: (e) fact_extraction keys — present, absent, and empty-string
+
+    @Test func factExtractionKeys_allPresent_returnValues() throws {
+        let dir = try tempDir()
+        let assetPath = "/Volumes/llm_models/coreai/model.aimodel"
+        let tokenizerPath = "/Volumes/llm_models/gguf/nuextract/tokenizer.json"
+        let version = "nuextract-tiny-v1.5"
+        let json = """
+        {
+          "fact_extraction": {
+            "coreai_asset": "\(assetPath)",
+            "coreai_tokenizer": "\(tokenizerPath)",
+            "model_version": "\(version)"
+          }
+        }
+        """
+        try writeConfig(json, to: dir)
+        let settings = MootProductIdentity.Settings.load(configurationDirectory: dir)
+        #expect(settings.factExtractionCoreAIAsset == assetPath,
+                "fact_extraction.coreai_asset must be returned verbatim when present")
+        #expect(settings.factExtractionCoreAITokenizer == tokenizerPath,
+                "fact_extraction.coreai_tokenizer must be returned verbatim when present")
+        #expect(settings.factExtractionModelVersion == version,
+                "fact_extraction.model_version must be returned verbatim when present")
+    }
+
+    @Test func factExtractionKeys_absent_returnNil() throws {
+        let dir = try tempDir()
+        // No fact_extraction key at all.
+        try writeConfig(#"{"daemon":{"stats_store":"/tmp/stats.sqlite"}}"#, to: dir)
+        let settings = MootProductIdentity.Settings.load(configurationDirectory: dir)
+        #expect(settings.factExtractionCoreAIAsset == nil,
+                "absent fact_extraction.coreai_asset must yield nil")
+        #expect(settings.factExtractionCoreAITokenizer == nil,
+                "absent fact_extraction.coreai_tokenizer must yield nil")
+        #expect(settings.factExtractionModelVersion == nil,
+                "absent fact_extraction.model_version must yield nil")
+    }
+
+    @Test func factExtractionKeys_emptyString_treatedAsAbsent() throws {
+        let dir = try tempDir()
+        // Keys present but all empty strings — treated the same as absent.
+        let json = #"{"fact_extraction":{"coreai_asset":"","coreai_tokenizer":"","model_version":""}}"#
+        try writeConfig(json, to: dir)
+        let settings = MootProductIdentity.Settings.load(configurationDirectory: dir)
+        #expect(settings.factExtractionCoreAIAsset == nil,
+                "empty fact_extraction.coreai_asset must be treated as absent")
+        #expect(settings.factExtractionCoreAITokenizer == nil,
+                "empty fact_extraction.coreai_tokenizer must be treated as absent")
+        #expect(settings.factExtractionModelVersion == nil,
+                "empty fact_extraction.model_version must be treated as absent")
+    }
 }

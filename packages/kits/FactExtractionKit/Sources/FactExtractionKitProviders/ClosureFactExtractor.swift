@@ -19,7 +19,7 @@ public struct ClosureFactExtractor: FactExtractor {
     public func extract(_ request: FactExtractionRequest) async throws -> FactExtractionResponse {
         guard request.maximumFacts > 0,
               request.maximumFacts <= spec.maximumFactsPerSource,
-              request.distilledText.unicodeScalars.count <= spec.maximumInputCharacters else {
+              request.sourceText.unicodeScalars.count <= spec.maximumInputCharacters else {
             throw FactExtractionError.invalidRequest("request exceeds the active extractor recipe")
         }
         return try await inference(request)

@@ -16,6 +16,10 @@
 @_exported import GLKMigrationV1_6ToV1_7
 #endif
 
+#if GLK_MIGRATION_V1_7_TO_V1_8
+@_exported import GLKMigrationV1_7ToV1_8
+#endif
+
 #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG
 @_exported import GLKMigrationFlatLayoutToCatalog
 #endif
@@ -64,21 +68,24 @@ public struct GLKMigrationPreparation: Sendable, Equatable {
 public enum GLKMigrationCatalog {
     public static var compiledFloor: EstateFormatVersion? {
         #if GLK_MIGRATION_V1_0_TO_V1_1
-        // Floor covers the 1.0→1.1, 1.4→1.5, 1.5→1.6 and 1.6→1.7 capsules.
+        // Floor covers the 1.0→1.1, 1.4→1.5, 1.5→1.6, 1.6→1.7 and 1.7→1.8 capsules.
         .v1_0
         #elseif GLK_MIGRATION_V1_4_TO_V1_5
-        // The 1.4→1.5, 1.5→1.6 and 1.6→1.7 capsules are compiled. They serve
-        // every stamp from 1.1 up: the 1.1→1.2 column is added by CorpusKit's
+        // The 1.4→1.5, 1.5→1.6, 1.6→1.7 and 1.7→1.8 capsules are compiled. They
+        // serve every stamp from 1.1 up: the 1.1→1.2 column is added by CorpusKit's
         // own ladder at open, the 1.2→1.3 column was removed by schema v19,
         // and the 1.3→1.4 setting retired with the index composition policy,
         // so nothing separates 1.1, 1.2, 1.3 and 1.4 any more.
         .v1_1
         #elseif GLK_MIGRATION_V1_5_TO_V1_6
-        // The 1.5→1.6 column-drop and 1.6→1.7 vacuum capsules are compiled.
+        // The 1.5→1.6 column-drop, 1.6→1.7 vacuum and 1.7→1.8 seed capsules are compiled.
         .v1_5
         #elseif GLK_MIGRATION_V1_6_TO_V1_7
-        // Only the 1.6→1.7 whole-record float vacuum capsule is compiled.
+        // The 1.6→1.7 vacuum and 1.7→1.8 seed capsules are compiled.
         .v1_6
+        #elseif GLK_MIGRATION_V1_7_TO_V1_8
+        // Only the 1.7→1.8 fact-extraction-setting seed capsule is compiled.
+        .v1_7
         #else
         nil
         #endif
@@ -152,9 +159,10 @@ public enum GLKMigrationCatalog {
         from found: EstateFormatVersion,
         now: Date
     ) async throws -> GLKMigrationPreparation {
-        #if GLK_MIGRATION_V1_6_TO_V1_7
+        #if GLK_MIGRATION_V1_7_TO_V1_8
         var migrated = false
         var migrationState: String? = nil
+        #if GLK_MIGRATION_V1_6_TO_V1_7
         #if GLK_MIGRATION_V1_5_TO_V1_6
         #if GLK_MIGRATION_V1_4_TO_V1_5
         // Step 1 of the 1.4 -> 1.5 capsule, ahead of the chain: move the
@@ -187,9 +195,14 @@ public enum GLKMigrationCatalog {
         #endif
         // The 1.6 -> 1.7 capsule: vacuum the whole-record float rows and the
         // hnsw_graph rows, rebuild the binary sidecar, release the float
-        // representation claim and write the v1_7 stamp, the last write of
-        // the chain (I-26).
-        try await kit.runWholeRecordFloatVacuumMigration(handle: handle, now: now)
+        // representation claim and write the v1_7 stamp (I-26).
+        if found < .v1_7 {
+            try await kit.runWholeRecordFloatVacuumMigration(handle: handle, now: now)
+        }
+        #endif
+        // The 1.7 -> 1.8 capsule: seed `fact_extraction = "on"` when absent
+        // and write the v1_8 stamp, the last write of the chain (I-27).
+        try await kit.runFactExtractionSettingMigration(handle: handle, now: now)
         return GLKMigrationPreparation(
             format: .current,
             migrated: migrated,
