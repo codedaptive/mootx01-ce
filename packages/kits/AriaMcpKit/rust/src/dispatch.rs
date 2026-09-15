@@ -163,7 +163,8 @@ pub fn opt_float(
 
 /// Decode the recall filter from an optional `filter` argument.
 /// Omitted filter means ordinary recall: LocusKit inserts state/trust/sensitivity
-/// defaults, but no confirmation constraint. Mirrors Swift `decodeFilterChain`.
+/// defaults, but no confirmation constraint. Mirrors the Swift filter decode in
+/// `AriaV2GeniusLocusMemoryBackend.search`.
 /// `LensTools.frame(_:)`.
 pub fn decode_filter_chain(
     args: &BTreeMap<String, JsonValue>,
@@ -181,11 +182,12 @@ pub fn decode_filter_chain(
         // Activates the container-fingerprint pruning path for the first
         // time in production (.HasFeatureFlag is the only prunable filter
         // case; containers whose OR-fingerprint lacks bit 16 are pruned).
-        // Feature-flag adoption §1. Mirrors Swift ToolDispatch.decodeFilterChain.
+        // Feature-flag adoption §1. Mirrors the Swift "pinned" arm in
+        // AriaV2GeniusLocusMemoryBackend.search.
         Some("pinned") => Ok(vec![Filter::HasFeatureFlag(DrawerFeatureFlags::IS_PINNED)]),
         // hasLinks filter: constrains recall to drawers with links/citations
         // (bit 15). Used by grounded synthesis for citation-scoped synthesis.
-        // Feature-flag adoption §2. Mirrors Swift RecipeTools.decodeFilterChain.
+        // Feature-flag adoption §2.
         Some("hasLinks") => Ok(vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_LINKS)]),
         Some(unknown) => Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,

@@ -1237,34 +1237,13 @@ extension ToolDispatcher {
         }
     }
 
-    func decodeFilterChain(_ value: JSONValue?) throws -> [Filter] {
-        guard let name = try optionalString(value, argument: "filter") else { return [] }
-        switch name {
-        case "unconfirmed": return [.unconfirmed]
-        case "userConfirmed": return [.userConfirmed]
-        case "exportable": return [.exportable]
-        case "contained": return [.contained]
-        // isPinned filter: constrains recall to user-pinned drawers (bit 16).
-        // Activates the container-fingerprint pruning path for the first
-        // time in production (.hasFeatureFlag is the only prunable filter
-        // case; containers whose OR-fingerprint lacks bit 16 are pruned).
-        // Feature-flag adoption §1.
-        case "pinned": return [.hasFeatureFlag(.isPinned)]
-        default:
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "Unknown filter: \(name)"
-            )
-        }
-    }
-
     func decodeHydration(_ value: JSONValue?) throws -> HydrationLevel {
         // Absent hydrationLevel defaults to .structured.
         // Present but non-string (e.g. a JSON number or null) is a protocol
         // violation — fail loudly with invalidParams rather than silently
         // accepting malformed input as the default. Mirrors the established
-        // idiom for decodeFilter, decodeOrdering, and decodeMutationKind in
-        // this file, and the Rust decode_hydration_level fix in dispatch.rs.
+        // idiom for decodeMutationKind in this file, and the Rust
+        // decode_hydration_level fix in dispatch.rs.
         guard let name = try optionalString(value, argument: "hydrationLevel") else { return .structured }
         switch name {
         case "structured": return .structured
@@ -1274,31 +1253,6 @@ extension ToolDispatcher {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Unknown hydration level: \(name)"
-            )
-        }
-    }
-
-    func decodeOrdering(_ value: JSONValue?) throws -> Ordering {
-        guard let name = try optionalString(value, argument: "ordering") else { return .byCaptureTimeDesc }
-        switch name {
-        case "byCaptureTimeDesc": return .byCaptureTimeDesc
-        case "byCaptureTimeAsc": return .byCaptureTimeAsc
-        case "byRoomAsc": return .byRoomAsc
-        // byRelevanceDesc: LocusKit has no relevance signal in its Ordering
-        // enum (that case was removed because LocusKit cannot score). At the
-        // ARIA surface the client spelling is preserved as a compatibility
-        // input: when a caller sends "byRelevanceDesc", the request is routed
-        // to the scored recall path (GLKRecallRequest/recall_scored with
-        // mode=unionBest), whose results ARE relevance-ordered by the scoring
-        // machinery. The RecallFrame.ordering field is set to byCaptureTimeDesc
-        // as a stable tie-break within the scored layer; the final result order
-        // is driven by the score values, not the page order.
-        // Mirrors Rust decode_ordering in interface_tools.rs.
-        case "byRelevanceDesc": return .byCaptureTimeDesc
-        default:
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "Unknown ordering: \(name)"
             )
         }
     }
@@ -1378,7 +1332,7 @@ extension ToolDispatcher {
     // MARK: - Structured recall results (MXE-SS)
 
     /// One structured recall row — the typed twin of a rendered row, per the
-    /// recall family's `outputSchema` (`ToolProjection.recallResultsOutputSchema`).
+    /// recall family's structured-results contract (MXE-SS).
     /// Optional fields are OMITTED (never null) when the text analog is
     /// absent: room/content on opaque rows, content at memory_get
     /// depth:subject, subject at memory_get depth:full when the drawer
@@ -1475,16 +1429,6 @@ extension ToolDispatcher {
                 id: id, room: room, content: content,
                 subject: drawer.subject ?? ResultComposer.noSubjectMarker)
         }
-    }
-
-    /// Opaque structured row for an id the text path renders without a drawer
-    /// (gated or unhydrated). Subject is set to `noSubjectMarker` so the
-    /// row carries a non-nil subject (structurally admissible) while being
-    /// identifiable as opaque; room and content are absent. Readers that
-    /// filter on the marker skip opaque rows rather than surfacing them as
-    /// "(no subject)" entries for content the caller cannot see.
-    static func opaqueStructuredRow(id: String) -> StructuredRecallRow {
-        StructuredRecallRow(id: id, subject: ResultComposer.noSubjectMarker)
     }
 
     private func describe(_ error: VerbError) -> String {
@@ -1671,7 +1615,7 @@ extension ToolDispatcher {
     ///
     /// `now` is the dispatch-boundary instant and gates the sensitivity-grant check
     /// below; the `Date()` default covers direct runner calls in tests, the
-    /// same convention as `runMemorySearch`.
+    /// same convention as `runMemoryGet`.
     func runFileMemory(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let content = try requireString(args, "content")
@@ -1829,538 +1773,6 @@ extension ToolDispatcher {
             + "at the ceiling."
     }
 
-    /// `moot_memory_search` — hybrid BM25+vector recall over the estate.
-    ///
-    /// Routes through the Recall Director (GLKRecallRequest) using the
-    /// `unionBest` mode and `matrixAware` scoring by default, giving the
-    /// AI client the best available ranked results without exposing the
-    /// multi-lane machinery.
-    ///
-    /// B-10a: origin is set to `.external` so the RecallDirector writes
-    /// recall-trace rows for the reward pipeline. The ARIA_MCP boundary is
-    /// the ONLY place that sets `.external` — internal callers (dreaming,
-    /// lenses, recipes) must NOT. Full hydration is used (content blobs are
-    /// needed for the content preview; `.structured` would strip them).
-    /// `now` is threaded from the bench-clock seam. The `Date()` default covers direct runner calls
-    /// in tests (wall-clock mode; determinism is not a test concern there).
-    func runMemorySearch(_ args: [String: JSONValue], now: Date = Date()) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        // Anchor pivot (PR-03): `near:<uuid>` is accepted as an ALTERNATIVE
-        // to `query:` — "find memories similar to this one". Exactly one of
-        // the two must be present. The anchor's verbatim content becomes the
-        // query text through the SAME scored pipeline (full fusion stack),
-        // so the fan-out inherits every shape/filter/limit unchanged; the
-        // anchor row itself is excluded from the reply.
-        let queryArg = try optionalString(args["query"], argument: "query")
-        let nearArg = try optionalString(args["near"], argument: "near")
-        let query: String
-        var anchorID: String? = nil
-        switch (queryArg, nearArg) {
-        case (nil, nil):
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "Provide either query (text search) or near (UUID of an anchor "
-                    + "memory — returns the memories most similar to it)."
-            )
-        case (.some, .some):
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "query and near are mutually exclusive — pass exactly one."
-            )
-        case (.some(let q), nil):
-            query = q
-        case (nil, .some(let anchor)):
-            // Anchor fetch under the DEFAULT containment gate (no grant
-            // lift, deliberately) AND an explicit provenance check: the
-            // RecallFrame gate covers adjective sensitivity (bits 6-11)
-            // only, while `Drawer.sensitivity` decodes provenance
-            // sensitivity (bits 30-35). Both are needed — a
-            // provenance-Secret row with the default adjective-Normal
-            // passes the frame. Pivoting through a restricted/secret
-            // anchor's content would leak content-derived neighbors past
-            // the redaction boundary, so a gated anchor reads as
-            // not-found — the same oracle-free shape memory_get uses.
-            let estate = try await kit.estate(for: handle)
-            let fetched = try await estate.getDrawers(
-                ids: [anchor],
-                matchingFrame: RecallFrame(filterChain: [], hydrationLevel: .full),
-                hydrationLevel: .full)
-            // The provenance reject is evaluated BEFORE the empty-content
-            // check, so a gated row and an empty row collapse into the one
-            // not-found shape below, byte-identical to the message an absent
-            // id produces. Ordering discipline and defence in depth: this
-            // fetch requests a single id, so `admissible` holds at most one
-            // drawer and either order yields the same error today. Should
-            // this ever resolve a set, provenance-first is the order that
-            // cannot leak.
-            let admissibleAnchor = fetched.admissible.first { d in
-                switch d.sensitivity {
-                case .restricted, .secret: return false
-                case .normal, .elevated: return true
-                }
-            }
-            guard let anchorDrawer = admissibleAnchor,
-                  !anchorDrawer.content.isEmpty else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "near: anchor memory not found: \(anchor)"
-                )
-            }
-            query = anchorDrawer.content
-            anchorID = anchor
-        }
-        // Clamp to [1, 500]: reject negative/zero limits (crash downstream range ops)
-        // and cap absurdly-large values (DoS via unbounded substrate recall scan).
-        // Parity: Rust run_memory_search uses clamp_limit with the same ceiling.
-        let limit = try Self.clampLimit(
-            try optionalInt(args["limit"], argument: "limit"), argument: "limit")
-        // `now` is the bench-clock instant for this request.
-        // The SAME instant gates both the sensitivity-grant check below and the
-        // surfaced-recall-ledger recording further down — one request, one `now`.
-        // Build the base filter chain from the `filter` argument.
-        var filterChain = try decodeFilterChain(args["filter"])
-        // sensitivity unlock: when a restricted/secret grant is
-        // live, inject the grant-lifted ceiling explicitly. This is the
-        // seam BitmapEvaluator.insertDefaults documents: "conditional on
-        // absence so an explicit sensitivity constraint from the caller
-        // suppresses this default" — by appending our own
-        // `.sensitivityAtMost` here, the substrate's own narrower default
-        // (`.elevated`) never gets inserted. Only applies when the caller's
-        // `filter` argument did not already specify a sensitivity
-        // constraint of its own (an explicit caller constraint always
-        // wins — same precedence BitmapEvaluator already documents).
-        var sensitivityCeilingLifted = false
-        if !filterChain.contains(where: Self.isSensitivityFilter),
-           let ceiling = await sensitivityUnlockLedger.ceilingFilter(now: now) {
-            filterChain.append(ceiling)
-            sensitivityCeilingLifted = true
-        }
-        // optional `wing` argument scopes recall to a single wing.
-        // When absent, recall spans all wings (existing default behavior unchanged).
-        // Appended to the filter chain so it composes with any explicit filter.
-        if let wingName = try optionalString(args["wing"], argument: "wing") {
-            filterChain.append(.inWing(wingName))
-        }
-        // optional `media_type` argument: constrains recall to drawers that
-        // carry a specific media capture type. "voice" → hasVoice (bit 13),
-        // "image" → hasImage (bit 14). Composable with `filter` and `wing`.
-        if let mediaType = try optionalString(args["media_type"], argument: "media_type") {
-            switch mediaType {
-            case "voice": filterChain.append(.hasFeatureFlag(.hasVoice))
-            case "image": filterChain.append(.hasFeatureFlag(.hasImage))
-            default:
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "Unknown media_type: \(mediaType). Valid: voice, image"
-                )
-            }
-        }
-        let explain = try optionalBool(args["explain"], argument: "explain") ?? false
-        // Decode the answer shape adjective (spec §2). Defaults to "never"
-        // (byte-identical to pre-packager path when omitted) UNLESS a Recall
-        // variant is sticky from a prior mode declaration this session.
-        //
-        // Precedence (most-specific wins):
-        //   1. Per-call `answer` arg (explicit caller override — always wins)
-        //   2. Sticky Recall variant (Recall=Auto/Rows/Answer set earlier this session)
-        //   3. Spec default (.never / rows-only)
-        //
-        // Fail CLOSED on unknown `answer` values — a typo must never silently coerce
-        // to "never". This is the opposite of the `mode` arg's fail-open discipline:
-        // `answer` controls packager behavior that changes the response shape, so a
-        // bad value must surface immediately rather than silently defaulting.
-        let answerMode: PackagerAnswerMode
-        if let answerStr = try optionalString(args["answer"], argument: "answer") {
-            // Per-call explicit arg: fail closed on unknown values.
-            guard let decoded = PackagerAnswerMode(rawValue: answerStr) else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "Unknown answer: \(answerStr). Valid: never, always, auto"
-                )
-            }
-            answerMode = decoded
-        } else if let recallVariant = await modeSessionState.stickyDeclaration?.recognizedRecallVariant {
-            // Sticky Recall variant: maps Recall=Auto→.auto, Recall=Rows→.never,
-            // Recall=Answer→.always. This is the session-default that Recall variants
-            // set. Per-call `answer` above always overrides this for the current call.
-            let variantRaw = recallVariant.answerModeRawValue
-            // The rawValue is a known good value from RecallVariant; force-unwrap is safe.
-            answerMode = PackagerAnswerMode(rawValue: variantRaw) ?? .never
-        } else {
-            // Spec default: rows-only (byte-identical to pre-packager path).
-            answerMode = .never
-        }
-        // Decode scoring via the front-door precedence chain:
-        //   explicit door arg > explicit scoring arg > provisioned estate default (A1) > matrixAware
-        //
-        // `door` is an adjective on the recall verb (ARIA grammar: one verb, adjectives
-        // constrain). Valid values:
-        //   "guess"          — A1 per-corpus config (optimizer-provisioned DoorManifest).
-        //                      Falls back to .matrixAware when no config is provisioned.
-        //   <scoring rawValue> ("rrf", "matrixAware", "raw", "discriminative") — direct
-        //                      override of the scoring strategy, bypassing A1 config.
-        //
-        // "hedge" (top-two consensus) and "thorough" (full roster) are reserved names
-        // that require recipe-layer wiring not present in this build; they are unknown
-        // here and fail CLOSED. Fail-closed on any unknown door string so a typo is
-        // never silently coerced to a different door.
-        //
-        // When `door` is absent, fall through to the explicit `scoring` arg, then A1
-        // config, then .matrixAware. Mirrors Rust run_memory_search door decode.
-        let scoring: GLKRecallScoring
-        if let doorStr = try optionalString(args["door"], argument: "door") {
-            switch doorStr {
-            case "guess":
-                // A1 per-corpus static config: read the DoorManifest provisioned by
-                // the quality optimizer. Absent or malformed key → .matrixAware, which
-                // is the pre-front-door default (byte-identical behaviour).
-                let doorManifest = try await kit.provisionedDoorConfig(for: handle)
-                scoring = doorManifest.scoring
-            default:
-                // Attempt to parse as a direct GLKRecallScoring rawValue (e.g. "rrf").
-                // Unknown strings (including reserved "hedge", "thorough") fail CLOSED.
-                guard let decoded = GLKRecallScoring(rawValue: doorStr) else {
-                    throw JSONRPCError(
-                        code: JSONRPCErrorCode.invalidParams,
-                        message: "Unknown door: \(doorStr). Valid: guess, raw, rrf, matrixAware, discriminative"
-                    )
-                }
-                scoring = decoded
-            }
-        } else if let scoringStr = try optionalString(args["scoring"], argument: "scoring") {
-            // Explicit scoring arg (no door arg). Fail CLOSED on unknown values —
-            // silently coercing to matrixAware would hide a typo.
-            guard let decoded = GLKRecallScoring(rawValue: scoringStr) else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "Unknown scoring: \(scoringStr). Valid: raw, rrf, matrixAware, discriminative"
-                )
-            }
-            scoring = decoded
-        } else {
-            // Neither door nor scoring supplied: read the A1 per-corpus config.
-            // Falls back to .matrixAware when no config is provisioned —
-            // byte-identical to today's behaviour for un-provisioned estates.
-            let doorManifest = try await kit.provisionedDoorConfig(for: handle)
-            scoring = doorManifest.scoring
-        }
-        // Decode optional ordering. "byRelevanceDesc" is a compatibility spelling
-        // that routes through the scored recall pipeline — the results ARE
-        // relevance-ordered because recall_scored/unionBest ranks by score.
-        // All other orderings are decoded strictly; unknown values throw invalidParams.
-        // The decoded ordering goes into the RecallFrame as a stable tie-break;
-        // the scored path's final order is determined by scores, not page order.
-        // Full hydration: the caller is a human-facing AI client; the content
-        // preview in the search result requires the content blob. Structured
-        // hydration strips content blobs and would render every result as an
-        // empty-content preview.
-        let ordering = try decodeOrdering(args["ordering"])
-        // optional `anomalous_filter` argument (§11.18 anomalous-flag recall
-        // prefilter). Maps to GLKRecallRequest.anomalousFilter:
-        //   absent or null → nil (no filter; default)
-        //   true  → admit ONLY anomalous drawers (bit 26 set)
-        //   false → EXCLUDE anomalous drawers (bit 26 clear)
-        // Applied BEFORE scoring in RecallDirector.
-        let anomalousFilter = try optionalBool(args["anomalous_filter"], argument: "anomalous_filter")
-        // Optional per-call candidate-pool depth override. The GLK engine
-        // clamps to [RecallShape.frontierKFloor, RecallShape.frontierKCeiling]
-        // ([64, 256]), so out-of-range values are silently clamped rather than
-        // rejected at this boundary. Absent → nil → engine default formula
-        // min(max(limit × 4, 64), 256), byte-identical to today's behaviour.
-        // Mirrors Rust run_memory_search `frontier_k` decode.
-        let frontierK = try optionalInt(args["frontier_k"], argument: "frontier_k")
-        let frame = RecallFrame(
-            filterChain: filterChain,
-            hydrationLevel: .full,
-            limit: limit,
-            // ordering: decoded above. byCaptureTimeDesc is the default and the
-            // fallback for "byRelevanceDesc". The scored path (unionBest +
-            // queryText) produces relevance-ordered results regardless of this
-            // tie-break field.
-            ordering: ordering
-        )
-        let request = GLKRecallRequest(
-            frame: frame,
-            mode: .unionBest,
-            scoring: scoring,
-            limit: limit,
-            fallback: .allowDegraded,
-            queryText: query,
-            // B-10a: the ARIA boundary is the one external-origin caller, and
-            // external origin is what makes the director write recall-trace
-            // rows and enqueue a dreaming item. A frozen dispatcher passes
-            // internal origin instead, so a frozen search leaves no trace and
-            // no dreaming job — the same path every internal reader takes.
-            origin: posture == .frozen ? .internal : .external,
-            // W2.5 Track R(a): door identity recorded on every reward-cycle
-            // trace row this recall writes. The director derives the
-            // composition ("unionBest/<scoring>") since no recipe-level
-            // composition exists on this direct search path.
-            door: "memory_search",
-            frontierK: frontierK,
-            anomalousFilter: anomalousFilter,
-            // Sub-span scoring is off at the ARIA edge: it is an additive-cost
-            // stage, the tool exposes no argument for it, and the edge names
-            // the value rather than relying on the request default (ruling
-            // 2026-09-07).
-            subSpanScoring: .off
-        )
-        let result = try await kit.recall(handle, request)
-        // Anchor exclusion (PR-03): a near: pivot must not hand the anchor
-        // back as its own top neighbor. Every consumer below (ledger,
-        // discrimination scores, rendering, count) works from this list.
-        let hits = anchorID.map { a in result.hits.filter { $0.id != a } } ?? result.hits
-        // Record surfaced drawer ids in the session ledger so dereference verbs
-        // can trigger reward-trace marking (DESIGN_TRACE_REWARD_2026-06-12
-        // § session-ledger). Reuses the `now` hoisted at the top of this
-        // function (one request, one wall-clock instant).
-        // Use hit.id (always non-optional) rather than hit.drawer?.id so
-        // unhydrated hits (drawer == nil, rendered via renderUnhydrated) are
-        // also tracked. A drawer can arrive unhydrated when the recall engine
-        // returns it but the hydration step cannot load the full record
-        // (e.g. vector-only hit on a cold index); the id is still valid and
-        // the reward path must fire if the caller later dereferences it.
-        let surfacedIDs = hits.map { $0.id }
-        if !surfacedIDs.isEmpty {
-            await recallLedger.recordSurfaced(surfacedIDs, at: now)
-        }
-        // record a sensitivityReadUnderGrant audit entry for
-        // each hit that was admitted PAST the substrate's own default
-        // ceiling specifically because a grant is live. Only rows whose
-        // own adjective sensitivity is restricted/secret qualify — an
-        // elevated-or-below row would have been admitted regardless of
-        // any grant, so recording it here would misrepresent "read under
-        // grant" as having happened when it did not. Gated on
-        // `sensitivityCeilingLifted` so a query with no live grant never
-        // emits (in that case no restricted/secret row could have been
-        // admitted in the first place — the default ceiling excludes them).
-        if sensitivityCeilingLifted {
-            for hit in hits {
-                guard let drawer = hit.drawer else { continue }
-                switch drawer.adjectiveSensitivity {
-                case .restricted, .secret:
-                    try? await kit.recordSensitivityReadUnderGrant(
-                        handle, tier: drawer.adjectiveSensitivity, drawerID: drawer.id, now: now)
-                case .normal, .elevated:
-                    continue
-                }
-            }
-        }
-        // Compute discrimination before building the result lines so the signal
-        // reflects the full ordered hit list, not just the displayed prefix.
-        let hitScores = hits.map { Double($0.score.final) }
-        let discriminationLevel = RecallDiscrimination.classify(hitScores)
-        // Dense-lane dark flag: true when no span rerank stage is registered
-        // for the estate. The span stage is the one dense provider, so without
-        // it the ranking is lexical-only. Used to cap the discrimination
-        // signal so "high, clear top result" is never reported on a purely
-        // lexical ranking.
-        let denseLaneDark = RecallDiscrimination.denseLaneDark(
-            spanRerankRegistered: await kit.isSpanRerankRegistered(for: handle)
-        )
-
-        // answer:always|auto — compose an answer via GroundedSynthesis (the one-
-        // seam synthesis path shared with moot_synthesize), then route through
-        // GLKResultsPackager to select the response level (L0/L1/rowsOnly) and
-        // apply the score-cliff row cutoff (spec §2-6). answer:never is the fast
-        // path — byte-identical to the pre-packager dense-rows path; the packager
-        // still runs but the .never branch returns all hits unchanged with no gate
-        // computation.
-        //
-        // The recall_tuning manifest supplies the packager thresholds; absent key
-        // fills with spec defaults so an un-tuned estate behaves as documented.
-        let composedAnswer: String?
-        if answerMode != .never {
-            // Synthesize using the same GroundedSynthesis path as moot_synthesize.
-            // cueTerms is intentionally empty here — the scored second lane (query:)
-            // already grounds the synthesis on the query text without requiring a
-            // cue-term predicate filter on top.
-            let synthFrame = LocusKit.RecallFrame(
-                filterChain: filterChain,
-                hydrationLevel: .structured,
-                limit: limit,
-                ordering: ordering
-            )
-            let synthOut = try await GroundedSynthesis().run(
-                input: .init(
-                    frame: synthFrame,
-                    cueTerms: [],
-                    cap: limit,
-                    query: query,
-                    excludeProvenanceSensitive: true
-                ),
-                estate: handle,
-                kit: kit
-            )
-            composedAnswer = synthOut.context.summary
-        } else {
-            composedAnswer = nil
-        }
-        // Build the packaged result. Pass the post-anchor-exclusion hit list
-        // (`hits`, already anchor-filtered above) so gate signals (m1 top-margin,
-        // m3 span cosine spread) are computed on the same ranked set the caller receives.
-        // For near: queries where the anchor is rank-1, computing m1 on the
-        // pre-exclusion set would corrupt the margin signal — the anchor's self-
-        // comparison dominates rank-1 and inflates m1 artificially.
-        // The .never fast path returns all hits unchanged (byte-identical to today).
-        // The tuning manifest supplies the confidence thresholds; .default fills
-        // absent keys.
-        let tuning = try await kit.provisionedRecallTuning(for: handle)
-        let packagerResult: GLKRecallResult
-        if anchorID != nil {
-            // Rebuild the result with the anchor-excluded hit list so the packager's
-            // gate math operates on the post-filter ranked set.
-            packagerResult = result.replacing(hits: hits)
-        } else {
-            packagerResult = result
-        }
-        let packaged = GLKResultsPackager().package(
-            result: packagerResult,
-            mode: answerMode,
-            composedAnswer: composedAnswer,
-            thresholds: tuning.packagerThresholds
-        )
-        // The packager already received the anchor-excluded hit list, so its
-        // row output is already anchor-clean.
-        let packagedRows = packaged.rows
-
-        // Migrate to the shared ResultComposer (COMPOSER-02B). All text rendering
-        // goes through typed intermediates; the composer guarantees parity between
-        // the text payload and the structuredContent block.
-        //
-        // answer:never|rowsOnly → S1 rows only (existing path via composer).
-        // answer:always|auto + L0 → answer block only; no rows emitted.
-        // answer:always|auto + L1 → answer block then rows (via composer).
-        //
-        // recall_provenance removed from payload (logged only); the degradation
-        // signal is carried in the composer's ControlSignals.degraded flag.
-        // sensitivity_advisory removed from payload (moved to tool description).
-        // fdc/qid columns removed; scores now travel in S1 rows.
-        let shownHits = packaged.level == .l0AnswerOnly
-            ? []
-            : Array(packagedRows.prefix(50))
-        let searchEstate = try await kit.estate(for: handle)
-        let searchNodeNames = try await searchEstate.resolveNodeNames(
-            parentNodeIds: shownHits.compactMap { $0.drawer?.parentNodeId })
-        // Map hits → CandidateRowData typed intermediates for the composer.
-        var candidateRows: [CandidateRowData] = []
-        for hit in shownHits {
-            if let drawer = hit.drawer {
-                // Provenance-sensitivity redaction: subject/bestSpan are
-                // content-derived; restricted/secret rows replace them with the
-                // redaction marker so the body's access control cannot be
-                // bypassed through the summary.
-                let (subject, bestSpan): (String?, String?)
-                switch drawer.sensitivity {
-                case .restricted:
-                    (subject, bestSpan) = (ResultComposer.restrictedMarker, nil)
-                case .secret:
-                    (subject, bestSpan) = (ResultComposer.secretMarker, nil)
-                case .normal, .elevated:
-                    subject = drawer.subject
-                    // Pass full content; composer truncates to 120 chars and
-                    // deduplicates against subject (§11.1 rules 2–3).
-                    bestSpan = drawer.content.isEmpty ? nil : drawer.content
-                }
-                candidateRows.append(CandidateRowData(
-                    id: drawer.id,
-                    subject: subject,
-                    bestSpan: bestSpan,
-                    // sscFacts: stubbed nil until W1 schema-19 Drawer.sscFacts lands
-                    sscFacts: nil,
-                    eventTime: ResultComposer.iso8601(drawer.eventTime),
-                    score: Double(hit.score.final),
-                    room: searchNodeNames[drawer.parentNodeId]?.room))
-            } else {
-                // Unhydrated hit: id only; all columns render '-'.
-                candidateRows.append(CandidateRowData(
-                    id: hit.id,
-                    subject: nil,
-                    eventTime: "-",
-                    score: Double(hit.score.final)))
-            }
-            // Explain lines follow the row they annotate (outside the composer row).
-            // The composer does not know about explain output; append after the
-            // loop below once the composed text is built.
-        }
-
-        // Build ControlSignals (deviation-only per §11.3 absolute trailing order).
-        // Discrimination: dense-lane-dark caps "high" → "medium" (same rule as before).
-        let effectiveDiscrimination: DiscriminationLevel =
-            (denseLaneDark && discriminationLevel == .high) ? .medium : discriminationLevel
-        let discriminationArg: String? = switch effectiveDiscrimination {
-            case .low:             "low"
-            case .medium:          "medium"
-            case .high, .notFound, .single: nil   // no discrimination line when high, not-found, or single result
-        }
-        // Degradation: true when any stage was skipped (replaces the old recall_provenance line;
-        // the detail is now logged server-side, not surfaced in the payload).
-        let degraded = !result.degradedStages.isEmpty
-        // Tie note: non-determinate tie window was exhausted — same wording as before.
-        let tieNote = result.degradedStages.contains("tie.nonDeterminate")
-        let control = ControlSignals(
-            discrimination: discriminationArg,
-            degraded: degraded,
-            tieNote: tieNote)
-
-        // Compose via the central renderer.
-        let composed: ComposedResult
-        if candidateRows.isEmpty {
-            composed = ResultComposer.renderEmptyS1(hint: nil)
-        } else {
-            composed = ResultComposer.renderS1Surface(rows: candidateRows, control: control)
-        }
-
-        // Prepend the answer block (L0/L1) and, for the explain path, the explain
-        // lines after each row. Explain lines are not yet compositor-rendered —
-        // they are plain text that follow their row.
-        var finalText = composed.text
-        if explain {
-            // Interleave explain lines after each corresponding row in the text.
-            // The composed text is: header\nrow1\nrow2\n...\ncontrol-lines
-            // We need to insert explain lines after each row. Parse the text,
-            // find the row lines (skip header and control lines), and insert.
-            let textLines = finalText.components(separatedBy: "\n")
-            // Identify the header line (always first) and control lines (suffix).
-            // Rows are the middle section. We walk backward from candidateRows.
-            // Simple approach: rebuild from scratch to avoid parse fragility.
-            let n = candidateRows.count
-            var rebuilt: [String] = []
-            let rawLines = textLines
-            // Header is rawLines[0]; rows are rawLines[1..<1+n]; control lines follow.
-            if rawLines.count > 0 { rebuilt.append(rawLines[0]) }
-            for i in 0..<n {
-                let rowIdx = 1 + i
-                if rowIdx < rawLines.count { rebuilt.append(rawLines[rowIdx]) }
-                if i < shownHits.count {
-                    for line in shownHits[i].explanation { rebuilt.append("  \(line)") }
-                }
-            }
-            // Append remaining control lines.
-            let controlStart = 1 + n
-            if controlStart < rawLines.count {
-                rebuilt.append(contentsOf: rawLines[controlStart...])
-            }
-            finalText = rebuilt.joined(separator: "\n")
-        }
-        if let block = packaged.answerBlock {
-            var headerLines = [
-                "answer: \(block.text)",
-                "confidence: \(block.confidence.rawValue)",
-            ]
-            if !block.citationIDs.isEmpty {
-                headerLines.append("citations: \(block.citationIDs.prefix(5).joined(separator: ", "))")
-            }
-            headerLines.append(
-                "signals: margin=\(block.signals.margin) "
-                + "lane_agreement=\(block.signals.laneAgreement) "
-                + "dense_spread=\(block.signals.denseSpread) "
-                + "containment=\(block.signals.containment)"
-            )
-            finalText = headerLines.joined(separator: "\n") + "\n" + finalText
-        }
-        return Self.composedResult(ComposedResult(text: finalText, structured: composed.structured))
-    }
 
     /// `moot_memory_get` — fetch one memory drawer by id, in full.
     ///
@@ -2472,9 +1884,8 @@ extension ToolDispatcher {
         let estate = try await kit.estate(for: handle)
 
         // sensitivity unlock: same grant-ceiling injection as
-        // runMemorySearch — see that function's doc comment. moot_memory_get
-        // deliberately uses the SAME containment gate moot_memory_search
-        // does (its own doc history says so explicitly), so the grant must
+        // sensitivity unlock: the same containment gate moot_memory_search
+        // uses applies here too (per moot_memory_get's doc history), so the grant must
         // lift it here too, or an unlocked restricted/secret row would be
         // visible in search but still "not found" by id — an inconsistent,
         // confusing half-unlock.
@@ -2644,7 +2055,7 @@ extension ToolDispatcher {
         // (moot_update_memory, moot_withdraw_memory, moot_confirm_memory, etc.).
         await noteUsage(rowID, handle: handle)
 
-        // Same read-under-grant audit recording as runMemorySearch — gated on
+        // Same read-under-grant audit recording as moot_memory_search — gated on
         // BOTH the ceiling having been lifted AND the drawer's own sensitivity
         // actually being restricted/secret.
         if sensitivityCeilingLifted {

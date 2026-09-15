@@ -1,7 +1,6 @@
 //! V2_RESTORE_A Unit 1 — proves the sensitivity-read-under-grant audit fires
 //! on the REAL v2 core-memory operations (`execute_memory_search` /
-//! `execute_memory_get`, driven here through their public `run_memory_search`
-//! / `run_memory_get` wrappers — the exact functions `surface.rs`'s
+//! `execute_memory_get`, the exact functions `surface.rs`'s
 //! `SelectedSurface::execute` calls in production, backed by the exact same
 //! `EstateV2MemoryService` adapter production wiring uses) against a genuine
 //! in-memory estate and a genuine `SensitivityGrantLedger`.
@@ -21,7 +20,8 @@ use aria_mcp::{
     surfaced_recall_ledger::SurfacedRecallLedger,
     v2::{
         core_memory::{
-            run_file_memory, run_memory_get, run_memory_search, V2CoreMemoryDependencies,
+            execute_memory_search, run_file_memory, run_memory_get, V2CoreMemoryDependencies,
+            V2MemorySearchRequest,
             V2CoreMemoryOperation, V2MemoryAuthorization, V2MemoryClock, V2MemoryFailure,
             V2MemoryOperationContext,
         },
@@ -63,7 +63,7 @@ const NOW_MS: i64 = 1_700_000_000_000;
 
 /// Files two restricted-tier drawers through the real `run_file_memory`
 /// typed call, then — with a live restricted grant — reads one through
-/// `run_memory_search` and the other through `run_memory_get` at all three
+/// `execute_memory_search` and the other through `run_memory_get` at all three
 /// depths (subject, distilled, full; the v2 get path fetches and audits the
 /// row once per request regardless of which depth the response is projected
 /// to, so three depth calls on one row independently produce three entries).
@@ -127,8 +127,9 @@ fn v2_search_and_get_emit_read_under_grant_audit_entries_on_the_real_estate_back
     };
 
     // Without a live grant neither restricted row is reachable through v2.
-    let before_search = run_memory_search(
-        &arguments(json!({"query": "v2-audit-search-marker", "wing": "audit-search-wing"})), &deps,
+    let before_search = execute_memory_search(
+        V2MemorySearchRequest::decode(&arguments(json!({"query": "v2-audit-search-marker", "wing": "audit-search-wing"}))).expect("decode must not fail"),
+        &deps,
     ).expect("search must not throw");
     assert!(!contains_search_drawer(&before_search),
         "without a grant the restricted row must not appear in v2 search results");
@@ -139,8 +140,9 @@ fn v2_search_and_get_emit_read_under_grant_audit_entries_on_the_real_estate_back
 
     sensitivity_ledger.grant_restricted(NOW_MS);
 
-    let after_search = run_memory_search(
-        &arguments(json!({"query": "v2-audit-search-marker", "wing": "audit-search-wing"})), &deps,
+    let after_search = execute_memory_search(
+        V2MemorySearchRequest::decode(&arguments(json!({"query": "v2-audit-search-marker", "wing": "audit-search-wing"}))).expect("decode must not fail"),
+        &deps,
     ).expect("search must not throw");
     assert!(contains_search_drawer(&after_search),
         "with a live grant the restricted row must appear in v2 search results");

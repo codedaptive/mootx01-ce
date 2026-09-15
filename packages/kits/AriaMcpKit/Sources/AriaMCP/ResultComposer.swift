@@ -10,8 +10,6 @@
 //
 // ## Shape coverage
 //
-// S1 — ranked memory candidates (§11.2)
-//   renderS1Surface(rows:control:)
 // S2 — unranked memory rows (§11.5)
 //   renderS2Listing(wing:room:rows:)
 //   renderS2BatchGet(rows:resolved:requested:)
@@ -34,7 +32,6 @@
 // Federated — per-estate sections (§11.2)
 //   renderFederatedRecall(estates:)
 // Empty — zero-count header with optional hint (§11.1 rule 7)
-//   renderEmptyS1(hint:)
 //   renderEmptyS2Listing(wing:room:)
 //
 // ## Normalization rules (§11.1)
@@ -642,49 +639,6 @@ public enum ResultComposer {
         let sscText = normalizeValue(row.sscFacts ?? "-")
         return [row.id, subjectText, spanText, sscText,
                 row.eventTime].joined(separator: sep)
-    }
-
-    // MARK: - S1 ranked surface (§11.2)
-
-    /// Render the full S1 ranked surface: header + rows + control lines.
-    ///
-    /// The header is singular when rows.count == 1:
-    ///   "found 1 candidate memory, one per line"
-    ///   "found N candidate memories, one per line"
-    ///
-    /// Control lines follow in the absolute fixed order (§11.3):
-    ///   discrimination → temporal|walk → degradation → tie note → hint
-    public static func renderS1Surface(
-        rows: [CandidateRowData],
-        control: ControlSignals
-    ) -> ComposedResult {
-        let n = rows.count
-        let header = n == 1
-            ? "found 1 candidate memory, one per line"
-            : "found \(n) candidate memories, one per line"
-        var lines: [String] = [header]
-        lines.append(contentsOf: rows.map(renderS1Row))
-        lines.append(contentsOf: controlLines(for: control))
-        return ComposedResult(
-            text: lines.joined(separator: "\n"),
-            structured: structuredS1(rows: rows, control: control))
-    }
-
-    /// Render the S1 empty-result surface: header + optional hint + optional
-    /// control lines (§11.1 rule 7). The `control` parameter carries the walk-
-    /// stage annotation for `moot_recall_walk` — empty results still report
-    /// which stage was reached so the caller knows escalation occurred.
-    public static func renderEmptyS1(
-        hint: String? = nil,
-        control: ControlSignals = ControlSignals()
-    ) -> ComposedResult {
-        var lines = ["found 0 candidate memories, one per line"]
-        // Trailing order is absolute (§ 8.4): control lines first, hint LAST.
-        lines.append(contentsOf: controlLines(for: control))
-        if let hint { lines.append("hint: \(hint)") }
-        return ComposedResult(
-            text: lines.joined(separator: "\n"),
-            structured: .object(["results": .array([])]))
     }
 
     // MARK: - S2 unranked memory rows (§11.5)

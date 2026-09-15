@@ -14,7 +14,8 @@ import PersistenceKitInMemory
 /// including a client typo — running a different scoring mode than asked and
 /// hiding the mistake. The fix mirrors the strict `ordering` decode: absent
 /// keeps the documented default (matrixAware); an unknown non-empty string
-/// throws invalidParams. Kept in lockstep with the Rust run_memory_search.
+/// throws invalidParams. Kept in lockstep with the Rust v2 scoring decode
+/// (core_memory.rs).
 ///
 /// ## What these tests prove
 ///   A. Unknown scoring throws invalidParams (fail-closed).
