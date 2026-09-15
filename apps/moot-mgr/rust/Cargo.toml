@@ -18,6 +18,10 @@ path = "src/lib.rs"
 name = "moot-mgr"
 path = "src/main.rs"
 
+[target.'cfg(windows)'.dependencies]
+# Same native event sink as the CLI; no logging framework.
+windows-sys = { version = "0.61.2", features = ["Win32_System_EventLog", "Win32_System_Registry", "Win32_Security"] }
+
 [dependencies]
 # JSON encode/decode for the read-API payloads and admin request bodies. The
 # Swift host uses Foundation's JSONEncoder/JSONDecoder with .sortedKeys; the
