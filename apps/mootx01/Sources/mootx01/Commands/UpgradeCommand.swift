@@ -489,6 +489,9 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// place. Pre-release development estates at 11–18 are moved to a supported
     /// version by the schema surgery script, never by this command.
     ///
+    /// Also runs the CorpusKit basis ladder and stamps an unstamped 1.0.x
+    /// estate at format 1.0 so the migration chain seeds it.
+    ///
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
     /// Returns `true` when the estate is at 20 afterwards (or absent).
     @discardableResult
@@ -518,6 +521,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 let storage = try SQLiteStorage(configuration: configuration)
                 // The ledger row, read before any schema open (see the doc comment).
                 let stored = try await storage.currentSchemaVersion(for: LocusKitSchema.kitID)
+                var stampedFormat = false
                 switch LocusKitSchema.upgradePath(storedVersion: stored) {
                 case .unsupported(let found):
                     print("""
@@ -533,7 +537,27 @@ struct UpgradeCommand: AsyncParsableCommand {
                     // version gate above remains the only authority for schema
                     // acceptance before an open can mutate the estate.
                     try await storage.open(schema: LocusKitSchema.schema)
-                    print("  ✓ schema: already at LocusKit schema \(LocusKitSchema.version)")
+                    // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
+                    // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
+                    // through the attached profile, which creates the component tables
+                    // for a fresh estate but carries no component migrations, so a
+                    // fielded 1.0.x estate keeps the v2 shape and every basis write fails
+                    // with "no column named part_index". mootx01 upgrade is the only
+                    // migration vehicle, so the ladder runs here, before any later step
+                    // opens the estate.
+                    try await storage.migrate(to: BasisStore.schemaDeclaration)
+                    // A 1.0.x estate carries no glk_estate_format stamp (the table first
+                    // appeared in 1.1) and GLKMigrationCatalog.prepare treats a missing
+                    // stamp as a fresh estate: it stamps current and runs no capsule.
+                    // Stamping 1.0 makes the compiled chain run 1.0 → … → 1.9 on the first
+                    // GeniusLocusKit open of this upgrade (the whole-record vacuum step),
+                    // which seeds fact_extraction, the six preferences and recall_ratings.
+                    let formatStore = EstateFormatStore(storage: storage)
+                    if try await formatStore.readIfPresent() == nil {
+                        try await formatStore.stamp(.v1_0, now: Date())
+                        stampedFormat = true
+                    }
+                    print("  ✓ schema: already at LocusKit schema \(LocusKitSchema.version)\(stampedFormat ? "; estate format stamped 1.0 for the migration chain" : "")")
                 case .fresh:
                     print("  ✓ schema: no LocusKit ledger row; schema \(LocusKitSchema.version) is created on the first open")
                 case .upgrade(let from):
@@ -544,11 +568,31 @@ struct UpgradeCommand: AsyncParsableCommand {
                         await storage.close()
                         return false
                     }
+                    // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
+                    // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
+                    // through the attached profile, which creates the component tables
+                    // for a fresh estate but carries no component migrations, so a
+                    // fielded 1.0.x estate keeps the v2 shape and every basis write fails
+                    // with "no column named part_index". mootx01 upgrade is the only
+                    // migration vehicle, so the ladder runs here, before any later step
+                    // opens the estate.
+                    try await storage.migrate(to: BasisStore.schemaDeclaration)
+                    // A 1.0.x estate carries no glk_estate_format stamp (the table first
+                    // appeared in 1.1) and GLKMigrationCatalog.prepare treats a missing
+                    // stamp as a fresh estate: it stamps current and runs no capsule.
+                    // Stamping 1.0 makes the compiled chain run 1.0 → … → 1.9 on the first
+                    // GeniusLocusKit open of this upgrade (the whole-record vacuum step),
+                    // which seeds fact_extraction, the six preferences and recall_ratings.
+                    let formatStore = EstateFormatStore(storage: storage)
+                    if try await formatStore.readIfPresent() == nil {
+                        try await formatStore.stamp(.v1_0, now: Date())
+                        stampedFormat = true
+                    }
                     let v20Objects = "twelve kg_facts extraction columns, fact_extractor_models"
                     let hopObjects = from == 19
                         ? v20Objects
                         : "encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution; \(v20Objects)"
-                    print("  ✓ schema: LocusKit \(from) → \(after) (\(hopObjects))")
+                    print("  ✓ schema: LocusKit \(from) → \(after) (\(hopObjects))\(stampedFormat ? "; estate format stamped 1.0 for the migration chain" : "")")
                 }
                 await storage.close()
                 return true
