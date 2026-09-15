@@ -31,7 +31,9 @@
 // On Linux: install, uninstall, db, preference, status, query (serve/proxy require macOS).
 
 import ArgumentParser
+import AriaMCP
 import Foundation
+import GeniusLocusKit
 import MootCoreAIWorker
 import MootInstallerCore
 
@@ -65,9 +67,21 @@ struct Mootx01: AsyncParsableCommand {
     /// Release date stamp shown alongside the version by --version.
     static let releaseDate = "2026-08-10"
 
-    /// The exact string --version prints. The Rust port must print an identical
-    /// string (see apps/mootx01/rust: CURRENT_VERSION + RELEASE_DATE).
+    /// The unchanged first line printed by --version. The Rust port must print
+    /// this identical line before its converter identity lines.
     static let versionDisplay = "\(currentVersion) (\(releaseDate))"
+
+    /// The complete --version text. Converter identities come from the product
+    /// paths that use them, rather than duplicating ContextDistillLib literals.
+    static var versionOutput: String {
+        let hydration = GeniusLocusKit.distillationConverter
+        let recall = RecallDistillation.converter
+        return """
+        \(versionDisplay)
+        converter hydration \(hydration.id) \(hydration.converterVersion)
+        converter recall \(recall.id) \(recall.converterVersion)
+        """
+    }
 
     static var configuration: CommandConfiguration {
         #if os(macOS)
@@ -80,7 +94,7 @@ struct Mootx01: AsyncParsableCommand {
             Use `mootx01 upgrade` to replace the binary from a local build and
             restart background services.
             """,
-            version: versionDisplay,
+            version: versionOutput,
             subcommands: [
                 CoreAINuExtractWorkerCommand.self,
                 ServeCommand.self,
@@ -114,7 +128,7 @@ struct Mootx01: AsyncParsableCommand {
         return CommandConfiguration(
             commandName: "mootx01",
             abstract: "ARIA MCP estate management tool (Linux: serve requires macOS).",
-            version: versionDisplay,
+            version: versionOutput,
             subcommands: [
                 InstallCommand.self,
                 UninstallCommand.self,
