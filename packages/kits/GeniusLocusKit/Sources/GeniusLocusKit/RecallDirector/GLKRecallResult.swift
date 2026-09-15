@@ -151,7 +151,8 @@ public struct GLKRecallResult: Sendable {
 
     /// The preference key of the recall route that transformed this request,
     /// or nil when no route fired. Day one: `"cross_encoder_routing"` when
-    /// Route 1 applied `.strictTranscript()`; nil for all other recalls.
+    /// Route 1 applied its degradable rerank directive; nil for all other
+    /// recalls.
     public let route: String?
 
     /// Typed evidence for a strict transcript rerank request. Generic recalls

@@ -211,11 +211,12 @@ fn seed_dreaming_queue(registry: &EstateRegistry, now_epoch_i64: i64) {
 
 // MARK: - §1 Cadence
 
-/// AG-1: First tick always fires both daemons when the dreaming queue has
-/// pending work (v2 pending-count gate: cadence + pending > 0 → fire).
-/// Mirrors Swift `firstTickFiresDreamingAndMaintenance`.
+/// AG-1: First tick fires dreaming when the dreaming queue has pending work
+/// (v2 pending-count gate: cadence + pending > 0 → fire). The maintenance
+/// engine is driven by its standing signals, not by the tick.
+/// Mirrors Swift `firstTickFiresDreaming`.
 #[test]
-fn ag1_first_tick_always_fires_both_daemons() {
+fn ag1_first_tick_fires_dreaming() {
     let (mut governor, registry) = make_governor();
     // Seed the dreaming queue so the v2 pending-count gate passes.
     // The gate skips dreaming when the queue is empty; one external-origin
@@ -227,10 +228,6 @@ fn ag1_first_tick_always_fires_both_daemons() {
     assert!(
         report.dreaming_fired,
         "dreaming must fire on first tick (pending-count gate seeded)"
-    );
-    assert!(
-        report.maintenance_fired,
-        "maintenance must fire on first tick"
     );
 }
 
@@ -252,7 +249,6 @@ fn ag2_tick_before_interval_returns_no_fire() {
     // First tick fires (t=0).
     let first = governor.tick(UNIX_EPOCH);
     assert!(first.dreaming_fired, "first tick must fire dreaming (pending-count gate seeded)");
-    assert!(first.maintenance_fired, "first tick must fire maintenance");
 
     // Second tick at t=29 s — the cadence gate (30 s interval) has not elapsed,
     // so dreaming is skipped before the pending-count gate is consulted.
@@ -261,10 +257,6 @@ fn ag2_tick_before_interval_returns_no_fire() {
     assert!(
         !second.dreaming_fired,
         "dreaming must not fire before 30 s interval (cadence gate dominates)"
-    );
-    assert!(
-        !second.maintenance_fired,
-        "maintenance must not fire before 300 s interval"
     );
 }
 
@@ -294,10 +286,6 @@ fn ag3_dreaming_fires_at_interval_maintenance_does_not() {
         second.dreaming_fired,
         "dreaming must fire at the 30 s boundary (pending-count gate seeded)"
     );
-    assert!(
-        !second.maintenance_fired,
-        "maintenance must not fire before 300 s boundary"
-    );
 }
 
 /// AG-4: Both daemons fire when their intervals have both elapsed.
@@ -324,10 +312,6 @@ fn ag4_both_fire_after_long_gap() {
         later.dreaming_fired,
         "dreaming must fire after 300 s gap (pending-count gate seeded)"
     );
-    assert!(
-        later.maintenance_fired,
-        "maintenance must fire at its 300 s boundary"
-    );
 }
 
 // MARK: - §2 Construction
@@ -346,7 +330,6 @@ fn ag5_construction_smoke() {
     let report = governor.tick(UNIX_EPOCH + Duration::from_secs(1_000_000));
     // The first tick fires both daemons when cadence gate + pending gate pass.
     assert!(report.dreaming_fired, "dreaming must fire on first tick (pending-count gate seeded)");
-    assert!(report.maintenance_fired);
 }
 
 /// AG-6: Consecutive ticks at increasing timestamps stay coherent.
@@ -445,36 +428,6 @@ fn ag8_dreaming_fire_writes_diary_entry_to_live_estate() {
     );
     assert_eq!(diary[0].agent_name, "dreaming-daemon");
     assert_eq!(diary[0].topic, "dreaming-cycle");
-}
-
-/// AG-9: A maintenance tick on a populated estate writes a diary entry to
-/// the live store — proves maintenance sink wiring.
-#[test]
-fn ag9_maintenance_fire_writes_diary_entry_to_live_estate() {
-    use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
-
-    let (mut governor, registry) = make_governor();
-    // Advance to t=300 s so maintenance fires alongside dreaming.
-    let _ = governor.tick(UNIX_EPOCH);
-    let report = governor.tick(UNIX_EPOCH + Duration::from_secs(300));
-    assert!(report.maintenance_fired, "maintenance must fire at 300 s boundary");
-
-    // The maintenance daemon writes exactly one diary entry per cycle.
-    let diary = registry
-        .default
-        .store
-        .read_diary("maintenance-daemon", 10)
-        .expect("read_diary must succeed");
-    // At t=0 and t=300 both daemons fire; two maintenance cycles = 2 diary entries.
-    assert!(
-        diary.len() >= 2,
-        "two maintenance fires must produce at least 2 diary entries; got {}",
-        diary.len()
-    );
-    assert!(
-        diary.iter().all(|e| e.agent_name == "maintenance-daemon"),
-        "all entries must be from maintenance-daemon"
-    );
 }
 
 // MARK: - §5 Think event emission

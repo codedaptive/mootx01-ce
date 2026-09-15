@@ -21,9 +21,12 @@ import Foundation
 ///
 /// Defaults are the spec defaults (NEURONKIT_SPEC § 3.2 schedule and
 /// thresholds): how often the daemon ticks, how often it re-verifies
-/// the audit chain, the decay / tombstone age windows, and the two
-/// drift thresholds that gate fingerprint-drift and byReference-drift
-/// proposals.
+/// the audit chain, the decay / tombstone age windows, and the drift
+/// threshold that gates byReference-drift proposals.
+///
+/// Codable is synthesized, so a persisted manifest that carries keys this
+/// struct no longer declares (for example a retired threshold) decodes
+/// cleanly: unknown keys are ignored, never an error.
 public struct MaintenancePolicy: Sendable, Equatable, Codable {
 
     /// Tick cadence in milliseconds. Spec default 300_000 (5 minutes,
@@ -55,13 +58,6 @@ public struct MaintenancePolicy: Sendable, Equatable, Codable {
     /// proposed for expunge confirmation.
     public var tombstoneGraceSeconds: Double
 
-    /// Per-room/wing fingerprint Hamming-distance drift fraction past
-    /// which a fingerprint-drift proposal is emitted. Spec default
-    /// 0.25 — a quarter of the fingerprint bits drifting from baseline
-    /// is the documented threshold at which the room's anchor is
-    /// considered to have moved enough to warrant review.
-    public var fingerprintDriftThreshold: Float
-
     /// LearnedReference source-drift threshold (fraction). Spec default
     /// 0.25 — when a learned reference's source content has drifted by
     /// at least this fraction, the reference may no longer be valid and
@@ -75,18 +71,16 @@ public struct MaintenancePolicy: Sendable, Equatable, Codable {
         auditCheckIntervalMs: Int = 300_000,
         decayWindowSeconds: Double = 2_592_000,
         tombstoneGraceSeconds: Double = 604_800,
-        fingerprintDriftThreshold: Float = 0.25,
         byReferenceDriftThreshold: Float = 0.25
     ) {
         self.tickIntervalMs = tickIntervalMs
         self.auditCheckIntervalMs = auditCheckIntervalMs
         self.decayWindowSeconds = decayWindowSeconds
         self.tombstoneGraceSeconds = tombstoneGraceSeconds
-        self.fingerprintDriftThreshold = fingerprintDriftThreshold
         self.byReferenceDriftThreshold = byReferenceDriftThreshold
     }
 
-    /// Spec-default policy (300_000 / 300_000 / 30d / 7d / 0.25 / 0.25).
+    /// Spec-default policy (300_000 / 300_000 / 30d / 7d / 0.25).
     public static let `default` = MaintenancePolicy()
 }
 

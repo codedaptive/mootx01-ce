@@ -743,6 +743,20 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.count_recall_traces()
     }
 
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.0.upsert_recall_ratings(ratings)
+    }
+
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.0.recall_ratings(ids)
+    }
+
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
         self.0.count_drawer_rows()
     }

@@ -150,6 +150,8 @@ public enum PermissionsWriter {
         "moot_help",
         // Transcript recall: reads session transcript, no estate writes.
         "moot_memory_recall_transcript",
+        // Similar recall: nearest drawers by whole-record vector, no estate writes.
+        "moot_recall_similar",
         // Monitoring inspection: reads daemon telemetry state without changing it.
         "moot_monitoring_status",
         // Migration candidate evaluation (read-only, does not commit).

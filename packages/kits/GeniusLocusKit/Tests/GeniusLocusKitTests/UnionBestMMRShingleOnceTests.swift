@@ -90,7 +90,6 @@ struct UnionBestMMRShingleOnceTests {
         .matrixAware: [
             "quarterly budget review meeting notes finance team",
             "quarterly budget review meeting notes finance team yes",
-            "quarterly budget review meeting notes finance team ok",
         ],
     ]
 

@@ -6,8 +6,9 @@
 // read Tests/Conformance/sub_span_scoring_switch_fixture.json.
 //
 // Tests:
-//   1. offLeavesTheDenseColumnUntouched — fixture bodies, switch off: every
-//      hit reports dense 0 and no `subSpan.budget` stage.
+//   1. offLeavesTheDenseColumnUntouched — fixture bodies, switch off: the
+//      control body (never ingested) reports dense 0, no hit carries the
+//      `subSpan:budget` token and there is no `subSpan.budget` stage.
 //   2. onAppliesTheBlend — fixture bodies, switch on: every ingested body's
 //      hit reports dense above 0, the control body (captured, not in the
 //      corpus) stays at 0.
@@ -52,7 +53,8 @@ struct SubSpanScoringSwitchTests {
     /// also in a standalone corpus registered on the estate. The
     /// deterministic model gives the corpus a hashed float lane, so sub-span
     /// windows can be scored without a real encoder. No vector store is
-    /// registered, so the dense column starts at 0 for every candidate.
+    /// registered; the whole-record float lane over the corpus fills the dense
+    /// column for ingested bodies, and a body outside the corpus stays at 0.
     private func openEstate(
         bodies: [String], ingested: Int
     ) async throws -> (kit: GeniusLocusKit, handle: EstateHandle) {
@@ -100,10 +102,14 @@ struct SubSpanScoringSwitchTests {
             let result = try await kit.recall(
                 handle, request(query: fixture.query, limit: fixture.limit, subSpanScoring: .off))
             #expect(result.hits.count == bodies.count, "the locus lane supplies every body at limit \(fixture.limit)")
-            for hit in result.hits {
+            for hit in result.hits where hit.drawer?.content == fixture.control_body {
                 #expect(hit.score.dense == 0,
-                        "switch off: no dense lane and no blend, dense stays 0; got \(hit.score.dense) for \(hit.drawer?.content ?? hit.id)")
+                        "switch off: the control body has no corpus record and no blend runs, dense stays 0; got \(hit.score.dense)")
             }
+            let flagged = result.hits.filter { hit in
+                hit.explanation.contains { $0.hasPrefix("score:") && $0.contains(" subSpan:budget") }
+            }.count
+            #expect(flagged == 0, "switch off: no hit carries the sub-span budget token")
             #expect(!result.degradedStages.contains("subSpan.budget"),
                     "the engine was not called, so no budget stage; stages: \(result.degradedStages)")
         }

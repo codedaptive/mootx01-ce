@@ -172,6 +172,14 @@ pub fn selected_registry_with_vault(vault_on: bool) -> V2EffectiveRegistry {
                         "query":{"type":"string","minLength":1},
                         "estate_id":{"type":"string","format":"uuid"}},
                         "required":["query"],"additionalProperties":false})),
+                descriptor("similar_recall", "moot_recall_similar", V2OperationEffect::Read,
+                    "Find memories that mean the same as the question even when they share no words with it.",
+                    &["similar memories", "paraphrase recall", "meaning search"],
+                    json!({"type":"object","properties":{
+                        "query":{"type":"string","minLength":1},
+                        "limit":{"type":"integer","minimum":1,"maximum":50,"default":10},
+                        "estate_id":{"type":"string","format":"uuid"}},
+                        "required":["query"],"additionalProperties":false})),
                 descriptor("monitoring_set", "moot_monitoring_set", V2OperationEffect::Write,
                     "Set daemon telemetry monitoring and return only its confirmed effective state.",
                     &["set monitoring", "enable monitoring", "disable monitoring"],
@@ -576,6 +584,19 @@ fn remaining_data_schema(name: &str) -> Option<Value> {
             Some(exact(
                 json!({"memories":{"type":"array","items":memory}}),
                 json!(["memories"]),
+            ))
+        }
+        // Similar recall rows share the transcript row shape; the lane applies
+        // no rerank, so there is no evidence block.
+        "moot_recall_similar" => {
+            let fetch = fetch_schema();
+            let row = exact(
+                json!({"memory_id":uuid(),"room":{"type":"string"},"excerpt":{"type":"string"},"score":{"type":"number"},"fetch":fetch}),
+                json!(["memory_id", "room", "excerpt", "score", "fetch"]),
+            );
+            Some(exact(
+                json!({"matches":{"type":"array","items":row}}),
+                json!(["matches"]),
             ))
         }
         "moot_memory_recall_transcript" => {

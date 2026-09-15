@@ -6,12 +6,11 @@
 // (not snapshot-at-construction) by calling into the GeniusLocusKit
 // coordinator's public API surface.
 //
-// The five Swift reads map to scan fields as follows:
+// The four Swift reads map to scan fields as follows:
 //
-//   activeDrawers       → aged_active + forbidden_drawer_ids
+//   activeDrawers       → aged_active
 //   tombstonedDrawers   → aged_tombstoned
 //   learnedReferences   → reference_drift   (real reads via coordinator)
-//   fingerprintBaselines → fingerprint_drift (real reads via coordinator)
 //   currentAuditLog     → audit             (real verify via coordinator)
 //
 // ── Bounded scan strategy ─────────────────────────────────────────────
@@ -46,25 +45,6 @@
 // The fraction is the input the maintenance daemon thresholds against
 // `MaintenancePolicy.by_reference_drift_threshold` (spec default 0.25).
 //
-// ── Fingerprint drift (computed from drawer bitmaps) ──────────────────
-// `fingerprint_drift` is computed by OR-aggregating each container node's
-// drawer bitmaps grouped by `parent_node_id` (native node ID scope key
-// under the node-tree model). For each container node we compute a v1 drift fraction
-// as the BIT DENSITY of the node's OR aggregate:
-//
-//   drift = popcount(adjectiveOR | operationalOR | provenanceOR over their
-//           three 64-bit lanes) / FINGERPRINT_DRIFT_BIT_WIDTH (192)
-//
-// A focused container (few distinct adjective/operational/provenance bits
-// across its active drawers) reads low drift; a container whose content has
-// spread across many disparate bitmap axes reads high drift. This is a
-// deterministic, baseline-free definition computed identically on both ports.
-// The persisted-baseline refinement (Hamming distance of the live aggregate
-// against a recorded per-scope baseline, per `FingerprintDriftObservation`'s
-// documented intent) requires a baseline-persistence surface that does not
-// exist yet; bit density is the honest v1 signal that uses the data available
-// today. The key is the `parent_node_id` — native node ID scope key under the node-tree model.
-//
 // ── Audit integrity input (real verify) ──────────────────────────────
 // `audit` is populated from `coordinator.verify_audit_chain`, which replays
 // the estate's LocusKit audit trail into a `UnifiedAuditLog` and runs
@@ -83,24 +63,13 @@
 // B-1 compliance: all estate reads route through genius_locus_kit's
 // EstateCoordinator surface — no direct locus_kit storage calls.
 
-use std::collections::BTreeMap;
-
 use genius_locus_kit::{
-    AdjectiveExportability, AdjectiveSensitivity, AuditChainReport, DrawerState,
-    EstateCoordinator, EstateHandle, VerbDispatchError,
+    AuditChainReport, DrawerState, EstateCoordinator, EstateHandle, VerbDispatchError,
 };
 use locus_kit::learned_reference::DriftSeverity;
 
 use crate::maintenance_cycle::{MaintenanceScan, MaintenanceSubstrateReader, NodeInvariantRow};
 use crate::maintenance_decision::{AgedRow, AuditVerdict, DriftRow};
-
-// ── Fingerprint-drift bit width ──────────────────────────────────────
-//
-// A `ContainerFingerprint` carries three i64 bitmap lanes (adjective,
-// operational, provenance). Each lane uses its low 64 bits, so the
-// meaningful width of the combined fingerprint is 3 × 64 = 192 bits. The
-// v1 drift fraction is the set-bit density of the aggregate over this width.
-const FINGERPRINT_DRIFT_BIT_WIDTH: f32 = 192.0;
 
 // ── Scan cap ─────────────────────────────────────────────────────────
 //
@@ -153,15 +122,12 @@ impl<'a> MaintenanceSubstrateReader for EstateMaintenanceReader<'a> {
     /// Drawer corpus is bounded to `MAINTENANCE_SCAN_CAP` rows (B-10a:
     /// internal read, no trace rows). Reference drift is computed from all
     /// non-tombstoned learned references via `drift_severity` bitmap decoding,
-    /// fingerprint drift from the room-level container aggregates, and the audit
-    /// verdict from a read-only chain verification (see module comment).
+    /// and the audit verdict from a read-only chain verification (see module comment).
     fn scan(&self) -> MaintenanceScan {
         build_scan(self.coordinator, self.handle, self.now)
             .unwrap_or_default()
     }
 }
-
-// ── Fingerprint-drift v1 metric ──────────────────────────────────────
 
 /// Map an `AuditChainReport` plus its ingress-rejected-entry count to the
 /// daemon's `AuditVerdict`. The report's `valid` / `first_broken_at_millis`
@@ -200,7 +166,6 @@ fn build_scan(
     // enforces this by design.
     let drawers = coordinator.all_drawers_bounded(handle, Some(MAINTENANCE_SCAN_CAP))?;
 
-    let mut forbidden_drawer_ids: Vec<String> = Vec::new();
     let mut aged_active: Vec<AgedRow> = Vec::new();
     let mut aged_tombstoned: Vec<AgedRow> = Vec::new();
 
@@ -227,18 +192,6 @@ fn build_scan(
             // epoch-ms; age is reported in seconds, so convert here.
             let age_seconds = (now - drawer.filed_at).max(0) as f64 / 1000.0;
             aged_active.push(AgedRow { id: drawer.id.clone(), age_seconds });
-
-            // Check invariant I-3: a drawer may not be both secret and public_.
-            // Sensitivity is bits 6-11; exportability is bits 12-17.
-            let sensitivity =
-                AdjectiveSensitivity::from_raw((drawer.adjective_bitmap >> 6) & 0x3F);
-            let exportability =
-                AdjectiveExportability::from_raw((drawer.adjective_bitmap >> 12) & 0x3F);
-            if sensitivity == AdjectiveSensitivity::Secret
-                && exportability == AdjectiveExportability::Public
-            {
-                forbidden_drawer_ids.push(drawer.id.clone());
-            }
         }
     }
 
@@ -263,37 +216,6 @@ fn build_scan(
                 let severity = lr.drift_severity();
                 let drift_fraction = drift_fraction_for_severity(severity);
                 DriftRow { key: lr.id.clone(), drift_fraction }
-            })
-            .collect::<Vec<_>>()
-    };
-
-    // ── Fingerprint drift (from drawers, grouped by parent_node_id) ────
-    // OR-aggregate each container node's drawer bitmaps (adjective,
-    // operational, provenance) grouped by parent_node_id (room-level node
-    // under the node-tree model). The key is the parent_node_id — native node ID scope
-    // key. One DriftRow per container node; the daemon thresholds each
-    // against `fingerprint_drift_threshold`.
-    let fingerprint_drift = {
-        let mut aggregates: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();
-        for drawer in &drawers {
-            if drawer.tombstoned_at.is_some() {
-                continue;
-            }
-            let state = DrawerState::from_raw(drawer.adjective_bitmap & 0x3F);
-            if !state.is_cluster_a() {
-                continue;
-            }
-            let entry = aggregates.entry(drawer.parent_node_id.clone()).or_insert((0, 0, 0));
-            entry.0 |= drawer.adjective_bitmap;
-            entry.1 |= drawer.operational_bitmap;
-            entry.2 |= drawer.provenance;
-        }
-        aggregates
-            .into_iter()
-            .map(|(node_id, (adj, op, prov))| {
-                let set_bits = adj.count_ones() + op.count_ones() + prov.count_ones();
-                let drift_fraction = set_bits as f32 / FINGERPRINT_DRIFT_BIT_WIDTH;
-                DriftRow { key: node_id, drift_fraction }
             })
             .collect::<Vec<_>>()
     };
@@ -390,10 +312,8 @@ fn build_scan(
 
     Ok(MaintenanceScan {
         audit,
-        forbidden_drawer_ids,
         aged_active,
         aged_tombstoned,
-        fingerprint_drift,
         reference_drift,
         qid_pending_drawers,
         node_invariant_rows,
@@ -476,8 +396,6 @@ mod tests {
         let scan = reader.scan();
         assert!(scan.aged_active.is_empty());
         assert!(scan.aged_tombstoned.is_empty());
-        assert!(scan.forbidden_drawer_ids.is_empty());
-        assert!(scan.fingerprint_drift.is_empty());
         assert!(scan.reference_drift.is_empty());
         // The audit chain is now verified every cycle: an empty estate has an
         // empty audit log, which is vacuously valid (no break).
@@ -692,25 +610,6 @@ mod tests {
         assert_eq!(ids_a, ids_b, "bounded scan must be deterministic");
     }
 
-    // ── MR-10: fingerprint_drift computed from drawers by parent_node_id ─
-    //
-    // The fingerprint-drift signal is computed from the drawer corpus
-    // grouped by parent_node_id (room-level node under the node-tree model). Each node's
-    // bitmap lanes are OR-aggregated and the set-bit density over 192 bits
-    // is the v1 drift fraction. A captured drawer contributes its bitmaps
-    // to its parent node's aggregate.
-    #[test]
-    fn mr10_fingerprint_drift_from_drawers() {
-        let (coord, handle) = open_estate();
-        capture_one(&coord, &handle, "content", FILED_AT);
-        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
-        let scan = reader.scan();
-        // A captured drawer has adjective/operational/provenance bitmaps;
-        // the fingerprint drift is computed from those grouped by
-        // parent_node_id.
-        let _ = scan.fingerprint_drift;
-    }
-
     // ── MR-11: audit verdict is produced every cycle ─────────────────
 
     #[test]
@@ -724,22 +623,6 @@ mod tests {
         assert!(audit.first_broken_at_millis.is_none());
     }
 
-    // ── MR-12: fingerprint drift bit density is popcount / 192 ────────
-    //
-    // Verifies the inline bit-density computation in build_scan produces
-    // the expected fraction for known bitmap values.
-
-    #[test]
-    fn mr12_bit_density_is_popcount_over_192() {
-        // adjective has 2 set bits, operational 1, provenance 0 → 3 / 192.
-        let adj: i64 = 0b0011;
-        let op: i64 = 0b0100;
-        let prov: i64 = 0;
-        let set_bits = adj.count_ones() + op.count_ones() + prov.count_ones();
-        let f = set_bits as f32 / FINGERPRINT_DRIFT_BIT_WIDTH;
-        assert!((f - (3.0 / FINGERPRINT_DRIFT_BIT_WIDTH)).abs() < 1e-6);
-    }
-
     // ── MR-13: default scan has no audit verdict (the daemon's "no check
     // this cycle" sentinel) ──────────────────────────────────────────
 
@@ -748,7 +631,7 @@ mod tests {
         // MaintenanceScan::default() is the daemon's "audit cadence not elapsed"
         // sentinel — distinct from the reader's per-cycle verdict.
         let scan = MaintenanceScan::default();
-        assert!(scan.fingerprint_drift.is_empty());
+        assert!(scan.reference_drift.is_empty());
         assert!(scan.audit.is_none());
     }
 
@@ -770,8 +653,6 @@ mod tests {
         // present (empty chain verifies clean).
         assert!(scan.aged_active.is_empty());
         assert!(scan.aged_tombstoned.is_empty());
-        assert!(scan.forbidden_drawer_ids.is_empty());
-        assert!(scan.fingerprint_drift.is_empty());
         assert!(scan.reference_drift.is_empty());
         assert!(scan.audit.expect("verdict present").valid);
     }

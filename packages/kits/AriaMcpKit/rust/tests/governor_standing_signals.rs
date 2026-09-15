@@ -116,6 +116,14 @@ fn gss2_registered_defaults_make_signal_tick_fire() {
             None, // anomaly_cycle
             None, // span_encode_cycle
             None, // fact_extraction_cycle
+            None, // consolidation_cycle (preference-gated; absent here)
+            None, // contradiction_sweep_cycle (preference-gated; absent here)
+            None, // maintenance_cycle (preference-gated; absent here)
+            None, // decay_cycle (preference-gated; absent here)
+            None, // by_reference_cycle (preference-gated; absent here)
+            None, // fold_cycle (preference-gated; absent here)
+            None, // training_cycle (preference-gated; absent here)
+            None, // tournament_cycle (preference-gated; absent here)
         )
         .expect("in-memory estate has a registered VectorStore → registration succeeds");
 

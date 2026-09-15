@@ -2342,16 +2342,17 @@ fn h2_two_provider_dense_consensus_records_provenance_and_outranks() {
         .expect("consensus drawer must surface in the fused result");
 
     // Per-signal dense provenance: the consensus hit's explanation must name BOTH
-    // dense signals (minilm-v6 and mpnet-base-v2) — direct proof both held signals
-    // voted (the dense lane fanned out across both).
+    // registered dense providers (test-first-word-v1 and test-two-axis-v1) —
+    // direct proof both held signals voted (the dense lane fanned out across
+    // both). Same gate as the Swift twin, which names its own two providers.
     let consensus_expl = consensus_hit.explanation.join(" | ");
     assert!(
-        consensus_expl.contains("vectorDense:minilm-v6"),
-        "consensus hit explanation must record the miniLM dense signal; got: {consensus_expl}"
+        consensus_expl.contains("vectorDense:test-first-word-v1"),
+        "consensus hit explanation must record the first-word dense signal; got: {consensus_expl}"
     );
     assert!(
-        consensus_expl.contains("vectorDense:mpnet-base-v2"),
-        "consensus hit explanation must record the mpnet dense signal; got: {consensus_expl}"
+        consensus_expl.contains("vectorDense:test-two-axis-v1"),
+        "consensus hit explanation must record the two-axis dense signal; got: {consensus_expl}"
     );
     assert!(
         consensus_hit.score.dense > 0.0,

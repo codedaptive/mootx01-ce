@@ -8,10 +8,12 @@
 //   • RecipeCatalog.all.count == 29 (baseline 26 + distilled_recall +
 //     node_motion + walk_recall).
 //
-//   • GeniusLocusKit.defaultStandingSignalNames.count == 13 — 7 baseline
-//     + TrainingSignal + ContradictionScoutSignal (contradiction hunter)
-//     + ConsolidationSignal + AnomalySweepSignal + SpanEncodeSignal
-//     + FactExtractionSignal.
+//   • GeniusLocusKit.defaultStandingSignalNames.count == 6 (the always-on
+//     set) and GeniusLocusKit.preferenceGatedStandingSignalNames carries the
+//     eight preference-gated signals: consolidation sweep, contradiction
+//     sweep, the maintenance family (maintenance-daemon, decay-sweep,
+//     by-reference-validity) and the adaptive-recall trio
+//     (temporal-causality-fold, training-daemon, end-of-day-tournament).
 //
 // isRecipeTool assertions for the distilled-recall tool live in
 // AriaMcpKit/RecipeToolsTests.swift (they require AriaMcpKit scope).
@@ -36,19 +38,40 @@ struct SprintDXAssertionTests {
             "RecipeCatalog must contain exactly 29 recipes: 26 baseline + distilled_recall + node_motion + walk_recall")
     }
 
-    /// CK-DX-2: defaultStandingSignalNames contains all 13 standing signals.
+    /// CK-DX-2: the standing-signal vocabulary is split into two lists in
+    /// DefaultStandingSignals.swift and this test pins both.
     ///
-    /// Thirteen signals: 7 baseline + TrainingSignal
-    /// + ContradictionScoutSignal (contradiction hunter) + ConsolidationSignal
-    /// + AnomalySweepSignal (signal 11, P3a anomaly-flag sweep)
-    /// + SpanEncodeSignal (signal 12, span-encode drain signal)
-    /// + FactExtractionSignal (signal 13, distilled-fact drain).
-    /// The set is the list in DefaultStandingSignals.swift `defaultStandingSignalNames`
-    /// (thirteen names). The GENIUSLOCUSKIT_SPEC.md inventory table is one row
-    /// short of it (no fact-extraction row).
-    @Test("CK-DX-2: GeniusLocusKit.defaultStandingSignalNames.count == 13 (includes FactExtractionSignal)")
-    func defaultStandingSignalNamesCountIsThirteen() {
-        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 13,
-            "defaultStandingSignalNames must contain exactly 13 signals (13th: FactExtractionSignal)")
+    /// `defaultStandingSignalNames` is the always-on set (six names:
+    /// dreaming-daemon, vector-similarity, contradiction-scout,
+    /// anomaly-flag-sweep, span-encode, fact-extraction). The
+    /// preference-gated signals live in `preferenceGatedStandingSignalNames`
+    /// and register only when the host passes a live cycle closure, so
+    /// they are pinned by name rather than folded into the always-on count:
+    /// consolidation sweep, contradiction sweep, the maintenance family
+    /// (maintenance-daemon, decay-sweep, by-reference-validity) and the
+    /// adaptive-recall trio (temporal-causality-fold, training-daemon,
+    /// end-of-day-tournament).
+    @Test("CK-DX-2: defaultStandingSignalNames.count == 6 and preferenceGatedStandingSignalNames carries the eight gated names")
+    func standingSignalVocabularyIsPinned() {
+        #expect(GeniusLocusKit.defaultStandingSignalNames.count == 6,
+            "defaultStandingSignalNames must contain exactly the 6 always-on signals")
+
+        let gated = GeniusLocusKit.preferenceGatedStandingSignalNames
+        let expectedGated = [
+            "consolidation-sweep",
+            "contradiction-sweep",
+            "maintenance-daemon",
+            "decay-sweep",
+            "by-reference-validity",
+            "temporal-causality-fold",
+            "training-daemon",
+            "end-of-day-tournament",
+        ]
+        for name in expectedGated {
+            #expect(gated.contains(name),
+                "preferenceGatedStandingSignalNames must contain \(name)")
+        }
+        #expect(gated.count == expectedGated.count,
+            "preferenceGatedStandingSignalNames must contain exactly the 8 gated signals")
     }
 }

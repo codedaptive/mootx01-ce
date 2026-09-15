@@ -1988,6 +1988,26 @@ impl Estate {
         self.store.insert_recall_traces(items)
     }
 
+    /// Write one `recall_ratings` row per rating (insert or replace on
+    /// `drawer_id`). Delegates to `DrawerStore::upsert_recall_ratings`
+    /// (mirrors Swift `Estate.upsertRecallRatings`).
+    pub fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.store.upsert_recall_ratings(ratings)
+    }
+
+    /// Ratings for `ids`; ids without a `recall_ratings` row are absent.
+    /// Delegates to `DrawerStore::recall_ratings` (mirrors Swift
+    /// `Estate.recallRatings(ids:)`).
+    pub fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.store.recall_ratings(ids)
+    }
+
     /// Fetch one drawer by id (None when absent). Delegates to
     /// `DrawerStore::get_drawer` (mirrors Swift `Estate.getDrawers(ids:)`
     /// for the singular case).
