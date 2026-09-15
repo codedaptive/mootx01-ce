@@ -23,6 +23,7 @@
 //   loses half its historic influence before the new outcome lands.
 
 import Foundation
+import SubstrateML
 
 // MARK: - Bucket
 
@@ -115,13 +116,19 @@ public struct MatrixCalibrationCurve: Sendable, Equatable, Codable {
     ///
     /// `elapsedDays` is the time since the last update. `halfLifeDays`
     /// is 30 per math treatise §8. Decay is skipped for sub-day intervals
-    /// to avoid floating-point noise on rapid successive calls.
+    /// to avoid floating-point noise on rapid successive calls. The factor
+    /// comes from `SubstrateML.MatrixDecay.decayFactor`, the one half-life
+    /// formula every decaying surface in both ports shares; days convert to
+    /// seconds here because that function works in seconds.
     public mutating func applyDecay(
         elapsedDays: Double,
         halfLifeDays: Double = 30.0
     ) {
         guard elapsedDays >= 1.0 else { return }
-        let factor = pow(0.5, elapsedDays / halfLifeDays)
+        let factor = MatrixDecay.decayFactor(
+            elapsedSeconds: elapsedDays * 86_400,
+            halfLifeSeconds: halfLifeDays * 86_400
+        )
         for i in 0..<buckets.count {
             buckets[i].applyDecay(factor: factor)
         }

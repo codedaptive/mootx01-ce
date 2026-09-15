@@ -14,6 +14,7 @@
 // between ports by 978_307_200 (the Apple→Unix offset); cross-port
 // signature verification must use the same epoch convention on both sides.
 
+use substrate_ml::decay::decay_factor;
 use uuid::Uuid;
 
 /// Format an `f64` for the canonical signing payload so the output is
@@ -221,12 +222,14 @@ impl DecayPolicy {
     /// Deterministic in `now`: `elapsed` is clamped to non-negative so a `now`
     /// before `started_at` yields the undecayed `base_level`, and a non-positive
     /// `half_life_seconds` is clamped to 1. The surviving level is
-    /// `base_level * 0.5^(elapsed/half_life)`, rounded to the nearest integer
+    /// `base_level * 0.5^(elapsed/half_life)`, with the factor from
+    /// `substrate_ml::decay::decay_factor` (the one half-life formula shared
+    /// by every decaying surface in both ports), rounded to the nearest integer
     /// (`f64::round`, matching Swift's `.toNearestOrAwayFromZero`), then floored.
     pub fn effective_level(&self, base_level: i64, now: f64) -> i64 {
         let elapsed = (now - self.started_at).max(0.0);
         let half_life = self.half_life_seconds.max(1) as f64;
-        let surviving = base_level as f64 * 0.5_f64.powf(elapsed / half_life);
+        let surviving = base_level as f64 * decay_factor(elapsed, half_life);
         let rounded = surviving.round() as i64;
         rounded.max(self.floor)
     }
