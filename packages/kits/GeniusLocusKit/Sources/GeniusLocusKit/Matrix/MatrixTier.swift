@@ -458,39 +458,6 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         return TemporalCausalityFold.lagBucket(forMinutes: minutes)
     }
 
-    // MARK: Decay
-
-    /// Apply lazy multiplicative decay per cookbook §6.8. F and C do
-    /// not decay (population stats are stable). O half-life is 365
-    /// days; T half-life is 90 days. Counts are stored Int64 and
-    /// rounded after the multiply.
-    public mutating func applyDecay(
-        elapsedDays: Double,
-        oHalfLifeDays: Double = 365.0,
-        tHalfLifeDays: Double = 90.0
-    ) {
-        guard elapsedDays >= 1.0 else { return }
-        let oFactor = pow(0.5, elapsedDays / oHalfLifeDays)
-        let tFactor = pow(0.5, elapsedDays / tHalfLifeDays)
-
-        for (k, v) in coOccurrence {
-            let decayed = Int64((Double(v) * oFactor).rounded())
-            if decayed > 0 {
-                coOccurrence[k] = decayed
-            } else {
-                coOccurrence.removeValue(forKey: k)
-            }
-        }
-        for (k, v) in temporalCausality {
-            let decayed = Int64((Double(v) * tFactor).rounded())
-            if decayed > 0 {
-                temporalCausality[k] = decayed
-            } else {
-                temporalCausality.removeValue(forKey: k)
-            }
-        }
-    }
-
     // MARK: Rebuild
 
     /// Rebuild the matrix tier by replaying the unified audit log in
