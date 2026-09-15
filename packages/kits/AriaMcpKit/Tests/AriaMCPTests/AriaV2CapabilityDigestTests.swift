@@ -7,7 +7,7 @@ import AriaMCPWire
 struct AriaV2CapabilityDigestTests {
     @Test func selectedCatalogDigestSharedVector() throws {
         let digest = AriaV2SelectedCatalog.capabilityDigest
-        #expect(digest == "f9e67547120a7034e464d01013a0e103a8a1a7d735f84a1a42c786e64783cceb")
+        #expect(digest == "7e16e5149d12665d517d576ce17a4121b29848066783fbb750b46842270871a6")
         let artifactURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("../../Registry/aria-v2-selected-release.json")

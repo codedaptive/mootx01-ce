@@ -1,8 +1,14 @@
 // brain/signals/maintenance.rs — Rust mirror of `MaintenanceSignal.swift`.
 //
-// Architecture spec §11.2 row 2 / invariant I-3. Emits a forbidden-
-// combination discipline proposal, a decay-candidate routed through
-// propose, and a scan-summary diagnostic on each hourly fire.
+// Architecture spec §11.2 row 2. Fires the NeuronKit maintenance
+// engine's `tombstone` category on each tick
+// (`MaintenanceDaemon::run_cycle_scoped`), which proposes its candidates
+// through the engine's own sink; the signal surfaces the `tombstone_candidates`
+// count as a diagnostic. Mirrors AnomalySweepSignal in structure: interval
+// cadence, Single concurrency, diagnostic-only emission, injected closure
+// for the live cycle. Preference-gated on `maintenance`: the host passes a
+// live closure only when the preference is not Off, and the governor tick
+// never pumps the engine on this category.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +24,16 @@ impl MaintenanceSignal {
     /// Stable name surfaced in `SignalReport.name`.
     pub const SIGNAL_NAME: &'static str = "maintenance-daemon";
 
-    pub fn default_spec() -> SignalSpec {
+    /// Build a signal spec that runs the engine's `tombstone` category on each fire.
+    ///
+    /// `cycle` is called on each emit and returns `tombstone_candidates` from the
+    /// scoped maintenance cycle (`Ok(count)`) or an error description
+    /// (`Err(msg)`). Errors are surfaced as a "maintenance-daemon.error" diagnostic so
+    /// the scheduler's drain loop is not interrupted.
+    pub fn spec<F>(cycle: Arc<F>) -> SignalSpec
+    where
+        F: Fn() -> Result<i64, String> + Send + Sync + 'static,
+    {
         SignalSpec {
             name: Self::SIGNAL_NAME.to_string(),
             trigger: SignalTrigger::Interval {
@@ -27,31 +42,26 @@ impl MaintenanceSignal {
             resource_cost: ResourceCostEstimate::ZERO,
             freshness_target: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS * 2),
             concurrency_policy: ConcurrencyPolicy::Single,
-            emit: Arc::new(|context: &SignalContext| {
-                let discipline = ProposalFrame {
-                    target: "maintenance/forbidden-combination".into(),
-                    kind: ProposalKind::DisciplineViolation,
-                    justification: Some(
-                        "invariant I-3: sensitivity=secret AND exportability=public scan".into(),
-                    ),
-                };
-                let decay_candidate = SignalEmission::MutateCandidate {
-                    row_id: "maintenance/decay-candidate".into(),
-                    kind: MutationKind::Supersede,
-                };
-                let summary = DiagnosticReport {
-                    title: "maintenance.scan.summary".into(),
-                    detail: format!(
-                        "hourly maintenance pass observed: 0 forbidden combinations; signal={}",
-                        context.signal_id.0
-                    ),
-                    observed_at_nanos: context.now_nanos,
-                };
-                vec![
-                    SignalEmission::Propose(discipline),
-                    decay_candidate,
-                    SignalEmission::Diagnostic(summary),
-                ]
+            emit: Arc::new(move |context: &SignalContext| match cycle() {
+                Ok(count) => {
+                    let diagnostic = DiagnosticReport {
+                        title: "maintenance-daemon.complete".into(),
+                        detail: format!("{} tombstone candidate(s); signal={}", count, context.signal_id.0),
+                        observed_at_nanos: context.now_nanos,
+                    };
+                    vec![SignalEmission::Diagnostic(diagnostic)]
+                }
+                Err(msg) => {
+                    // Surface cycle errors as diagnostics so the scheduler's
+                    // drain loop is not interrupted. Matches the Swift spec
+                    // factory's catch block behaviour.
+                    let diagnostic = DiagnosticReport {
+                        title: "maintenance-daemon.error".into(),
+                        detail: format!("{}; signal={}", msg, context.signal_id.0),
+                        observed_at_nanos: context.now_nanos,
+                    };
+                    vec![SignalEmission::Diagnostic(diagnostic)]
+                }
             }),
         }
     }

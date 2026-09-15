@@ -82,6 +82,11 @@ struct RecallRouterTests {
         #expect(result.route == "cross_encoder_routing")
         // The cross-encoder stage ran (degraded — no scorer registered — but ran).
         #expect(result.crossEncoder != nil)
+        // The routed directive is the degradable `apply`, never the transcript
+        // operation's fail-closed `.strictTranscript()`: a routed ordinary
+        // question must keep its lane order when the stage cannot run, so no
+        // strict-transcript evidence is produced for it.
+        #expect(result.strictTranscriptRerank == nil)
     }
 
     /// Gate: preference off + dialogue query → route does not fire.

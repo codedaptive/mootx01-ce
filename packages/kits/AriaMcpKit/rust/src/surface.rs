@@ -57,6 +57,7 @@ pub(crate) enum SurfaceRequest {
     },
     VaultLifecycle(VaultLifecycleRequest),
     TranscriptRecall(crate::v2::transcript_recall::V2TranscriptRecallRequest),
+    SimilarRecall(crate::v2::similar_recall::V2SimilarRecallRequest),
     MonitoringSet(crate::v2::monitoring_set::V2MonitoringSetRequest),
     MonitoringStatus,
 }
@@ -342,6 +343,9 @@ impl SelectedSurface {
                 "moot_memory_recall_transcript" => SurfaceRequest::TranscriptRecall(
                     crate::v2::transcript_recall::V2TranscriptRecallRequest::decode(&value)
                         .map_err(crate::v2::codec::V2InvalidArgument::into_jsonrpc_error)?),
+                "moot_recall_similar" => SurfaceRequest::SimilarRecall(
+                    crate::v2::similar_recall::V2SimilarRecallRequest::decode(&value)
+                        .map_err(crate::v2::codec::V2InvalidArgument::into_jsonrpc_error)?),
                 "moot_monitoring_status" => {
                     if let Some((key, _)) = args.iter().next() {
                         return Err(invalid_argument(
@@ -387,6 +391,7 @@ impl SurfaceRequest {
             | SurfaceRequest::VaultLifecycle(VaultLifecycleRequest::Export(_))
             | SurfaceRequest::VaultLifecycle(VaultLifecycleRequest::Job(_))
             | SurfaceRequest::TranscriptRecall(_)
+            | SurfaceRequest::SimilarRecall(_)
             | SurfaceRequest::MonitoringStatus => SurfaceEffect::Inspection,
             SurfaceRequest::FileMemory(_)
             | SurfaceRequest::Dream(_)
@@ -501,6 +506,10 @@ pub(crate) fn execute(
             execute_vault_lifecycle(request, registry, vault_ledger, &meta, now_millis),
         SurfaceRequest::TranscriptRecall(request) =>
             crate::v2::transcript_recall::execute(request, registry, &meta, now_millis,
+                sensitivity_ledger.ceiling_sensitivity(now_millis)
+                    .unwrap_or(locus_kit::adjectives::AdjectiveSensitivity::Elevated)),
+        SurfaceRequest::SimilarRecall(request) =>
+            crate::v2::similar_recall::execute(request, registry, &meta, now_millis,
                 sensitivity_ledger.ceiling_sensitivity(now_millis)
                     .unwrap_or(locus_kit::adjectives::AdjectiveSensitivity::Elevated)),
         SurfaceRequest::MonitoringSet(request) => {
@@ -2547,7 +2556,7 @@ mod tests {
     fn selected_catalog_and_admission_match_each_other() {
         let surface = SelectedSurface::selected(false, true);
         {
-            assert_eq!(surface.catalog().as_array().unwrap().len(), 73);
+            assert_eq!(surface.catalog().as_array().unwrap().len(), 74);
             assert!(surface
                 .catalog()
                 .as_array()
@@ -2571,7 +2580,7 @@ mod tests {
                 .is_err());
 
             let enabled = SelectedSurface::selected(true, false);
-            assert_eq!(enabled.catalog().as_array().unwrap().len(), 80);
+            assert_eq!(enabled.catalog().as_array().unwrap().len(), 81);
             assert!(enabled.accepted_arg_keys("moot_vault_export").is_some());
             assert_ne!(surface.capability_digest(), enabled.capability_digest());
             let help = crate::v2::help::resolve_help(
@@ -2580,7 +2589,7 @@ mod tests {
             )
             .unwrap()
             .as_value();
-            assert_eq!(help["operations"].as_array().unwrap().len(), 73);
+            assert_eq!(help["operations"].as_array().unwrap().len(), 74);
             assert!(help["operations"].as_array().unwrap().iter().all(|operation| {
                 operation["name"].as_str() != Some("moot_vault_export")
             }));

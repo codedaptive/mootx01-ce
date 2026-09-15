@@ -131,8 +131,11 @@ struct RecallShapePresetTests {
     func forwardPresets() throws {
         let ri = try #require(RecallShape.preset("ri_forward"))
         #expect(ri.weight(for: RecallShape.DenseSignal.randomIndexing) > 1.0)
-        // RI is the only live family: nothing to exclude.
-        #expect(ri.laneWeights == [RecallShape.DenseSignal.randomIndexing: 1.5])
+        // The sibling LSA lane is zeroed so only RI's geometry votes.
+        #expect(ri.laneWeights == [
+            RecallShape.DenseSignal.randomIndexing: 1.5,
+            RecallShape.DenseSignal.lsa: 0,
+        ])
     }
 
     @Test("fast keeps the hamming lane only")

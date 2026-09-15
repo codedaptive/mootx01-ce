@@ -28,7 +28,7 @@
 // reachable via the single PATH-visible directory.
 //
 // On macOS: full subcommand surface including `serve`/`proxy`.
-// On Linux: install, uninstall, db, status, query (serve/proxy require macOS).
+// On Linux: install, uninstall, db, preference, status, query (serve/proxy require macOS).
 
 import ArgumentParser
 import Foundation
@@ -91,6 +91,7 @@ struct Mootx01: AsyncParsableCommand {
                 UpgradeCommand.self,
                 UninstallCommand.self,
                 DbCommand.self,
+                PreferenceCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
                 // BL-1: one-shot MCP transport for cloud agents (also the
@@ -118,6 +119,7 @@ struct Mootx01: AsyncParsableCommand {
                 InstallCommand.self,
                 UninstallCommand.self,
                 DbCommand.self,
+                PreferenceCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
                 // BL-1: one-shot MCP transport for cloud agents. Registered

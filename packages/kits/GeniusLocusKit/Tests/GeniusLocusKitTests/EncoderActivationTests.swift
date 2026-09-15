@@ -140,11 +140,9 @@ struct EncoderActivationEstateTests {
         let corpus = try #require(await kit.corpusKits[handle2])
         let modelIDs = await corpus.providerGenerations().map(\.modelID)
         // The ensemble is the default dense ensemble exactly — Random Indexing
-        // alone while the dense families are dark (contract sheet §13) — and
-        // the encoder is never a member of it.
-        #expect(modelIDs == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
-                "the encoder is never an ensemble member, got \(modelIDs)")
-        #expect(modelIDs == ["random-indexing-v1"],
+        // plus the LSA whole-record float provider (GENIUSLOCUSKIT_SPEC 3.32.0)
+        // — and the encoder is never a member of it.
+        #expect(modelIDs == ["random-indexing-v1", "lsa-v1"],
                 "the encoder is never an ensemble member, got \(modelIDs)")
         try await kit.close(handle2)
     }

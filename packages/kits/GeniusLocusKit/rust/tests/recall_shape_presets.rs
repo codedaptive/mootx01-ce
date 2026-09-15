@@ -6,6 +6,7 @@
 // Swift RecallShapePresetTests.swift — both ports assert the same directions.
 
 use genius_locus_kit::recall::RecallShape;
+use std::collections::HashMap;
 
 // A preset resolves to the EXACT lane keys it documents, at the directions
 // (forward >1, neutral ==1 via absence, exclude ==0, suppress <0) the roster
@@ -144,8 +145,13 @@ fn forward_presets_isolate_one_dense_signal() {
     // ri_forward amplifies RI and EXCLUDES the other distributional siblings.
     let s = RecallShape::preset("ri_forward").unwrap();
     assert!(s.weight(RecallShape::DENSE_RANDOM_INDEXING) > 1.0);
-    // RI and LSA are both live; ri_forward excludes the LSA sibling.
-    assert_eq!(s.lane_weights.len(), 1);
+    // The shipped dense roster is RI + LSA: the LSA sibling is present at zero
+    // weight so only RI's geometry votes. Mirrors the Swift `forwardPresets` pin.
+    let expected: HashMap<String, f32> = HashMap::from([
+        (RecallShape::DENSE_RANDOM_INDEXING.to_string(), 1.5),
+        (RecallShape::DENSE_LSA.to_string(), 0.0),
+    ]);
+    assert_eq!(s.lane_weights, expected);
 }
 
 #[test]
@@ -202,15 +208,16 @@ fn session_hybrid_amplifies_bm25_dense_temporal() {
 #[test]
 fn leave_one_out_is_reachable_by_zeroing_a_dense_lane() {
     // The documented leave-one-out pattern: take a forward shape and zero ONE
-    // dense lane. consensus + zero LSA ablates exactly LSA.
+    // dense lane. consensus + zero LSA ablates exactly LSA; the shipped dense
+    // roster is RI + LSA (`DENSE_SIGNALS`), so RI is the sibling that survives.
     let base = RecallShape::preset("consensus").unwrap();
     let mut weights = base.lane_weights.clone();
-    // DENSE_LSA is dark unless the `lsa` feature is on (ruling 2026-09-07).
     {
         weights.insert(RecallShape::DENSE_LSA.to_string(), 0.0);
-        let ablated = RecallShape::new(weights, base.frontier_k);
+        // Clone: the second block below reuses `weights` to ablate RI.
+        let ablated = RecallShape::new(weights.clone(), base.frontier_k);
         assert_eq!(ablated.weight(RecallShape::DENSE_LSA), 0.0);
-        assert!(ablated.weight(RecallShape::DENSE_PPMI) > 0.0);
+        assert!(ablated.weight(RecallShape::DENSE_RANDOM_INDEXING) > 0.0);
     }
     {
         weights.insert(RecallShape::DENSE_RANDOM_INDEXING.to_string(), 0.0);
@@ -240,13 +247,13 @@ fn anti_redundant_ri_inverts_ri_and_suppresses_bm25_hamming() {
     assert!(!RecallShape::preset_description("anti_redundant_ri").is_empty());
 }
 
-// anti_redundant_lsa is dark unless the `lsa` feature is on (ruling 2026-09-07).
 #[test]
 fn anti_redundant_lsa_inverts_lsa_and_suppresses_bm25_hamming() {
     let s = RecallShape::preset("anti_redundant_lsa").unwrap();
+    // Only LSA is anti-similar; its RI sibling keeps the nearest direction.
     assert!(s.is_anti_similar(RecallShape::DENSE_LSA));
     assert!(!s.is_anti_similar(RecallShape::DENSE_RANDOM_INDEXING));
-    assert!(!s.is_anti_similar(RecallShape::DENSE_FDC));
+    assert_eq!(s.anti_similar_lanes.len(), 1);
     assert_eq!(s.weight(RecallShape::DENSE_LSA), 1.0);
     assert!(s.weight("bm25") < 0.0);
     assert!(s.weight("hamming") < 0.0);

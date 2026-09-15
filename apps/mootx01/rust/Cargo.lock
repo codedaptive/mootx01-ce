@@ -85,6 +85,8 @@ dependencies = [
  "corpus-kit-providers",
  "digest 0.10.7",
  "eidetic-lib",
+ "fact-extraction-kit",
+ "fact-extraction-kit-providers",
  "genius-locus-kit",
  "genius-locus-kit-migrations",
  "intellectus-lib",
@@ -818,6 +820,16 @@ name = "fact-extraction-kit"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "fact-extraction-kit-providers"
+version = "0.1.0"
+dependencies = [
+ "fact-extraction-kit",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
