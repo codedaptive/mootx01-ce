@@ -13,8 +13,7 @@ import PersistenceKitInMemory
 ///   §1  activeDrawers: returns only non-tombstoned Cluster-A drawers
 ///   §2  tombstonedDrawers: returns only tombstoned drawers (expunged via GLK)
 ///   §3  currentAuditLog: returns a UnifiedAuditLog whose chain verifies
-///   §4  signal reads: learnedReferences (empty for estate with no references),
-///       and fingerprintBaselines (empty for fresh estate — no content yet)
+///   §4  signal reads: learnedReferences (empty for estate with no references)
 ///   §5  Integration: MaintenanceDaemon with production adapters triggers a
 ///       cycle, emits decay proposals, and writes a diary entry
 ///   §6  Protocol conformance: EstateMaintenanceReader constructs cleanly
@@ -128,36 +127,6 @@ struct EstateMaintenanceReaderTests {
         #expect(refs.isEmpty, "no references in estate → learnedReferences returns []")
     }
 
-    @Test("fingerprintBaselines is empty for a fresh estate (no container aggregate yet)")
-    func fingerprintBaselinesEmptyForFreshEstate() async throws {
-        // No drawers captured → the container-fingerprint aggregate is empty →
-        // no room-level observations. The read path is exercised (no throw).
-        let (kit, handle) = try await makeKit()
-        let reader = EstateMaintenanceReader(handle: handle, kit: kit)
-        let baselines = try await reader.fingerprintBaselines()
-        #expect(baselines.isEmpty, "fresh estate → no room-level fingerprints")
-    }
-
-    @Test("fingerprintBaselines returns a real per-node drift observation after capture")
-    func fingerprintBaselinesReturnsRealObservationAfterCapture() async throws {
-        // The reader computes OR-aggregates of drawer bitmaps grouped by
-        // parentNodeId (room-level node under the node-tree model). After a capture the
-        // reader returns one observation for that node with a real,
-        // non-negative drift fraction.
-        let (kit, handle) = try await makeKit()
-        _ = try await kit.capture(handle, captureFrame(content: "alpha", room: "study"))
-
-        let reader = EstateMaintenanceReader(handle: handle, kit: kit)
-        let baselines = try await reader.fingerprintBaselines()
-        #expect(!baselines.isEmpty, "a captured drawer populates a node-level fingerprint")
-        // scopeKey is the parentNodeId — a UUID string, not wing/room.
-        // nodeId matches scopeKey in the current implementation.
-        if let first = baselines.first {
-            #expect(!first.scopeKey.isEmpty, "scope key is non-empty")
-            #expect(first.nodeId == first.scopeKey, "nodeId matches scopeKey")
-            #expect(first.driftFraction >= 0.0 && first.driftFraction <= 1.0)
-        }
-    }
 
     @Test("currentAuditLog feeds a verifiable, intact chain after capture")
     func currentAuditLogYieldsVerifiableChain() async throws {

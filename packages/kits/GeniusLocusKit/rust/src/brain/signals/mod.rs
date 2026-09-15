@@ -4,7 +4,9 @@
 // + brain-layer governor ownership (TemporalCausalitySignal signal 7, TrainingSignal signal 9)
 // + contradiction-scout (signal 10) + consolidation-sweep (signal 11)
 // + P3a anomaly-flag sweep (signal 12, AnomalySweepSignal)
-// + ENCODER_RERANK_CONTRACT §10 span-encode drain (signal 13, SpanEncodeSignal).
+// + ENCODER_RERANK_CONTRACT §10 span-encode drain (signal 13, SpanEncodeSignal)
+// + distilled fact extraction (signal 14, FactExtractionSignal)
+// + preference-gated contradiction sweep (ContradictionSweepSignal).
 //
 // Each signal is a thin factory that produces a `SignalSpec` carrying the
 // same name, cadence, and emit semantics as its Swift counterpart. The
@@ -23,6 +25,7 @@ pub mod anomaly_sweep;
 pub mod by_reference_validity;
 pub mod consolidation;
 pub mod contradiction_scout;
+pub mod contradiction_sweep;
 pub mod decay_sweep;
 pub mod default_set;
 pub mod dreaming;
@@ -38,8 +41,12 @@ pub use anomaly_sweep::AnomalySweepSignal;
 pub use by_reference_validity::ByReferenceValiditySignal;
 pub use consolidation::ConsolidationSignal;
 pub use contradiction_scout::ContradictionScoutSignal;
+pub use contradiction_sweep::ContradictionSweepSignal;
 pub use decay_sweep::DecaySweepSignal;
-pub use default_set::{default_standing_signal_names, default_standing_signal_specs};
+pub use default_set::{
+    default_standing_signal_names, default_standing_signal_specs,
+    preference_gated_standing_signal_names,
+};
 pub use dreaming::DreamingSignal;
 pub use end_of_day_tournament::EndOfDayTournamentSignal;
 pub use maintenance::MaintenanceSignal;

@@ -7,7 +7,8 @@
 //
 // Tests:
 //   1. off_leaves_the_dense_column_untouched — fixture bodies, switch off:
-//      every hit reports dense 0 and no `subSpan.budget` stage.
+//      the control body (never ingested) reports dense 0, no hit carries the
+//      `subSpan:budget` token and there is no `subSpan.budget` stage.
 //   2. on_applies_the_blend — fixture bodies, switch on: every ingested
 //      body's hit reports dense above 0, the control body (captured, not in
 //      the corpus) stays at 0.
@@ -80,8 +81,9 @@ fn long_body(query: &str, index: usize, scalars: usize) -> String {
 /// An estate with every body captured and the first `ingested` of them also
 /// in a standalone corpus registered on the estate. The deterministic model
 /// gives the corpus a hashed float lane, so sub-span windows can be scored
-/// without a real encoder. No vector store is registered, so the dense
-/// column starts at 0 for every candidate.
+/// without a real encoder. No vector store is registered; the whole-record
+/// float lane over the corpus fills the dense column for ingested bodies, and
+/// a body outside the corpus stays at 0.
 fn open_estate(
     bodies: &[String],
     ingested: usize,
@@ -135,10 +137,14 @@ fn off_leaves_the_dense_column_untouched() {
         .recall_scored(&h, request(&fixture.query, fixture.limit, GLKSubSpanScoring::Off), NOW + 1_000)
         .expect("recall_scored");
     assert_eq!(result.hits.len(), bodies.len(), "the locus lane supplies every body at limit {}", fixture.limit);
-    for hit in &result.hits {
+    for hit in result.hits.iter().filter(|hit| content(hit) == fixture.control_body) {
         assert_eq!(hit.score.dense, 0.0,
-            "switch off: no dense lane and no blend, dense stays 0; got {} for {}", hit.score.dense, content(hit));
+            "switch off: the control body has no corpus record and no blend runs, dense stays 0; got {}", hit.score.dense);
     }
+    let flagged = result.hits.iter().filter(|hit| {
+        hit.explanation.iter().any(|line| line.starts_with("score:") && line.contains(" subSpan:budget"))
+    }).count();
+    assert_eq!(flagged, 0, "switch off: no hit carries the sub-span budget token");
     assert!(!result.degraded_stages.iter().any(|s| s == "subSpan.budget"),
         "the engine was not called, so no budget stage; stages: {:?}", result.degraded_stages);
 }

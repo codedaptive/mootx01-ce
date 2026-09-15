@@ -7,8 +7,10 @@
 //
 // The `spec` factory accepts a closure that invokes `TrainingDaemon::run_once`
 // against the caller-owned audit log, matrix tier, and calibration registry,
-// and returns a detail string for the diagnostic emission.
-// `default_spec` is the no-op scaffold variant.
+// and returns a detail string for the diagnostic emission. There is no no-op
+// variant: `default_standing_signal_specs` pushes this signal only when
+// handed a live `training_cycle`, which the resident passes only while the
+// estate's `adaptive_recall` preference is not `Off`.
 //
 // The daemon's own threshold gate
 // decides whether to actually enrich on each invocation; the signal fires the
@@ -76,39 +78,6 @@ impl TrainingSignal {
                     };
                     vec![SignalEmission::Diagnostic(diagnostic)]
                 }
-            }),
-        }
-    }
-
-    /// Build a diagnostic-only spec for test and registration contexts
-    /// where no live training daemon is available.
-    ///
-    /// Fires at the hourly cadence and emits a single diagnostic confirming
-    /// the fire. No enrichment or matrix work is performed. This is the
-    /// correct spec for `default_standing_signal_specs`, which cannot supply
-    /// estate-specific context (daemon, audit log, matrix tier) without
-    /// breaking the helper's generic signature.
-    pub fn default_spec() -> SignalSpec {
-        SignalSpec {
-            name: Self::SIGNAL_NAME.to_string(),
-            trigger: SignalTrigger::Interval {
-                seconds: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS),
-            },
-            resource_cost: ResourceCostEstimate::ZERO,
-            freshness_target: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS * 2),
-            concurrency_policy: ConcurrencyPolicy::Single,
-            emit: Arc::new(|context: &SignalContext| {
-                // No-op pass: fires the scheduled signal and surfaces a
-                // diagnostic so the scheduler's cadence is observable.
-                let diagnostic = DiagnosticReport {
-                    title: "training-daemon.fired".into(),
-                    detail: format!(
-                        "training signal fired (no-op); signal={}",
-                        context.signal_id.0
-                    ),
-                    observed_at_nanos: context.now_nanos,
-                };
-                vec![SignalEmission::Diagnostic(diagnostic)]
             }),
         }
     }
