@@ -827,7 +827,10 @@ struct AriaSurfaceV2Tests {
         let drains = try await dispatcher.dispatch(name: "moot_drain_status", arguments: .object([:]))
         let drainData = drains.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
         #expect((drainData.map { Set($0.keys) } ?? Set<String>()) == Set(["drains"]))
-        #expect(drainData?["drains"] == .array([]))
+        // fact_extraction is always rendered; an empty estate owes nothing.
+        #expect(drainData?["drains"] == .array([
+            .object(["name": .string("fact_extraction"), "state": .string("idle"), "pending": .integer(0)])
+        ]))
 
         let rebuild = try await dispatcher.dispatch(name: "moot_rebuild_status", arguments: .object([:]))
         let rebuildData = rebuild.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
