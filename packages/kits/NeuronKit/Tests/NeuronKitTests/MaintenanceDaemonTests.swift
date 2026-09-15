@@ -6,7 +6,7 @@
 // Maintenance/MaintenanceDecision.swift,
 // Maintenance/MaintenancePolicy.swift, Maintenance/MaintenanceSeams.swift
 // — the decision core, policy, and seams are exercised through the
-// daemon over the shared seam fakes below. Covers C-3 (all five scan
+// daemon over the shared seam fakes below. Covers C-3 (all three scan
 // categories detected and proposed), C-4 / C-12 (content-tampered entry
 // rejected at ingress; the rejection is COUNTED and the daemon alerts via
 // an integrity proposal keyed on the rejected count — AUDIT-ALERT-RESTORE,
@@ -134,14 +134,13 @@ private actor FailingSink: MaintenanceProposalSink {
 ///
 /// The `qidPending` array is the seam's view of drawers with
 /// enrichment-status `qid_pending`. Tests seed this independently of
-/// `active` so the two scans (decay/forbidden vs QID-retry) are exercised
+/// `active` so the two scans (decay vs QID-retry) are exercised
 /// in isolation. B-10a: `qidPendingDrawers` is an internal maintenance
 /// read — the fake returns it without writing any trace rows.
 private actor FakeReader: MaintenanceSubstrateReader {
     var active: [Drawer]
     var tombstoned: [Drawer]
     var references: [LearnedReferenceObservation]
-    var fingerprints: [FingerprintDriftObservation]
     var auditLog: UnifiedAuditLog
     /// Drawers to return from `qidPendingDrawers(limit:)`. Set by Board
     /// item 14 tests.
@@ -151,14 +150,12 @@ private actor FakeReader: MaintenanceSubstrateReader {
         active: [Drawer] = [],
         tombstoned: [Drawer] = [],
         references: [LearnedReferenceObservation] = [],
-        fingerprints: [FingerprintDriftObservation] = [],
         auditLog: UnifiedAuditLog = UnifiedAuditLog(),
         qidPending: [Drawer] = []
     ) {
         self.active = active
         self.tombstoned = tombstoned
         self.references = references
-        self.fingerprints = fingerprints
         self.auditLog = auditLog
         self.qidPending = qidPending
     }
@@ -166,7 +163,6 @@ private actor FakeReader: MaintenanceSubstrateReader {
     func activeDrawers() async throws -> [Drawer] { active }
     func tombstonedDrawers() async throws -> [Drawer] { tombstoned }
     func learnedReferences() async throws -> [LearnedReferenceObservation] { references }
-    func fingerprintBaselines() async throws -> [FingerprintDriftObservation] { fingerprints }
     func currentAuditLog() async throws -> UnifiedAuditLog { auditLog }
     func qidPendingDrawers(limit: Int) async throws -> [Drawer] {
         // Honour the cap: the daemon controls the limit, but the seam must
@@ -260,17 +256,11 @@ private func daemon(
 @Suite("Maintenance daemon conformance")
 struct MaintenanceDaemonTests {
 
-    // MARK: - C-3: all five scan categories detected and proposed
+    // MARK: - C-3: all three scan categories detected and proposed
 
-    @Test("C-3: all five scan categories emit a proposal")
-    func c3AllFiveScanCategoriesEmitAProposal() async throws {
-        // One drawer per scan category. The forbidden drawer is recent
-        // (not a decay candidate); the decay drawer is normal-sensitivity
-        // (not forbidden), so each drawer hits exactly one category.
-        let forbidden = drawer(
-            id: "d-forbidden", filedAt: t0,
-            sensitivity: .secret, exportability: .public_
-        )
+    @Test("C-3: all three scan categories emit a proposal")
+    func c3AllThreeScanCategoriesEmitAProposal() async throws {
+        // One row per scan category, so each row hits exactly one category.
         let decayed = drawer(
             id: "d-decay", filedAt: t0.addingTimeInterval(-40 * 86_400)
         )
@@ -279,10 +269,9 @@ struct MaintenanceDaemonTests {
             tombstonedAt: t0.addingTimeInterval(-10 * 86_400)
         )
         let reader = FakeReader(
-            active: [forbidden, decayed],
+            active: [decayed],
             tombstoned: [tomb],
             references: [LearnedReferenceObservation(referenceRowID: "ref-1", sourceDriftFraction: 0.5)],
-            fingerprints: [FingerprintDriftObservation(scopeKey: "node-room-1", nodeId: "node-room-1", driftFraction: 0.5)],
             auditLog: cleanAuditLog()
         )
         let sink = RecordingSink()
@@ -290,12 +279,10 @@ struct MaintenanceDaemonTests {
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
 
-        #expect(report.forbiddenCombinations == 1)
         #expect(report.decayCandidates == 1)
         #expect(report.tombstoneCandidates == 1)
-        #expect(report.fingerprintDrifts == 1)
         #expect(report.byReferenceDrifts == 1)
-        #expect(report.proposalsEmitted.count == 5, "one proposal per scan category")
+        #expect(report.proposalsEmitted.count == 3, "one proposal per scan category")
 
         // The clean audit log produced no integrity proposal.
         #expect(report.auditChecked == true)
@@ -303,9 +290,7 @@ struct MaintenanceDaemonTests {
 
         // Each category's kind is present in the emission.
         let kinds = report.proposalsEmitted.map(\.kind)
-        #expect(kinds.contains(.disciplineViolation))
         #expect(kinds.filter { $0 == .mutateCandidate }.count == 2, "decay + tombstone both mutate-candidate")
-        #expect(kinds.contains(.other("fingerprint_drift")))
         #expect(kinds.contains(.byReferenceDrift))
     }
 
@@ -398,7 +383,7 @@ struct MaintenanceDaemonTests {
     @Test("B-2: every detected issue is a proposal, never an action")
     func b2EveryDetectedIssueIsAProposalNeverAnAction() async throws {
         let reader = FakeReader(
-            active: [drawer(id: "d-forbidden", filedAt: t0, sensitivity: .secret, exportability: .public_)],
+            active: [drawer(id: "d-decay", filedAt: t0.addingTimeInterval(-40 * 86_400))],
             auditLog: cleanAuditLog()
         )
         let sink = RecordingSink()
@@ -406,11 +391,11 @@ struct MaintenanceDaemonTests {
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
 
-        // The detected violation produced a proposal — and the sink
+        // The detected decay candidate produced a proposal — and the sink
         // exposes only propose + recordCycleDiary, so the daemon
         // structurally cannot remediate. The only writes this cycle were
         // one proposal and one diary entry.
-        #expect(report.forbiddenCombinations == 1)
+        #expect(report.decayCandidates == 1)
         #expect(report.proposalsEmitted.count == 1)
         let total = await sink.proposalCount()
         #expect(total == 1)
@@ -422,59 +407,53 @@ struct MaintenanceDaemonTests {
 
     @Test("B-4: second cycle over unchanged state proposes nothing new")
     func b4SecondCycleOverUnchangedStateProposesNothingNew() async throws {
-        let forbidden = drawer(id: "d-forbidden", filedAt: t0, sensitivity: .secret, exportability: .public_)
         let decayed = drawer(id: "d-decay", filedAt: t0.addingTimeInterval(-40 * 86_400))
         let tomb = drawer(
             id: "d-tomb", filedAt: t0.addingTimeInterval(-100 * 86_400),
             tombstonedAt: t0.addingTimeInterval(-10 * 86_400)
         )
         let reader = FakeReader(
-            active: [forbidden, decayed],
+            active: [decayed],
             tombstoned: [tomb],
             references: [LearnedReferenceObservation(referenceRowID: "ref-1", sourceDriftFraction: 0.5)],
-            fingerprints: [FingerprintDriftObservation(scopeKey: "node-room-1", nodeId: "node-room-1", driftFraction: 0.5)],
             auditLog: cleanAuditLog()
         )
         let sink = RecordingSink()
         let d = daemon(reader: reader, sink: sink)
 
         let first = try await d.triggerMaintenanceCycle(now: t0)
-        #expect(first.proposalsEmitted.count == 5)
+        #expect(first.proposalsEmitted.count == 3)
 
         // Second cycle over identical state: every candidate is still
         // detected, but every key was already proposed, so nothing new
-        // is emitted and all five are counted as suppressed duplicates.
+        // is emitted and all three are counted as suppressed duplicates.
         let second = try await d.triggerMaintenanceCycle(now: t0.addingTimeInterval(60))
         #expect(second.proposalsEmitted.count == 0, "already-proposed candidates are suppressed")
-        #expect(second.suppressedDuplicates == 5)
+        #expect(second.suppressedDuplicates == 3)
 
         // Two cycles produced exactly the proposals of one.
         let total = await sink.proposalCount()
-        #expect(total == 5)
+        #expect(total == 3)
     }
 
     // MARK: - B-4: a failed proposal write must not suppress the finding
 
     @Test("B-4: a sink failure mid-cycle does not permanently suppress unwritten findings")
     func b4FailedProposalIsRetriedNextCycle() async throws {
-        // Five detected candidates → five proposals in scan order. The sink
-        // throws on the 3rd propose (index 2), so decisions 0 and 1 persist,
-        // decision 2 fails, decisions 3 and 4 never run. The pre-fix code
-        // committed ALL FIVE keys to proposedKeys before the loop, so a later
-        // cycle would suppress every one — permanently silencing findings 2–4
-        // whose proposals were never written. The fix commits per-key after a
-        // successful propose, so only 0 and 1 are remembered.
-        let forbidden = drawer(id: "d-forbidden", filedAt: t0, sensitivity: .secret, exportability: .public_)
+        // Three detected candidates → three proposals in scan order. The sink
+        // throws on the 3rd propose (index 2), so decisions 0 and 1 persist
+        // and decision 2 fails. A key enters proposedKeys only after ITS
+        // propose succeeds, so only 0 and 1 are remembered and finding 2 is
+        // re-emitted next cycle rather than permanently silenced.
         let decayed = drawer(id: "d-decay", filedAt: t0.addingTimeInterval(-40 * 86_400))
         let tomb = drawer(
             id: "d-tomb", filedAt: t0.addingTimeInterval(-100 * 86_400),
             tombstonedAt: t0.addingTimeInterval(-10 * 86_400))
         func freshReader() -> FakeReader {
             FakeReader(
-                active: [forbidden, decayed],
+                active: [decayed],
                 tombstoned: [tomb],
                 references: [LearnedReferenceObservation(referenceRowID: "ref-1", sourceDriftFraction: 0.5)],
-                fingerprints: [FingerprintDriftObservation(scopeKey: "node-room-1", nodeId: "node-room-1", driftFraction: 0.5)],
                 auditLog: cleanAuditLog())
         }
 
@@ -491,17 +470,17 @@ struct MaintenanceDaemonTests {
 
         // Cycle 2: the failing sink no longer fails (its failAt index is past),
         // same daemon (retains proposedKeys). The two committed findings are
-        // suppressed as duplicates; the three whose writes never landed are
+        // suppressed as duplicates; the one whose write never landed is
         // re-emitted — NOT permanently suppressed.
         let second = try await d.triggerMaintenanceCycle(now: t0.addingTimeInterval(60))
-        #expect(second.proposalsEmitted.count == 3,
-                "the three unwritten findings are retried, not suppressed")
+        #expect(second.proposalsEmitted.count == 1,
+                "the unwritten finding is retried, not suppressed")
         #expect(second.suppressedDuplicates == 2,
                 "only the two successfully-written findings are treated as already-proposed")
 
         // Across both cycles every distinct finding was ultimately written once.
         let allWritten = await failingSink.proposedTargets()
-        #expect(allWritten.count == 5, "all five findings reach the sink across the retry")
+        #expect(allWritten.count == 3, "all three findings reach the sink across the retry")
     }
 
     // MARK: - Policy round-trips through the manifest seam
@@ -518,7 +497,6 @@ struct MaintenanceDaemonTests {
             auditCheckIntervalMs: 60_000,
             decayWindowSeconds: 1_000,
             tombstoneGraceSeconds: 500,
-            fingerprintDriftThreshold: 0.4,
             byReferenceDriftThreshold: 0.6
         )
 
@@ -531,7 +509,6 @@ struct MaintenanceDaemonTests {
             auditCheckIntervalMs: 60_000,
             decayWindowSeconds: 1_000,
             tombstoneGraceSeconds: 500,
-            fingerprintDriftThreshold: 0.4,
             byReferenceDriftThreshold: 0.6
         ))
     }

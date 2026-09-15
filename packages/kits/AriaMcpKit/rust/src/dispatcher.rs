@@ -5,7 +5,7 @@
 //! and `prompts/list`. All other method names return a `methodNotFound` error.
 //!
 //! `tools/call` decodes and dispatches through the v2 surface (`crate::surface::SelectedSurface`)
-//! which covers all 80 ARIA v2 tools. Unknown tool names are rejected with METHOD_NOT_FOUND.
+//! which covers all 81 ARIA v2 tools. Unknown tool names are rejected with METHOD_NOT_FOUND.
 //!
 //! # Session ledger
 //!
@@ -952,7 +952,7 @@ mod catalog_sync_tests {
 
     /// Reads the dispatcher's actual tools/list response — not the inventory,
     /// not the surface catalog — and asserts the `memory` entry is present when
-    /// enabled and absent when disabled.  The absolute counts (81 / 80) pin the
+    /// enabled and absent when disabled.  The absolute counts (82 / 81) pin the
     /// full roster so any addition or removal shows up here.
     ///
     /// This pins the `retain`/`push` branches in `with_memory_tool_enabled`.
@@ -994,14 +994,14 @@ mod catalog_sync_tests {
         // will surface here before it can hide behind a relative-only assertion.
         assert_eq!(
             enabled_tools.len(),
-            81,
-            "enabled tools/list must have exactly 81 entries; got {}",
+            82,
+            "enabled tools/list must have exactly 82 entries; got {}",
             enabled_tools.len(),
         );
         assert_eq!(
             disabled_tools.len(),
-            80,
-            "disabled tools/list must have exactly 80 entries; got {}",
+            81,
+            "disabled tools/list must have exactly 81 entries; got {}",
             disabled_tools.len(),
         );
         assert!(

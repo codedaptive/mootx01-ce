@@ -2232,63 +2232,66 @@ public extension GeniusLocusKit {
         return await provisionedModesConfig(estate: estate)
     }
 
-    /// Provision the USER-OWNED fact-extraction toggle on an estate:
-    /// stored as the plain string `"on"` or `"off"` under
-    /// `"fact_extraction"`.
+    /// Provision a USER-OWNED estate preference: stored as the plain string
+    /// `"on"` or `"off"` under the key's manifest string (`key.rawValue`).
     ///
     /// Part of the same provisioned-manifest family as `provisionModesConfig`,
     /// `provisionDoorConfig`, `provisionLaneWeights`, `provisionRecallTuning`,
     /// and `provisionEmbeddingProvider`. The user or an operator tool sets
-    /// this value; `provisionedFactExtraction(for:)` reads it back.
+    /// this value; `provisionedPreference(_:for:)` reads it back.
     ///
-    /// An absent key is treated as `.on` (see `provisionedFactExtraction`).
-    /// The 1.7 → 1.8 migration capsule seeds `"on"` on every populated estate
-    /// so the key is physically present and a later change to the default
-    /// cannot silently flip an estate already in use.
+    /// An absent key is treated as `.on` (see `provisionedPreference`).
+    /// Seeding capsules write `"on"` on every populated estate so the key is
+    /// physically present and a later change to the default cannot silently
+    /// flip an estate already in use.
     ///
     /// - Parameters:
-    ///   - setting: the fact-extraction toggle value to store.
+    ///   - key: the preference to store.
+    ///   - value: the on/off value to store.
     ///   - handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    func provisionFactExtraction(
-        _ setting: FactExtractionSetting, for handle: EstateHandle
+    func provisionPreference(
+        _ key: EstatePreferenceKey, _ value: EstatePreferenceValue, for handle: EstateHandle
     ) async throws {
         let estate = try estate(for: handle)
         do {
             // The value is a plain string — the rawValue of the enum.
             // No JSON encoding needed; the reader uses rawValue init.
-            try await estate.setMeta(
-                key: GeniusLocusKit.factExtractionMetaKey,
-                value: setting.rawValue)
+            try await estate.setMeta(key: key.rawValue, value: value.rawValue)
         } catch {
             throw remap(
-                verb: "provisionFactExtraction",
+                verb: "provisionPreference",
                 estateID: handle.estateUUID.uuidString,
                 error: error)
         }
     }
 
-    /// Read back the provisioned fact-extraction toggle, or `.on` when the
-    /// estate carries none.
+    /// Read back a provisioned estate preference, or `.on` when the estate
+    /// carries none.
     ///
     /// Note: absent key means ON, not OFF. ON is the ruled product default
-    /// for this feature; the capsule seeds the value explicitly so a later
-    /// change to the default cannot silently flip an estate already in use.
-    /// A stored value that is neither `"on"` nor `"off"` also returns `.on`
-    /// — the same fail-quiet contract `provisionedDoorConfig` applies to
-    /// unrecognised JSON. Storage errors also degrade to `.on` (fail-quiet).
-    /// Use `provisionFactExtraction(_:for:)` to write the user's preference.
+    /// for every key in this family; the seeding capsules write the value
+    /// explicitly so a later change to the default cannot silently flip an
+    /// estate already in use. A stored value that is neither `"on"` nor
+    /// `"off"` also returns `.on` — the same fail-quiet contract
+    /// `provisionedDoorConfig` applies to unrecognised JSON. Storage errors
+    /// also degrade to `.on` (fail-quiet). Use `provisionPreference(_:_:for:)`
+    /// to write the user's preference.
     ///
-    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Parameters:
+    ///   - key: the preference to read.
+    ///   - handle: the estate handle returned by `open` or `provision`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
-    func provisionedFactExtraction(for handle: EstateHandle) async throws -> FactExtractionSetting {
+    func provisionedPreference(
+        _ key: EstatePreferenceKey, for handle: EstateHandle
+    ) async throws -> EstatePreferenceValue {
         let estate = try estate(for: handle)
-        // meta(key:) returns nil when the key is absent. Absent → `.on`.
-        // An unrecognised string returns nil from rawValue init → `.on`.
-        guard let raw = try? await estate.meta(key: GeniusLocusKit.factExtractionMetaKey),
-              let setting = FactExtractionSetting(rawValue: raw)
-        else { return .on }
-        return setting
+        // meta(key:) returns nil when the key is absent. Absent → `.default`.
+        // An unrecognised string returns nil from rawValue init → `.default`.
+        guard let raw = try? await estate.meta(key: key.rawValue),
+              let value = EstatePreferenceValue(rawValue: raw)
+        else { return .default }
+        return value
     }
 
     /// Count all rows in the recall_trace table for the estate addressed by

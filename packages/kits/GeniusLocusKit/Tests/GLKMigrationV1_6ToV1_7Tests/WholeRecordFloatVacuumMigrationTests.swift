@@ -21,8 +21,8 @@
 //   2. The capsule's report carries the counts; a second run deletes
 //      nothing, releases nothing and reports v1_7 again; prepare afterwards
 //      carries the estate to current.
-//   3. The format values are pinned: current is v1_8, and v1_7 keeps its
-//      (1, 7) identity, above v1_6 and below current.
+//   3. The format values are pinned: v1_7 keeps its (1, 7) identity, above
+//      v1_6 and below current.
 //   4. Fresh estate (nil stamp): prepare stamps current without running the
 //      capsule.
 //   5. On a SQLite estate the `.vec` sidecar is rewritten by the capsule and
@@ -190,8 +190,9 @@ struct WholeRecordFloatVacuumMigrationTests {
     // MARK: §3 The format value is pinned
 
     @Test
-    func currentFormatIsV1_8() {
-        #expect(EstateFormatVersion.current == .v1_8)
+    func formatValuesArePinned() {
+        // The capsule stamps v1_7; later capsules carry the estate on to
+        // `EstateFormatVersion.current`, which sits above v1_7.
         #expect(EstateFormatVersion.v1_7 == EstateFormatVersion(major: 1, minor: 7))
         #expect(EstateFormatVersion.v1_6 < EstateFormatVersion.v1_7)
         #expect(EstateFormatVersion.v1_7 < EstateFormatVersion.current)

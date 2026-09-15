@@ -1819,6 +1819,36 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Write one `recall_ratings` row per rating, keyed on `drawer_id`
+    /// (insert when absent, replace when present). Mirrors Swift
+    /// `DrawerStore.upsertRecallRatings`.
+    ///
+    /// ## Default impl — fail-loud
+    ///
+    /// A backend that does not override this returns `DatabaseUnavailable`
+    /// rather than silently dropping the tournament's ratings.
+    fn upsert_recall_ratings(
+        &self,
+        _ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "upsert_recall_ratings not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Read the `recall_ratings` rows for `ids`; ids without a row are
+    /// absent from the result. Mirrors Swift `DrawerStore.recallRatings(ids:)`.
+    ///
+    /// ## Default impl — fail-loud
+    fn recall_ratings(
+        &self,
+        _ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "recall_ratings not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Count raw rows in the `drawers` table via SQL `COUNT(*)`, bypassing
     /// all row-decode logic. Corrupt rows (e.g. a poison timestamp) are still
     /// counted because `COUNT(*)` never reads column values. Used by the
@@ -2740,6 +2770,18 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     }
     fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
         self.as_ref().count_recall_traces()
+    }
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().upsert_recall_ratings(ratings)
+    }
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.as_ref().recall_ratings(ids)
     }
     fn audit_events_for_row(
         &self,
