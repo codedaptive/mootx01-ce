@@ -226,7 +226,7 @@ impl FactExtractor for NuExtractWorkerClient {
     ) -> Result<FactExtractionResponse, FactExtractionError> {
         if request.maximum_facts == 0
             || request.maximum_facts > self.spec.maximum_facts_per_source
-            || request.distilled_text.chars().count() > self.spec.maximum_input_characters
+            || request.source_text.chars().count() > self.spec.maximum_input_characters
         {
             return Err(FactExtractionError::InvalidRequest(
                 "request exceeds the configured NuExtract recipe".into(),

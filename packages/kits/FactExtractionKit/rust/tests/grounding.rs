@@ -18,7 +18,7 @@ fn accepts_one_uniquely_grounded_fact() {
     let request = FactExtractionRequest {
         source_id: "drawer-1".into(),
         source_digest: "digest".into(),
-        distilled_text: source.into(),
+        source_text: source.into(),
         eligible_source_spans: vec![FactSourceSpan {
             start: 0,
             end: source.chars().count(),
@@ -59,7 +59,7 @@ fn rejects_ambiguous_outside_and_fabricated_evidence() {
     let request = FactExtractionRequest {
         source_id: "drawer-2".into(),
         source_digest: "digest".into(),
-        distilled_text: source.into(),
+        source_text: source.into(),
         eligible_source_spans: vec![FactSourceSpan {
             start: 0,
             end: 33,
@@ -98,7 +98,7 @@ fn rejects_real_quote_paired_with_hallucinated_subject_or_object() {
     let request = FactExtractionRequest {
         source_id: "drawer-values".into(),
         source_digest: "digest".into(),
-        distilled_text: source.into(),
+        source_text: source.into(),
         eligible_source_spans: vec![FactSourceSpan {
             start: 0,
             end: source.chars().count(),
@@ -135,7 +135,7 @@ fn source_offsets_distinguish_unicode_scalars_from_utf8_bytes() {
     let request = FactExtractionRequest {
         source_id: "drawer-unicode".into(),
         source_digest: "digest".into(),
-        distilled_text: source.into(),
+        source_text: source.into(),
         eligible_source_spans: vec![FactSourceSpan {
             start: 0,
             end: source.chars().count(),

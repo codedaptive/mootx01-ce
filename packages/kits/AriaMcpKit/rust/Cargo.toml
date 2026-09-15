@@ -66,10 +66,23 @@ intellectus-lib  = { path = "../../../libs/IntellectusLib/rust" }
 # startup by runtime.rs when in resident HTTP mode; path computed from the
 # configuration directory (ARIA_MCP_STATS_STORE env override removed per R6).
 observer-sink    = { path = "../../../libs/ObserverSink/rust" }
-# moot-product-identity: settings::load() reads config.json for the
-# daemon.stats_store R6 setting used by stats_store_path in runtime.rs.
+# moot-product-identity: settings::load() reads config.json for
+# daemon.stats_store (R6) and the fact_extraction.* paths used by
+# build_fact_extraction_cycle in runtime.rs.
 # Per in-repository dependency direction (app/kit → lib); no inversion.
 moot-product-identity = { path = "../../../libs/MootProductIdentity/rust" }
+# fact-extraction-kit: the FactExtractor trait, needed to call spec() on
+# NuExtractWorkerClient and to cast the Arc for activate_fact_extractor.
+# fact-extraction-kit is already compiled as a transitive dep of
+# genius-locus-kit; added here as a direct dep so the trait is nameable.
+# Per in-repository dependency direction (app/kit → kit); no inversion.
+fact-extraction-kit = { path = "../../FactExtractionKit/rust" }
+# fact-extraction-kit-providers: NuExtractWorkerClient is the concrete
+# FactExtractor for signal 14. Activated at estate open when the estate
+# setting is On and all four config.json paths are present. Most installs
+# carry no model; missing assets degrade silently (signal 14 inactive),
+# never an error. Per in-repository dependency direction; no inversion.
+fact-extraction-kit-providers = { path = "../../FactExtractionKit/rust-providers" }
 # lattice-lib: the resident Autonomic Governor drives `lattice::pool_reduce`
 # (novel-token merge-back — the second dormant learning loop) on a low cadence
 # from autonomic_governor.rs. App→lib path dep (downstream→upstream), no

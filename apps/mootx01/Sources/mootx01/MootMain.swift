@@ -32,6 +32,7 @@
 
 import ArgumentParser
 import Foundation
+import MootCoreAIWorker
 import MootInstallerCore
 
 @main
@@ -81,6 +82,7 @@ struct Mootx01: AsyncParsableCommand {
             """,
             version: versionDisplay,
             subcommands: [
+                CoreAINuExtractWorkerCommand.self,
                 ServeCommand.self,
                 ProxyCommand.self,
                 DrainCommand.self,
