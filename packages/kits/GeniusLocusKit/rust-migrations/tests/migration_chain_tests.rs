@@ -185,7 +185,7 @@ fn a_chain_that_returns_ok_leaves_the_estate_current() {
         let before = coord
             .estate_for(&handle)
             .expect("estate_for")
-            .meta(EstateCoordinator::FACT_EXTRACTION_META_KEY)
+            .meta(genius_locus_kit::EstatePreferenceKey::FactExtraction.as_str())
             .expect("meta");
         assert!(before.is_none(), "precondition: key absent before the chain runs");
         coord
@@ -199,7 +199,7 @@ fn a_chain_that_returns_ok_leaves_the_estate_current() {
         let seeded = coord
             .estate_for(&handle)
             .expect("estate_for")
-            .meta(EstateCoordinator::FACT_EXTRACTION_META_KEY)
+            .meta(genius_locus_kit::EstatePreferenceKey::FactExtraction.as_str())
             .expect("meta");
         assert_eq!(
             seeded.as_deref(),

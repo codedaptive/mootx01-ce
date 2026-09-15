@@ -920,6 +920,11 @@ private extension ToolDispatcher {
                     backend: AriaV2GeniusLocusTranscriptRecallBackend(kit: kit, handle: handle),
                     context: memoryOperations.context)
                 return try await service.recall(transcriptRequest)
+            case .similarRecall(let similarRequest):
+                let service = AriaV2SimilarRecallService(
+                    backend: AriaV2GeniusLocusSimilarRecallBackend(kit: kit, handle: handle),
+                    context: memoryOperations.context)
+                return try await service.recall(similarRequest)
             case .recallLens(let request):
                 if AriaV2LensLower.supported.contains(request.operation) {
                     return try await lensLower.execute(request)

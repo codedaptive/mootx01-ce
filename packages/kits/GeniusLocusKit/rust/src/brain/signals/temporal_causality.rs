@@ -7,9 +7,9 @@
 // §6.4 weekly cadence.
 //
 // The `spec` factory accepts a closure that runs the T-population fold.
-// `default_spec` is the no-op scaffold variant used when no live fold
-// closure is available (e.g., test scaffolds or `default_standing_signal_specs`
-// before the production caller wires the live fold).
+// There is no no-op variant: `default_standing_signal_specs` pushes this
+// signal only when handed a live `fold_cycle`, which the resident passes
+// only while the estate's `adaptive_recall` preference is not `Off`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -68,39 +68,6 @@ impl TemporalCausalitySignal {
                     };
                     vec![SignalEmission::Diagnostic(diagnostic)]
                 }
-            }),
-        }
-    }
-
-    /// Build a diagnostic-only spec for test and registration contexts
-    /// where no live fold cycle is available.
-    ///
-    /// Fires at the hourly cadence and emits a single diagnostic confirming
-    /// the fire. No T-population fold work is performed. This is the correct
-    /// spec for `default_standing_signal_specs`, which cannot supply
-    /// estate-specific context (audit log, mutable MatrixTier) without
-    /// breaking the helper's generic signature.
-    pub fn default_spec() -> SignalSpec {
-        SignalSpec {
-            name: Self::SIGNAL_NAME.to_string(),
-            trigger: SignalTrigger::Interval {
-                seconds: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS),
-            },
-            resource_cost: ResourceCostEstimate::ZERO,
-            freshness_target: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS * 2),
-            concurrency_policy: ConcurrencyPolicy::Single,
-            emit: Arc::new(|context: &SignalContext| {
-                // No-op fold: fires the scheduled signal and surfaces a
-                // diagnostic so the scheduler's cadence is observable.
-                let diagnostic = DiagnosticReport {
-                    title: "temporal-causality-fold.fired".into(),
-                    detail: format!(
-                        "T-fold signal fired (no-op); signal={}",
-                        context.signal_id.0
-                    ),
-                    observed_at_nanos: context.now_nanos,
-                };
-                vec![SignalEmission::Diagnostic(diagnostic)]
             }),
         }
     }

@@ -919,6 +919,18 @@ public actor Estate {
         try await store.insertRecallTraces(items)
     }
 
+    /// Write end-of-day tournament ratings (one `insert or replace` per
+    /// row keyed on `drawer_id`). Delegates to `DrawerStore.upsertRecallRatings`.
+    public func upsertRecallRatings(_ ratings: [RecallRating]) async throws {
+        try await store.upsertRecallRatings(ratings)
+    }
+
+    /// Tournament ratings for `ids`, keyed by drawer id; ids without a
+    /// `recall_ratings` row are absent. Delegates to `DrawerStore.recallRatings`.
+    public func recallRatings(ids: [String]) async throws -> [String: RecallRating] {
+        try await store.recallRatings(ids: ids)
+    }
+
     /// Wave-2 §3.2: atomically capture a vague drawer, write its
     /// `_consolidated_from` tunnels, and mark every constituent
     /// `representedByVague` — one serializable commit. Delegates to

@@ -21,10 +21,7 @@
 use std::sync::Arc;
 
 use aria_mcp::{activate_and_build_extraction_cycle, build_fact_extraction_cycle, estate_registry::EstateRegistry};
-use genius_locus_kit::{
-    coordinator::FactExtractionSetting,
-    EstateCoordinator,
-};
+use genius_locus_kit::{EstateCoordinator, EstatePreferenceKey, EstatePreferenceValue};
 use fact_extraction_kit::contract::{
     FactExtractor, FactExtractorKind, FactExtractorModelSpec,
     FactExtractionRequest, FactExtractionResponse, FactExtractionError,
@@ -121,7 +118,7 @@ fn fact_extraction_cycle_is_none_when_setting_is_off() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_fact_extraction(&handle, FactExtractionSetting::Off)
+            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::Off)
             .expect("provision Off");
     }
 
@@ -173,7 +170,7 @@ fn fact_extraction_cycle_is_some_when_setting_is_on_and_extractor_provided() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_fact_extraction(&handle, FactExtractionSetting::On)
+            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::On)
             .expect("provision On");
     }
 
@@ -224,7 +221,7 @@ fn build_fact_extraction_cycle_is_none_when_setting_on_and_no_config_paths() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_fact_extraction(&handle, FactExtractionSetting::On)
+            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::On)
             .expect("provision On");
     }
 

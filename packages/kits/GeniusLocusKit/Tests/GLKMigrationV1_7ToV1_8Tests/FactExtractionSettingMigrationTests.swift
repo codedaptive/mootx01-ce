@@ -1,5 +1,5 @@
-// Tests for the GLK 1.7 → 1.8 migration capsule and the FactExtractionSetting
-// accessor pair. Seven tests: the six capsule gates G1–G6 (enum default,
+// Tests for the GLK 1.7 → 1.8 migration capsule and the EstatePreference
+// accessor pair on the fact_extraction key. Seven tests: the six capsule gates G1–G6 (enum default,
 // absent-means-on seeding, explicit-off preservation, stamp advance,
 // idempotent re-run, unrecognised-value fallback) and one chain test (an
 // estate stamped v1_7 driven through GLKMigrationCatalog.prepare reaches
@@ -43,17 +43,18 @@ private func makeEstate(
     return (kit, handle, storage)
 }
 
-// MARK: - G1 FactExtractionSetting enum default
+// MARK: - G1 EstatePreferenceValue enum default
 
-@Test("G1: FactExtractionSetting.default is .on")
-func factExtractionSettingDefaultIsOn() {
+@Test("G1: EstatePreferenceValue.default is .on")
+func estatePreferenceValueDefaultIsOn() {
     // The absent-means-on inversion: the default is .on, not .off.
-    #expect(FactExtractionSetting.default == .on)
-    #expect(FactExtractionSetting.default.rawValue == "on")
+    #expect(EstatePreferenceValue.default == .on)
+    #expect(EstatePreferenceValue.default.rawValue == "on")
+    #expect(EstatePreferenceKey.factExtraction.rawValue == "fact_extraction")
     // Roundtrip the rawValue initializer.
-    #expect(FactExtractionSetting(rawValue: "on") == .on)
-    #expect(FactExtractionSetting(rawValue: "off") == .off)
-    #expect(FactExtractionSetting(rawValue: "garbage") == nil)
+    #expect(EstatePreferenceValue(rawValue: "on") == .on)
+    #expect(EstatePreferenceValue(rawValue: "off") == .off)
+    #expect(EstatePreferenceValue(rawValue: "garbage") == nil)
 }
 
 // MARK: - G2 absent-means-on seeding
@@ -63,20 +64,20 @@ func migrationSeedsFactExtractionWhenAbsent() async throws {
     let (kit, handle, storage) = try await makeEstate()
 
     // The key must be absent before migration runs.
-    let rawBefore = try? await kit.estate(for: handle).meta(key: GeniusLocusKit.factExtractionMetaKey)
+    let rawBefore = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
     #expect(rawBefore == nil, "key must be absent before migration")
 
     // The public accessor returns .on even when absent (absent-means-on).
-    let settingBefore = try await kit.provisionedFactExtraction(for: handle)
+    let settingBefore = try await kit.provisionedPreference(.factExtraction, for: handle)
     #expect(settingBefore == .on)
 
     // Run the capsule.
     try await kit.runFactExtractionSettingMigration(handle: handle, now: testNow)
 
     // The key must now be physically present and set to "on".
-    let rawAfter = try? await kit.estate(for: handle).meta(key: GeniusLocusKit.factExtractionMetaKey)
+    let rawAfter = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
     #expect(rawAfter == "on", "migration must seed fact_extraction = on")
-    let settingAfter = try await kit.provisionedFactExtraction(for: handle)
+    let settingAfter = try await kit.provisionedPreference(.factExtraction, for: handle)
     #expect(settingAfter == .on)
 }
 
@@ -87,15 +88,15 @@ func migrationPreservesExplicitOff() async throws {
     let (kit, handle, storage) = try await makeEstate()
 
     // Pre-write .off through the provisioner before migration.
-    try await kit.provisionFactExtraction(.off, for: handle)
+    try await kit.provisionPreference(.factExtraction, .off, for: handle)
 
     // Run the capsule.
     try await kit.runFactExtractionSettingMigration(handle: handle, now: testNow)
 
     // The capsule must not overwrite an existing value; the stamp advances to v1_8.
-    let after = try await kit.provisionedFactExtraction(for: handle)
+    let after = try await kit.provisionedPreference(.factExtraction, for: handle)
     #expect(after == .off, "capsule must not overwrite an existing value")
-    let raw = try? await kit.estate(for: handle).meta(key: GeniusLocusKit.factExtractionMetaKey)
+    let raw = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
     #expect(raw == "off")
     let stamp = try await EstateFormatStore(storage: storage).readIfPresent()
     #expect(stamp == .v1_8, "capsule stamps v1_8 even when the value is pre-set")
@@ -111,7 +112,6 @@ func migrationStampsV1_8() async throws {
 
     let stamp = try await EstateFormatStore(storage: storage).readIfPresent()
     #expect(stamp == .v1_8, "capsule must stamp v1_8")
-    #expect(EstateFormatVersion.current == .v1_8, "current format is v1_8")
 }
 
 // MARK: - G5 idempotent re-run
@@ -125,7 +125,7 @@ func migrationIsIdempotent() async throws {
     // Second run: must not throw.
     try await kit.runFactExtractionSettingMigration(handle: handle, now: testNow)
 
-    let setting = try await kit.provisionedFactExtraction(for: handle)
+    let setting = try await kit.provisionedPreference(.factExtraction, for: handle)
     #expect(setting == .on, "second run must leave value at .on")
     let stamp = try await EstateFormatStore(storage: storage).readIfPresent()
     #expect(stamp == .v1_8, "second run must leave stamp at v1_8")
@@ -133,18 +133,18 @@ func migrationIsIdempotent() async throws {
 
 // MARK: - G6 accessor unrecognised-value fallback
 
-@Test("G6: provisionedFactExtraction returns .on when stored value is unrecognised (\"garbage\")")
-func provisionedFactExtractionReturnsOnForUnrecognisedValue_garbage() async throws {
+@Test("G6: provisionedPreference(.factExtraction) returns .on when stored value is unrecognised (\"garbage\")")
+func provisionedPreferenceReturnsOnForUnrecognisedValue_garbage() async throws {
     let (kit, handle, _) = try await makeEstate()
 
     // Write an unrecognised string directly via setMeta, bypassing the
     // typed provisioner, so the accessor's unrecognised-value branch runs.
     try await kit.estate(for: handle).setMeta(
-        key: GeniusLocusKit.factExtractionMetaKey,
+        key: EstatePreferenceKey.factExtraction.rawValue,
         value: "garbage")
 
     // The accessor must degrade to .on — the fail-quiet fallback.
-    let result = try await kit.provisionedFactExtraction(for: handle)
+    let result = try await kit.provisionedPreference(.factExtraction, for: handle)
     #expect(result == .on, "unrecognised value must fall back to .on")
 }
 
@@ -155,15 +155,15 @@ func provisionedFactExtractionReturnsOnForUnrecognisedValue_garbage() async thro
 // this capsule rather than stamping on its own. Whether the chain skipped the
 // 1.6→1.7 vacuum on the way is not observable on this bare fixture; that guard
 // is gated by WholeRecordFloatVacuumMigrationTests §8.
-@Test("Chain from v1_7: reaches v1_8 with fact_extraction seeded")
+@Test("Chain from v1_7: reaches current with fact_extraction seeded")
 func chainFromV1_7EstateReachesCurrentFormat() async throws {
     let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_7)
-    let rawBefore = try? await kit.estate(for: handle).meta(key: GeniusLocusKit.factExtractionMetaKey)
+    let rawBefore = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
     #expect(rawBefore == nil, "key must be absent before the chain runs")
     let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
     #expect(prep.format == .current)
     #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
-    let rawAfter = try? await kit.estate(for: handle).meta(key: GeniusLocusKit.factExtractionMetaKey)
+    let rawAfter = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
     #expect(rawAfter == "on", "the chain must run the 1.7→1.8 capsule, which seeds the key")
 }
 
