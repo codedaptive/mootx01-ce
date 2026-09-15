@@ -106,8 +106,8 @@ struct MemoryToolAdapterSensitivityTests {
         ))
         #expect(edit.contains("edited"))
 
-        let estate = try await kit.estate(for: handle)
-        let drawers = try await estate.allDrawers(hydrationLevel: .full, limit: nil)
+        let drawers = try await kit.allDrawers(
+            in: handle, hydrationLevel: .full, limit: nil)
         let active = drawers.first { $0.content == "elevated new text" && $0.tombstonedAt == nil }
         #expect(active?.adjectiveSensitivity == .elevated,
                 "str_replace re-capture must carry the source tier, not downgrade to .normal")
