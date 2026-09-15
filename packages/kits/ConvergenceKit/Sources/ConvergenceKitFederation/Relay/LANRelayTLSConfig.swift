@@ -47,7 +47,7 @@
 //   Certificate key type:          id-ecPublicKey   (OID 1.2.840.10045.2.1), P-256 curve
 //
 // Spec references:
-//   - docs/analysis/FED_OD_CHARTER.md §V2 (identity-bound TLS mechanism)
+//   - FED_OD_CHARTER §V2 (identity-bound TLS mechanism)
 //   - ECDSA P-256 in FIPS approved mode
 //   - WC1 (estate Ed25519 identity, _fed_identity), WC6 (_fed_peers)
 
