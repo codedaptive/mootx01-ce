@@ -55,13 +55,12 @@ struct GraphCentralityProducerTests {
     /// real ids (unlike the per-wing keystones lens, which takes raw endpoints).
     private func addTunnel(_ kit: GeniusLocusKit, _ handle: EstateHandle,
                            src: String, tgt: String) async throws {
-        let estate = try await kit.estate(for: handle)
         let frame = TunnelCaptureFrame(
             sourceWing: "centrality", sourceRoom: "centrality",
             targetWing: "centrality", targetRoom: "centrality",
             label: "relates", addedBy: "centrality-tests",
             sourceDrawerId: src, targetDrawerId: tgt, kind: .references)
-        _ = try await estate.capture(frame)
+        _ = try await kit.captureTunnel(handle, frame)
     }
 
     /// Build a star: one hub drawer tunnelled to N spoke drawers. Returns the

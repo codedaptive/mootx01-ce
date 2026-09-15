@@ -146,8 +146,7 @@ public struct PalaceBridge: Sendable {
             handle: handle, wings: existingWings.union(tunnelSourceWings)
         )
 
-        // Fetch the estate actor once; needed for tunnel capture via estate.capture(_:).
-        let estate = try await kit.estate(for: handle)
+        // Tunnel records are captured through GLK's handle-scoped verb below.
 
         // Declare the encode SPEED for this import's background drain before any
         // encode work is enqueued. SPEED only (foreground hard / background
@@ -257,7 +256,8 @@ public struct PalaceBridge: Sendable {
         for record in preloadedTunnelRecords {
             try await importTunnelRecord(
                 record,
-                estate: estate,
+                kit: kit,
+                handle: handle,
                 existingSignatures: &existingTunnelSignatures,
                 report: &report
             )
@@ -569,7 +569,8 @@ public struct PalaceBridge: Sendable {
     /// Import one tunnel record from tunnels.json, respecting signature dedup.
     private func importTunnelRecord(
         _ record: MemPalaceChromaAdapter.TunnelRecord,
-        estate: Estate,
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
         existingSignatures: inout Set<String>,
         report: inout ImportReport
     ) async throws {
@@ -605,7 +606,7 @@ public struct PalaceBridge: Sendable {
             kind: .references,
             originClass: .userExplicit
         )
-        _ = try await estate.capture(tunnelFrame)
+        _ = try await kit.captureTunnel(handle, tunnelFrame)
         report.tunnelsCreated += 1
     }
 
@@ -830,9 +831,8 @@ public struct PalaceBridge: Sendable {
                 limit: 10_000_000
             )
         )
-        let estate = try await kit.estate(for: handle)
-        let nodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: drawers.map(\.parentNodeId))
+        let nodeNames = try await kit.resolveNodeNames(
+            handle, parentNodeIds: drawers.map(\.parentNodeId))
 
         var lineageIDs: Set<UUID> = []
         var wings: Set<String> = []
