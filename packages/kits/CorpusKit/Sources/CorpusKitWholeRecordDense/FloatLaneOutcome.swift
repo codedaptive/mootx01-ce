@@ -1,14 +1,10 @@
 // FloatLaneOutcome.swift
 //
 // The observable outcome and discrimination signal of the whole-record dense
-// float lane. This target is the WholeRecordDense sidecar: it compiles only
-// when the `WholeRecordDense` trait defines MOOTX01_WHOLE_RECORD_DENSE. The
-// default product graph never links it; the span stage (Arctic) is the one
-// dense provider in the default build.
+// float lane.
 //
-// Rust twin: rust/src/corpus/float_lane.rs (feature `whole-record-dense`).
+// Rust twin: rust/src/corpus/float_lane.rs.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
 import Foundation
 
 // MARK: - FloatLaneOutcome
@@ -121,4 +117,3 @@ public struct FloatDiscriminationSignal: Sendable {
     /// Hit count K used to compute the spread (top-K hits, after limit truncation).
     public let hitCount: Int
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

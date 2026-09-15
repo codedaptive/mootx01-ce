@@ -46,23 +46,38 @@ struct FingerprintLaneTests {
 
     // MARK: - Helpers
 
+    /// Float provider that returns the same constant 384-d vector for every
+    /// non-empty input — used in T4 to saturate the dense lane so it carries
+    /// zero discrimination. When all texts map to the same vector, cosine
+    /// similarity is 1.0 for every (query, document) pair and the dense lane
+    /// contributes no ranking signal, leaving Lane B as the sole tiebreaker.
+    private struct ConstantFloatProvider: EmbeddingProvider, @unchecked Sendable {
+        let modelID = "test-constant-v1"
+        let modelVersion = "1.0.0"
+        let value: Float
+
+        func embed(_ text: String) async throws -> Engram { .zero }
+
+        func embedFloat(_ text: String) async throws -> [Float] {
+            guard !text.isEmpty else { return [] }
+            return Array(repeating: value, count: 384)
+        }
+    }
+
     /// Open an estate with a corpus and a standalone VectorStore.
     ///
-    /// The corpus uses the provided inference function. Pass a constant-return
-    /// closure (e.g., `{ _ in Array(repeating: 0.5, count: 384) }`) for a
-    /// saturated dense lane; the default heuristic varies by first token.
+    /// The corpus uses the provided `provider` for the dense float lane.
+    /// Pass `ConstantFloatProvider(value: 0.5)` for a saturated dense lane
+    /// (zero discrimination); the default `HashFloatProvider` varies by content.
     ///
     /// - Parameters:
     ///   - ownerSuffix:  Unique suffix for the owner identifier (test isolation).
-    ///   - inference:    CoreML-style inference closure — takes FNV-1a token ids
-    ///                   and returns a 384-element float vector. Defaults to the
-    ///                   first-token-modulo heuristic used in degradation tests.
+    ///   - provider:     Embedding provider used for the dense float lane.
+    ///                   Defaults to `HashFloatProvider`, which produces
+    ///                   content-dependent deterministic 384-d vectors.
     private func openEstate(
         ownerSuffix: String,
-        inference: @escaping @Sendable ([Int32]) async throws -> [Float] = { tokens in
-            let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
-            return Array(repeating: v, count: 384)
-        }
+        provider: any EmbeddingProvider & Sendable = HashFloatProvider(modelID: "test-miniLM-v1")
     ) async throws -> (kit: GeniusLocusKit, handle: EstateHandle) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "fp-lane-tests-\(ownerSuffix)")
@@ -75,7 +90,7 @@ struct FingerprintLaneTests {
             estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusContentEngine(
             standaloneOn: corpusStorage,
-            models: [.miniLM(inference: inference)]
+            models: [.lsa(provider: provider)]
         )
         await kit.registerCorpus(corpus, for: handle)
 
@@ -311,7 +326,7 @@ struct FingerprintLaneTests {
         // Rankings can only be determined by Lane B (structural fingerprint).
         let (kit, handle) = try await openEstate(
             ownerSuffix: "t4",
-            inference: { _ in Array(repeating: 0.5, count: 384) }
+            provider: ConstantFloatProvider(value: 0.5)
         )
 
         let contentA = "The Tokyo Treaty governs maritime navigation in the Pacific region."

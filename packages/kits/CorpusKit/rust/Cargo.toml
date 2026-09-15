@@ -62,27 +62,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # crate (mirrors the Swift `CorpusKitProviders` target). Dev-only so
 # the core kit stays provider-free in normal builds.
 [features]
-# dense-families: compiles the dark dense-family providers (PPMI, NMF, FDC)
-# into the test build so the trainable-slot engine tests can run against
-# them. OFF by default (contract sheet §13): Random Indexing is the only live
-# family, and the gated tests are the Rust twin of the Swift tests behind the
-# `MOOTX01_DENSE_FAMILIES` trait. Enable with
-# `cargo test --features dense-families`.
-dense-families = ["corpus-kit-providers/dense-families", "whole-record-dense"]
-# lsa: the LSA provider, its basis training and its tests on a switch of
-# their own (ruling 2026-09-07). dense-families does not enable it and the
-# dark-variant gate does not build it: the family is dark and unproven.
-# Enables dense-families. Twin of the Swift package trait `LSA` (MOOTX01_LSA).
-lsa = ["corpus-kit-providers/lsa", "dense-families"]
-# whole-record-dense: compiles the whole-record dense float engine (the float
-# row write at ingest, vector_index 1; the `float_lane` query surfaces of
-# Corpus and CorpusContentEngine; their tests). OFF by default (ruling
-# 2026-09-07): the span stage is the one dense provider in the product.
-# dense-families implies it because the families are whole-record float
-# signals. Twin of the Swift package trait `WholeRecordDense`
-# (MOOTX01_WHOLE_RECORD_DENSE). Enable with
-# `cargo test --features whole-record-dense`.
-whole-record-dense = []
 # Optional standalone passage indexing. GLK/MOOTx01 dependencies do not
 # enable this feature, so the segmenter, range table, and configuration
 # persistence are absent from their production build.
@@ -112,7 +91,7 @@ required-features = ["test-seams"]
 
 # float_lane_tests.rs is the whole-record float lane half of the legacy Corpus
 # tests (forced store errors, provider opt-out, farthest per signal). It needs
-# the same seams plus the sidecar engine.
+# the test-seams flag for the forced_float_error seam.
 [[test]]
 name = "float_lane_tests"
-required-features = ["test-seams", "whole-record-dense"]
+required-features = ["test-seams"]

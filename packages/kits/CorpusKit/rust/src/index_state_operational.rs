@@ -15,13 +15,13 @@
 //! ## Coverage mask registry (model_id → bit offset K)
 //!
 //! K=0  corpus-ri-v1         (RandomIndexing)
-//! K=1  corpus-ppmi-v1       (PPMI)
+//! K=1  corpus-ppmi-v1       (PPMI — retired family; the bit stays reserved)
 //! K=2  corpus-lsa-v1        (LSA)
-//! K=3  corpus-nmf-v1        (NMF)
-//! K=4  corpus-fdc-v1        (FDC)
+//! K=3  corpus-nmf-v1        (NMF — retired family; the bit stays reserved)
+//! K=4  corpus-fdc-v1        (FDC — retired family; the bit stays reserved)
 //! K=5  corpus-deterministic (Deterministic / FloatSimHash)
-//! K=6  RESERVED (miniLM)
-//! K=7  RESERVED (mpNet / embeddingGemma / nlEmbedding / nlContextual)
+//! K=6  RESERVED (never assigned)
+//! K=7  RESERVED (nlEmbedding / nlContextual)
 
 // MARK: - Bit constants
 
@@ -60,13 +60,13 @@ pub const INDEX_GENERATION_MODULUS: i64 = 16;
 pub fn coverage_mask_bit_offset(model_id: &str) -> Option<u32> {
     match model_id {
         "corpus-ri-v1"         => Some(0), // RandomIndexing
-        "corpus-ppmi-v1"       => Some(1), // PPMI
+        "corpus-ppmi-v1"       => Some(1), // PPMI — retired family; bit stays reserved
         "corpus-lsa-v1"        => Some(2), // LSA
-        "corpus-nmf-v1"        => Some(3), // NMF
-        "corpus-fdc-v1"        => Some(4), // FDC
+        "corpus-nmf-v1"        => Some(3), // NMF — retired family; bit stays reserved
+        "corpus-fdc-v1"        => Some(4), // FDC — retired family; bit stays reserved
         "corpus-deterministic" => Some(5), // Deterministic / FloatSimHash
-        // K=6 RESERVED (miniLM)
-        // K=7 RESERVED (mpNet / embeddingGemma / nlEmbedding / nlContextual)
+        // K=6 RESERVED (never assigned)
+        // K=7 RESERVED (nlEmbedding / nlContextual)
         _ => None,
     }
 }

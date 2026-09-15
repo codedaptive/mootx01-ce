@@ -28,7 +28,7 @@
 //!   classification door for `moot_file_memory`, vault import, and branch
 //!   promotion (one-door principle). UNRESOLVED content keeps the "000" sentinel.
 //! - `embedding_model_id` = `"default"` (selects the default recall
-//!   ensemble — RI/PPMI/NMF/FDC fused in Lane D; plus LSA when the `lsa` feature is on,
+//!   ensemble — RI and LSA fused in Lane D,
 //!   trained on-corpus and reproducible cross-port; NOT a learned model-weight
 //!   embedding)
 

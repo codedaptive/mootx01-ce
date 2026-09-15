@@ -1,8 +1,8 @@
 // DistributionalPooling.swift
 //
 // The ONE pooling function that turns a bag of terms into a unit document
-// vector for the sparse-index distributional families (Random Indexing and
-// PPMI). Documents at index time and queries at recall time go through this
+// vector for the sparse-index distributional family (Random Indexing).
+// Documents at index time and queries at recall time go through this
 // same function, so the two sides of a cosine comparison are built the same
 // way — a document's own opening sentence lands on the document.
 //
@@ -13,7 +13,7 @@
 // co-occur with everything) and they occur in every long text. Every
 // document therefore points at one shared direction — the corpus mean — and
 // pairwise cosines sit near 1 regardless of content. Measured on a 13,817
-// drawer estate: mean pairwise cosine 0.999 (RI), 0.955 (PPMI). Two fixes,
+// drawer estate: mean pairwise cosine 0.999 (RI). Two fixes,
 // each necessary:
 //
 //   1. IDF weighting shrinks the contribution of a term that appears in many
@@ -65,7 +65,7 @@ import SubstrateKernel
 // Only the composition (weighted sum, projection removal) lives here.
 // ─────────────────────────────────────────────────────────────────
 
-/// Shared pooling for the term-vector distributional providers (RI, PPMI).
+/// Shared pooling for the term-vector distributional provider (RI).
 public enum DistributionalPooling {
 
     /// Pool a bag of terms into a unit vector — the same function for a
@@ -78,7 +78,7 @@ public enum DistributionalPooling {
     ///   - idf: term → smoothed IDF weight fitted at training time.
     ///   - meanDirection: the unit corpus-mean direction fitted at training
     ///     time (`dimension` long), or empty to skip centring.
-    ///   - dimension: vector dimensionality (RI/PPMI: 2048).
+    ///   - dimension: vector dimensionality (RI: 2048).
     /// - Returns: `vector` — the pooled unit vector, or nil when nothing
     ///   contributed or the result collapsed to zero; `hits` — how many
     ///   distinct terms had a context vector (0 means every term was OOV,

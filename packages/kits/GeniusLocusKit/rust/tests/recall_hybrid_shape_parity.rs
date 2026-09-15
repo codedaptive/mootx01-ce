@@ -32,11 +32,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
+use engram_lib::Engram;
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath, RecallFallbackPolicy,
     RecallHit, RecallOrigin,
 };
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -102,25 +104,58 @@ fn ramp(rank: usize) -> f32 {
     (FRONTIER_K - rank) as f32 / FRONTIER_K as f32
 }
 
-/// A bag-of-tokens direction: every token adds a cosine ridge keyed on its
-/// id, so two texts that share a token share part of their direction and the
-/// Hamming lane ranks the text sharing the query word nearer than one that
-/// shares none. The same closure as the Swift twin's `miniLM` inference. (A
-/// direction that varies in two dimensions alone never flips a +-1 SimHash
-/// plane, so token count alone cannot separate drawers.)
-fn minilm_bag_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MiniLM {
-        inference: Box::new(|tokens: &[i32]| {
-            let mut v = vec![0.0_f32; 384];
-            for tok in tokens {
-                let key = (tok.rem_euclid(251) + 1) as f32;
-                for (j, slot) in v.iter_mut().enumerate() {
-                    *slot += (key * (j as f32 + 1.0) * 0.1).cos();
-                }
-            }
-            Ok(v)
-        }),
+/// A word-bag direction provider. Every word in the text adds a cosine ridge
+/// keyed on its FNV-1a hash, so two texts that share a word share part of
+/// their direction and the Hamming lane ranks the text sharing the query word
+/// nearer than one that shares none.
+///
+/// Replaces the removed `EmbeddingModelConfig::MiniLM { inference }` case.
+/// (A direction that varies in two dimensions alone never flips a +-1 SimHash
+/// plane, so word count alone cannot separate drawers — the bag approach is
+/// required.)
+struct WordBagProvider;
+impl EmbeddingProvider for WordBagProvider {
+    fn model_id(&self) -> &str { "test-word-bag-v1" }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
+        if text.is_empty() { return Ok(Engram::ZERO); }
+        // Project the float vector to a 256-bit Engram by taking the sign bit
+        // of the first 256 floats (4 groups of 64). Texts sharing words share
+        // cosine-sum components, producing correlated sign patterns and low
+        // Hamming distance — the discrimination the vector-lane tests rely on.
+        let v = self.embed_float(text)?;
+        let bits = |chunk: &[f32]| -> u64 {
+            chunk.iter().enumerate().fold(0u64, |acc, (i, &x)| {
+                if x >= 0.0 { acc | (1u64 << i) } else { acc }
+            })
+        };
+        use substrate_types::fingerprint256::Fingerprint256;
+        Ok(Fingerprint256 {
+            block0: bits(&v[..64]),
+            block1: bits(&v[64..128]),
+            block2: bits(&v[128..192]),
+            block3: bits(&v[192..256]),
+        })
     }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let mut v = vec![0.0_f32; 384];
+        for word in text.split_whitespace() {
+            // FNV-1a hash of the word bytes, then reduce to [1, 251] — the same
+            // domain as the original token-id approach.
+            let h = word.bytes().fold(14_695_981_039_346_656_037u64, |a, b| {
+                (a ^ u64::from(b)).wrapping_mul(1_099_511_628_211)
+            });
+            let key = ((h % 251) + 1) as f32;
+            for (j, slot) in v.iter_mut().enumerate() {
+                *slot += (key * (j as f32 + 1.0) * 0.1).cos();
+            }
+        }
+        Ok(v)
+    }
+}
+
+fn minilm_bag_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(WordBagProvider) }
 }
 
 fn make_corpus() -> Arc<CorpusContentEngine> {
