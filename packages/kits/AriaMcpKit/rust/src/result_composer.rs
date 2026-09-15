@@ -10,7 +10,6 @@
 //!
 //! ## Shape coverage
 //!
-//! - S1 — ranked memory candidates (§11.2): `render_s1_surface`
 //! - S2 — unranked memory rows (§11.5): `render_s2_listing`, `render_s2_batch_get`
 //! - S3 — full record hydration (§11.6): `render_s3_record`
 //! - S4 — fact rows (§11.7): `render_s4_fact_search`, `render_s4_fact_timeline`
@@ -21,7 +20,7 @@
 //! - Distilled — distilled recall with continuation lines (§11.2): `render_distilled_recall`
 //! - Federated — per-estate sections (§11.2): `render_federated_recall`
 //! - Empty — zero-count header with optional hint (§11.1 rule 7):
-//!   `render_empty_s1`, `render_empty_s2_listing`
+//!   `render_empty_s2_listing`
 //!
 //! ## Normalization rules (§11.1)
 //!
@@ -600,46 +599,6 @@ pub fn render_s2_row(row: &CandidateRowData) -> String {
     let ssc = ssc_text(row);
     [row.id.as_str(), &subject_text, &span_text, &ssc,
      &row.event_time].join(SEP)
-}
-
-// ─── S1 ranked surface (§11.2) ────────────────────────────────────────────────
-
-/// Render the full S1 ranked surface: header + rows + control lines.
-///
-/// The header is singular when rows.count == 1:
-///   "found 1 candidate memory, one per line"
-///   "found N candidate memories, one per line"
-///
-/// Control lines follow in the absolute fixed order (§11.3):
-///   discrimination → temporal|walk → degradation → tie note → hint
-pub fn render_s1_surface(rows: &[CandidateRowData], control: &ControlSignals) -> ComposedResult {
-    let n = rows.len();
-    let header = if n == 1 {
-        "found 1 candidate memory, one per line".to_string()
-    } else {
-        format!("found {} candidate memories, one per line", n)
-    };
-    let mut lines = vec![header];
-    for row in rows {
-        lines.push(render_s1_row(row));
-    }
-    lines.extend(control_lines(control));
-    ComposedResult {
-        text: lines.join("\n"),
-        structured: Some(structured_s1(rows, control)),
-    }
-}
-
-/// Render the S1 empty-result surface: header + optional hint (§11.1 rule 7).
-pub fn render_empty_s1(hint: Option<&str>) -> ComposedResult {
-    let mut lines = vec!["found 0 candidate memories, one per line".to_string()];
-    if let Some(h) = hint {
-        lines.push(format!("hint: {}", h));
-    }
-    ComposedResult {
-        text: lines.join("\n"),
-        structured: Some(json!({"results": []})),
-    }
 }
 
 // ─── S2 unranked memory rows (§11.5) ──────────────────────────────────────────
