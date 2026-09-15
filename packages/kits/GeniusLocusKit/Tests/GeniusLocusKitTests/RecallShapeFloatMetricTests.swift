@@ -23,8 +23,7 @@
 //   — RecallShape Codable round-trips (no estate required)
 //   — VectorStore float metric parameter (SQLite backend, proves downstream threading)
 
-// WholeRecordDense build only: the whole-record float lane is a sidecar (ruling 2026-09-07).
-#if MOOTX01_WHOLE_RECORD_DENSE
+// Whole-record float lane tests.
 import Testing
 import Foundation
 import PersistenceKit
@@ -301,4 +300,3 @@ struct RecallShapeFloatMetricTests {
         #expect(!l2Farthest.isEmpty, "l2 farthest must return hits")
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

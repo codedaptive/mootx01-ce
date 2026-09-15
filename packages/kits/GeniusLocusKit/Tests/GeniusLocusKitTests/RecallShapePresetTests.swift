@@ -35,43 +35,16 @@ struct RecallShapePresetTests {
                 #expect(RecallShape.preset(name) != nil, "preset \(name) must resolve")
             }
         }
-        // Default roster: 26 presets. The WholeRecordDense build adds the
-        // eight whole-record presets (conceptual, associative, consensus,
-        // ri_forward, whole_record_baseline, anti_redundant_ri, float-l2,
-        // float-dot) = 34; DenseFamilies adds ppmi/nmf_forward and
-        // anti_redundant_nmf on top = 37; MOOTX01_LSA additionally adds
-        // lsa_forward and anti_redundant_lsa = 39.
-        let lsaPresets = ["lsa_forward", "anti_redundant_lsa"]
-        let familyPresets = ["ppmi_forward", "nmf_forward", "anti_redundant_nmf"]
-        let wholeRecordPresets = ["conceptual", "associative", "consensus", "ri_forward",
-                                  "whole_record_baseline", "anti_redundant_ri", "float-l2", "float-dot"]
-#if MOOTX01_DENSE_FAMILIES
-#if MOOTX01_LSA
-        #expect(RecallShape.presetNames.count == 39)
-        _ = lsaPresets; _ = familyPresets; _ = wholeRecordPresets
-#else
-        #expect(RecallShape.presetNames.count == 37)
-        for dark in lsaPresets {
-            #expect(!RecallShape.presetNames.contains(dark), "\(dark) is dark without the LSA trait")
-            #expect(RecallShape.preset(dark) == nil)
+        // Roster: 26 base presets + 7 whole-record (conceptual, associative, consensus,
+        // ri_forward, anti_redundant_ri, float-l2, float-dot) + 2 LSA (lsa_forward,
+        // anti_redundant_lsa) = 35. Dense families (PPMI/NMF/FDC) are retired.
+        let retiredPresets = ["ppmi_forward", "nmf_forward", "anti_redundant_nmf"]
+        #expect(RecallShape.presetNames.count == 35)
+        for retired in retiredPresets {
+            #expect(!RecallShape.presetNames.contains(retired), "\(retired) is retired (dense families removed)")
+            #expect(RecallShape.preset(retired) == nil)
+            #expect(RecallShape.presetDescription(retired).isEmpty)
         }
-        _ = familyPresets; _ = wholeRecordPresets
-#endif
-#elseif MOOTX01_WHOLE_RECORD_DENSE
-        #expect(RecallShape.presetNames.count == 34)
-        for dark in familyPresets {
-            #expect(!RecallShape.presetNames.contains(dark), "\(dark) is dark without the DenseFamilies trait")
-            #expect(RecallShape.preset(dark) == nil)
-        }
-        _ = wholeRecordPresets
-#else
-        #expect(RecallShape.presetNames.count == 26)
-        for dark in familyPresets + wholeRecordPresets {
-            #expect(!RecallShape.presetNames.contains(dark), "\(dark) is dark without the WholeRecordDense trait")
-            #expect(RecallShape.preset(dark) == nil)
-            #expect(RecallShape.presetDescription(dark).isEmpty)
-        }
-#endif
         // `cross_encoder` is reserved (sheet §8), not implemented: absent from
         // the roster and unresolvable, so the tool rejects it as unknown.
         #expect(!RecallShape.presetNames.contains("cross_encoder"))
@@ -101,29 +74,17 @@ struct RecallShapePresetTests {
     func precise() throws {
         let s = try #require(RecallShape.preset("precise"))
         #expect(s.weight(for: "bm25") > 1.0)
-#if MOOTX01_DENSE_FAMILIES
-        #expect(s.weight(for: RecallShape.DenseSignal.fdc) > 1.0)
-#endif
         #expect(s.weight(for: "dense") > 1.0)
         #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
     }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("conceptual amplifies distributional lanes and damps the keyword lane")
     func conceptual() throws {
         let s = try #require(RecallShape.preset("conceptual"))
         #expect(s.weight(for: RecallShape.DenseSignal.randomIndexing) > 1.0)
-#if MOOTX01_DENSE_FAMILIES
-        #expect(s.weight(for: RecallShape.DenseSignal.ppmi) > 1.0)
-#if MOOTX01_LSA
-        #expect(s.weight(for: RecallShape.DenseSignal.lsa) > 1.0)
-#endif // MOOTX01_LSA
-        #expect(s.weight(for: RecallShape.DenseSignal.nmf) > 1.0)
-#endif
         let bm25 = s.weight(for: "bm25")
         #expect(bm25 < 1.0 && bm25 > 0.0)
     }
-#endif
 
     @Test("broad forwards all retrieval lanes and widens to the ceiling")
     func broad() throws {
@@ -139,9 +100,6 @@ struct RecallShapePresetTests {
     func lexical() throws {
         let s = try #require(RecallShape.preset("lexical"))
         #expect(s.weight(for: "bm25") > 1.0)
-#if MOOTX01_DENSE_FAMILIES
-        #expect(s.weight(for: RecallShape.DenseSignal.fdc) > 1.0)
-#endif
         #expect(s.weight(for: "dense") == 0.0)
         #expect(s.weight(for: "hamming") == 0.0)
     }
@@ -150,60 +108,32 @@ struct RecallShapePresetTests {
     func notLexical() throws {
         let s = try #require(RecallShape.preset("not_lexical"))
         #expect(s.weight(for: "bm25") == 0.0)
-#if MOOTX01_DENSE_FAMILIES
-        #expect(s.weight(for: RecallShape.DenseSignal.fdc) == 0.0)
-#endif
         #expect(s.weight(for: "locus") == 1.0)
     }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("associative amplifies RI + NMF and widens")
     func associative() throws {
         let s = try #require(RecallShape.preset("associative"))
         #expect(s.weight(for: RecallShape.DenseSignal.randomIndexing) > 1.0)
-#if MOOTX01_DENSE_FAMILIES
-        #expect(s.weight(for: RecallShape.DenseSignal.nmf) > 1.0)
-#endif
         #expect(s.effectiveFrontierK(engineDefault: 64) == RecallShape.frontierKCeiling)
     }
-#endif
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("consensus forwards every dense signal and narrows")
     func consensus() throws {
         let s = try #require(RecallShape.preset("consensus"))
         for key in RecallShape.DenseSignal.all {
             #expect(s.weight(for: key) > 0.0)
         }
-#if MOOTX01_DENSE_FAMILIES
-        #expect(s.weight(for: RecallShape.DenseSignal.fdc) > 0.0)
-#endif
         #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
     }
-#endif
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("forward presets isolate one dense signal, excluding the siblings")
     func forwardPresets() throws {
         let ri = try #require(RecallShape.preset("ri_forward"))
         #expect(ri.weight(for: RecallShape.DenseSignal.randomIndexing) > 1.0)
-#if MOOTX01_DENSE_FAMILIES
-        #expect(ri.weight(for: RecallShape.DenseSignal.ppmi) == 0.0)
-#if MOOTX01_LSA
-        #expect(ri.weight(for: RecallShape.DenseSignal.lsa) == 0.0)
-#endif // MOOTX01_LSA
-        #expect(ri.weight(for: RecallShape.DenseSignal.nmf) == 0.0)
-#if MOOTX01_LSA
-        let lsa = try #require(RecallShape.preset("lsa_forward"))
-        #expect(lsa.weight(for: RecallShape.DenseSignal.lsa) > 1.0)
-        #expect(lsa.weight(for: RecallShape.DenseSignal.randomIndexing) == 0.0)
-#endif // MOOTX01_LSA
-#else
         // RI is the only live family: nothing to exclude.
         #expect(ri.laneWeights == [RecallShape.DenseSignal.randomIndexing: 1.5])
-#endif
     }
-#endif
 
     @Test("fast keeps the hamming lane only")
     func fast() throws {
@@ -224,18 +154,6 @@ struct RecallShapePresetTests {
     @Test("anti_redundant inverts FDC and suppresses BM25/Hamming lexical duplicates")
     func antiRedundant() throws {
         let s = try #require(RecallShape.preset("anti_redundant"))
-#if MOOTX01_DENSE_FAMILIES
-        // FDC lane is anti-similar (farthest-neighbour direction).
-        #expect(s.isAntiSimilar(RecallShape.DenseSignal.fdc))
-#if MOOTX01_LSA
-        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.lsa))
-#endif // MOOTX01_LSA
-        // FDC lane weight stays at 1.0 — the anti-similar flag flips direction, not magnitude.
-        #expect(s.weight(for: RecallShape.DenseSignal.fdc) == 1.0)
-#elseif MOOTX01_WHOLE_RECORD_DENSE
-        // FDC is dark: nothing is inverted, the suppression and narrow frontier remain.
-        #expect(s.antiSimilarLanes.isEmpty)
-#endif
         // BM25 and Hamming are suppressed so lexical near-duplicates cannot dominate.
         #expect(s.weight(for: "bm25") < 0)
         #expect(s.weight(for: "hamming") < 0)
@@ -259,35 +177,18 @@ struct RecallShapePresetTests {
         #expect(!RecallShape.presetDescription("session_hybrid").isEmpty)
     }
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("leave-one-out is reachable by zeroing one dense lane")
     func leaveOneOut() throws {
         let base = try #require(RecallShape.preset("consensus"))
         var weights = base.laneWeights
-#if MOOTX01_DENSE_FAMILIES
-#if MOOTX01_LSA
-        weights[RecallShape.DenseSignal.lsa] = 0
-        let ablated = RecallShape(laneWeights: weights, frontierK: base.frontierK)
-        #expect(ablated.weight(for: RecallShape.DenseSignal.lsa) == 0.0)
-        #expect(ablated.weight(for: RecallShape.DenseSignal.ppmi) > 0.0)
-#else
-        weights[RecallShape.DenseSignal.ppmi] = 0
-        let ablated = RecallShape(laneWeights: weights, frontierK: base.frontierK)
-        #expect(ablated.weight(for: RecallShape.DenseSignal.ppmi) == 0.0)
-        #expect(ablated.weight(for: RecallShape.DenseSignal.nmf) > 0.0)
-#endif // MOOTX01_LSA
-#else
         weights[RecallShape.DenseSignal.randomIndexing] = 0
         let ablated = RecallShape(laneWeights: weights, frontierK: base.frontierK)
         #expect(ablated.weight(for: RecallShape.DenseSignal.randomIndexing) == 0.0)
         #expect(ablated.weight(for: "dense") == 1.0)
-#endif
     }
-#endif
 
-    // MARK: - Per-signal anti-similarity presets (WholeRecordDense build)
+    // MARK: - Per-signal anti-similarity presets
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("anti_redundant_ri inverts RI to farthest and suppresses BM25/Hamming")
     func antiRedundantRI() throws {
         let s = try #require(RecallShape.preset("anti_redundant_ri"))
@@ -306,38 +207,19 @@ struct RecallShapePresetTests {
         #expect(!RecallShape.presetDescription("anti_redundant_ri").isEmpty)
     }
 
-#if MOOTX01_LSA
     @Test("anti_redundant_lsa inverts LSA to farthest and suppresses BM25/Hamming")
     func antiRedundantLSA() throws {
         let s = try #require(RecallShape.preset("anti_redundant_lsa"))
         #expect(s.isAntiSimilar(RecallShape.DenseSignal.lsa))
         #expect(!s.isAntiSimilar(RecallShape.DenseSignal.randomIndexing))
-        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.fdc))
+        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.encoder))
         #expect(s.weight(for: RecallShape.DenseSignal.lsa) == 1.0)
         #expect(s.weight(for: "bm25") < 0)
         #expect(s.weight(for: "hamming") < 0)
         #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
         #expect(!RecallShape.presetDescription("anti_redundant_lsa").isEmpty)
     }
-#endif // MOOTX01_LSA
 
-#if MOOTX01_DENSE_FAMILIES
-    @Test("anti_redundant_nmf inverts NMF to farthest and suppresses BM25/Hamming")
-    func antiRedundantNMF() throws {
-        let s = try #require(RecallShape.preset("anti_redundant_nmf"))
-        #expect(s.isAntiSimilar(RecallShape.DenseSignal.nmf))
-#if MOOTX01_LSA
-        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.lsa))
-#endif // MOOTX01_LSA
-        #expect(!s.isAntiSimilar(RecallShape.DenseSignal.fdc))
-        #expect(s.weight(for: RecallShape.DenseSignal.nmf) == 1.0)
-        #expect(s.weight(for: "bm25") < 0)
-        #expect(s.weight(for: "hamming") < 0)
-        #expect(s.effectiveFrontierK(engineDefault: 200) == RecallShape.frontierKFloor)
-        #expect(!RecallShape.presetDescription("anti_redundant_nmf").isEmpty)
-    }
-#endif
-#endif // MOOTX01_WHOLE_RECORD_DENSE
 
     // MARK: - Multi-column matrix presets
 
@@ -350,9 +232,7 @@ struct RecallShapePresetTests {
         // No lanes excluded or anti-similar — purely additive over balanced.
         #expect(s.weight(for: "locus") == 1.0)
         #expect(s.weight(for: "bm25") == 1.0)
-#if MOOTX01_WHOLE_RECORD_DENSE
         #expect(s.antiSimilarLanes.isEmpty)
-#endif
         // No frontier override — the engine formula applies.
         #expect(s.frontierK == nil)
         #expect(!RecallShape.presetDescription("temporal_connection").isEmpty)
@@ -367,36 +247,13 @@ struct RecallShapePresetTests {
         // No lanes excluded or anti-similar — purely additive over balanced.
         #expect(s.weight(for: "locus") == 1.0)
         #expect(s.weight(for: "temporal") == 1.0)
-#if MOOTX01_WHOLE_RECORD_DENSE
         #expect(s.antiSimilarLanes.isEmpty)
-#endif
         #expect(s.frontierK == nil)
         #expect(!RecallShape.presetDescription("field_preference").isEmpty)
     }
 
-    // MARK: - The audition baseline (WholeRecordDense build)
-
-#if MOOTX01_WHOLE_RECORD_DENSE
-    @Test("whole_record_baseline forwards every held whole-record signal at 1.0 over the default frontier")
-    func wholeRecordBaseline() throws {
-        let s = try #require(RecallShape.preset("whole_record_baseline"))
-        for key in RecallShape.DenseSignal.all {
-            #expect(s.weight(for: key) == 1.0)
-        }
-#if MOOTX01_DENSE_FAMILIES
-        #expect(s.weight(for: RecallShape.DenseSignal.fdc) == 1.0)
-#endif
-        // Nothing else is steered: the fusion equals this build's nil shape.
-        #expect(s.weight(for: "bm25") == 1.0)
-        #expect(s.frontierK == nil)
-        #expect(s.antiSimilarLanes.isEmpty)
-        #expect(!RecallShape.presetDescription("whole_record_baseline").isEmpty)
-    }
-#endif
-
     // MARK: - Float-lane metric presets
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("float-l2 sets floatMetric to l2 and leaves all other fields at their defaults")
     func floatL2() throws {
         let s = try #require(RecallShape.preset("float-l2"))
@@ -413,9 +270,7 @@ struct RecallShapePresetTests {
         // Description is present in the catalog.
         #expect(!RecallShape.presetDescription("float-l2").isEmpty)
     }
-#endif
 
-#if MOOTX01_WHOLE_RECORD_DENSE
     @Test("float-dot sets floatMetric to dot and leaves all other fields at their defaults")
     func floatDot() throws {
         let s = try #require(RecallShape.preset("float-dot"))
@@ -432,5 +287,4 @@ struct RecallShapePresetTests {
         // Description is present in the catalog.
         #expect(!RecallShape.presetDescription("float-dot").isEmpty)
     }
-#endif
 }

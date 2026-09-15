@@ -11,9 +11,7 @@
 // resumable (kill and re-run to continue from the persisted record).
 
 import CorpusKit
-#if MOOTX01_WHOLE_RECORD_DENSE
 import CorpusKitWholeRecordDense
-#endif
 import CorpusKitProviders
 import Foundation
 import GeniusLocusKit
@@ -29,7 +27,7 @@ func q(_ label: String, _ value: Any) { print("QUAL \(label)=\(value)") }
 /// Cross-port diagnostic over the exact ordered token stream consumed by the
 /// distributional trainers. Length prefixes make the fold unambiguous. This is
 /// deliberately independent of provider math: if it differs, investigate the
-/// content source/tokenizer before RI/PPMI accumulation.
+/// content source/tokenizer before RI/LSA accumulation.
 func tokenStreamFingerprint(
     source: any CorpusContentSource
 ) async throws -> (digest: String, tokenCount: Int) {
@@ -141,8 +139,7 @@ let queries = ["project planning decisions",
                "release engineering process",
                "memory estate"]
 for (i, query) in queries.enumerated() {
-#if MOOTX01_WHOLE_RECORD_DENSE
-    // Whole-record float lane probe (WholeRecordDense build only).
+    // Whole-record float lane probe.
     let tF = Date()
     let perSignal = await engine.floatNearestPerSignal(query: query, limit: 5)
     q("recall.q\(i).float_all_signals_ms",
@@ -154,7 +151,6 @@ for (i, query) in queries.enumerated() {
             q("recall.q\(i).float.\(modelID).served", false)
         }
     }
-#endif
     let tQ = Date()
     let hits = try await engine.bm25TopK(query: query, limit: 5)
     q("recall.q\(i).latency_ms",

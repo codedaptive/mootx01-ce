@@ -1,13 +1,30 @@
 import AriaMCPWire
 import CorpusKit
+import EngramLib
 import Foundation
 @testable import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import Testing
 import SynapseKit
+import Testing
 @testable import AriaMCP
+
+/// Constant-value float provider: returns the same 384-d vector for every
+/// non-empty input. Used to populate the dense lane in tests that do not
+/// exercise semantic similarity.
+private struct ConstantFloatProvider: EmbeddingProvider, @unchecked Sendable {
+    let modelID: String
+    let modelVersion = "1.0.0"
+    let value: Float
+
+    func embed(_ text: String) async throws -> Engram { .zero }
+
+    func embedFloat(_ text: String) async throws -> [Float] {
+        guard !text.isEmpty else { return [] }
+        return Array(repeating: value, count: 384)
+    }
+}
 
 @Suite("Sensitivity-only counts at the shipping v2 door", .serialized)
 struct AriaV2WithheldTests {
@@ -103,7 +120,7 @@ struct AriaV2WithheldTests {
             room: "r", latticeAnchor: .udc("004"), addedBy: "withheld-v2", embeddingModelID: "test-v1"))
         let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
         let corpus = try await CorpusContentEngine(standaloneOn: corpusStorage,
-            models: [.miniLM(inference: { _ in Array(repeating: Float(0.05), count: 384) })])
+            models: [.lsa(provider: ConstantFloatProvider(modelID: "test-miniLM-v1", value: 0.05))])
         try await corpus.ingest(content, contentID: drawer.id, now: Date())
         await kit.registerCorpus(corpus, for: handle)
         let vectorStorage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))

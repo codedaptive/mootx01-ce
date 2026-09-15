@@ -1,16 +1,16 @@
 //! reduced_vocab.rs — shared IDF-reduced vocabulary selection for the dense
-//! distributional-factorization providers (LSA, NMF). shared reduced embedding vocabulary.
+//! distributional-factorization provider (LSA).
 //!
 //! Rust port of Swift's `CorpusKitProviders/ReducedVocab.swift`.
 //!
 //! ## Why this exists
 //!
-//! LSA/NMF build a DENSE `docs × vocab` matrix and factor it. On a real corpus
+//! LSA builds a DENSE `docs × vocab` matrix and factors it. On a real corpus
 //! the vocabulary is tens of thousands of distinct terms, so the fixed-sweep
 //! factorization is ~10^15 ops — infeasible, and it hangs the encode drain.
 //! This picks a deterministic top-K informative sub-vocabulary so the factored
-//! matrix is `docs × K` (feasible). Both dense providers consume ONE reduced
-//! vocab; `K` is an optimizer knob.
+//! matrix is `docs × K` (feasible). The reduced vocab is a corpus property,
+//! consumed by any dense factorization provider; `K` is an optimizer knob.
 //!
 //! ## Determinism (cross-port bit-identity)
 //!
@@ -22,8 +22,8 @@
 use std::collections::HashMap;
 
 /// Default reduced-vocabulary cap K. Mirrors Swift `defaultReducedVocabCap`.
-/// Dense SVD/ALS cost scales as ~K²·numDocs; 512 keeps a large-corpus reindex
-/// in the seconds range while far exceeding the providers' rank (LSA 64/NMF 32).
+/// Dense SVD cost scales as ~K²·numDocs; 512 keeps a large-corpus reindex
+/// in the seconds range while far exceeding the provider's rank (LSA 64).
 pub const DEFAULT_REDUCED_VOCAB_CAP: usize = 512;
 
 /// A frozen reduced vocabulary: the ordered kept terms plus the maps to remap

@@ -31,7 +31,6 @@
 // acquire GlobalTestLock.shared for their entire duration to prevent
 // interleaving with the CorpusKitTelemetryTests suites.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
 import Foundation
 import Testing
 import PersistenceKit
@@ -54,19 +53,30 @@ private func makeDeterministicCorpus() async throws -> Corpus {
     return try await Corpus(storage: storage, model: .deterministic)
 }
 
-/// Creates a fresh SQLite-backed Corpus with a MiniLM-shaped inference
-/// closure. The closure returns a stable 384-d vector so floatNearest
-/// can store and retrieve float rows.
+/// Stable 384-d provider whose values depend on text length mod 8,
+/// so different texts produce distinguishably different vectors.
+private struct StableFloatProvider: EmbeddingProvider, @unchecked Sendable {
+    let modelID: String = "test-stable-float-v1"
+    let modelVersion: String = "1.0.0"
+
+    func embed(_ text: String) async throws -> Engram { Engram.zero }
+
+    func embedFloat(_ text: String) async throws -> [Float] {
+        // Value depends on UTF-8 byte count mod 8 so texts of different
+        // lengths produce distinguishably different vectors.
+        let base = Float(text.utf8.count % 8 + 1) / 8.0
+        return Array(repeating: base, count: 384)
+    }
+}
+
+/// Creates a fresh SQLite-backed Corpus with a stable 384-d provider.
+/// The provider returns a vector whose magnitude depends on the text length,
+/// so floatNearest can store and retrieve float rows.
 private func makeFloatCorpus() async throws -> Corpus {
     let storage = try makeScratchStorage()
     return try await Corpus(
         storage: storage,
-        model: .miniLM(inference: { tokens in
-            // Stable 384-d vector whose values depend on the token count
-            // so different texts produce distinguishably different vectors.
-            let base = Float(tokens.count % 8 + 1) / 8.0
-            return Array(repeating: base, count: 384)
-        })
+        model: .randomIndexing(provider: StableFloatProvider())
     )
 }
 
@@ -453,12 +463,9 @@ struct FloatLaneConformanceTests {
             let storage = try makeScratchStorage()
             let corpus = try await Corpus(
                 storage: storage,
-                model: .miniLM(inference: { tokens in
-                    // Deterministic: value depends on first token id only, so
-                    // different texts produce reliably distinguishable vectors.
-                    let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
-                    return Array(repeating: v, count: 384)
-                })
+                // StableFloatProvider: vector magnitude depends on text length,
+                // producing distinguishably different vectors for different texts.
+                model: .randomIndexing(provider: StableFloatProvider())
             )
 
             Intellectus.setEnabled(false)
@@ -626,21 +633,32 @@ struct FloatLaneStoreErrorTests {
 
 // MARK: - §7 Farthest (anti-similarity, mission 6b-modifiers-antisim)
 
-/// A direction-discriminating corpus: each ingested text gets a ONE-HOT
-/// 384-d direction chosen by the sum of its FNV-1a token ids mod 384. Distinct
-/// texts therefore get distinct, mostly-orthogonal directions, so the float
+/// One-hot 384-d provider keyed by FNV-1a hash of text UTF-8 bytes mod 384.
+/// Distinct texts get distinct, mostly-orthogonal directions, so the float
 /// lane can be steered toward "similar" or "dissimilar" sources unambiguously.
+private struct DirectionalFloatProvider: EmbeddingProvider, @unchecked Sendable {
+    let modelID: String = "test-directional-float-v1"
+    let modelVersion: String = "1.0.0"
+
+    func embed(_ text: String) async throws -> Engram { Engram.zero }
+
+    func embedFloat(_ text: String) async throws -> [Float] {
+        var v = [Float](repeating: 0.0, count: 384)
+        let hash = text.utf8.reduce(UInt64(14_695_981_039_346_656_037)) { acc, b in
+            (acc ^ UInt64(b)) &* 1_099_511_628_211
+        }
+        v[Int(hash % 384)] = 1.0
+        return v
+    }
+}
+
+/// A direction-discriminating corpus: each ingested text gets a ONE-HOT
+/// 384-d direction chosen by the FNV-1a hash of its UTF-8 bytes mod 384.
 private func makeDirectionalCorpus() async throws -> Corpus {
     let storage = try makeScratchStorage()
     return try await Corpus(
         storage: storage,
-        model: .miniLM(inference: { tokens in
-            var v = [Float](repeating: 0, count: 384)
-            let sum = tokens.reduce(Int32(0), &+)
-            let slot = Int((sum % 384 + 384) % 384)
-            v[slot] = 1.0
-            return v
-        })
+        model: .randomIndexing(provider: DirectionalFloatProvider())
     )
 }
 
@@ -879,4 +897,3 @@ struct FloatLaneVocabMissTests {
         }
     }
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE

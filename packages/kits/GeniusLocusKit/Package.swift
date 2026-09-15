@@ -75,36 +75,6 @@ let package = Package(
         .default(enabledTraits: [
             "MigrationFlatLayoutToCatalog", "MigrationAppContainerToCatalog",
         ]),
-        // DenseFamilies: compiles the dark dense-family lane keys and presets
-        // (PPMI, NMF, FDC — contract sheet §13) into RecallShape. Off by
-        // default; Random Indexing is the only live family. LSA sits on its
-        // own trait below. Enable with `swift build --traits DenseFamilies`
-        // together with CorpusKit's matching trait, which compiles the
-        // providers themselves.
-        .trait(
-            name: "DenseFamilies",
-            description: "Compile the dark dense-family lane keys and presets (PPMI, NMF, FDC) into the recall shape roster. Enables WholeRecordDense: the families are whole-record float signals. LSA is on its own LSA trait.",
-            enabledTraits: ["WholeRecordDense"]
-        ),
-        // WholeRecordDense: compiles the whole-record dense float lane of
-        // unionBest (step 4.5), its lane keys, presets, anti-similar hook,
-        // float metric and telemetry, and links CorpusKit's sidecar target.
-        // Off by default (ruling 2026-09-07): the span stage is the one dense
-        // provider in the product. Enable with `swift build --traits WholeRecordDense`.
-        .trait(
-            name: "WholeRecordDense",
-            description: "Compile the whole-record dense float lane (unionBest step 4.5, its lane keys, presets, anti-similar hook, float metric, telemetry) and link CorpusKit's WholeRecordDense sidecar. Off by default; the span stage is the one dense provider."
-        ),
-        // LSA: the Latent-Semantic-Analysis family on a switch of its own
-        // (ruling 2026-09-07). DenseFamilies does not enable it and the
-        // dark-variant gate does not build it: the family is dark and unproven
-        // (its reindex recovery test fails). Enables DenseFamilies, which its
-        // lane key and presets need. Enable with `swift build --traits LSA`.
-        .trait(
-            name: "LSA",
-            description: "Compile the LSA lane key and presets (lsa_forward, anti_redundant_lsa) into the recall shape roster and the LsaProvider into CorpusKit. Dark and unproven since 2026-09-07; DenseFamilies does not enable it. Enables DenseFamilies.",
-            enabledTraits: ["DenseFamilies"]
-        ),
         // Step traits name concrete historical code. Floor traits are the
         // consumer-facing cumulative selection and enable every required step.
         .trait(
@@ -193,12 +163,13 @@ let package = Package(
             enabledTraits: ["MigrationV1_7ToV1_8"]
         ),
         // Apple encoder providers (NLContextualEmbedding, NLEmbedding, NeuralEmbed).
-        // Off by default (plan 70BC55F3, 2026-09-05): held for v1.2 iOS and
-        // Apple cloud compute. Mirror of CorpusKit's AppleEncoders trait and
-        // APPLE_ENCODERS Swift define. Enable: --traits AppleEncoders.
+        // Off by default: retained in case Apple improves the NaturalLanguage framework,
+        // or for a device class that cannot host a CoreML encoder. Mirror of
+        // CorpusKit's AppleEncoders trait and APPLE_ENCODERS Swift define.
+        // Enable: --traits AppleEncoders.
         .trait(
             name: "AppleEncoders",
-            description: "Compile apple-nl-v1 and neural-embed-v1 provisioning paths in EstateLifecycle (off by default, plan 70BC55F3)."
+            description: "Compile apple-nl-v1 and neural-embed-v1 provisioning paths in EstateLifecycle. Off by default; retained for device classes that cannot host CoreML encoders or when the NaturalLanguage framework improves. Enable: --traits AppleEncoders."
         ),
         // CrossEncoder: lets the retrieval-time cross-encoder stage load the
         // packaged pair classifier (PairScorerFactory over CoreML). The
@@ -224,13 +195,9 @@ let package = Package(
         .package(name: "EstateEncryption", path: "../../libs/EstateEncryption"),
         .package(name: "LocusKit", path: "../LocusKit"),
         .package(name: "SynapseKit", path: "../SynapseKit"),
-        // CorpusKit traits follow this package's: DenseFamilies compiles the
-        // family providers, WholeRecordDense the float sidecar. CorpusKit has
-        // no default traits, so the list is the whole selection.
+        // CorpusKit traits follow this package's: AppleEncoders compiles the
+        // Apple NL providers in CorpusKitProviders.
         .package(name: "CorpusKit", path: "../CorpusKit", traits: [
-            .trait(name: "DenseFamilies", condition: .when(traits: ["DenseFamilies"])),
-            .trait(name: "LSA", condition: .when(traits: ["LSA"])),
-            .trait(name: "WholeRecordDense", condition: .when(traits: ["WholeRecordDense"])),
             // AppleEncoders compiles AppleNLProvider and NeuralEmbedProvider in
             // CorpusKitProviders, which EstateLifecycle wires under APPLE_ENCODERS.
             .trait(name: "AppleEncoders", condition: .when(traits: ["AppleEncoders"])),
@@ -293,8 +260,7 @@ let package = Package(
                 "GeniusLocusKitMigrations",
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
-                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
-                         condition: .when(traits: ["WholeRecordDense"])),
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
@@ -305,7 +271,6 @@ let package = Package(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
@@ -369,8 +334,7 @@ let package = Package(
         // (vectors kind 1) and the hnsw_graph rows from populated estates,
         // rebuilds the binary sidecar and releases the float representation
         // claim. Mirrors the GLKMigrationV1_5ToV1_6 target structure. Under the
-        // WholeRecordDense trait the capsule reads the manifest and leaves an
-        // audition estate's rows in place.
+        // The capsule reads the manifest and leaves an audition estate's rows in place.
         .target(
             name: "GLKMigrationV1_6ToV1_7",
             dependencies: [
@@ -386,7 +350,6 @@ let package = Package(
                     "GLK_MIGRATION_V1_6_TO_V1_7",
                     .when(traits: ["MigrationV1_6ToV1_7"])
                 ),
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
@@ -511,17 +474,14 @@ let package = Package(
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 // CorpusKitProviders: the concrete embedding providers. GLK's
                 // provision path defaults the Corpus to CorpusEnsemble.defaultEnsemble()
-                // (RI-only by default; dense families off, plan 70BC55F3, 2026-09-05),
-                // which NEWs concrete providers — so
-                // the composition layer needs the providers product. Dependency per
-                // in-repository dependency direction; layering is
-                // upstream→downstream (CorpusKitProviders ← GeniusLocusKit), no inversion.
+                // (RI + LSA), which NEWs concrete providers — the composition layer
+                // needs the providers product. Dependency per in-repository dependency
+                // direction; layering is upstream→downstream (CorpusKitProviders ← GeniusLocusKit),
+                // no inversion.
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
                 // CorpusKitWholeRecordDense: the float query surface the
-                // unionBest whole-record lane reads. Linked only under the
-                // WholeRecordDense trait; the default graph never sees it.
-                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
-                         condition: .when(traits: ["WholeRecordDense"])),
+                // unionBest whole-record lane reads.
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 // PersistenceKitReplication (§5 full-snapshot flush/hydrate).
@@ -563,17 +523,10 @@ let package = Package(
             path: "Sources/GeniusLocusKit",
             swiftSettings: [
                 // AppleEncoders: gates apple-nl-v1 and neural-embed-v1 provisioning
-                // paths in EstateLifecycle.swift. Off by default (plan 70BC55F3,
-                // 2026-09-05). Mirror of CorpusKit AppleEncoders trait.
+                // paths in EstateLifecycle.swift. Off by default; retained for device
+                // classes that cannot host CoreML encoders. Mirror of CorpusKit
+                // AppleEncoders trait.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
-                // DenseFamilies: the dark dense-family lane keys and presets
-                // (PPMI, NMF, FDC). Off by default (plan 70BC55F3, 2026-09-05).
-                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
-                // LSA: the LSA lane key and presets, on their own switch.
-                .define("MOOTX01_LSA", .when(traits: ["LSA"])),
-                // WholeRecordDense: the whole-record dense float lane and its
-                // lane keys, presets, anti-similar hook and telemetry.
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
@@ -595,8 +548,7 @@ let package = Package(
                 .product(name: "LocusKitEstateFixture", package: "LocusKit"),
                 .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
-                         condition: .when(traits: ["WholeRecordDense"])),
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "PersistenceKitReplication", package: "PersistenceKit"),
@@ -623,9 +575,6 @@ let package = Package(
             swiftSettings: [
                 // Mirror the production trait defines into the test target.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
-                .define("MOOTX01_DENSE_FAMILIES", .when(traits: ["DenseFamilies"])),
-                .define("MOOTX01_LSA", .when(traits: ["LSA"])),
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
@@ -657,10 +606,7 @@ let package = Package(
                 ),
                 .product(name: "CorpusKit", package: "CorpusKit"),
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
-                // The scale-qualification probe reads the whole-record float
-                // lane only in the sidecar build.
-                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit",
-                         condition: .when(traits: ["WholeRecordDense"])),
+                .product(name: "CorpusKitWholeRecordDense", package: "CorpusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
@@ -673,7 +619,6 @@ let package = Package(
                     "GLK_MIGRATION_V1_0_TO_V1_1",
                     .when(traits: ["MigrationV1_0ToV1_1"])
                 ),
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),
@@ -753,8 +698,7 @@ let package = Package(
         // and span rows intact, the sidecar loading without a rebuild, the
         // same ordered binary neighbours, the float representation claim
         // released and a v1_7 stamp; a second run is a no-op; the chain from
-        // v1_5 ends at v1_7; under WholeRecordDense an audition estate keeps
-        // its rows.
+        // v1_5 ends at v1_7; an audition estate keeps its rows.
         .testTarget(
             name: "GLKMigrationV1_6ToV1_7Tests",
             dependencies: [
@@ -781,7 +725,6 @@ let package = Package(
                     "GLK_MIGRATION_V1_5_TO_V1_6",
                     .when(traits: ["MigrationV1_5ToV1_6"])
                 ),
-                .define("MOOTX01_WHOLE_RECORD_DENSE", .when(traits: ["WholeRecordDense"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
             ]
         ),

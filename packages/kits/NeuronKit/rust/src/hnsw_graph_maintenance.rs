@@ -66,7 +66,7 @@
 ///
 /// Mirrors Swift `HNSWGraphMaintenance` protocol (NeuronKit). The float-index
 /// duties (`rebuild_float_index`, `compact_float_index_tombstones`) exist only
-/// with the `whole-record-dense` feature: the default product writes no
+/// via the whole-record float lane:
 /// whole-record float rows, so the seam carries the generation reclaim alone
 /// there (ruling 2026-09-07).
 /// `clearFloatIndex` was removed from both ports in D-7 (VEC-SHADOWSWAP-01):
@@ -80,7 +80,6 @@ pub trait HNSWGraphMaintenance {
     /// instances, so graph topology matches the new embedding geometry.
     ///
     /// `now_epoch_secs` is the caller-injected cycle timestamp.
-    #[cfg(feature = "whole-record-dense")]
     fn rebuild_float_index(&mut self, now_epoch_secs: f64) -> bool;
 
     /// Compact HNSW tombstones across all active graph partitions (BETA duty).
@@ -90,7 +89,6 @@ pub trait HNSWGraphMaintenance {
     /// compaction.
     ///
     /// `now_epoch_secs` is the caller-injected cycle timestamp.
-    #[cfg(feature = "whole-record-dense")]
     fn compact_float_index_tombstones(&mut self, now_epoch_secs: f64) -> bool;
 
     /// Delete vector rows whose generation is neither the serving generation
@@ -121,10 +119,8 @@ pub trait HNSWGraphMaintenance {
 #[derive(Debug, Default)]
 pub struct InMemoryHNSWGraphMaintenance {
     /// Timestamps of successful `rebuild_float_index` calls, in call order.
-    #[cfg(feature = "whole-record-dense")]
     pub rebuild_calls: Vec<f64>,
     /// Timestamps of successful `compact_float_index_tombstones` calls, in call order.
-    #[cfg(feature = "whole-record-dense")]
     pub compact_calls: Vec<f64>,
     /// Timestamps of successful `reclaim_superseded_generations` calls, in call order.
     pub reclaim_calls: Vec<f64>,
@@ -145,7 +141,6 @@ impl InMemoryHNSWGraphMaintenance {
 }
 
 impl HNSWGraphMaintenance for InMemoryHNSWGraphMaintenance {
-    #[cfg(feature = "whole-record-dense")]
     fn rebuild_float_index(&mut self, now_epoch_secs: f64) -> bool {
         if self.fail_all {
             return false;
@@ -154,7 +149,6 @@ impl HNSWGraphMaintenance for InMemoryHNSWGraphMaintenance {
         true
     }
 
-    #[cfg(feature = "whole-record-dense")]
     fn compact_float_index_tombstones(&mut self, now_epoch_secs: f64) -> bool {
         if self.fail_all {
             return false;
@@ -181,12 +175,10 @@ impl HNSWGraphMaintenance for InMemoryHNSWGraphMaintenance {
 /// then pass `Option<&mut Box<dyn HNSWGraphMaintenance + Send>>` without
 /// introducing a wrapper type or changing the generic signatures.
 impl HNSWGraphMaintenance for Box<dyn HNSWGraphMaintenance + Send> {
-    #[cfg(feature = "whole-record-dense")]
     fn rebuild_float_index(&mut self, now_epoch_secs: f64) -> bool {
         (**self).rebuild_float_index(now_epoch_secs)
     }
 
-    #[cfg(feature = "whole-record-dense")]
     fn compact_float_index_tombstones(&mut self, now_epoch_secs: f64) -> bool {
         (**self).compact_float_index_tombstones(now_epoch_secs)
     }
