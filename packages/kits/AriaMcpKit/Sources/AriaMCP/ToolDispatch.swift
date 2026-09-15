@@ -2005,10 +2005,8 @@ extension ToolDispatcher {
                         eventTime: ResultComposer.iso8601(d.eventTime),
                         room: getNodeNames[d.parentNodeId]?.room)
                     lines.append(ResultComposer.renderS2Row(row))
-                    // Inline distillation: compute at read time, 17 ms per 4.9k-char record.
-                    let distilledText = ContextDistiller().distill(
-                        DistillationInput(original: d.content),
-                        converter: .intentSpanV23Attributed).aiText
+                    // Same converter and rendering as the typed v2 get path.
+                    let distilledText = RecallDistillation.render(d.content)
                     lines.append("    \(distilledText)")
                 } else {
                     // depth:full in batch mode — S3 full record per drawer.
