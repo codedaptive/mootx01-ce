@@ -450,9 +450,8 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
         let currentFDCDataVersion = FDC.dataVersion
         let currentFDCRecalculationVersion = FDC.recalculationVersion
 
-        let estate = try await kit.estate(for: handle)
-        let priorFloor = try await estate.meta(key: Self.fdcRecalcedDataVersionMetaKey)
-        let drawers = try await estate.allDrawers()
+        let priorFloor = try await kit.meta(in: handle, key: Self.fdcRecalcedDataVersionMetaKey)
+        let drawers = try await kit.allDrawers(in: handle)
         let active = drawers.filter {
             // Dataset handles (contentKind == .dataset) carry structured JSON,
             // not classifiable free text. The FDC classifier must never reclassify
