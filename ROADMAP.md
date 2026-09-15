@@ -2,7 +2,7 @@
 title: The Road Ahead for MOOTx01
 status: active-roadmap
 audience: public
-updated: 2026-08-18
+updated: 2026-09-15
 ---
 
 # The Road Ahead for MOOTx01
@@ -66,6 +66,11 @@ reported and never automatically erase estate memories.
 
 The next chapter is MOOTx01-App: one native product across iOS, iPadOS, and
 macOS.
+
+1.1 ships through release candidates. The first candidate freezes the memory
+core so its benchmark numbers describe the release you install, and the app,
+`moot-mgr`, and installers finish while those benchmarks run. Anything below is
+direction, and it is renegotiated against what the candidates show.
 
 ### One Mac, one resident estate
 
@@ -135,26 +140,6 @@ and blocked items, and keep the estate—not the vault—as the authority. Priva
 restricted, secret, and non-exportable material will remain outside automatic
 exchange.
 
-### One memory, many models
-
-We are building a vendor-neutral Work Packet: a durable record of an objective,
-the sources used, the claims produced, what remains uncertain, and what should
-happen next.
-
-That unlocks our flagship demonstration:
-
-1. Claude researches a topic and files its findings in MOOTx01.
-2. ChatGPT or Codex researches independently and files another result.
-3. Apple Intelligence or another local model finds both.
-4. It compares the evidence, preserves the disagreements, and writes a linked
-   synthesis.
-5. Either frontier model can return later and continue from that work.
-
-No copied chat transcript. No vendor-owned memory silo. No pretending that two
-models agreed when they did not.
-
-We call it **Three Minds, One Memory**.
-
 ### Take your estate with you
 
 Optional iCloud Sync will keep eligible memories available across supported
@@ -169,17 +154,16 @@ You choose when continuity is worth crossing the device boundary.
 Windows and Linux users will not be left watching through an Apple-shaped
 window.
 
-The `moot-mgr` web app will provide the Review Center, Work Packet lineage,
-estate health, and approved memory-management actions through the local
-resident host. The native MOOTx01-App is the Apple experience. The `moot-mgr`
+The `moot-mgr` web app will provide the Review Center, estate health, and
+approved memory-management actions through the local resident host. The native MOOTx01-App is the Apple experience. The `moot-mgr`
 web app is the cross-platform experience. Both speak the same memory language.
 
 ## Version 1.2 — your MOOT can meet another MOOT
 
 Personal memory is only the beginning.
 
-Federation will let explicitly paired estates exchange eligible memories and
-Work Packets during bounded, time-limited sessions.
+Federation will let explicitly paired estates exchange eligible memories during
+bounded, time-limited sessions.
 
 You will be able to see:
 
@@ -206,7 +190,7 @@ Postgres environments.
 
 **PGlite** will explore a portable Postgres runtime in WebAssembly: a path to
 zero-install MOOTx01 demonstrations, richer offline web experiences, and
-private Work Packet exploration directly in the browser.
+private estate exploration directly in the browser.
 
 **pgMOOT** is our working name for an optional PostgreSQL deployment and
 computation layer for larger estates, teams, resident jobs, backup and
