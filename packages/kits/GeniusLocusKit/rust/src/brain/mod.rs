@@ -31,3 +31,4 @@ pub mod enrichment_stage;
 pub mod event_lag_pairs;
 pub mod scheduler;
 pub mod signals;
+pub mod end_of_day_tournament;

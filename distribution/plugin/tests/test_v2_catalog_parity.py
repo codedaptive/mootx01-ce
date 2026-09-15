@@ -530,18 +530,18 @@ class TestV2CatalogParity(unittest.TestCase):
         cls.tool_names = _extract_moot_tool_names(cls.text)
 
     def test_catalogs_have_tools(self):
-        """Sanity: fixtures must contain exactly 80 tools each (v2 post-int9 count).
+        """Sanity: fixtures must contain exactly 81 tools each (v2 count with moot_recall_similar).
 
         An exact count catches both directions: a fixture that regained the
-        four retired packet operations (84 tools) passes a >=80 floor but
+        four retired packet operations (85 tools) passes a >=81 floor but
         fails here. The Swift twin already pins this value exactly in
-        PermissionsWriterTests.swift (realTools.count == 80).
+        PermissionsWriterTests.swift (realTools.count == 81).
         """
-        self.assertEqual(len(self.swift_catalog), 80,
-            f"Swift fixture has {len(self.swift_catalog)} tools, expected exactly 80; "
+        self.assertEqual(len(self.swift_catalog), 81,
+            f"Swift fixture has {len(self.swift_catalog)} tools, expected exactly 81; "
             "re-capture the fixture from the current server build")
-        self.assertEqual(len(self.rust_catalog), 80,
-            f"Rust fixture has {len(self.rust_catalog)} tools, expected exactly 80; "
+        self.assertEqual(len(self.rust_catalog), 81,
+            f"Rust fixture has {len(self.rust_catalog)} tools, expected exactly 81; "
             "re-capture the fixture from the current server build")
 
     def test_catalogs_are_identical(self):

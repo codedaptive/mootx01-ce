@@ -36,6 +36,12 @@ public extension GeniusLocusKit {
     /// carries the same values.
     static let graphExpansionPerSourceCap = 32
     static let graphExpansionTotalCap = 512
+    /// Weight of the end-of-day tournament rating term in the matrixAware
+    /// score: a small additive reward, `ratingWeight × rating`, per candidate
+    /// that holds a `recall_ratings` row. Zero when no row exists, so a fresh
+    /// estate scores byte-identically to one that has never run a tournament.
+    /// The Rust twin carries the same value (`RATING_WEIGHT`).
+    static let ratingWeight: Float = 0.1
 
     private static var recallLog: Logger {
         Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
@@ -1534,20 +1540,6 @@ public extension GeniusLocusKit {
     /// migration required.
     static var modesConfigMetaKey: String { "modes_config" }
 
-    /// The estate-manifest key carrying the USER-OWNED fact-extraction toggle:
-    /// the plain string `"on"` or `"off"`. Read back via
-    /// `GeniusLocusKit.provisionedFactExtraction(for:)`.
-    ///
-    /// Default is ON — absent key means `.on`. This inverts the fail-quiet
-    /// contract of the other members of this family, where absent means nil
-    /// or the spec default. Here the absent default IS on: ON is the ruled
-    /// product behaviour for this feature. See `FactExtractionSetting` for
-    /// the full rationale.
-    ///
-    /// Seeded on populated estates through the 1.7 → 1.8 migration capsule
-    /// (GENIUSLOCUSKIT_SPEC I-27); no migration is required for a fresh estate.
-    static var factExtractionMetaKey: String { "fact_extraction" }
-
     /// The estate-manifest key controlling the cross-encoder recall route.
     /// Values are `"on"` / `"off"`; absent key reads as `"on"` (ON is the
     /// ruled product default). Seeded on populated estates in the next
@@ -2846,12 +2838,17 @@ public extension GeniusLocusKit {
             // split into two independently-weighted halves whose 1.0/1.0 sum equals the
             // combined form mathematically (the split is the steerable path only).
             let matrixNeutral = (shapeCoOccurrence == 1.0 && shapeTemporal == 1.0)
+            // Tournament ratings for every candidate in the buffer: one point
+            // read per id; ids without a recall_ratings row are absent from the
+            // map and contribute 0 below.
+            let ratings = try await estate.recallRatings(ids: buffer.ids)
             for i in 0..<buffer.count {
                 let matrixTerm: Float
                 if matrixNeutral {
                     // Pre-steer combined matrix signal — both signals share the matrix
                     // budget slice at equal weight without over-weighting matrix overall.
                     let matrixSignal = (buffer.coOccurrence[i] + buffer.temporal[i]) * 0.5
+                        + Self.ratingWeight * Float(ratings[buffer.ids[i]]?.rating ?? 0)
                     matrixTerm = budget.matrix * matrixSignal
                 } else {
                     // Steered: each matrix signal carries HALF the matrix budget and is

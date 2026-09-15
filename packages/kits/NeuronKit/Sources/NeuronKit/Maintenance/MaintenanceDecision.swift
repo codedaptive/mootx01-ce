@@ -1,15 +1,14 @@
 // MaintenanceDecision.swift
 //
 // The DETERMINISTIC DECISION CORE of the maintenance daemon's cycle
-// (NEURONKIT_SPEC § 3.2 + § 3.5 steps 0–5), factored out of
+// (NEURONKIT_SPEC § 3.2 + § 3.5 steps 0–3), factored out of
 // `MaintenanceDaemon` so it is a pure function of pre-gathered, identity-
 // free inputs — no actor, no seam I/O, no clock, no substrate value type.
 // This is the Swift side of NeuronKit's Rust-parity Bucket A; the Rust
 // version at `NeuronKit/rust/src/maintenance_decision.rs` implements the same
 // logic and both gate on shared fixtures.
 //
-// What stays in the actor: the async seam reads, the I-3 forbidden-combo
-// bitmap read on `Drawer` (a substrate type), the GLK-owned
+// What stays in the actor: the async seam reads, the GLK-owned
 // `AuditChainVerifier.verify` call, the `now`-relative age subtractions,
 // the proposal emission, the per-scan `ProposeFrame` + justification
 // construction (the kind/justification text is Swift-side, not part of the
@@ -17,9 +16,9 @@
 // across-cycle state.
 //
 // What moves here is every DECISION that does not need a substrate type:
-// the six scan-category KEY FORMATS, the SCAN ORDERING into one emission
-// list, the threshold predicates (decay/tombstone strict `>`; fingerprint/
-// byReference `>=`), the crosser COUNTS, and the B-4 idempotency dedup
+// the four scan-category KEY FORMATS, the SCAN ORDERING into one emission
+// list, the threshold predicates (decay/tombstone strict `>`; byReference
+// `>=`), the crosser COUNTS, and the B-4 idempotency dedup
 // (a key proposed in a prior cycle — or earlier this cycle — is suppressed,
 // not re-emitted). Splitting decision from I/O is what makes the daemon's
 // behaviour portable and conformance-gateable while the seam-bound actor
@@ -37,16 +36,14 @@ public enum MaintenanceDecision {
     /// the emission order within a cycle.
     public enum Category: String, Sendable, Equatable {
         case auditIntegrity
-        case disciplineViolation
         case decay
         case tombstone
-        case fingerprintDrift
         case byReferenceDrift
     }
 
     /// One emit decision: the idempotency `key`, the proposal `target`
     /// RowID, the `category`, and an optional raw `detailValue` — the drift
-    /// fraction for the two drift categories, `nil` otherwise. The actor
+    /// fraction for the byReference-drift category, `nil` otherwise. The actor
     /// turns each into a `ProposeFrame` with the category's kind and a
     /// justification built from `target` + `detailValue` (audit's
     /// entry-count comes from the actor's in-scope `auditReport`).
@@ -103,7 +100,7 @@ public enum MaintenanceDecision {
     }
 
     /// A scope/reference key paired with a drift fraction in `[0, 1]`, the
-    /// input to the fingerprint-drift and byReference-validity scans.
+    /// input to the byReference-validity scan.
     public struct DriftRow: Sendable, Equatable {
         public let key: String
         public let driftFraction: Float
@@ -113,17 +110,15 @@ public enum MaintenanceDecision {
         }
     }
 
-    /// The cycle's decisions. `emitted` is in scan order (audit, forbidden,
-    /// decay, tombstone, fingerprint, byReference); the `*Candidates`
+    /// The cycle's decisions. `emitted` is in scan order (audit, decay,
+    /// tombstone, byReference); the `*Candidates`
     /// counts are threshold-crossers (counted whether or not the B-4
     /// dedup suppressed them — matching the daemon's report semantics).
     public struct Outcome: Sendable, Equatable {
         public let emitted: [Decision]
         public let suppressedDuplicates: Int
-        public let forbiddenCombinations: Int
         public let decayCandidates: Int
         public let tombstoneCandidates: Int
-        public let fingerprintDrifts: Int
         public let byReferenceDrifts: Int
         public let updatedProposedKeys: Set<String>
     }
@@ -134,19 +129,16 @@ public enum MaintenanceDecision {
         firstBrokenAtMillis.map(String.init) ?? "unknown"
     }
 
-    /// Decide one maintenance cycle over pre-gathered inputs (steps 0–5).
+    /// Decide one maintenance cycle over pre-gathered inputs (steps 0–3).
     ///
     /// - `audit`: the audit verdict when the chain was checked this cycle,
     ///   else `nil`. An invalid chain emits one audit-integrity decision.
-    /// - `forbiddenDrawerIDs`: ids of active drawers failing invariant I-3
-    ///   (the actor computed the secret-AND-public bitmap predicate), in
-    ///   scan order.
     /// - `agedActive`: `(id, ageSeconds)` for active drawers; a row emits a
     ///   decay decision when `ageSeconds > decayWindowSeconds` (strict).
     /// - `agedTombstoned`: `(id, tombstoneAgeSeconds)` for tombstoned rows;
     ///   emits an expunge decision when `> tombstoneGraceSeconds` (strict).
-    /// - `fingerprintDrift` / `referenceDrift`: `(key, driftFraction)`;
-    ///   emits when `driftFraction >= threshold` (inclusive).
+    /// - `referenceDrift`: `(key, driftFraction)`; emits when
+    ///   `driftFraction >= byReferenceDriftThreshold` (inclusive).
     /// - `alreadyProposedKeys`: keys proposed in a prior cycle (B-4).
     ///
     /// A crosser whose key is already proposed (in a prior cycle, or
@@ -155,13 +147,10 @@ public enum MaintenanceDecision {
     /// category total — mirroring the actor's count-then-register order.
     public static func decide(
         audit: AuditVerdict?,
-        forbiddenDrawerIDs: [String],
         agedActive: [AgedRow],
         decayWindowSeconds: Double,
         agedTombstoned: [AgedRow],
         tombstoneGraceSeconds: Double,
-        fingerprintDrift: [DriftRow],
-        fingerprintDriftThreshold: Float,
         referenceDrift: [DriftRow],
         byReferenceDriftThreshold: Float,
         alreadyProposedKeys: Set<String>
@@ -221,36 +210,21 @@ public enum MaintenanceDecision {
             }
         }
 
-        // ── Step 1: forbidden-combination scan (invariant I-3) ─────────
-        let forbiddenCombinations = forbiddenDrawerIDs.count
-        for id in forbiddenDrawerIDs {
-            consider(key: "discipline|\(id)", target: id, category: .disciplineViolation)
-        }
-
-        // ── Step 2: decay-candidate scan (strict age > window) ─────────
+        // ── Step 1: decay-candidate scan (strict age > window) ─────────
         var decayCandidates = 0
         for row in agedActive where row.ageSeconds > decayWindowSeconds {
             decayCandidates += 1
             consider(key: "decay|\(row.id)", target: row.id, category: .decay)
         }
 
-        // ── Step 3: tombstone/expunge scan (strict age > grace) ────────
+        // ── Step 2: tombstone/expunge scan (strict age > grace) ────────
         var tombstoneCandidates = 0
         for row in agedTombstoned where row.ageSeconds > tombstoneGraceSeconds {
             tombstoneCandidates += 1
             consider(key: "tombstone|\(row.id)", target: row.id, category: .tombstone)
         }
 
-        // ── Step 4: fingerprint-drift scan (inclusive drift >= thresh) ─
-        var fingerprintDrifts = 0
-        for row in fingerprintDrift where row.driftFraction >= fingerprintDriftThreshold {
-            fingerprintDrifts += 1
-            consider(
-                key: "fingerprint_drift|\(row.key)", target: row.key,
-                category: .fingerprintDrift, detailValue: row.driftFraction)
-        }
-
-        // ── Step 5: byReference-validity scan (inclusive drift >= thresh)
+        // ── Step 3: byReference-validity scan (inclusive drift >= thresh)
         var byReferenceDrifts = 0
         for row in referenceDrift where row.driftFraction >= byReferenceDriftThreshold {
             byReferenceDrifts += 1
@@ -262,10 +236,8 @@ public enum MaintenanceDecision {
         return Outcome(
             emitted: emitted,
             suppressedDuplicates: suppressed,
-            forbiddenCombinations: forbiddenCombinations,
             decayCandidates: decayCandidates,
             tombstoneCandidates: tombstoneCandidates,
-            fingerprintDrifts: fingerprintDrifts,
             byReferenceDrifts: byReferenceDrifts,
             updatedProposedKeys: proposed)
     }

@@ -335,13 +335,13 @@ struct AriaSurfaceV2Tests {
             "moot_monitoring_set", "moot_monitoring_status", "moot_move_memory",
             "moot_palace_import", "moot_propose_contradictions",
             "moot_read_journal", "moot_rebuild_status", "moot_recall_connected",
-            "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped",
+            "moot_recall_distilled", "moot_recall_precise", "moot_recall_shaped", "moot_recall_similar",
             "moot_recall_temporal", "moot_recall_vague", "moot_recall_walk", "moot_reclassify_fdc", "moot_reindex",
             "moot_retire_fact", "moot_review_tunnel", "moot_synthesize", "moot_timing_report", "moot_update_memory",
             "moot_vault_export", "moot_vault_import", "moot_vault_job", "moot_vault_reconcile", "moot_vault_status",
             "moot_withdraw_memory", "moot_write_journal",
         ])
-        #expect(tools.count == 80)
+        #expect(tools.count == 81)
         #expect(tools.allSatisfy { $0.outputSchema != nil })
         #expect(tools.allSatisfy { $0.annotations != nil })
         #expect(tools.first { $0.name == "moot_memory_get" }?.annotations == .object([
@@ -458,9 +458,11 @@ struct AriaSurfaceV2Tests {
         let enabled = ToolProjection.tools(environment: [:])
         let explicitlyEnabled = ToolProjection.tools(environment: ["MOOTX01_VAULT": "1"])
         let disabled = ToolProjection.tools(environment: ["MOOTX01_VAULT": "0"])
-        #expect(enabled.count == 80)
+        #expect(enabled.count == 81)
         #expect(explicitlyEnabled.map(\.name) == enabled.map(\.name))
-        #expect(disabled.count == 73)
+        // 81 operations less the seven vault-gated ones: the vault operations
+        // leave the catalog together when MOOTX01_VAULT is off.
+        #expect(disabled.count == 74)
         #expect(disabled.allSatisfy { !$0.name.hasPrefix("moot_vault_") })
         #expect(disabled.allSatisfy { !["moot_palace_import", "moot_json_import"].contains($0.name) })
         #expect(
@@ -475,7 +477,7 @@ struct AriaSurfaceV2Tests {
         let help = try await dispatcher.dispatch(name: "moot_help", arguments: .object([:]))
         let structured = try #require(help.objectValue?["structuredContent"]?.objectValue)
         let operations = try #require(structured["data"]?.objectValue?["operations"]?.arrayValue)
-        #expect(operations.count == 73)
+        #expect(operations.count == 74)
         #expect(operations.allSatisfy {
             $0.objectValue?["name"]?.stringValue != "moot_vault_export"
         })
@@ -563,7 +565,7 @@ struct AriaSurfaceV2Tests {
     @Test func snapshotGatesCatalogAgainstMission02Fixture() throws {
         // Snapshot gate: compares every row in the mission02 fixture against the
         // live Swift catalog on four fields — inputSchema, outputSchema, description,
-        // and effect — for all 80 operations.
+        // and effect — for all 81 operations.
         //
         // What this test proves:
         //   On the Swift side the fixture was generated from the live Swift catalog
@@ -613,8 +615,8 @@ struct AriaSurfaceV2Tests {
         let liveNames = Set(liveTools.map(\.name))
 
         // Count gates.
-        #expect(fixtureOps.count == 80, "fixture must contain exactly 80 operations; got \(fixtureOps.count)")
-        #expect(liveTools.count == 80, "live catalog must contain exactly 80 tools; got \(liveTools.count)")
+        #expect(fixtureOps.count == 81, "fixture must contain exactly 81 operations; got \(fixtureOps.count)")
+        #expect(liveTools.count == 81, "live catalog must contain exactly 81 tools; got \(liveTools.count)")
 
         // Bidirectional name coverage: every fixture row must have a live tool, and
         // every live tool must have a fixture row.
@@ -1336,7 +1338,7 @@ struct AriaSurfaceV2Tests {
             info: .init(name: "aria-v2-test", version: "test"),
             tooling: tooling)
         let publicNames = try await listedToolNames(publicDispatcher)
-        #expect(publicNames.count == 80)
+        #expect(publicNames.count == 81)
         #expect(publicNames.contains("moot_dream"))
 
         let communityLog = V2CommunityHandlerInvocationLog()

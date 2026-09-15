@@ -77,8 +77,8 @@ struct EstateMaintenanceSinkTests {
         // for autonomic daemon diary entries that carry no vector.
         let entry = DiaryEntry(
             agentName: "maintenance-daemon",
-            entry: "maintenance cycle 1: audit-checked false, forbidden 0, "
-                + "decay 0, tombstone 0, fingerprint-drift 0, byReference-drift 0, "
+            entry: "maintenance cycle 1: audit-checked false, "
+                + "decay 0, tombstone 0, byReference-drift 0, "
                 + "proposed 0, suppressed 0",
             topic: "maintenance-cycle",
             wing: "wing_maintenance-daemon",

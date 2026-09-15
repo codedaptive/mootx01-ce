@@ -34,7 +34,7 @@ use crate::maintenance_decision::{self, AgedRow, AuditVerdict, Category, DriftRo
 
 /// One drawer's node-tree data for node-tree integrity invariant verification. The
 /// adapter populates these from the same active-drawer scan it uses for
-/// decay/forbidden checks; the daemon verifies I-NT-3 (non-empty
+/// the decay check; the daemon verifies I-NT-3 (non-empty
 /// parent_node_id) and sibling display-name consistency.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeInvariantRow {
@@ -72,8 +72,6 @@ pub struct MaintenanceCycleReport {
     pub proposals_emitted: Vec<ProposeFrameOut>,
     pub decay_candidates: usize,
     pub tombstone_candidates: usize,
-    pub forbidden_combinations: usize,
-    pub fingerprint_drifts: usize,
     pub by_reference_drifts: usize,
     pub suppressed_duplicates: usize,
     pub diary_entry: MaintenanceDiaryEntry,
@@ -118,23 +116,19 @@ pub struct MaintenancePolicy {
     /// Grace period past which a tombstoned drawer is an expunge candidate,
     /// in seconds (spec default 604_800 / 7 days).
     pub tombstone_grace_seconds: f64,
-    /// Per-room/wing fingerprint Hamming-distance drift fraction past which
-    /// a fingerprint-drift proposal is emitted (spec default 0.25).
-    pub fingerprint_drift_threshold: f32,
     /// LearnedReference source-drift threshold (spec default 0.25).
     pub by_reference_drift_threshold: f32,
 }
 
 impl Default for MaintenancePolicy {
     /// Spec defaults (NEURONKIT_SPEC § 3.2):
-    /// 300_000 / 300_000 / 30d / 7d / 0.25 / 0.25.
+    /// 300_000 / 300_000 / 30d / 7d / 0.25.
     fn default() -> Self {
         Self {
             tick_interval_ms: 300_000,
             audit_check_interval_ms: 300_000,
             decay_window_seconds: 2_592_000.0,
             tombstone_grace_seconds: 604_800.0,
-            fingerprint_drift_threshold: 0.25,
             by_reference_drift_threshold: 0.25,
         }
     }
@@ -247,14 +241,10 @@ pub struct QidPendingRow {
 pub struct MaintenanceScan {
     /// The audit verdict when the chain was checked this cycle, else `None`.
     pub audit: Option<AuditVerdict>,
-    /// Active drawers failing invariant I-3 (secret AND public).
-    pub forbidden_drawer_ids: Vec<String>,
     /// `(id, age_seconds)` for active drawers (decay scan).
     pub aged_active: Vec<AgedRow>,
     /// `(id, tombstone_age_seconds)` for tombstoned drawers.
     pub aged_tombstoned: Vec<AgedRow>,
-    /// `(scope_key, drift_fraction)` fingerprint observations.
-    pub fingerprint_drift: Vec<DriftRow>,
     /// `(reference_id, source_drift_fraction)` learned-reference observations.
     pub reference_drift: Vec<DriftRow>,
     /// Active drawers with enrichment-status `qid_pending` (provenance bits
@@ -340,15 +330,13 @@ const HEALTH_DUTY_CADENCE_SECS: f64 = 86_400.0;
 const QID_RETRY_SCAN_CAP: usize = 64;
 
 /// The proposal-kind tag for a decision category, mirroring the Swift
-/// actor's `ProposalKind` choices (audit/fingerprint via the `.other`
-/// escape hatch; decay+tombstone both `mutateCandidate`).
+/// actor's `ProposalKind` choices (audit via the `.other` escape hatch;
+/// decay+tombstone both `mutateCandidate`).
 fn kind_tag(category: Category) -> &'static str {
     match category {
         Category::AuditIntegrity => "other:audit_integrity",
-        Category::DisciplineViolation => "disciplineViolation",
         Category::Decay => "mutateCandidate",
         Category::Tombstone => "mutateCandidate",
-        Category::FingerprintDrift => "other:fingerprint_drift",
         Category::ByReferenceDrift => "byReferenceDrift",
     }
 }
@@ -381,6 +369,33 @@ pub struct MaintenanceDaemon {
     /// HLC physical-time watermark (epoch ms) for audit-log paging.
     /// 0 = start from the beginning. Mirrors Swift `performanceHealthWatermarkMs`.
     performance_health_watermark_ms: i64,
+}
+
+/// Which scan categories one maintenance cycle runs. The three standing
+/// signals (`maintenance-daemon`, `decay-sweep`, `by-reference-validity`)
+/// each drive one category on their own cadence; the audit-chain monitor,
+/// the QID-pending retry and the diary entry run on every cycle regardless.
+/// An unselected category is handed an empty input to the decision core, so
+/// it neither counts nor emits. Swift twin: `MaintenanceCategories` (OptionSet).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaintenanceCategories {
+    /// Tombstoned drawers past the expunge grace window.
+    pub tombstone: bool,
+    /// Active drawers past the decay window.
+    pub decay: bool,
+    /// LearnedReference rows whose source drift is at or above threshold.
+    pub by_reference: bool,
+}
+
+impl MaintenanceCategories {
+    /// Every category — what `pump` and `run_cycle` run.
+    pub const ALL: Self = Self { tombstone: true, decay: true, by_reference: true };
+    /// Only the tombstone category (the `maintenance-daemon` signal).
+    pub const TOMBSTONE: Self = Self { tombstone: true, decay: false, by_reference: false };
+    /// Only the decay category (the `decay-sweep` signal).
+    pub const DECAY: Self = Self { tombstone: false, decay: true, by_reference: false };
+    /// Only the by-reference category (the `by-reference-validity` signal).
+    pub const BY_REFERENCE: Self = Self { tombstone: false, decay: false, by_reference: true };
 }
 
 impl MaintenanceDaemon {
@@ -494,12 +509,8 @@ impl MaintenanceDaemon {
         }
     }
 
-    /// Run one maintenance cycle (steps 0-6) against the seams. Mirrors
-    /// `MaintenanceDaemon.runCycle`.
-    ///
-    /// DETERMINISM: `now_epoch_secs` is the injected timestamp the caller
-    /// supplies. Neither dreaming nor maintenance reads the system clock
-    /// internally; the clock is owned by the resident pump loop.
+    /// Run one maintenance cycle over every scan category. Mirrors Swift
+    /// `MaintenanceDaemon.triggerMaintenanceCycle(now:)`.
     pub fn run_cycle<R, S>(
         &mut self,
         now_epoch_secs: f64,
@@ -510,7 +521,39 @@ impl MaintenanceDaemon {
         R: MaintenanceSubstrateReader,
         S: MaintenanceProposalSink,
     {
+        self.run_cycle_scoped(now_epoch_secs, reader, sink, MaintenanceCategories::ALL)
+    }
+
+    /// Run one maintenance cycle (steps 0-6) against the seams over the
+    /// selected scan categories only. The standing signals call this with
+    /// one category each so every category runs on its own signal cadence;
+    /// an unselected category is handed an empty input to the decision core.
+    /// Mirrors Swift `MaintenanceDaemon.triggerMaintenanceCycle(now:categories:)`.
+    ///
+    /// DETERMINISM: `now_epoch_secs` is the injected timestamp the caller
+    /// supplies. Neither dreaming nor maintenance reads the system clock
+    /// internally; the clock is owned by the caller.
+    pub fn run_cycle_scoped<R, S>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+        categories: MaintenanceCategories,
+    ) -> MaintenanceCycleReport
+    where
+        R: MaintenanceSubstrateReader,
+        S: MaintenanceProposalSink,
+    {
+        // The reader seam returns one snapshot for every category; the
+        // per-category gate below is what keeps an unselected category out
+        // of the core (Swift reads each seam lazily, same observable result).
         let scan = reader.scan();
+        let aged_active: &[maintenance_decision::AgedRow] =
+            if categories.decay { &scan.aged_active } else { &[] };
+        let aged_tombstoned: &[maintenance_decision::AgedRow] =
+            if categories.tombstone { &scan.aged_tombstoned } else { &[] };
+        let reference_drift: &[maintenance_decision::DriftRow] =
+            if categories.by_reference { &scan.reference_drift } else { &[] };
 
         // ── Step 0: audit-chain integrity monitor cadence (§ 3.5) ──────────
         // The audit verdict is consumed only when DUE, tracked independently of
@@ -539,17 +582,14 @@ impl MaintenanceDaemon {
         }
         let audit_checked = audit_due;
 
-        // Delegate every decision to the pure core (steps 0-5).
+        // Delegate every decision to the pure core (steps 0-3).
         let outcome = maintenance_decision::decide(&maintenance_decision::Inputs {
             audit: audit_input,
-            forbidden_drawer_ids: &scan.forbidden_drawer_ids,
-            aged_active: &scan.aged_active,
+            aged_active,
             decay_window_seconds: self.policy.decay_window_seconds,
-            aged_tombstoned: &scan.aged_tombstoned,
+            aged_tombstoned,
             tombstone_grace_seconds: self.policy.tombstone_grace_seconds,
-            fingerprint_drift: &scan.fingerprint_drift,
-            fingerprint_drift_threshold: self.policy.fingerprint_drift_threshold,
-            reference_drift: &scan.reference_drift,
+            reference_drift,
             by_reference_drift_threshold: self.policy.by_reference_drift_threshold,
             already_proposed_keys: &self.proposed_keys,
         });
@@ -746,16 +786,14 @@ drawer {} (mdcc: {}); enrichment proposal filed for human/agent Q-ID assignment"
         let entry = MaintenanceDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
             entry: format!(
-                "maintenance cycle {}: audit-checked {}, forbidden {}, decay {}, \
-tombstone {}, fingerprint-drift {}, byReference-drift {}, proposed {}, suppressed {}, \
+                "maintenance cycle {}: audit-checked {}, decay {}, tombstone {}, \
+byReference-drift {}, proposed {}, suppressed {}, \
 qid-retried {}, qid-resolved {}, qid-proposed {}, qid-pending {}, \
 node-invariant-violations {}",
                 self.cycle_count,
                 audit_checked,
-                outcome.forbidden_combinations,
                 outcome.decay_candidates,
                 outcome.tombstone_candidates,
-                outcome.fingerprint_drifts,
                 outcome.by_reference_drifts,
                 proposals_emitted.len(),
                 outcome.suppressed_duplicates,
@@ -810,8 +848,6 @@ node-invariant-violations {}",
             proposals_emitted,
             decay_candidates: outcome.decay_candidates,
             tombstone_candidates: outcome.tombstone_candidates,
-            forbidden_combinations: outcome.forbidden_combinations,
-            fingerprint_drifts: outcome.fingerprint_drifts,
             by_reference_drifts: outcome.by_reference_drifts,
             suppressed_duplicates: outcome.suppressed_duplicates,
             diary_entry: entry,
@@ -881,30 +917,26 @@ mod tests {
                 first_broken_at_millis: None,
                 rejected_entry_count: 0,
             }),
-            forbidden_drawer_ids: vec!["d-forbidden".to_string()],
-            aged_active: vec![aged("d-old", 3_000_000.0), aged("d-forbidden", 1.0)],
+            aged_active: vec![aged("d-old", 3_000_000.0), aged("d-new", 1.0)],
             aged_tombstoned: vec![aged("d-tomb", 700_000.0)],
-            fingerprint_drift: vec![drift("wing_a/room_b", 0.5)],
             reference_drift: vec![drift("ref-1", 0.5)],
             qid_pending_drawers: vec![],
             node_invariant_rows: vec![],
         }
     }
 
-    // MC-1: all five scan categories emit (valid chain adds no audit
+    // MC-1: all three scan categories emit (valid chain adds no audit
     // proposal); the report counts and the single diary entry are assembled.
     #[test]
-    fn mc1_all_five_categories_emit_and_report() {
+    fn mc1_all_three_categories_emit_and_report() {
         let reader = FakeReader { scan: full_scan() };
         let mut sink = RecordingSink::default();
         let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
         let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
 
-        assert_eq!(report.proposals_emitted.len(), 5);
-        assert_eq!(report.forbidden_combinations, 1);
+        assert_eq!(report.proposals_emitted.len(), 3);
         assert_eq!(report.decay_candidates, 1);
         assert_eq!(report.tombstone_candidates, 1);
-        assert_eq!(report.fingerprint_drifts, 1);
         assert_eq!(report.by_reference_drifts, 1);
         assert!(report.audit_checked);
         // decay + tombstone both map to the mutateCandidate kind.
@@ -918,8 +950,8 @@ mod tests {
         assert_eq!(sink.diaries[0].wing, "wing_maintenance-daemon");
         assert_eq!(
             sink.diaries[0].entry,
-            "maintenance cycle 1: audit-checked true, forbidden 1, decay 1, \
-tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0, \
+            "maintenance cycle 1: audit-checked true, decay 1, tombstone 1, \
+byReference-drift 1, proposed 3, suppressed 0, \
 qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0, \
 node-invariant-violations 0"
         );
@@ -1034,7 +1066,7 @@ node-invariant-violations 0"
     }
 
     // MC-3: a second cycle over unchanged state proposes nothing new — all
-    // five suppressed by the B-4 idempotency memory; counts still report
+    // three suppressed by the B-4 idempotency memory; counts still report
     // the crossers; the diary's cycle index advances. (Swift B4.)
     #[test]
     fn mc3_second_cycle_suppresses_all() {
@@ -1043,14 +1075,14 @@ node-invariant-violations 0"
         let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
 
         let first = d.run_cycle(1_000_000.0, &reader, &mut sink);
-        assert_eq!(first.proposals_emitted.len(), 5);
+        assert_eq!(first.proposals_emitted.len(), 3);
 
         let second = d.run_cycle(1_300_000.0, &reader, &mut sink);
         assert_eq!(second.proposals_emitted.len(), 0);
-        assert_eq!(second.suppressed_duplicates, 5);
+        assert_eq!(second.suppressed_duplicates, 3);
         assert_eq!(second.decay_candidates, 1, "counts still report crossers");
         assert!(sink.diaries[1].entry.starts_with("maintenance cycle 2:"));
-        assert!(sink.diaries[1].entry.contains("proposed 0, suppressed 5"));
+        assert!(sink.diaries[1].entry.contains("proposed 0, suppressed 3"));
         assert!(sink.diaries[1].entry.contains("qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0, node-invariant-violations 0"));
     }
 
@@ -1065,7 +1097,6 @@ node-invariant-violations 0"
             audit_check_interval_ms: 120_000,
             decay_window_seconds: 1_296_000.0, // 15 days
             tombstone_grace_seconds: 302_400.0,  // 3.5 days
-            fingerprint_drift_threshold: 0.15,
             by_reference_drift_threshold: 0.10,
         };
         store.save_policy(custom);

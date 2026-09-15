@@ -105,6 +105,9 @@ pub enum Command {
     },
     /// §4.4 db <create|list|open|delete>
     Db(DbCommand),
+    /// preference <list|get|set> [--db <name>|<dir>/<name>] — the user-owned
+    /// estate switches (`EstatePreferenceKey`), each stored as `on`/`off`.
+    Preference(PreferenceCommand),
     /// §4.5 status
     Status,
     /// §4.6 query <verb> [--db <name>|<dir>/<name>] [--json] [-- <args...>]
@@ -183,6 +186,21 @@ pub enum DbCommand {
     List,
     Open { name: String },
     Delete { name: String, yes: bool },
+}
+
+/// `mootx01 preference` subcommands. Every variant carries `--db`: a
+/// registered estate name or `<dir>/<name>` for a transient estate; `None`
+/// means the catalog's active estate. `key` and `value` stay strings here —
+/// the command decodes them against `EstatePreferenceKey` /
+/// `EstatePreferenceValue` so the refusal message can name the offending text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreferenceCommand {
+    /// Print every preference key with its current value, in declaration order.
+    List { db: Option<String> },
+    /// Print one preference's current value.
+    Get { key: String, db: Option<String> },
+    /// Write `on` or `off` under one preference key and print the read-back.
+    Set { key: String, value: String, db: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +308,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "install" => parse_install(&mut it),
         "uninstall" => parse_uninstall(&mut it),
         "db" => parse_db(&mut it),
+        "preference" => parse_preference(&mut it),
         "status" => {
             if let Some(h) = expect_help_or_end(&mut it, "status")? {
                 return Ok(h);
@@ -620,6 +639,72 @@ fn parse_db(it: &mut Args) -> Result<Command, UsageError> {
     }
 }
 
+/// What the shared `preference` flag loop settled on: the estate selector,
+/// or a `--help` that short-circuits to the command help.
+enum PreferenceFlags {
+    Db(Option<String>),
+    Help,
+}
+
+/// The flag loop every `preference` subcommand shares: `--db <value>` picks
+/// the estate (same value shape as `serve --db`), `--help`/`-h` asks for the
+/// command help, anything else is a usage error naming `cmd`.
+fn parse_preference_flags(it: &mut Args, cmd: &str) -> Result<PreferenceFlags, UsageError> {
+    let mut db = None;
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => db = Some(take_value(it, "--db")?),
+            "--help" | "-h" => return Ok(PreferenceFlags::Help),
+            other => return Err(unexpected(other, cmd)),
+        }
+    }
+    Ok(PreferenceFlags::Db(db))
+}
+
+fn parse_preference(it: &mut Args) -> Result<Command, UsageError> {
+    let sub = match it.next() {
+        None => {
+            return Err(UsageError(
+                "Error: 'preference' requires a subcommand: list, get, set.".into(),
+            ))
+        }
+        Some(s) => s.as_str(),
+    };
+    match sub {
+        "list" => match parse_preference_flags(it, "preference list")? {
+            PreferenceFlags::Help => Ok(Command::HelpFor("preference")),
+            PreferenceFlags::Db(db) => Ok(Command::Preference(PreferenceCommand::List { db })),
+        },
+        "get" => {
+            let key = take_value(it, "preference get <key>")?;
+            if key == "--help" || key == "-h" {
+                return Ok(Command::HelpFor("preference"));
+            }
+            match parse_preference_flags(it, "preference get")? {
+                PreferenceFlags::Help => Ok(Command::HelpFor("preference")),
+                PreferenceFlags::Db(db) => Ok(Command::Preference(PreferenceCommand::Get { key, db })),
+            }
+        }
+        "set" => {
+            let key = take_value(it, "preference set <key> <on|off>")?;
+            if key == "--help" || key == "-h" {
+                return Ok(Command::HelpFor("preference"));
+            }
+            let value = take_value(it, "preference set <key> <on|off>")?;
+            match parse_preference_flags(it, "preference set")? {
+                PreferenceFlags::Help => Ok(Command::HelpFor("preference")),
+                PreferenceFlags::Db(db) => {
+                    Ok(Command::Preference(PreferenceCommand::Set { key, value, db }))
+                }
+            }
+        }
+        "--help" | "-h" => Ok(Command::HelpFor("preference")),
+        other => Err(UsageError(format!(
+            "Error: unknown preference subcommand '{other}'. Expected list, get, set."
+        ))),
+    }
+}
+
 fn parse_query(it: &mut Args) -> Result<Command, UsageError> {
     let verb = match it.next() {
         None => {
@@ -942,6 +1027,7 @@ fn help_for(s: &str) -> Result<&'static str, UsageError> {
         "install" => Ok("install"),
         "uninstall" => Ok("uninstall"),
         "db" => Ok("db"),
+        "preference" => Ok("preference"),
         "status" => Ok("status"),
         "query" => Ok("query"),
         "botlink" => Ok("botlink"),
@@ -978,6 +1064,7 @@ pub fn root_usage() -> &'static str {
      \x20 install                 Wire mootx01 into MCP clients.\n\
      \x20 uninstall               Remove mootx01 from MCP clients.\n\
      \x20 db                      Manage estate databases.\n\
+     \x20 preference              List or set an estate's on/off preferences (fact extraction, consolidation, ...).\n\
      \x20 status                  Show server state, active estate, and wired clients.\n\
      \x20 query                   Issue a single ARIA tool call (v1.0: MCP subprocess passthrough).\n\
      \x20 botlink                 One-shot MCP transport for cloud agents (machine JSON stdout, loopback only).\n\
@@ -1044,6 +1131,20 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \x20 list                                List the registered estates, active first.\n\
             \x20 open <name>                         Make a registered estate the active one (used by serve, drain, dream, query and status).\n\
             \x20 delete <name> [-y]                  Delete a registered estate: its files and its record. Cannot delete the active estate or 'default' (use uninstall --purge).".into(),
+        "preference" => "List or set an estate's on/off preferences.\n\
+            \n\
+            USAGE: mootx01 preference <list|get|set> [--db <name>|<dir>/<name>]\n\
+            \n\
+            Every preference is on unless set to off. A change takes effect without a daemon restart: each reader consults its key when it next fires.\n\
+            Keys: fact_extraction, consolidation, contradiction_sweep, cross_encoder_routing, maintenance, adaptive_recall.\n\
+            \n\
+            SUBCOMMANDS:\n\
+            \x20 list                                Print every preference key with its current value.\n\
+            \x20 get <key>                           Print one preference's current value.\n\
+            \x20 set <key> <on|off>                  Set one preference and print the value read back.\n\
+            \n\
+            OPTIONS:\n\
+            \x20 --db <name>|<dir>/<name>  Estate to act on: a registered name, or <dir>/<name> for a transient estate. Default: the active estate.".into(),
         "status" => "Show server state, active estate, and wired clients.\n\
             \n\
             USAGE: mootx01 status".into(),
