@@ -435,7 +435,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // forward the dense consensus, then NARROW the frontier so suppression
         // reshapes a tight, high-precision pool. The "find the exact answer" shape.
         case "precise":
-            var weights: [String: Float] = ["bm25": 1.5, "dense": 1.2]
+            let weights: [String: Float] = ["bm25": 1.5, "dense": 1.2]
             return RecallShape(laneWeights: weights, frontierK: frontierKFloor)
 
         // Concepts over keywords: amplify the distributional dense lanes
@@ -464,7 +464,7 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // (dense aggregate and 256-bit Hamming) so only literal/field signals
         // vote. The pure-lexical lane.
         case "lexical":
-            var weights: [String: Float] = ["bm25": 1.5, "dense": 0, "hamming": 0]
+            let weights: [String: Float] = ["bm25": 1.5, "dense": 0, "hamming": 0]
             return RecallShape(laneWeights: weights)
 
         // Binary-lane metric swap (W2.5 M1): identical fusion, but the
@@ -495,14 +495,14 @@ public struct RecallShape: Sendable, Codable, Equatable {
         // Suppress the literal lanes: ZERO bm25 + fdc so only the distributional
         // and structural lanes decide. The complement of `lexical`.
         case "not_lexical":
-            var weights: [String: Float] = ["bm25": 0]
+            let weights: [String: Float] = ["bm25": 0]
             return RecallShape(laneWeights: weights)
 
         // Loose association: amplify the two most "associative" distributional
         // signals (RI and NMF) and widen the frontier so loosely-related memories
         // surface. The free-association shape.
         case "associative":
-            var weights: [String: Float] = [DenseSignal.randomIndexing: 1.5]
+            let weights: [String: Float] = [DenseSignal.randomIndexing: 1.5]
             return RecallShape(laneWeights: weights, frontierK: frontierKCeiling)
 
         // Dense consensus: forward EVERY per-signal dense lane at full strength
