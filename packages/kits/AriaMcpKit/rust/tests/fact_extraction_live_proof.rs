@@ -99,9 +99,8 @@ fn live_proof_cycle_from_build_fact_extraction_cycle_files_at_least_one_fact() {
     //    uses in production; `config_dir` is injected so no real
     //    ~/Library/Application Support is read.
     // ----------------------------------------------------------------
-    let scratch_dir = Path::new(
-        "/Users/bob/devlop/benchmark-work/relocation-2026-09-13/fact-wire",
-    );
+    let scratch_root = std::env::temp_dir().join("mootx01-fact-extraction-live-proof");
+    let scratch_dir = scratch_root.as_path();
     std::fs::create_dir_all(scratch_dir).expect("create scratch dir");
 
     // Write config.json with all four fact_extraction paths.
