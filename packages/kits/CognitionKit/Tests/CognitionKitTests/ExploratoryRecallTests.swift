@@ -4,9 +4,8 @@
 // cookbook § 19.1). Seven tests mirroring CK-ER-1 through CK-ER-7 in
 // the Rust port's exploratory_recall_recipe.rs test suite.
 //
-// Layer discipline: estates are opened via GeniusLocusKit (the correct
-// composition layer) and tunnels are captured through the estate's
-// TunnelCaptureFrame API — no direct substrate access.
+// Layer discipline: estates are opened and tunnels captured through
+// GeniusLocusKit's handle-scoped verb surface — no direct substrate access.
 
 import Testing
 import Foundation
@@ -47,13 +46,12 @@ struct ExploratoryRecallTests {
         _ kit: GeniusLocusKit, _ handle: EstateHandle,
         src: String, tgt: String
     ) async throws {
-        let estate = try await kit.estate(for: handle)
         let frame = TunnelCaptureFrame(
             sourceWing: Self.wing, sourceRoom: "r",
             targetWing: Self.wing, targetRoom: "r",
             label: "relates", addedBy: "user",
             sourceDrawerId: src, targetDrawerId: tgt, kind: .references)
-        _ = try await estate.capture(frame)
+        _ = try await kit.captureTunnel(handle, frame)
     }
 
     // CK-ER-1: seed is always visited; seed is excluded from results;

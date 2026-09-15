@@ -30,13 +30,12 @@ struct ConstellationTests {
         _ kit: GeniusLocusKit, _ handle: EstateHandle,
         src: String, tgt: String
     ) async throws {
-        let estate = try await kit.estate(for: handle)
         let frame = TunnelCaptureFrame(
             sourceWing: Self.wing, sourceRoom: "r",
             targetWing: Self.wing, targetRoom: "r",
             label: "relates", addedBy: "user",
             sourceDrawerId: src, targetDrawerId: tgt, kind: .references)
-        _ = try await estate.capture(frame)
+        _ = try await kit.captureTunnel(handle, frame)
     }
 
     // CK-CS-1: two disjoint cliques resolve into two emergent communities.

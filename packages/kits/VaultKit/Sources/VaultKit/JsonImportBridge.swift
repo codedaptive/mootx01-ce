@@ -822,10 +822,8 @@ extension JsonImportBridge {
         let occupied = try await occupiedLineageIDs(handle: handle)
         try Self.assertStrictAppend(file: file, occupied: occupied)
 
-        // Fetch the estate actor once (tunnel capture + node-name
-        // resolution); declare the encode SPEED before any encode work is
-        // enqueued — SPEED only, the write strategy is fixed.
-        let estate = try await kit.estate(for: handle)
+        // Declare the encode SPEED before any encode work is enqueued — SPEED
+        // only, the write strategy is fixed.
         await kit.setEncodeSpeed(mode, for: handle)
 
         var report = JsonImportReport()
@@ -863,7 +861,8 @@ extension JsonImportBridge {
         for record in file.records {
             if let subject = record.subject {
                 let drawer = drawersByRecordID[record.id]!
-                _ = try await estate.setSubjectRepresentation(
+                _ = try await kit.setSubjectRepresentation(
+                    in: handle,
                     drawerId: drawer.id,
                     subject: subject,
                     pipelineVersion: DrawerStore.subjectPipelineImportV1,
@@ -899,7 +898,8 @@ extension JsonImportBridge {
         if !file.tunnels.isEmpty {
             // Endpoint wing/room names resolved once for all imported
             // drawers (batch-returned drawers carry node ids, not names).
-            let nodeNames = try await estate.resolveNodeNames(
+            let nodeNames = try await kit.resolveNodeNames(
+                handle,
                 parentNodeIds: file.records.compactMap { drawersByRecordID[$0.id]?.parentNodeId })
             for tunnel in file.tunnels {
                 let source = drawersByRecordID[tunnel.from]!
@@ -925,7 +925,7 @@ extension JsonImportBridge {
                     targetDrawerId: target.id,
                     kind: tunnel.kind,
                     originClass: .imported)
-                _ = try await estate.capture(tunnelFrame)
+                _ = try await kit.captureTunnel(handle, tunnelFrame)
                 report.tunnelsCreated += 1
             }
         }
