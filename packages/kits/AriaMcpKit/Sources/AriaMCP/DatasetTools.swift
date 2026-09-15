@@ -18,7 +18,7 @@ import AriaMCPWire
 //   PROVENANCE: .interface — dataset tools are user-facing CRUD operations that
 //   target a specific estate (they carry an optional estateID like all interface
 //   tools). withEstateID() is applied in the tool schema here, consistent with
-//   how coreMemoryTools() applies it in ToolProjection.
+//   the v2 catalog in AriaV2SelectedCatalog.
 //
 //   CSV SIZE CAP: csvPathSizeCapBytes = 100 MiB. Rationale: generous for
 //   substantial real-world datasets while bounding peak parse memory.

@@ -743,7 +743,7 @@ fn sticky_recall_auto_e2e_dispatcher() {
          (packager gate path — fails if sticky injection is reverted or \
          the seed memory is removed); got: {text2}"
     );
-    // The line shape is Swift `runMemorySearch`'s, byte for byte on this
+    // The line shape is moot_memory_search's, byte for byte on this
     // fixture: one hit gives margin 1.0, lane agreement from the union
     // profile, dense spread 1.0 (single-hit rule) and containment false
     // (the Rust port composes no answer text).

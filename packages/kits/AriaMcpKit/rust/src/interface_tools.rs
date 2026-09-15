@@ -308,7 +308,7 @@ fn strip_enum_prefix(reason: &str) -> &str {
 /// (see below). Scoring precedence: explicit door > explicit scoring > A1
 /// per-corpus DoorManifest (provisioned by the quality optimizer) > MatrixAware.
 /// Decodes the door/scoring arguments and routes through `recall_scored` with
-/// mode=unionBest, matching Swift `runMemorySearch`.
+/// mode=unionBest (the default for moot_memory_search).
 ///
 /// # ordering argument
 ///
@@ -422,7 +422,6 @@ pub fn structured_recall_row(
 /// identifiable as opaque; room and content are absent. Readers that filter
 /// on the marker skip opaque rows rather than surfacing them as "(no subject)"
 /// entries for content the caller cannot see.
-/// Mirrors Swift `ToolDispatcher.opaqueStructuredRow`.
 pub fn opaque_structured_row(id: &str) -> StructuredRow {
     StructuredRow {
         id: id.to_string(),
@@ -431,9 +430,6 @@ pub fn opaque_structured_row(id: &str) -> StructuredRow {
         subject: Some(crate::result_composer::NO_SUBJECT_MARKER.to_string()),
     }
 }
-
-/// Mirrors Swift `ToolDispatch.runMemorySearch` and `decodeOrdering`.
-
 
 /// `moot_memory_get` — fetch one memory drawer by id, in full.
 ///
