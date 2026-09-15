@@ -726,6 +726,7 @@ mod tests {
             lane_ranks: std::collections::HashMap::new(),
             query_lattice_anchor: None,
             cross_encoder: None,
+            route: None,
         }
     }
 
