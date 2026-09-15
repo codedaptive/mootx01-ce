@@ -35,6 +35,21 @@ import FactExtractionKit
 import FactExtractionKitProviders
 @testable import AriaResident
 
+// MARK: - Checkout-relative paths
+
+/// The repo root, resolved from this file's own location so the proof runs in
+/// whatever checkout it is built in rather than one named here.
+private let liveProofRepoRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()   // AriaResidentTests
+    .deletingLastPathComponent()   // Tests
+    .deletingLastPathComponent()   // AriaMcpKit
+    .deletingLastPathComponent()   // kits
+    .deletingLastPathComponent()   // packages
+    .deletingLastPathComponent()   // repo root
+
+private let liveProofWorkerPath = liveProofRepoRoot
+    .appendingPathComponent("apps/mootx01/.build/out/Products/Debug/mootx01").path
+
 // MARK: - Helpers
 
 /// Open a minimal in-memory GLK estate for the live proof.
@@ -75,9 +90,7 @@ struct FactExtractionLiveProofTests {
     /// The mootx01 debug binary hosts the CoreAI worker subprocess.
     /// The worker is invoked as a child process with "coreai-nuextract-worker"
     /// as its first argument; the mootx01 binary handles that subcommand.
-    static let workerExecutableURL = URL(
-        fileURLWithPath:
-            "/Users/bob/devlop/mootx01-ee-kgfact-swift-audit/apps/mootx01/.build/out/Products/Debug/mootx01")
+    static let workerExecutableURL = URL(fileURLWithPath: liveProofWorkerPath)
 
     // -----------------------------------------------------------------------
     // Live proof: file a drawer, activate the real CoreAI extractor, run one
@@ -95,8 +108,7 @@ struct FactExtractionLiveProofTests {
                     atPath: "/Volumes/llm_models/coreai/nuextract-tiny-v1.5-v11s-8k-b1-q8.aimodel")
                 && FileManager.default.fileExists(
                     atPath: "/Volumes/llm_models/gguf/nuextract-tiny-v1.5/tokenizer.json")
-                && FileManager.default.isExecutableFile(
-                    atPath: "/Users/bob/devlop/mootx01-ee-kgfact-swift-audit/apps/mootx01/.build/out/Products/Debug/mootx01"),
+                && FileManager.default.isExecutableFile(atPath: liveProofWorkerPath),
             "requires CoreAI assets on /Volumes/llm_models and the built mootx01 binary")
     )
     func liveProof_fileDrawer_runCycle_atLeastOneFact() async throws {
