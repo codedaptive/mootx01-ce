@@ -35,7 +35,7 @@ Enterprise Edition offerings.
 ## Standalone Apache-2.0 SDK repositories
 
 - https://github.com/codedaptive/moot-memory
-  LocusKit, VectorKit, and CorpusKit.
+  LocusKit, SynapseKit, and CorpusKit.
 - https://github.com/codedaptive/moot-semantics
   ARIA grammar, FDC lattice, and deterministic grounding.
 - https://github.com/codedaptive/moot-system
@@ -50,8 +50,8 @@ package in the MOOTx01 product repository belongs to a standalone SDK.
 
 - Manager/dashboard: apps/moot-mgr/README.md
 - Optional two-backend MCP bridge: apps/moot-bridge/README.md
-- Benchmark program: apps/moot-math-benchmark/README.md
-- Tracked benchmark data: apps/moot-math-benchmark/results/README.md
+- Benchmark program: apps/moot-math-speedtest/README.md
+- Tracked benchmark data: apps/moot-math-speedtest/results/README.md
 - Obsidian vault workflow: docs/start-here/OBSIDIAN_VAULT.md
 
 ## Contracts and evidence
