@@ -56,7 +56,8 @@ impl<'a> EstateV2MemoryService<'a> {
         Ok(V2Memory {
             memory_id,
             subject: drawer.subject.clone(),
-            distilled: Some(crate::v2::render::compact_text(&drawer.content)),
+            // Render only at projection, after authorization, not on subject/skim reads.
+            distilled: None,
             skim: None,
             content: Some(drawer.content.clone()),
             placement: Some(V2Placement { wing, room }),
