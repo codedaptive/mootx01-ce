@@ -497,7 +497,7 @@ pub fn tunnel_key(link: &TunnelLink) -> Option<String> {
 /// Vocabulary-growth-and-retrain seam for the auto-reindex step. Mirrors the
 /// Swift `CorpusGrowthProbe` protocol (NeuronKit/Sources/NeuronKit/Dreaming/CorpusGrowthProbe.swift).
 ///
-/// Distributional embedding providers (RI / PPMI / LSA / NMF) freeze their
+/// Distributional embedding providers (RI / LSA) freeze their
 /// vocabulary at training time. Terms ingested after the last retrain are
 /// OOV and produce zero-vectors, silently missing novel content in dense
 /// recall. The daemon calls this trait after each cycle to measure VOCABULARY
@@ -1865,7 +1865,7 @@ impl DreamingDaemon {
     ///
     /// Pass `hook: None` to skip the daily retrain (equivalent to calling
     /// `run_theta_cycle` directly). Pass `hnsw: None` to skip the graph rebuild.
-    #[cfg_attr(not(feature = "whole-record-dense"), allow(unused_variables))]
+    #[allow(unused_variables)]
     pub fn run_theta_cycle_with_hook_and_hnsw<R, S, H, M>(
         &mut self,
         now_epoch_secs: f64,
@@ -1893,9 +1893,8 @@ impl DreamingDaemon {
         // the old graph topology stale. Rebuild from the current float records
         // so `find_nearest_float` queries immediately use the new geometry.
         // Non-fatal on failure — falls back to exact scan.
-        // The float-index rebuild is a `whole-record-dense` duty; without the
-        // feature THETA has no graph to rebuild and `hnsw` is unused here.
-        #[cfg(feature = "whole-record-dense")]
+        // Rebuild the float index after every retrain; THETA skips this
+        // when `hnsw` is None (the caller did not wire a graph).
         if let Some(m) = hnsw {
             let _ = m.rebuild_float_index(now_epoch_secs);
         }
@@ -1946,9 +1945,7 @@ impl DreamingDaemon {
         // Mirrors Swift DreamingDaemon REM-BETA (reclaimSupersededGenerations
         // called alongside compactFloatIndexTombstones).
         if let Some(m) = hnsw {
-            // Tombstone compaction is a `whole-record-dense` duty; generation
-            // reclaim runs in every build (engram rows regenerate on a swap).
-            #[cfg(feature = "whole-record-dense")]
+            // Tombstone compaction and generation reclaim both run every BETA cycle.
             {
                 let _ = m.compact_float_index_tombstones(now_epoch_secs);
             }
@@ -3101,7 +3098,6 @@ mod tests {
         let ts = 1_755_000_000.0_f64;
 
         // Pre-condition: no calls yet.
-        #[cfg(feature = "whole-record-dense")]
         assert!(hnsw.compact_calls.is_empty(), "compact_calls must be empty before BETA");
         assert!(hnsw.reclaim_calls.is_empty(), "reclaim_calls must be empty before BETA");
 
@@ -3109,8 +3105,7 @@ mod tests {
         let _report = daemon.run_beta_cycle_with_hnsw(ts, Some(&mut hnsw));
 
         // Reclaim fires exactly once with the injected ts in every build; the
-        // tombstone compaction is a whole-record-dense duty.
-        #[cfg(feature = "whole-record-dense")]
+        // tombstone compaction runs on every BETA cycle.
         {
             assert_eq!(hnsw.compact_calls.len(), 1, "compact must fire once per BETA cycle");
             assert_eq!(

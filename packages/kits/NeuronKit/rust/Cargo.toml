@@ -75,10 +75,3 @@ persistence-kit = { path = "../../PersistenceKit/rust" }
 uuid = { version = "1", features = ["v4"] }
 
 [features]
-# whole-record-dense: compiles the whole-record float index duties of the
-# dreaming daemon (THETA rebuild, BETA compaction through the
-# HNSWGraphMaintenance seam) and the `dense-fused` reduction composition. Off
-# by default (ruling 2026-09-07): the span stage is the one dense provider and
-# no float rows are written. Twin of the Swift package trait `WholeRecordDense`
-# (MOOTX01_WHOLE_RECORD_DENSE). Enable with `cargo test --features whole-record-dense`.
-whole-record-dense = []

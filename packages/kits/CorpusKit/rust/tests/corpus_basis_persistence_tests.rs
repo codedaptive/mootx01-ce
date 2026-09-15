@@ -15,21 +15,14 @@
 //! exercise genuine primitive-form read-back (a TIMESTAMP column round-trips as
 //! a parsed `Timestamp(i64)` here), the same discipline as bundle_store_tests.
 
-// Every case persists an NMF or PPMI basis — dark dense families (contract sheet §13) —
-// so this file compiles only under the dense-families feature.
-// LSA-specific tests are additionally gated on the `lsa` feature (ruling 2026-09-07).
-#![cfg(feature = "dense-families")]
+// Tests basis persistence for RI and LSA providers.
 
 use corpus_kit::{
     BasisStore, Corpus, CorpusPathReason, EmbeddingModelConfig, PersistedBasis,
     TrainableEmbeddingBasis, TrainingPathDecision,
 };
-// FloatLaneOutcome is only used in lsa-gated tests (ruling 2026-09-07).
-#[cfg(feature = "lsa")]
 use corpus_kit::FloatLaneOutcome;
-use corpus_kit_providers::{NmfProvider, PpmiProvider, RandomIndexingProvider};
-// LsaProvider is dark unless the `lsa` feature is on (ruling 2026-09-07).
-#[cfg(feature = "lsa")]
+use corpus_kit_providers::RandomIndexingProvider;
 use corpus_kit_providers::LsaProvider;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use serde::Deserialize;
@@ -240,16 +233,13 @@ fn first_ingest_auto_trains_and_growth_retrains() {
 // ── §8 per-doc ingest non-degeneracy (REGRESSION — Kinsta-verified bug) ──
 // These helpers and tests construct LsaProvider; gated on `lsa` (ruling 2026-09-07).
 
-#[cfg(feature = "lsa")]
 fn lsa_car_doc(n: usize) -> String {
     format!("car engine fuel road vehicle drive speed combustion power auto document {n}")
 }
-#[cfg(feature = "lsa")]
 fn lsa_animal_doc(n: usize) -> String {
     format!("dog cat bark fetch run animal pet fur forest wild document {n}")
 }
 
-#[cfg(feature = "lsa")]
 fn fresh_lsa_corpus(storage: Arc<dyn Storage>) -> Corpus {
     Corpus::open(
         storage,
@@ -261,10 +251,8 @@ fn fresh_lsa_corpus(storage: Arc<dyn Storage>) -> Corpus {
 }
 
 /// REGRESSION TEST — fails on code with the degenerate-basis bug, passes after fix.
-/// Gated on `lsa` because it constructs LsaProvider (ruling 2026-09-07).
 ///
 /// Mirrors Swift `perDocIngestProducesNonDegenerateBasis`.
-#[cfg(feature = "lsa")]
 ///
 /// The old per-doc ingest path trained the LSA basis on the FIRST document only,
 /// producing a rank-1 SVD. All subsequent documents folded onto this 1-doc basis,
@@ -336,8 +324,6 @@ fn per_doc_ingest_produces_non_degenerate_basis() {
 // ── §9 reindex recovers a deliberately-degenerate basis ──
 
 /// Mirrors Swift `reindexRecoversDegenerateBasis`.
-/// Gated on `lsa` because it constructs LsaProvider (ruling 2026-09-07).
-#[cfg(feature = "lsa")]
 ///
 /// Flow:
 ///   1. Ingest 20 docs via ingest_batch (Phase 1b trains on the full corpus).
@@ -1138,175 +1124,6 @@ fn t4_ri_corrupted_term_row_detected() {
 // round-trip + finalize path yields byte-identical basis output to from-scratch
 // train_on_corpus.
 #[test]
-fn t5_ppmi_restore_finalize_byte_identity() {
-    // Scratch path: train_on_corpus (accumulate + finalize), serialize_basis.
-    let a = {
-        let mut p = PpmiProvider::new();
-        p.train_on_corpus(&DIGEST_CORPUS);
-        p.serialize_basis()
-    };
-
-    // Counts path: fold each doc via add_to_counts, serialize counts blob.
-    let counts_blob = {
-        let mut p = PpmiProvider::new();
-        for doc in &DIGEST_CORPUS {
-            p.add_to_counts(doc);
-        }
-        p.serialize_counts()
-    };
-
-    // Restore path: fresh provider, restore counts, finalize_from_counts, serialize_basis.
-    let b = {
-        let mut p = PpmiProvider::new();
-        p.restore_counts(&counts_blob).expect("T5: restore_counts must succeed");
-        let ok = p.finalize_from_counts();
-        assert!(ok, "T5: finalize_from_counts must return true for PPMI");
-        p.serialize_basis()
-    };
-
-    assert_eq!(
-        a, b,
-        "T5: PPMI restore→finalize basis bytes must be identical to from-scratch train_on_corpus"
-    );
-}
-
-// T6 — PPMI delta-fold extend
-//
-// Proves countsDeltaFoldSafe == true for PPMI: folding additional docs into
-// restored counts produces the same basis as training on the whole corpus at once.
-// Pattern precedent: PpmiBasisSerializationTests (Swift port).
-#[test]
-fn t6_ppmi_delta_fold_extend() {
-    // Scratch: train_on_corpus over ALL 8 docs.
-    let a = {
-        let mut p = PpmiProvider::new();
-        p.train_on_corpus(&DIGEST_CORPUS);
-        p.serialize_basis()
-    };
-
-    // Counts over first 5 docs only.
-    let counts_5 = {
-        let mut p = PpmiProvider::new();
-        for doc in &DIGEST_CORPUS[..5] {
-            p.add_to_counts(doc);
-        }
-        p.serialize_counts()
-    };
-
-    // Restore from 5-doc counts, then fold in the remaining 3 docs, then finalize.
-    let b = {
-        let mut p = PpmiProvider::new();
-        p.restore_counts(&counts_5).expect("T6: restore_counts must succeed");
-        for doc in &DIGEST_CORPUS[5..] {
-            p.add_to_counts(doc);
-        }
-        let ok = p.finalize_from_counts();
-        assert!(ok, "T6: finalize_from_counts must return true for PPMI");
-        p.serialize_basis()
-    };
-
-    assert_eq!(
-        a, b,
-        "T6: PPMI delta-fold (restore 5 docs + fold 3 more) must produce byte-identical basis \
-         to train_on_corpus over all 8 docs (countsDeltaFoldSafe commutativity property)"
-    );
-}
-
-// T7 — PPMI permuted fold order: must produce EQUAL bytes (commutativity)
-//
-// Asserts the commutativity property that countsDeltaFoldSafe declares.
-// PPMI accumulation is integer maps; order does not affect the result.
-#[test]
-fn t7_ppmi_permuted_fold_order_produces_same_bytes() {
-    // Scratch basis over canonical corpus order.
-    let a = {
-        let mut p = PpmiProvider::new();
-        p.train_on_corpus(&DIGEST_CORPUS);
-        p.serialize_basis()
-    };
-
-    // Counts folded in REVERSED corpus order.
-    let reversed_blob = {
-        let mut p = PpmiProvider::new();
-        for doc in DIGEST_CORPUS.iter().rev() {
-            p.add_to_counts(doc);
-        }
-        p.serialize_counts()
-    };
-
-    // Restore reversed counts, finalize, serialize.
-    let b = {
-        let mut p = PpmiProvider::new();
-        p.restore_counts(&reversed_blob).expect("T7: restore_counts must succeed");
-        p.finalize_from_counts();
-        p.serialize_basis()
-    };
-
-    // PPMI integer accumulation is commutative; finalize sorts keys by raw UTF-8
-    // bytes before iterating, so the derived PPMI vectors are fold-order-independent.
-    // Any inequality here is a regression in PPMI accumulation or serialization.
-    assert_eq!(
-        a, b,
-        "T7: PPMI reversed-fold basis bytes must equal canonical-order bytes (commutativity). \
-         Any inequality is a regression — PPMI accumulation must be order-independent."
-    );
-}
-
-// T8 — PPMI corrupted blob: restore must throw OR finalized bytes must differ
-//
-// A byte flip at roughly 3/4 of the blob (inside the map payload region, well
-// past magic / version / model-id / projection-seed header) is either caught by
-// the decoder or produces a different finalized basis. At least one must be true.
-#[test]
-fn t8_ppmi_corrupted_blob_detected() {
-    // Scratch basis (clean).
-    let a = {
-        let mut p = PpmiProvider::new();
-        p.train_on_corpus(&DIGEST_CORPUS);
-        p.serialize_basis()
-    };
-
-    // Build counts blob and corrupt one byte at 3/4 position.
-    let mut counts_blob = {
-        let mut p = PpmiProvider::new();
-        for doc in &DIGEST_CORPUS {
-            p.add_to_counts(doc);
-        }
-        p.serialize_counts()
-    };
-    let corrupt_pos = (counts_blob.len() * 3) / 4;
-    assert!(corrupt_pos > 20, "T8: blob must be long enough to corrupt past the header");
-    counts_blob[corrupt_pos] ^= 0xFF;
-
-    // Attempt to restore and finalize from the corrupted blob.
-    let result = {
-        let mut p = PpmiProvider::new();
-        p.restore_counts(&counts_blob).map(|()| {
-            p.finalize_from_counts();
-            p.serialize_basis()
-        })
-    };
-
-    match result {
-        Err(_) => {
-            // Decoder rejected the corrupt blob — expected behavior.
-        }
-        Ok(b) => {
-            // Decoder accepted (corruption landed in an integer field that decoded
-            // to a different but valid value). The finalized basis must differ.
-            assert_ne!(
-                a, b,
-                "T8: corrupted PPMI blob produced identical basis bytes — corruption was silently ignored"
-            );
-        }
-    }
-}
-
-// T9 — LSA counts-only unsupported: finalize_from_counts must return false
-//      and leave provider state unchanged.
-// Gated on `lsa` because it constructs LsaProvider (ruling 2026-09-07).
-#[cfg(feature = "lsa")]
-#[test]
 fn t9_lsa_counts_only_unsupported() {
     // Build an LSA provider with counts accumulated.
     let mut p = LsaProvider::default_new();
@@ -1337,34 +1154,3 @@ fn t9_lsa_counts_only_unsupported() {
     );
 }
 
-// T10 — NMF counts-only unsupported: same as T9.
-#[test]
-fn t10_nmf_counts_only_unsupported() {
-    // Build an NMF provider with counts accumulated.
-    let mut p = NmfProvider::default_new();
-    for doc in &DIGEST_CORPUS {
-        p.add_to_counts(doc);
-    }
-    let counts_blob = p.serialize_counts();
-
-    // Restore into a fresh provider.
-    let mut restored = NmfProvider::default_new();
-    restored.restore_counts(&counts_blob).expect("T10: restore_counts must succeed");
-
-    // Capture the pre-call basis (empty, untrained).
-    let pre = restored.serialize_basis();
-
-    // finalize_from_counts must return false: NMF lacks TF rows in its counts blob.
-    let ok = restored.finalize_from_counts();
-    assert!(
-        !ok,
-        "T10: NMF finalize_from_counts must return false (counts blob holds only vocab anchors, not TF rows)"
-    );
-
-    // State must be unchanged: serialize_basis must still equal the pre-call snapshot.
-    let post = restored.serialize_basis();
-    assert_eq!(
-        pre, post,
-        "T10: NMF finalize_from_counts must leave provider state unchanged when returning false"
-    );
-}

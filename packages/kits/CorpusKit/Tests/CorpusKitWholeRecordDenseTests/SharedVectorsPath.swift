@@ -4,7 +4,6 @@
 // is not visible from this target). Both resolve Tests/SharedVectors relative
 // to this source file.
 
-#if MOOTX01_WHOLE_RECORD_DENSE
 import Foundation
 
 /// Resolve a file in Tests/SharedVectors relative to this source file.
@@ -18,4 +17,3 @@ func sharedVectorsURL(for name: String) -> URL {
         .appendingPathComponent("SharedVectors")
         .appendingPathComponent(name)
 }
-#endif // MOOTX01_WHOLE_RECORD_DENSE
