@@ -3,7 +3,7 @@
 #
 # GATE 1: Developer-path leak guard.
 #   Blocks a commit that adds a reconstructable developer worktree path under
-#   docs_internal/. Covered forms: absolute /Users/<name>/... paths,
+#   the documentation tree. Covered forms: absolute /Users/<name>/... paths,
 #   prefix-substituted forms where a username segment immediately precedes a
 #   known home subdirectory (devlop, dev_docs, Library/Application Support),
 #   and tilde-user forms such as ~<username>/devlop where the tilde is followed
@@ -40,7 +40,7 @@
 #   transcript, the evidence file, or the guard script —
 #   scripts/dg01-guard-evidence-gen.sh,
 #   scripts/dg01-guard-evidence-transcript.txt,
-#   docs_internal/analysis/DG-01_GUARD_EVIDENCE.md, or
+#   docs/analysis/DG-01_GUARD_EVIDENCE.md, or
 #   scripts/check-docs-internal-paths.sh —
 #   this hook regenerates the transcript to a temporary file, diffs it
 #   against the committed copy, and blocks the commit if they differ.
@@ -162,7 +162,7 @@ fi
 # with #). Strip the header from the committed copy before diffing so both
 # sides contain only scenario output.
 if printf '%s\n' "$staged_files" | grep -qE \
-    '^(scripts/dg01-guard-evidence-gen\.sh|scripts/dg01-guard-evidence-transcript\.txt|docs_internal/analysis/DG-01_GUARD_EVIDENCE\.md|scripts/check-docs-internal-paths\.sh)$'
+    '^(scripts/dg01-guard-evidence-gen\.sh|scripts/dg01-guard-evidence-transcript\.txt|docs/analysis/DG-01_GUARD_EVIDENCE\.md|scripts/check-docs-internal-paths\.sh)$'
 then
   echo "pre-commit: transcript inputs staged — checking transcript currency"
   # Same index-versus-worktree hazard as GATE 2: regenerate from the STAGED
@@ -173,7 +173,7 @@ then
     scripts/dg01-guard-evidence-gen.sh \
     scripts/dg01-guard-evidence-transcript.txt \
     scripts/check-docs-internal-paths.sh \
-    docs_internal/analysis/DG-01_GUARD_EVIDENCE.md
+    docs/analysis/DG-01_GUARD_EVIDENCE.md
   _generated="$(mktemp)"
   _committed_body="$(mktemp)"
   # Defence in depth: clear every git plumbing variable before invoking the
