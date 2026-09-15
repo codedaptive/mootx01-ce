@@ -176,8 +176,7 @@ struct AriaV2DataMobilityDirectTests {
         let parsed = try #require(UUID(uuidString: projected))
         #expect(projected == parsed.uuidString.lowercased())
         #expect(map.count == 1)
-        let estate = try await kit.estate(for: handle)
-        let persistedIDs = try await estate.allDrawers().map(\.id)
+        let persistedIDs = try await kit.allDrawers(in: handle).map(\.id)
         #expect(persistedIDs.contains { UUID(uuidString: $0) == parsed },
                 "the returned canonical id_map UUID must identify a persisted drawer")
     }
@@ -223,8 +222,7 @@ struct AriaV2DataMobilityDirectTests {
             storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         defer { Task { try? await kit.close(handle) } }
 
-        let estate = try await kit.estate(for: handle)
-        let drawerIDsBefore = try await estate.allDrawers().map(\.id)
+        let drawerIDsBefore = try await kit.allDrawers(in: handle).map(\.id)
         try await kit.quiesce(handle)
         #expect(await kit.mountState(for: handle) == .quiesced)
         let mobility = AriaV2DataMobility(authority: AriaV2GeniusLocusDataMobilityAuthority(
@@ -241,7 +239,7 @@ struct AriaV2DataMobilityDirectTests {
             ]))
         #expect(result.objectValue?["isError"] == .bool(true),
                 "quiesced filing must fail at the selected typed transaction seam")
-        #expect(try await estate.allDrawers().map(\.id) == drawerIDsBefore,
+        #expect(try await kit.allDrawers(in: handle).map(\.id) == drawerIDsBefore,
                 "a refused filing must not leave a dataset handle")
     }
 

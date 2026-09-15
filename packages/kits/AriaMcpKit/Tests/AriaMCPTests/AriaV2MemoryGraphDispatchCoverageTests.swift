@@ -139,8 +139,7 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
 
         let fromID = try await fileMemory(dispatcher, content: "Quiesced source.", subject: "Quiesced source")
         let toID = try await fileMemory(dispatcher, content: "Quiesced target.", subject: "Quiesced target")
-        let estate = try await kit.estate(for: handle)
-        let tunnelsBefore = try await estate.allTunnels()
+        let tunnelsBefore = try await kit.allTunnels(in: handle)
         try await kit.quiesce(handle)
         #expect(await kit.mountState(for: handle) == .quiesced)
 
@@ -153,7 +152,7 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
             ]))
         #expect(result.objectValue?["isError"] == .bool(true),
                 "quiesced selected link must be refused by the typed capture verb")
-        #expect(try await estate.allTunnels().map(\.id) == tunnelsBefore.map(\.id),
+        #expect(try await kit.allTunnels(in: handle).map(\.id) == tunnelsBefore.map(\.id),
                 "a quiesced selected link must not reach tunnel storage")
     }
 

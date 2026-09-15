@@ -591,11 +591,10 @@ struct JsonImportWriteTests {
         // label for the unlabeled one. The unlabeled tunnel's source is
         // r0002, which omits `wing` and therefore lands in the estate
         // DEFAULT wing — resolve it rather than assuming a name.
-        let estate = try await kit.estate(for: handle)
         let r2 = try #require(drawers.first {
             $0.lineageID == DrawerMapping.lineageID(forStableSourceKey: "r0002")
         })
-        let r2Names = try await estate.resolveNodeNames(parentNodeIds: [r2.parentNodeId])
+        let r2Names = try await kit.resolveNodeNames(handle, parentNodeIds: [r2.parentNodeId])
         let defaultWingName = try #require(r2Names[r2.parentNodeId]?.wing)
 
         let benchmarkTunnels = try await kit.recallTunnels(handle, wing: "Benchmark")
@@ -646,8 +645,7 @@ struct JsonImportWriteTests {
         let r2 = try #require(drawers.first {
             $0.lineageID == DrawerMapping.lineageID(forStableSourceKey: "r0002")
         })
-        let estate = try await kit.estate(for: handle)
-        let names = try await estate.resolveNodeNames(parentNodeIds: [r2.parentNodeId])
+        let names = try await kit.resolveNodeNames(handle, parentNodeIds: [r2.parentNodeId])
         #expect(names[r2.parentNodeId]?.wing == "SeedWing")
     }
 

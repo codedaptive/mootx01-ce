@@ -288,12 +288,11 @@ struct MemoryGetTests {
         let restricted = try await seed("restricted far endpoint", room: "mg-disclosure",
             sensitivity: .restricted, in: handle, kit: kit)
 
-        // Build the Case 1/2 fixture through the estate directly: the v2 write
-        // verbs now gate on the caller's sensitivity ceiling and refuse a link
-        // whose target exceeds that ceiling, so moot_link_memories correctly
-        // refuses to file this tunnel without a grant.
-        let estate = try await kit.estate(for: handle)
-        _ = try await estate.capture(TunnelCaptureFrame(
+        // Build the Case 1/2 fixture through GLK's handle-scoped tunnel verb:
+        // moot_link_memories correctly refuses a target above the caller's
+        // sensitivity ceiling without a grant, while this fixture needs to
+        // preserve the restricted endpoint's filing stamp.
+        _ = try await kit.captureTunnel(handle, TunnelCaptureFrame(
             sourceWing: "Agentic Memory", sourceRoom: "mg-disclosure",
             targetWing: "Agentic Memory", targetRoom: "mg-disclosure",
             label: "relates", addedBy: "aria-mcp-tests",
@@ -351,20 +350,19 @@ struct MemoryGetTests {
         let sourceNormal = try await seed("source for line-802 gate", room: "mg-disclosure-802", in: handle, kit: kit)
         let targetNormal = try await seed("initially-normal far endpoint", room: "mg-disclosure-802", in: handle, kit: kit)
 
-        // Both endpoints are .normal when the tunnel is filed — the estate stamps
-        // the tunnel with .normal sensitivity (the max of the two normal endpoints).
-        _ = try await estate.capture(TunnelCaptureFrame(
+        // Both endpoints are .normal when the tunnel is filed — captureTunnel
+        // preserves the tunnel's .normal sensitivity stamp (the max of both endpoints).
+        _ = try await kit.captureTunnel(handle, TunnelCaptureFrame(
             sourceWing: "Agentic Memory", sourceRoom: "mg-disclosure-802",
             targetWing: "Agentic Memory", targetRoom: "mg-disclosure-802",
             label: "relates", addedBy: "aria-mcp-tests",
             sourceDrawerId: sourceNormal.id, targetDrawerId: targetNormal.id, kind: .references))
 
-        // Raise the far endpoint to .restricted through the estate. The v2
-        // moot_update_memory verb now gates on the caller's sensitivity ceiling
-        // and refuses a write whose target exceeds that ceiling; using the estate
-        // directly bypasses that gate because the fixture is building state, not
-        // exercising the write surface. The tunnel's own .normal stamp is unaffected.
-        try await estate.mutate(rowID: targetNormal.id, kind: .correctSensitivity(.restricted))
+        // Raise the far endpoint through GLK's handle-scoped mutation verb.
+        // The tunnel's own .normal sensitivity stamp is unaffected because
+        // nothing re-stamps it after creation.
+        try await kit.mutate(handle, MutateFrame(
+            rowID: targetNormal.id, kind: .correctSensitivity(.restricted)))
 
         // Revoke the Case 2 grant before querying — the test must run without
         // a live restricted ceiling so line 802 fires rather than the grant
@@ -431,24 +429,21 @@ struct MemoryGetTests {
             room: "mg-line780",
             in: handle, kit: kit)
 
-        // Build the fixture through the estate directly: the v2 write verbs now
-        // gate on the caller's sensitivity ceiling and refuse any endpoint above
-        // it, so moot_link_memories with a restricted source drawer is correctly
-        // refused and moot_update_memory on a restricted drawer is correctly refused.
-        // The tunnel is stamped .restricted (max of source .restricted and
-        // farEndpoint .normal) because both endpoints are at their filing
-        // sensitivity when the tunnel is captured.
-        let estate = try await kit.estate(for: handle)
-        _ = try await estate.capture(TunnelCaptureFrame(
+        // Build the fixture through GLK's handle-scoped tunnel verb. The tunnel
+        // is stamped .restricted (max of source .restricted and farEndpoint
+        // .normal) because both endpoints retain their filing sensitivity when
+        // captured.
+        _ = try await kit.captureTunnel(handle, TunnelCaptureFrame(
             sourceWing: "Agentic Memory", sourceRoom: "mg-line780",
             targetWing: "Agentic Memory", targetRoom: "mg-line780",
             label: "relates", addedBy: "aria-mcp-tests",
             sourceDrawerId: source.id, targetDrawerId: farEndpoint.id, kind: .references))
 
-        // Correct the source drawer's sensitivity to .normal through the estate.
-        // The tunnel's stamped .restricted sensitivity is unaffected — nothing
-        // re-stamps it after creation.
-        try await estate.mutate(rowID: source.id, kind: .correctSensitivity(.normal))
+        // Correct the source drawer through GLK's handle-scoped mutation verb.
+        // The tunnel's stamped .restricted sensitivity is unaffected because
+        // nothing re-stamps it after creation.
+        try await kit.mutate(handle, MutateFrame(
+            rowID: source.id, kind: .correctSensitivity(.normal)))
 
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
