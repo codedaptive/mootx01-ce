@@ -22,7 +22,7 @@ enum RecipeTools {
     /// THE EMPTY `filterChain` IS LOAD-BEARING, NOT AN ABSENT ARGUMENT.
     /// `BitmapEvaluator.insertDefaults` inserts `.sensitivityAtMost(.elevated)`
     /// so restricted/secret drawers never appear in the result.  Do NOT
-    /// substitute the frameless `estate.getDrawers(ids:hydrationLevel:)`.
+    /// substitute the frameless `kit.getDrawers(in: handle, ids:hydrationLevel:)`.
     ///
     /// `filterChain` carries the CALLER's filter when the tool surface
     /// accepts one (connected recall passes it so walk-reachable rows cannot
@@ -36,11 +36,11 @@ enum RecipeTools {
     /// (id visible, subject withheld) for absent ids, which keeps the gate
     /// an accurate containment boundary without changing result counts.
     static func structuredDrawersByID(
-        ids: [String], estate: Estate, filterChain: [Filter] = [],
+        ids: [String], kit: GeniusLocusKit, handle: EstateHandle, filterChain: [Filter] = [],
         hydrationLevel: HydrationLevel = .structured
     ) async throws -> [String: Drawer] {
         guard !ids.isEmpty else { return [:] }
-        let fetched = try await estate.getDrawers(
+        let fetched = try await kit.getDrawers(in: handle, 
             ids: ids,
             matchingFrame: RecallFrame(filterChain: filterChain, hydrationLevel: hydrationLevel),
             hydrationLevel: hydrationLevel)
