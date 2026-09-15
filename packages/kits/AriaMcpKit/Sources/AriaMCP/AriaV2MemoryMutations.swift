@@ -441,8 +441,7 @@ public struct AriaV2MemoryMutations: Sendable {
             // parentNodeId is available for placement without a second estate call.
             let source = try await gatedDrawer(request.fromID)
             let target = try await gatedDrawer(request.toID)
-            let estate = try await kit.estate(for: handle)
-            let names = try await estate.resolveNodeNames(parentNodeIds: [source.parentNodeId, target.parentNodeId])
+            let names = try await kit.resolveNodeNames(handle, parentNodeIds: [source.parentNodeId, target.parentNodeId])
             guard let sourcePlacement = names[source.parentNodeId], let targetPlacement = names[target.parentNodeId] else {
                 return unavailable("moot_link_memories")
             }
@@ -476,10 +475,9 @@ public struct AriaV2MemoryMutations: Sendable {
         try validateEstate(request.estateID)
         let tunnelID = id(request.tunnelID)
         do {
-            let estate = try await kit.estate(for: handle)
             var storedTunnel: Tunnel?
             for candidate in AriaV2ArgumentDecoder.storageIdentitySpellings(request.tunnelID) where storedTunnel == nil {
-                storedTunnel = try await estate.getTunnel(id: candidate)
+                storedTunnel = try await kit.getTunnel(in: handle, id: candidate)
             }
             // Two-part tunnel sensitivity gate (mirrors loadTunnels / visibleTunnels):
             // refuse when the tunnel's own sensitivity exceeds the ceiling, and refuse
@@ -495,7 +493,7 @@ public struct AriaV2MemoryMutations: Sendable {
                 }
                 let endpointIDs = [tunnel.sourceDrawerId, tunnel.targetDrawerId].compactMap { $0 }
                 if !endpointIDs.isEmpty {
-                    let endpoints = (try? await estate.getDrawers(ids: endpointIDs, hydrationLevel: .bitmapOnly)) ?? []
+                    let endpoints = (try? await kit.getDrawers(in: handle, ids: endpointIDs, hydrationLevel: .bitmapOnly)) ?? []
                     if endpoints.contains(where: {
                         $0.adjectiveSensitivity.rawValue > context.maximumSensitivity.rawValue ||
                             (context.exportableOnly && $0.exportability != .public_)
@@ -583,8 +581,7 @@ public struct AriaV2MemoryMutations: Sendable {
     /// helper.
     private func gatedDrawer(_ memoryID: UUID) async throws -> Drawer {
         let candidates = AriaV2ArgumentDecoder.storageIdentitySpellings(memoryID)
-        let estate = try await kit.estate(for: handle)
-        let rows = try await estate.getDrawers(ids: candidates, hydrationLevel: .structured)
+        let rows = try await kit.getDrawers(in: handle, ids: candidates, hydrationLevel: .structured)
         guard let match = rows.first(where: {
             AriaV2ArgumentDecoder.matchingStorageIdentity(memoryID, among: [$0.id]) != nil
         }) else {
