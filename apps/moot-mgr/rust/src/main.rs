@@ -18,6 +18,12 @@ use moot_mgr::manager_cli::{self, ManagerCommand};
 use moot_mgr::manager_config::ManagerConfig;
 use moot_mgr::resident_host::{ResidentHost, ResidentHostConfig};
 
+// Compile the app-layer native sink from its single source without pulling
+// the CLI and its command/dependency graph into the resident manager.
+#[path = "../../../mootx01/rust/src/core/platform_log.rs"]
+#[cfg(any(target_os = "windows", test))]
+mod platform_log;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match manager_cli::parse(&args) {
@@ -77,7 +83,10 @@ fn run_serve() -> ExitCode {
     let cadence = config.manager.retention_cadence_secs.max(1);
     let mut host = ResidentHost::new(config, now_secs());
     if let Err(e) = host.start() {
-        eprintln!("moot-mgr: cannot start resident host: {e:?}");
+        let message = format!("moot-mgr: cannot start resident host: {e:?}");
+        #[cfg(target_os = "windows")]
+        platform_log::report_fatal(&message);
+        eprintln!("{message}");
         return ExitCode::FAILURE;
     }
     eprintln!(

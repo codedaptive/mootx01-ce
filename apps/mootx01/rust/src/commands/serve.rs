@@ -103,7 +103,9 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
     let record: EstateRecord = match crate::core::estate_open::catalog(db.as_deref()) {
         Ok(catalog) => catalog.active().clone(),
         Err(e) => {
-            eprintln!("mootx01 serve fatal: {e}");
+            let message = format!("mootx01 serve fatal: {e}");
+            crate::core::platform_log::report_fatal(&message);
+            eprintln!("{message}");
             return ExitCode::from(exit::FAILURE);
         }
     };
@@ -157,7 +159,9 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
                 let open_posture = match EstateOpenPosture::resolve(&record) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("mootx01 serve fatal: estate encryption posture unavailable: {e}");
+                        let message = format!("mootx01 serve fatal: estate encryption posture unavailable: {e}");
+                        crate::core::platform_log::report_fatal(&message);
+                        eprintln!("{message}");
                         return ExitCode::from(exit::FAILURE);
                     }
                 };
@@ -251,9 +255,11 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
             // mutating server and forwarding would hand the client
             // exactly what the flag promised it would not get.
             if frozen {
-                eprintln!(
+                let message = format!(
                     "mootx01 serve fatal: a live resident already serves this estate on 127.0.0.1:{port}; a frozen serve cannot forward to a live daemon. Stop the resident or freeze a clone."
                 );
+                crate::core::platform_log::report_fatal(&message);
+                eprintln!("{message}");
                 return ExitCode::FAILURE;
             }
             eprintln!(
@@ -270,9 +276,11 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
     // daemon's autonomic governor is a background worker by definition.
     if frozen {
         if bound_port.is_some() {
-            eprintln!(
+            let message = format!(
                 "mootx01 serve fatal: --frozen / MOOTX01_FROZEN=1 cannot be combined with --http / MOOTX01_HTTP_PORT \u{2014} the resident daemon runs background workers. Serve a frozen estate over stdio."
             );
+            crate::core::platform_log::report_fatal(&message);
+            eprintln!("{message}");
             return ExitCode::FAILURE;
         }
         eprintln!("mootx01 serve: {}", EstatePosture::FROZEN_LOG_LINE);
