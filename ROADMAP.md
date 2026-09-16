@@ -184,6 +184,14 @@ Version 1.2 also extends the local-agent idea beyond supported Apple devices:
 - private research-result comparison;
 - no automatic destructive memory cleanup.
 
+Version 1.2 also plans an optional embedded question answering capability.
+Ask a question, and MOOTx01 retrieves the relevant memories, hands their text
+to a small model installed on your machine, and returns a concise answer with
+references to the memories it used, so the calling AI reads less source
+material. It ships only when a model answers above our accuracy bar and
+abstains when the evidence is thin or contradictory; until then, and whenever
+an answer cannot be trusted, you get the retrieved memories themselves.
+
 ## Version 1.3 — PGlite, pgMOOT, and Postgres anywhere
 
 MOOTx01 is local first. Version 1.3 brings that idea to two very different
