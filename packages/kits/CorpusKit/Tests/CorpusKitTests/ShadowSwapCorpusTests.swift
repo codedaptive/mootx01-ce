@@ -142,8 +142,8 @@ private func makeRIEngine(
        .serialized)
 struct ShadowSwapCorpusTests {
 
-    @Test("bounded reindex refuses cap+1 before training and retains serving generation")
-    func boundedReindexRetainsServingGeneration() async throws {
+    @Test("bounded reindex trains on a capped sample, embeds every document, and advances the generation")
+    func boundedReindexTrainsOnSampleAndEmbedsAll() async throws {
         let storage = try makeScratchStorage()
         let source = SimpleContentSource()
         for index in 1...3 {
@@ -156,12 +156,16 @@ struct ShadowSwapCorpusTests {
 
         let report = try await engine.reindex(
             now: now, budget: RetrainingBudget(maxDocuments: 2, maxSweeps: 30))
-        #expect(report.completedModelIDs.isEmpty)
-        #expect(report.skippedModelIDs["random-indexing-v1"] ==
-            .documentLimit(actual: 3, limit: 2))
-        #expect(await source.lastRequestedLimit == 3)
-        #expect(try await servingGeneration(storage: storage, modelID: "random-indexing-v1") == before)
-        #expect(try await vectorRowCount(storage: storage, modelID: "random-indexing-v1") == 3 * vectorLanesPerItem)
+        // The cap bounds the training sample (the source is asked for at most
+        // 2 ids), not the estate: training completes, every one of the 3
+        // documents is embedded, and the generation advances.
+        #expect(report.completedModelIDs == ["random-indexing-v1"])
+        #expect(report.skippedModelIDs.isEmpty)
+        #expect(await source.lastRequestedLimit == 2)
+        #expect(try await servingGeneration(storage: storage, modelID: "random-indexing-v1") != before)
+        // The prior generation's rows stay until vacuum, so the table holds at
+        // least the full re-embed of all 3 documents.
+        #expect(try await vectorRowCount(storage: storage, modelID: "random-indexing-v1") >= 3 * vectorLanesPerItem)
     }
 
     // ── c1: serving_generation advances across two reindex passes ─────────
