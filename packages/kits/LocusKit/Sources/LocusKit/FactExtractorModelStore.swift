@@ -56,9 +56,27 @@ public actor FactExtractorModelStore {
 
     public func upsert(_ row: FactExtractorModelRow) async throws {
         try Self.validate(row)
-        _ = try await storage.rowStore.upsert(
-            table: "fact_extractor_models",
-            values: [
+        _ = try await storage.transaction(isolation: .serializable) { txn in
+            let existing = try await txn.rowStore.query(
+                table: "fact_extractor_models",
+                where: .eq(Column(table: "fact_extractor_models", name: "recipe_id"), .text(row.recipeID)),
+                orderBy: [], limit: 1, offset: nil).first.map(Self.row(from:))
+            let invalidatesDebt = existing.map { previous in
+                previous.providerID != row.providerID
+                    || previous.modelID != row.modelID
+                    || previous.modelVersion != row.modelVersion
+                    || previous.schemaVersion != row.schemaVersion
+                    || previous.isActive != row.isActive
+            } ?? row.isActive
+
+            if row.isActive {
+                _ = try await txn.rowStore.update(
+                    table: "fact_extractor_models", values: ["is_active": .int(0)],
+                    where: .eq(Column(table: "fact_extractor_models", name: "is_active"), .int(1)))
+            }
+            _ = try await txn.rowStore.upsert(
+                table: "fact_extractor_models",
+                values: [
                 "recipe_id": .text(row.recipeID),
                 "provider_id": .text(row.providerID),
                 "model_id": .text(row.modelID),
@@ -69,8 +87,10 @@ public actor FactExtractorModelStore {
                 "maximum_facts_per_source": .int(Int64(row.maximumFactsPerSource)),
                 "is_active": .int(row.isActive ? 1 : 0),
                 "ext": .null,
-            ],
-            conflictColumns: ["recipe_id"])
+                ],
+                conflictColumns: ["recipe_id"])
+            return invalidatesDebt ? try await Self.clearExtractionDebt(in: txn.rowStore) : 0
+        }
     }
 
     /// Activating a recipe clears bit 28 on every carrier. Old KGFacts stay
@@ -93,23 +113,27 @@ public actor FactExtractorModelStore {
                 table: "fact_extractor_models", values: ["is_active": .int(1)],
                 where: .eq(Column(table: "fact_extractor_models", name: "recipe_id"), .text(recipeID)))
 
-            let carriers = try await txn.rowStore.query(
-                table: "drawers",
-                where: .bitmaskAll(Column(table: "drawers", name: "operationalBitmap"),
-                                   mask: DrawerFeatureFlags.factsExtracted.rawValue),
-                orderBy: [], limit: nil, offset: nil, columns: ["id", "operationalBitmap"])
-            var cleared = 0
-            for carrier in carriers {
-                guard case let .text(id) = carrier["id"] ?? .null else { continue }
-                let bitmap = Self.bitmap(carrier["operationalBitmap"])
-                cleared += try await txn.rowStore.update(
-                    table: "drawers",
-                    values: ["operationalBitmap": .bitmap(
-                        bitmap & ~DrawerFeatureFlags.factsExtracted.rawValue)],
-                    where: .eq(Column(table: "drawers", name: "id"), .text(id)))
-            }
-            return cleared
+            return try await Self.clearExtractionDebt(in: txn.rowStore)
         }
+    }
+
+    private static func clearExtractionDebt(in rowStore: any RowStore) async throws -> Int {
+        let carriers = try await rowStore.query(
+            table: "drawers",
+            where: .bitmaskAll(Column(table: "drawers", name: "operationalBitmap"),
+                               mask: DrawerFeatureFlags.factsExtracted.rawValue),
+            orderBy: [], limit: nil, offset: nil, columns: ["id", "operationalBitmap"])
+        var cleared = 0
+        for carrier in carriers {
+            guard case let .text(id) = carrier["id"] ?? .null else { continue }
+            let bitmap = Self.bitmap(carrier["operationalBitmap"])
+            cleared += try await rowStore.update(
+                table: "drawers",
+                values: ["operationalBitmap": .bitmap(
+                    bitmap & ~DrawerFeatureFlags.factsExtracted.rawValue)],
+                where: .eq(Column(table: "drawers", name: "id"), .text(id)))
+        }
+        return cleared
     }
 
     private static func validate(_ row: FactExtractorModelRow) throws {
