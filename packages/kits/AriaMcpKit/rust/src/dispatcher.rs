@@ -544,6 +544,10 @@ impl Dispatcher {
             JsonValue::Object(m) => m,
             _ => args_map.clone(),
         };
+        let mode_declaration = crate::v2::chain_registry::aria_v2_global_mode_declaration(
+            name,
+            &args_map,
+        );
 
         // Surface admission: decode the typed v2 request before frozen policy
         // is evaluated.  The decoder receives the transform-phase output so a
@@ -611,6 +615,7 @@ impl Dispatcher {
                 crate::v2::chain_registry::aria_v2_production_registrations(
                     request.clone(),
                     Arc::clone(&self.mode_session_state),
+                    mode_declaration,
                 )
             ).expect("chain construction fails only on programmer error in hard-coded registrations");
 
