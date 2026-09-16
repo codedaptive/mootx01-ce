@@ -790,7 +790,6 @@ fn execute_memory_mutation(
 struct SelectedVaultMobilityAuthority<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     now_millis: i64,
-    maximum_sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
 }
 
 impl crate::v2::data_mobility::V2DataMobilityAuthority for SelectedVaultMobilityAuthority<'_> {
@@ -833,6 +832,7 @@ impl crate::v2::data_mobility::V2DataMobilityAuthority for SelectedVaultMobility
 struct SelectedVaultMobilityLower<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     ledger: &'a crate::vault_tools::VaultJobLedger,
+    maximum_sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
 }
 
 impl SelectedVaultMobilityLower<'_> {
@@ -1044,11 +1044,14 @@ fn execute_vault_lifecycle(
         SelectedVaultMobilityAuthority {
             registry,
             now_millis,
+        },
+        SelectedVaultMobilityLower {
+            registry,
+            ledger,
             maximum_sensitivity: sensitivity_ledger
                 .ceiling_sensitivity(now_millis)
                 .unwrap_or(locus_kit::adjectives::AdjectiveSensitivity::Elevated),
         },
-        SelectedVaultMobilityLower { registry, ledger },
     );
     // return_id_map is read before the match consumes `request`. True only for
     // moot_json_import; every other lifecycle tool leaves the reply at one block.
@@ -3626,6 +3629,80 @@ mod tests {
             "correct_sensitivity raise on a normal row must succeed; got: {}", response
         );
     }
+
++    /// A row above the active sensitivity ceiling must not receive a reward
+    /// trace when its mutation is refused.
+    #[test]
+    fn sensitivity_write_gate_does_not_dereference_refused_row() {
+        use locus_kit::adjectives::AdjectiveSensitivity;
+        use locus_kit::drawer_operational::CaptureChannel;
+        use locus_kit::estate_types::LatticeAnchor;
+        use locus_kit::frames::{CaptureFrame, MutationKind};
+        use locus_kit::recall_trace_item::RecallTraceItem;
+        use crate::estate_posture::EstatePosture;
+        use crate::estate_registry::EstateRegistry;
+        use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+        use crate::v2::memory_mutations::V2WithdrawMemoryRequest;
+        use crate::v2::operation::V2OperationEffect;
+        use crate::v2::render::V2ResultMeta;
+
+        const NOW: i64 = 1_700_000_000_000_i64;
+        let registry = EstateRegistry::new_inmemory();
+        let handle = registry.default.handle.clone();
+        let id_str = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.capture(
+                &handle,
+                CaptureFrame::new(
+                    "sensitivity reward probe", CaptureChannel::Typed, "default",
+                    LatticeAnchor::udc("000"), "test", "test-embed-v1",
+                ),
+                NOW,
+            ).expect("capture").id.clone()
+        };
+        let uuid = Uuid::parse_str(&id_str).expect("parse uuid");
+        {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.insert_recall_traces(
+                &handle,
+                &[RecallTraceItem::new(
+                    "trace-sensitivity-reward", &id_str, "2023-11-14T22:13:20Z",
+                    Some(0.9), 0,
+                )],
+            ).expect("insert recall trace");
+        }
+        let ledger = SurfacedRecallLedger::new();
+        ledger.record_surfaced(&[id_str.clone(), id_str.to_uppercase()], NOW / 1000);
+        {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.mutate(
+                &handle, &id_str,
+                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted), None,
+            ).expect("raise sensitivity");
+        }
+
+        let response = execute_memory_mutation(
+            MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
+                memory_id: uuid, reason: None, estate_id: None,
+            }),
+            &registry,
+            &V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write),
+            NOW + 100,
+            EstatePosture::Live,
+            &ledger,
+            &crate::sensitivity_grant_ledger::SensitivityGrantLedger::new(),
+        ).expect("mutation refusal");
+
+        assert_eq!(response["isError"], true);
+        let probe_count = {
+            let coord = registry.coord.lock().expect("coord lock");
+            coord.mark_recall_used(
+                &handle, &id_str, "2000-01-01T00:00:00Z", "3000-01-01T00:00:00Z",
+            ).expect("probe mark_recall_used")
+        };
+        assert!(probe_count > 0, "above-ceiling refusal must not fire note_usage");
+    }
+
 
     /// Ledger ordering proof: an estate-admission refusal must NOT
     /// fire the reward-trace dereference write (note_usage / mark_recall_used).
