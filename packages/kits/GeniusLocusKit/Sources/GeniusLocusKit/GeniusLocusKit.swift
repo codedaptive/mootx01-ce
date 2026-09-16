@@ -331,6 +331,9 @@ public actor GeniusLocusKit {
     /// alongside the dreaming queue in `ensureDreamingQueue(for:)`.
     /// Dropped in `close` alongside `dreamingQueues`.
     internal var dreamingHLCs: [EstateHandle: HLCGenerator] = [:]
+    /// Duties this process has queued and not yet drained, per estate: the
+    /// single-occupancy guard for `enqueueDuty` (DutyQueue.swift).
+    internal var dutyQueued: [EstateHandle: Set<DutyKind>] = [:]
 
     // The encode QUEUE + DRAIN worker + per-estate HLC + at-least-once ingest
     // failure hook used to live here. They were relocated into CorpusKit: a

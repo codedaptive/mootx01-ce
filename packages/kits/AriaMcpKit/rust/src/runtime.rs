@@ -392,8 +392,17 @@ pub fn run(
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as i64;
+                    // The batch runs as a claimed QueueKit job (duty_queue):
+                    // the tick queued the owed duty, this cycle drains it.
                     match span_coord.lock() {
-                        Ok(mut coord) => coord.run_span_encode_batch(&span_handle, now_ms),
+                        Ok(mut coord) => {
+                            use genius_locus_kit::brain::duty_queue::DutyKind;
+                            coord.enqueue_duty(&span_handle, DutyKind::SpanEncode, now_ms).map_err(|e| format!("{e:?}"))?;
+                            coord
+                                .drain_duty(&span_handle, DutyKind::SpanEncode, now_ms)
+                                .map(|r| r.units_paid as i64)
+                                .map_err(|e| format!("{e:?}"))
+                        }
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
                 });
@@ -564,6 +573,27 @@ pub fn run(
             };
             let reconcile_coord = Arc::clone(&coord_for_hnsw);
             governor.run_loop_with_before_tick(move |governor, now| {
+                // Row-debt duties ride QueueKit (duty_queue): drain the duties
+                // no signal owns (queued on the previous tick), then queue what
+                // the estate owes now; the span and fact signals drain their
+                // own streams inside their cycles. Twin of Swift `signalTick`.
+                {
+                    let now_ms = now
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    match reconcile_coord.lock() {
+                        Ok(mut coord) => {
+                            if let Err(e) = coord.drain_duties(&handle_for_hnsw, now_ms) {
+                                eprintln!("AriaResident duty drain failed: {e:?}");
+                            }
+                            if let Err(e) = coord.enqueue_owed_duties(&handle_for_hnsw, now_ms) {
+                                eprintln!("AriaResident duty enqueue failed: {e:?}");
+                            }
+                        }
+                        Err(e) => eprintln!("AriaResident duty tick skipped — coordinator lock poisoned: {e}"),
+                    }
+                }
                 let reconciliation = (|| -> Result<(), String> {
                     let enabled = |key| {
                         read_estate_preference(&reconcile_coord, &handle_for_hnsw, key)
@@ -931,7 +961,6 @@ fn parse_max_body_bytes(banner: &str) -> usize {
 /// backlogs are cleared across successive ticks, matching the Swift resident's
 /// behaviour. Raising this constant is the only tuning lever — no runtime
 /// setting is needed.
-const FACT_EXTRACTION_BATCH_LIMIT: usize = 20;
 
 /// Prepare the signal-14 cycle for an already-built fact extractor.
 /// Each invocation re-reads the live estate preference: Off returns zero without
@@ -994,9 +1023,14 @@ pub fn activate_and_build_extraction_cycle(
                 coord
                     .activate_fact_extractor(Arc::clone(&extractor), &recipe_id, &fact_handle)
                     .map_err(|e| format!("{e:?}"))?;
+                // The batch runs as a claimed QueueKit job (duty_queue): the
+                // tick queued the owed duty, this cycle drains its stream.
                 coord
-                    .run_fact_extraction_batch(&fact_handle, FACT_EXTRACTION_BATCH_LIMIT, now_ms)
-                    .map(|r| r.facts_filed as i64)
+                    .enqueue_duty(&fact_handle, genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
+                    .map_err(|e| format!("{e:?}"))?;
+                coord
+                    .drain_duty(&fact_handle, genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
+                    .map(|r| r.units_paid as i64)
                     .map_err(|e| format!("{e:?}"))
             }
             Err(e) => Err(format!("coordinator lock poisoned: {e}")),

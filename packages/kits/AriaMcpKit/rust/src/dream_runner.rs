@@ -203,15 +203,28 @@ pub fn run_one_dreaming_cycle(
     // estate whose drawers still owe spans. The batch attempts encoder
     // activation itself when none is registered; with no model it is a clean
     // 0. Twin of the Swift dream command's span step.
+    // Both duties run as claimed QueueKit jobs (duty_queue): one 256-item
+    // subject batch and one span batch per pass, as the Swift finisher does.
     match reg.coord.lock() {
-        Ok(mut coord) => match coord.run_span_encode_batch(&handle, (now_epoch_secs * 1000.0) as i64) {
-            Ok(encoded) if encoded > 0 => {
-                eprintln!("mootx01 dream: span encode — {encoded} drawer(s) encoded")
+        Ok(mut coord) => {
+            use genius_locus_kit::brain::duty_queue::DutyKind;
+            let now_ms = (now_epoch_secs * 1000.0) as i64;
+            for kind in [DutyKind::SubjectBackfill, DutyKind::SpanEncode] {
+                if let Err(error) = coord.enqueue_duty(&handle, kind, now_ms) {
+                    eprintln!("mootx01 dream: {} enqueue error: {error:?}", kind.wire_name());
+                    continue;
+                }
+                match coord.drain_duty(&handle, kind, now_ms) {
+                    Ok(report) if report.jobs_run > 0 => eprintln!(
+                        "mootx01 dream: {} — {} paid, {} remaining",
+                        kind.wire_name(), report.units_paid, report.remaining_debt
+                    ),
+                    Ok(_) => {}
+                    Err(error) => eprintln!("mootx01 dream: {} error: {error:?}", kind.wire_name()),
+                }
             }
-            Ok(_) => {}
-            Err(error) => eprintln!("mootx01 dream: span encode error: {error}"),
-        },
-        Err(error) => eprintln!("mootx01 dream: span encode skipped — coordinator lock poisoned: {error}"),
+        }
+        Err(error) => eprintln!("mootx01 dream: duties skipped — coordinator lock poisoned: {error}"),
     }
 
     // The DrawerStore is the manifest-backed KV surface for policy persistence.
