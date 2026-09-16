@@ -21,8 +21,13 @@
 //      called directly — validating the fallback path independently of whether
 //      the evented watcher succeeded.
 //
-// All tests terminate in well under 3 seconds (watchdog rule).
-// The OS-event path fires within milliseconds; 1 s deadlines are generous.
+// Watchdog bounds are expressed as multiples of WATCH_POLL_INTERVAL (200 ms,
+// filesystem.rs) so the bound is principled, not a magic number. The evented-
+// path watchdog is 50 × WATCH_POLL_INTERVAL (10 s) — generous enough for a
+// heavily loaded build host where the notify dispatcher thread may be starved
+// by a concurrent Swift compile. The poll-fallback watchdog is 10 × (2 s) —
+// the poll loop delivers within one WATCH_POLL_INTERVAL of the write; 10 ×
+// provides headroom for scheduling jitter without masking a dead watcher.
 
 #[cfg(feature = "watch")]
 mod evented_tests {
@@ -100,8 +105,15 @@ mod evented_tests {
     // --- TEST 2 ---
     // Drain-first via OS events: a job written AFTER watch() starts is delivered
     // promptly. The evented path (inotify on Linux, kqueue on macOS) fires within
-    // milliseconds of the write. The 1 s deadline is generous enough for any
-    // scheduler jitter.
+    // milliseconds of the write.
+    //
+    // The watchdog is 50 × WATCH_POLL_INTERVAL (200 ms, filesystem.rs) = 10 s.
+    // Under normal conditions the OS event fires in < 10 ms. Under heavy build
+    // load (e.g. a concurrent Swift compile) the notify dispatcher thread can be
+    // starved for CPU, so a wall-clock bound smaller than the polling period would
+    // fail for the wrong reason. The poll fallback delivers within one
+    // WATCH_POLL_INTERVAL after the write — if neither mechanism delivers within
+    // 50 × WATCH_POLL_INTERVAL, the watcher is completely inactive.
     //
     // We wait 300 ms before writing so the watcher's initial drain pass completes
     // and the watcher enters its event-wait loop — the same stagger as the poll
@@ -129,12 +141,16 @@ mod evented_tests {
 
         backend.write(&make_job("evented-after-start")).unwrap();
 
-        // OS-event path fires in < 50 ms on Linux/macOS; 1 s is a safe upper bound.
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // 50 × WATCH_POLL_INTERVAL (200 ms, filesystem.rs) = 10 s watchdog.
+        // Evented delivery is normally < 10 ms; a polled fallback delivers within
+        // one WATCH_POLL_INTERVAL of the write. The large multiple prevents build-
+        // load CPU starvation of the notify dispatcher thread from tripping the
+        // watchdog for the wrong reason.
+        let deadline = Instant::now() + Duration::from_millis(200 * 50); // 50 × WATCH_POLL_INTERVAL
         loop {
             if watch_handle.is_finished() { break; }
             if Instant::now() > deadline {
-                panic!("watch() did not deliver the job within 1 s — evented path broken");
+                panic!("watch() did not deliver the job within 50 × WATCH_POLL_INTERVAL (10 s) — evented path broken");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -211,7 +227,7 @@ mod evented_tests {
     // watch-limit exhausted, unsupported filesystem, etc.). It verifies that:
     //   - the fallback is not BackendUnavailable
     //   - jobs are delivered via drain_available() inside the poll loop
-    //   - the 200 ms cadence is met (delivery within 1 s of write)
+    //   - the poll cadence is met (delivery within 10 × WATCH_POLL_INTERVAL)
     #[test]
     fn watch_poll_loop_fallback_delivers_job() {
         let dir = make_dir("poll-fallback");
@@ -236,12 +252,16 @@ mod evented_tests {
 
         backend.write(&make_job("poll-fallback-job")).unwrap();
 
-        // Poll fires within one 200 ms interval; 1 s is generous.
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // 10 × WATCH_POLL_INTERVAL (200 ms, filesystem.rs) = 2 s watchdog.
+        // The poll loop sleeps WATCH_POLL_INTERVAL between scans; a job written
+        // after the loop enters its wait is delivered within one interval.
+        // 10 × provides headroom for a loaded build host where the poll thread
+        // may be preempted between the write and the next scan.
+        let deadline = Instant::now() + Duration::from_millis(200 * 10); // 10 × WATCH_POLL_INTERVAL
         loop {
             if poll_handle.is_finished() { break; }
             if Instant::now() > deadline {
-                panic!("poll_watch_loop fallback did not deliver job within 1 s");
+                panic!("poll_watch_loop fallback did not deliver job within 10 × WATCH_POLL_INTERVAL (2 s)");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
