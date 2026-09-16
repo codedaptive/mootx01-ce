@@ -208,8 +208,12 @@ public extension GeniusLocusKit {
 
                 // Retire only machine-extracted facts. Manual/imported facts
                 // anchored to the same source remain independent assertions.
+                // A pass that accepted nothing retires nothing: unusable or
+                // ungrounded model output settles the source but is not
+                // evidence that the facts an earlier pass grounded are false.
                 for old in active where
-                    !old.extractionSchemaVersion.isEmpty && !desiredIDs.contains(old.id) {
+                    !groundedCandidates.isEmpty
+                    && !old.extractionSchemaVersion.isEmpty && !desiredIDs.contains(old.id) {
                     try await retireKGFact(handle, rowID: old.id, changedBy: "fact-extraction-duty", reason: nil, now: now)
                 }
 

@@ -1434,6 +1434,10 @@ pub struct EstateCoordinator {
     /// Duties this process has queued and not yet drained, per estate: the
     /// single-occupancy guard for `enqueue_duty` (brain/duty_queue.rs).
     pub(crate) duty_queued: crate::brain::duty_queue::DutyQueued,
+    /// Per-estate cursor of the subject backfill sweep into the ordered
+    /// debt: rows the producer could not settle stay owed, and the sweep
+    /// moves past them instead of re-reading them (`subject_backfill_sweep`).
+    pub(crate) subject_sweep_offsets: std::cell::RefCell<HashMap<EstateHandle, usize>>,
 
     // ── Recall degradation test seams (P1 fail-loud contract) ──
     //
@@ -1638,6 +1642,7 @@ impl EstateCoordinator {
             sync_engines: HashMap::new(),
             dreaming_queues: RefCell::new(HashMap::new()),
             duty_queued: std::cell::RefCell::new(HashMap::new()),
+            subject_sweep_offsets: std::cell::RefCell::new(HashMap::new()),
             // Test seams start clear; only `inject_*` methods set them.
             #[cfg(any(test, feature = "test-seams"))]
             test_force_vector_hamming_error: std::cell::RefCell::new(None),
@@ -2868,11 +2873,30 @@ impl EstateCoordinator {
             });
         };
         let estate = self.estate_for(handle)?;
-        let batch = estate
-            .subject_debt_batch_including(batch_limit, &producer.regenerates_pipelines())
-            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                reason: format!("subject_debt_batch: {e:?}"),
-            })?;
+        // The cursor: rows the producer could not settle (inadmissible
+        // output) stay in the debt predicate, so a sweep reading from the
+        // head every time would re-enumerate the same rows forever and the
+        // rest of the estate would never be reached. Read from the cursor,
+        // wrap to the head when the tail is exhausted, and advance past
+        // what this batch skipped (written rows leave the predicate).
+        let mut offset = self
+            .subject_sweep_offsets
+            .borrow()
+            .get(handle)
+            .copied()
+            .unwrap_or(0);
+        let read = |offset: usize| {
+            estate
+                .subject_debt_batch_including_from(batch_limit, &producer.regenerates_pipelines(), offset)
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("subject_debt_batch: {e:?}"),
+                })
+        };
+        let mut batch = read(offset)?;
+        if batch.is_empty() && offset > 0 {
+            offset = 0;
+            batch = read(0)?;
+        }
         let mut written = 0usize;
         let mut skipped = 0usize;
         for drawer in &batch {
@@ -2899,6 +2923,9 @@ impl EstateCoordinator {
                 })?;
             written += 1;
         }
+        self.subject_sweep_offsets
+            .borrow_mut()
+            .insert(handle.clone(), if batch.is_empty() { 0 } else { offset + skipped });
         let remaining = estate
             .count_subject_debt_including(&producer.regenerates_pipelines())
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
