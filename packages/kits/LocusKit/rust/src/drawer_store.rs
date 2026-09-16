@@ -532,6 +532,33 @@ pub trait DrawerStore: Send + Sync {
         Ok(all)
     }
 
+    /// Active non-dataset IDs in `(filed_at, content, id)` order, capped at
+    /// storage when the backend overrides this method. The default preserves
+    /// correctness for test stores; production stores forward to the projected
+    /// storage query in `DrawerStoreCore`.
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RowID>, LocusKitError> {
+        let mut rows: Vec<Drawer> = self
+            .all_drawers()?
+            .into_iter()
+            .filter(|d| d.tombstoned_at.is_none())
+            .filter(|d| !d.content.is_empty())
+            .filter(|d| d.content_kind() != crate::drawer_operational::ContentKind::Dataset)
+            .filter(|d| {
+                d.embedding_model_id
+                    != crate::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            a.filed_at.cmp(&b.filed_at)
+                .then(a.content.cmp(&b.content))
+                .then(a.id.cmp(&b.id))
+        });
+        Ok(rows.into_iter().take(limit).map(|d| d.id).collect())
+    }
+
     /// Bounded full-corpus scan ordered by `filed_at` ascending, projected to
     /// the structured (no-blob) column set — the `content` column is omitted
     /// so decoded drawers carry `content == ""`.
@@ -2426,6 +2453,12 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         limit: usize,
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().active_drawers_after(after_id, limit)
+    }
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RowID>, LocusKitError> {
+        self.as_ref().active_corpus_content_ids_limited(limit)
     }
     fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().all_drawers_bounded_desc(limit)
