@@ -259,38 +259,38 @@ struct RecallDiscriminationTests {
         )
     }
 
-    /// CONTRACT REVERSED 2026-09-11. This case previously asserted that the
-    /// discrimination line was suppressed unless `explain` was passed, on the
-    /// grounds that callers who do not ask for it should not pay the tokens.
-    ///
-    /// That premise does not hold: the line is emitted for LOW and MEDIUM
-    /// only — high, single-result and not-found are silent — so it is not a
-    /// per-call cost, it is a warning that appears exactly when the ranking is
-    /// too weak to rely on. Gating it meant the ordinary caller received a
-    /// poor ranking with nothing saying so, which is the one case where the
-    /// signal is worth its tokens. v1 emitted it on every search under the
-    /// same confidence condition.
-    ///
-    /// So the assertion is inverted rather than deleted: a weak result must
-    /// carry its warning WITHOUT `explain`.
-    @Test func weakDiscriminationIsReportedWithoutExplain() async throws {
+    /// Weak discrimination is still computed for every search, but its compact
+    /// text line is opt-in. The explain flag changes presentation only: the
+    /// structured result remains identical.
+    @Test func weakDiscriminationRequiresExplainOptIn() async throws {
         let dispatcher = try await makeDispatcher()
         try await fileMemory(content: "discrimination-gate-test content alpha", location: "lab", dispatcher: dispatcher)
         try await fileMemory(content: "discrimination-gate-test content beta", location: "lab", dispatcher: dispatcher)
         try await fileMemory(content: "discrimination-gate-test content gamma", location: "lab", dispatcher: dispatcher)
-        let result = try await dispatcher.dispatch(
+        let defaultResult = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
                 "query": .string("discrimination-gate-test"),
                 // explain omitted — default is false
             ])
         )
-        let text = result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        // Three near-identical rows give a weak, indiscriminate ranking, so
-        // the warning must be present even though explain was not passed.
-        #expect(
-            text.contains("discrimination:"),
-            "a weak ranking must warn the caller without needing explain; got: \(text.prefix(400))"
+        let explainedResult = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("discrimination-gate-test"),
+                "explain": .bool(true),
+            ])
         )
+        let defaultText = defaultResult.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        let explainedText = explainedResult.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+
+        #expect(!defaultText.contains("discrimination:"),
+                "default compact text must omit opt-in discrimination detail")
+        #expect(
+            explainedText.contains("discrimination:"),
+            "explain:true must render the computed discrimination; got: \(explainedText.prefix(400))"
+        )
+        #expect(defaultResult.objectValue?["structuredContent"] == explainedResult.objectValue?["structuredContent"],
+                "explain must not change the computed structured result")
     }
 }
