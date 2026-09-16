@@ -36,7 +36,7 @@ fn composite_version_is_sum_of_live_component_versions() {
         + corpus_kit::attached_declaration().version
         + genius_locus_kit::estate_format::EstateFormatStore::schema_declaration().version
         + 1  // grants
-        + genius_locus_kit::matrix::MatrixSnapshotStore::schema_declaration().version;
+        + genius_locus_kit::matrix::MatrixRecordStore::schema_declaration().version;
     assert_eq!(composite.version, expected);
 }
 

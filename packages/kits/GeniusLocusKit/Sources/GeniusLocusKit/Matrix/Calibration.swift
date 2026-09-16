@@ -77,6 +77,11 @@ public struct MatrixCalibrationCurve: Sendable, Equatable, Codable {
         )
     }
 
+    package init(buckets: [MatrixCalibrationBucket]) {
+        precondition(buckets.count == Self.bucketCount)
+        self.buckets = buckets
+    }
+
     /// Record one observation. Confidence is clamped to `[0, 1)` so
     /// the bucket index always lands in range.
     public mutating func record(
@@ -156,6 +161,11 @@ public struct MatrixCalibrationRegistry: Sendable, Equatable, Codable {
     public init() {
         self.curves = [:]
         self.updateTimestamps = [:]
+    }
+
+    package init(curves: [String: MatrixCalibrationCurve], updateTimestamps: [String: Double]) {
+        self.curves = curves
+        self.updateTimestamps = updateTimestamps
     }
 
     // MARK: Codable
