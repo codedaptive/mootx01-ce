@@ -65,6 +65,46 @@ struct DrawerStoreTests {
         #expect(loaded == d)
     }
 
+    @Test("active corpus IDs filter in storage before applying the deterministic limit")
+    func activeCorpusContentIDsAreFilteredBeforeLimit() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+
+        func drawer(
+            _ id: String,
+            content: String,
+            filedAt: TimeInterval,
+            embeddingModelID: String = "minilm-v6",
+            tombstonedAt: Date? = nil,
+            operationalBitmap: Int64 = 0
+        ) -> Drawer {
+            Drawer(
+                id: TestStorage.tid(id),
+                content: content,
+                parentNodeId: "test-parent",
+                addedBy: "bilby",
+                filedAt: t(filedAt),
+                embeddingModelID: embeddingModelID,
+                tombstonedAt: tombstonedAt,
+                operationalBitmap: operationalBitmap
+            )
+        }
+
+        let datasetKind = Int64(ContentKind.dataset.rawValue) << 6
+        let rows = [
+            drawer("empty", content: "", filedAt: 1),
+            drawer("dataset", content: "dataset", filedAt: 2, operationalBitmap: datasetKind),
+            drawer("tombstoned", content: "removed", filedAt: 3, tombstonedAt: t(4)),
+            drawer("beta", content: "beta", filedAt: 10),
+            drawer("alpha", content: "alpha", filedAt: 10),
+            drawer("gamma", content: "gamma", filedAt: 10),
+        ]
+        for row in rows { try await store.addDrawer(row) }
+
+        let ids = try await store.activeCorpusContentIDs(limit: 2)
+        #expect(ids == [TestStorage.tid("alpha"), TestStorage.tid("beta")])
+    }
+
     @Test("getDrawer returns nil for unknown id")
     func getDrawerMiss() async throws {
         let (store, url) = try await makeStore()
