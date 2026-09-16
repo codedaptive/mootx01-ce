@@ -44,7 +44,7 @@
 // ─────────────────────────────────────────────────────────────────
 
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
-use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
+use corpus_kit::{CorpusKitError, RetrainingBudget, RetrainingOutcome, RetrainingSkipReason, TrainableEmbeddingBasis};
 use crate::term_document_counts::TermDocumentCounts;
 use crate::reduced_vocab::{select_reduced_vocabulary, DEFAULT_REDUCED_VOCAB_CAP};
 use corpus_kit::default_keyword_tokens;
@@ -208,9 +208,17 @@ impl LsaProvider {
     ///   idf(t)     = ln((N + 1) / (df(t) + 1))
     ///   tfidf(t,d) = tf(t, d) * idf(t)
     pub fn finalize(&mut self) {
+        let _ = self.finalize_with_budget(&RetrainingBudget::unbounded());
+    }
+
+    pub fn finalize_with_budget(&mut self, budget: &RetrainingBudget) -> RetrainingOutcome {
         let n = self.counts.document_count();
+        if n > budget.max_documents {
+            return RetrainingOutcome::Skipped(RetrainingSkipReason::DocumentLimit { actual: n, limit: budget.max_documents });
+        }
+        if let Some(reason) = budget.cancellation_reason() { return RetrainingOutcome::Skipped(reason); }
         if n == 0 || self.counts.vocabulary_size() == 0 {
-            return;
+            return RetrainingOutcome::Completed;
         }
 
         // factor over a reduced, informative sub-vocabulary so the
@@ -228,7 +236,7 @@ impl LsaProvider {
         if vocab_size == 0 {
             self.vt = Vec::new();
             self.idf_weights = Vec::new();
-            return;
+            return RetrainingOutcome::Completed;
         }
 
         // IDF over REDUCED columns, using the full-corpus df, through the one
@@ -260,9 +268,13 @@ impl LsaProvider {
         // SVD on M (numDocs × vocabSize).
         // JacobiSvd requires m >= n. Handle both tall and wide orientations
         // identically to the Swift port.
+        let sweeps = self.svd_sweeps.min(budget.max_sweeps);
         let svd_result = if n >= vocab_size {
             // Tall or square: SVD on M directly.
-            JacobiSvd::decompose(&m, effective_rank, self.svd_sweeps)
+            match JacobiSvd::decompose_cancellable(&m, effective_rank, sweeps, || budget.cancellation_reason().is_some()) {
+                Ok(result) => result,
+                Err(_) => return RetrainingOutcome::Skipped(budget.cancellation_reason().unwrap_or(RetrainingSkipReason::Cancelled)),
+            }
         } else {
             // Wide matrix: SVD on Mᵀ (vocabSize × numDocs), then swap U/Vt.
             let mut mt: Vec<Vec<f32>> = vec![vec![0.0_f32; n]; vocab_size];
@@ -271,7 +283,10 @@ impl LsaProvider {
                     mt[j][i] = m[i][j];
                 }
             }
-            let transposed = JacobiSvd::decompose(&mt, effective_rank, self.svd_sweeps);
+            let transposed = match JacobiSvd::decompose_cancellable(&mt, effective_rank, sweeps, || budget.cancellation_reason().is_some()) {
+                Ok(result) => result,
+                Err(_) => return RetrainingOutcome::Skipped(budget.cancellation_reason().unwrap_or(RetrainingSkipReason::Cancelled)),
+            };
             let k = transposed.rank;
             // Swap: doc U = transposedSVD.Vt transposed (numDocs × k)
             let u_new: Vec<Vec<f32>> = (0..n)
@@ -307,6 +322,7 @@ impl LsaProvider {
                 float_vec_ops::l2_normalize(v)
             })
             .collect();
+        RetrainingOutcome::Completed
     }
 
     // MARK: Public accessors
@@ -620,6 +636,18 @@ impl TrainableEmbeddingBasis for LsaProvider {
             self.train(text);
         }
         self.finalize();
+    }
+
+    fn train_on_corpus_with_budget(&mut self, texts: &[&str], budget: &RetrainingBudget) -> RetrainingOutcome {
+        if texts.len() > budget.max_documents {
+            return RetrainingOutcome::Skipped(RetrainingSkipReason::DocumentLimit { actual: texts.len(), limit: budget.max_documents });
+        }
+        if let Some(reason) = budget.cancellation_reason() { return RetrainingOutcome::Skipped(reason); }
+        for text in texts {
+            if let Some(reason) = budget.cancellation_reason() { return RetrainingOutcome::Skipped(reason); }
+            self.train(text);
+        }
+        self.finalize_with_budget(budget)
     }
 
     /// Streamed-training page: the same per-document accumulation
