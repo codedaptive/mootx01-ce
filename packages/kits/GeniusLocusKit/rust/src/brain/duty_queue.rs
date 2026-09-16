@@ -97,13 +97,12 @@ pub struct DutyDrainReport {
     pub units_paid: usize,
     /// Debt still owed after the drain (0 for the retrain).
     pub remaining_debt: usize,
-    pub made_progress: bool,
 }
 
 /// Batch sizes per job. The subject figure matches the `dream` finisher
 /// (256 per pass); fact extraction keeps this port's Signal 14 batch (20).
 const DUTY_SUBJECT_BATCH: usize = 256;
-const DUTY_FACT_EXTRACTION_BATCH: usize = 16;
+const DUTY_FACT_EXTRACTION_BATCH: usize = 20;
 
 impl EstateCoordinator {
     fn duty_failure(kind: DutyKind, detail: String) -> GeniusLocusKitError {
@@ -118,10 +117,6 @@ impl EstateCoordinator {
     /// backfill has no cheap count and is paid on demand; the retrain is
     /// requested, not inferred.
     pub fn duty_debt(&self, handle: &EstateHandle, kind: DutyKind) -> Result<usize, GeniusLocusKitError> {
-        self.duty_debt_at(handle, kind, (queuekit::wall_now_secs() * 1000.0) as i64)
-    }
-
-    fn duty_debt_at(&self, handle: &EstateHandle, kind: DutyKind, now: i64) -> Result<usize, GeniusLocusKitError> {
         let estate = self.estate_for(handle)?;
         let count = match kind {
             DutyKind::SpanEncode => {
@@ -144,8 +139,7 @@ impl EstateCoordinator {
                 if !self.fact_extractors.contains_key(handle) {
                     return Ok(0);
                 }
-                let state = self.fact_extraction_work_status(handle, now)?;
-                return Ok(state.runnable + state.in_flight + state.retrying + state.blocked + state.rejected);
+                estate.count_fact_extraction_debt()
             }
             DutyKind::FactsBackfill | DutyKind::RetrainBasis => return Ok(0),
         };
@@ -160,10 +154,7 @@ impl EstateCoordinator {
         if self.duty_queued.borrow().get(handle).is_some_and(|set| set.contains(&kind)) {
             return Ok(false);
         }
-        if kind == DutyKind::FactExtraction && self.fact_extraction_work_status(handle, now_millis)?.runnable == 0 {
-            return Ok(false);
-        }
-        if kind.debt_driven() && self.duty_debt_at(handle, kind, now_millis)? == 0 {
+        if kind.debt_driven() && self.duty_debt(handle, kind)? == 0 {
             return Ok(false);
         }
         self.ensure_dreaming_queue(handle);
@@ -222,13 +213,6 @@ impl EstateCoordinator {
     /// with concerns and is returned after the reply so the queue never holds
     /// a job the process has given up on.
     pub fn drain_duty(&mut self, handle: &EstateHandle, kind: DutyKind, now_millis: i64) -> Result<DutyDrainReport, GeniusLocusKitError> {
-        let extraction = if kind == DutyKind::FactExtraction {
-            self.prepare_fact_extraction_batch(handle, DUTY_FACT_EXTRACTION_BATCH, now_millis)?
-        } else { None };
-        if kind == DutyKind::FactExtraction && extraction.is_none() {
-            return Ok(DutyDrainReport { kind, jobs_run: 0, units_paid: 0,
-                remaining_debt: self.duty_debt_at(handle, kind, now_millis)?, made_progress: false });
-        }
         self.ensure_dreaming_queue(handle);
         let batch = {
             let map = self.dreaming_queues.borrow();
@@ -247,13 +231,8 @@ impl EstateCoordinator {
         // existed in this process) are paid by ONE batch, not one batch each.
         let mut jobs_run = 0usize;
         let mut units_paid = 0usize;
-        let mut advanced = false;
         if !batch.is_empty() {
-            let result = if kind == DutyKind::FactExtraction {
-                extraction.expect("prepared extraction").run()
-                    .map(|result| { advanced = result.made_progress; result.completed_sources })
-            } else { self.run_duty_batch(handle, kind, now_millis).map(|units| { advanced = units > 0; units }) };
-            match result {
+            match self.run_duty_batch(handle, kind, now_millis) {
                 Ok(paid) => {
                     units_paid = paid;
                     for (job, _session) in &batch {
@@ -274,13 +253,13 @@ impl EstateCoordinator {
                 }
             }
         }
-        let remaining = self.duty_debt_at(handle, kind, now_millis)?;
+        let remaining = self.duty_debt(handle, kind)?;
         // Carry the work forward: a job that paid something and left debt
         // queues the next batch; a job that paid nothing does not loop.
-        if jobs_run > 0 && advanced && remaining > 0 {
+        if jobs_run > 0 && units_paid > 0 && remaining > 0 {
             self.enqueue_duty(handle, kind, now_millis)?;
         }
-        Ok(DutyDrainReport { kind, jobs_run, units_paid, remaining_debt: remaining, made_progress: advanced })
+        Ok(DutyDrainReport { kind, jobs_run, units_paid, remaining_debt: remaining })
     }
 
     /// Claim the jobs on `kind`'s stream without running them, for a caller
@@ -337,7 +316,7 @@ impl EstateCoordinator {
             self.enqueue_duty(handle, kind, now_millis)?;
             let report = self.drain_duty(handle, kind, now_millis)?;
             total += report.units_paid;
-            if report.jobs_run == 0 || !report.made_progress {
+            if report.jobs_run == 0 || report.units_paid == 0 {
                 return Ok(total);
             }
             if !kind.debt_driven() || report.remaining_debt == 0 {
