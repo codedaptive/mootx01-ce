@@ -266,47 +266,28 @@ pub(crate) fn data_inventory(
     Some(parts.join(", "))
 }
 
-/// Return the smallest set of directories covering the configuration and
-/// every existing registered estate. This collapses in-tree estates and any
-/// other overlap so a descendant is never moved after its ancestor.
-fn data_trash_targets(configuration: &Path, registered_databases: &[PathBuf]) -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = registered_databases
+/// Return every existing external owned file followed by the controlled
+/// configuration directory. Paths are deduplicated without canonicalising
+/// symlinks: the catalog-owned directory entry is the deletion boundary.
+fn data_trash_targets(configuration: &Path, registered_estate_files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut targets: Vec<PathBuf> = registered_estate_files
         .iter()
-        .filter(|database| database.exists())
-        .filter_map(|database| database.parent().map(Path::to_path_buf))
+        .filter(|file| file.exists() && !file.starts_with(configuration))
+        .cloned()
         .collect();
+    targets.sort();
+    targets.dedup();
     if configuration.exists() {
-        candidates.push(configuration.to_path_buf());
-    }
-    for candidate in &mut candidates {
-        if let Ok(canonical) = candidate.canonicalize() {
-            *candidate = canonical;
-        }
-    }
-    candidates.sort_by(|left, right| {
-        left.components()
-            .count()
-            .cmp(&right.components().count())
-            .then_with(|| left.cmp(right))
-    });
-    candidates.dedup();
-
-    let configuration = configuration
-        .canonicalize()
-        .unwrap_or_else(|_| configuration.to_path_buf());
-    let mut targets: Vec<PathBuf> = Vec::new();
-    for candidate in candidates {
-        if candidate != configuration
-            && !candidate.starts_with(&configuration)
-            && !targets.iter().any(|ancestor| candidate.starts_with(ancestor))
-        {
-            targets.push(candidate);
-        }
-    }
-    if configuration.exists() && !targets.iter().any(|ancestor| configuration.starts_with(ancestor)) {
-        targets.push(configuration);
+        targets.push(configuration.to_path_buf());
     }
     targets
+}
+
+fn external_estate_files(configuration: &Path, registered_estate_files: &[PathBuf]) -> Vec<PathBuf> {
+    data_trash_targets(configuration, registered_estate_files)
+        .into_iter()
+        .filter(|target| target != configuration)
+        .collect()
 }
 
 /// Offer/confirm/trash every registered estate and the configuration
@@ -328,6 +309,11 @@ fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
         .filter(|r| r.name != EstateCatalog::DEFAULT_NAME)
         .map(|r| r.database_path())
         .collect();
+    let registered_estate_files: Vec<PathBuf> = records
+        .iter()
+        .flat_map(crate::commands::install::replaceable_estate_files)
+        .collect();
+    let external_estate_files = external_estate_files(&data, &registered_estate_files);
     let Some(inventory) = data_inventory(default_database.as_deref(), &named_databases, &data) else {
         return ExitCode::from(exit::OK);
     };
@@ -339,6 +325,7 @@ fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
         || {
             println!("\nYour data is still in place at {}:", data.display());
             println!("  {inventory}");
+            print_external_estate_files(&external_estate_files);
             print!("Remove it too? [y/N]: ");
             let _ = io::stdout().flush();
             let mut line = String::new();
@@ -347,6 +334,7 @@ fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
         },
         || {
             println!("WARNING: this DESTROYS all MOOTx01 memory data ({inventory}).");
+            print_external_estate_files(&external_estate_files);
             println!("It will be moved to {} (recoverable until you empty it).", trash_name());
             print!("Type 'yes' to confirm: ");
             let _ = io::stdout().flush();
@@ -365,8 +353,7 @@ fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
             ExitCode::from(exit::FAILURE)
         }
         DataDecision::Trash => {
-            let registered_databases: Vec<PathBuf> = records.iter().map(|r| r.database_path()).collect();
-            let targets = data_trash_targets(&data, &registered_databases);
+            let targets = data_trash_targets(&data, &registered_estate_files);
             let result = targets.iter().try_for_each(trash::delete);
             match result {
             Ok(()) => {
@@ -383,6 +370,16 @@ fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
             }
             }
         }
+    }
+}
+
+fn print_external_estate_files(files: &[PathBuf]) {
+    if files.is_empty() {
+        return;
+    }
+    println!("  External registered estate files:");
+    for file in files {
+        println!("    {}", file.display());
     }
 }
 
@@ -732,28 +729,44 @@ mod tests {
     }
 
     #[test]
-    fn trash_targets_include_external_registered_estates_and_collapse_in_tree_estates() {
+    fn trash_targets_include_external_owned_files_and_preserve_unrelated_siblings() {
         let data = tmp_home("trash-targets");
         let external = tmp_home("trash-targets-external");
         let in_tree = data.join("databases").join("default").join("estate.sqlite");
         let external_db = external.join("work").join("estate.sqlite");
+        let external_wal = external.join("work").join("estate.sqlite-wal");
+        let sentinel = external.join("work").join("unrelated.txt");
         let absent_external_db = external.join("absent").join("estate.sqlite");
-        for database in [&in_tree, &external_db] {
-            std::fs::create_dir_all(database.parent().unwrap()).unwrap();
-            std::fs::write(database, b"x").unwrap();
+        for file in [&in_tree, &external_db, &external_wal, &sentinel] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"x").unwrap();
         }
 
         let targets = data_trash_targets(
             &data,
-            &[in_tree, external_db.clone(), external_db.clone(), absent_external_db],
+            &[
+                in_tree,
+                external_db.clone(),
+                external_wal.clone(),
+                external_db.clone(),
+                absent_external_db,
+            ],
         );
         assert_eq!(
             targets.iter().cloned().collect::<std::collections::HashSet<_>>(),
-            [data.canonicalize().unwrap(), external_db.parent().unwrap().canonicalize().unwrap()]
+            [data.clone(), external_db.clone(), external_wal.clone()]
                 .into_iter()
                 .collect()
         );
-        assert_eq!(targets.last(), Some(&data.canonicalize().unwrap()), "catalog moves last");
+        assert_eq!(targets.last(), Some(&data), "catalog moves last");
+        for target in &targets {
+            if target == &data {
+                continue;
+            }
+            std::fs::remove_file(target).unwrap();
+        }
+        assert!(sentinel.exists(), "unrelated sibling files must survive purge");
+        assert!(sentinel.parent().unwrap().exists(), "user-controlled parent directory must survive");
 
         let _ = std::fs::remove_dir_all(&data);
         let _ = std::fs::remove_dir_all(&external);
