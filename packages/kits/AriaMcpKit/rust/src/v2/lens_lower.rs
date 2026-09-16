@@ -424,15 +424,13 @@ impl CoordinatorRecallLensLower {
         // directly.  It intentionally never calls the v1 lens dispatcher or
         // reparses its rendered report.
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
-        // COUNT FIRST, THEN WITHHOLD. Filtering by sensitivity before counting
-        // makes a restricted contradiction vanish from the total, so an estate
-        // with three contradictions reports one and reads as more consistent
-        // than it is. For a contradiction lens the count IS the product.
-        // Restricted tunnel rows are omitted from the emitted set; only the
-        // tally is complete. Endpoint ids within kept (Normal/Elevated) tunnel
+        // Restrict the population before deriving rows or aggregates. Counts
+        // are part of the product, so counting protected rows would disclose
+        // their existence even when their contents remain redacted. Endpoint
+        // ids within kept (Normal/Elevated) tunnel
         // rows are always emitted — an id is not body-derived content
         // (WITHHELD-ID-ONLY = a).
-        let all_contradictions = coordinator
+        let tunnels = coordinator
             .all_tunnels(&admission.estate_handle)
             .map_err(|_| ())?
             .into_iter()
@@ -440,14 +438,10 @@ impl CoordinatorRecallLensLower {
                 tunnel.kind == TunnelKind::Contradicts
                     && tunnel.tombstoned_at.is_none()
                     && matches!(tunnel.lifecycle(), TunnelLifecycle::Active | TunnelLifecycle::Proposed)
+                    && tunnel.adjective_sensitivity().is_bulk_exportable()
             })
             .collect::<Vec<_>>();
-        let total_contradiction_count = all_contradictions.len() as i64;
-        let tunnels = all_contradictions
-            .into_iter()
-            .filter(|tunnel| tunnel.adjective_sensitivity().is_bulk_exportable())
-            .collect::<Vec<_>>();
-        let withheld_contradiction_count = total_contradiction_count - tunnels.len() as i64;
+        let total_contradiction_count = tunnels.len() as i64;
         let emitted_tunnels = tunnels.iter().take(50).collect::<Vec<_>>();
         let contradicts_tunnels = emitted_tunnels
             .into_iter()
@@ -472,26 +466,11 @@ impl CoordinatorRecallLensLower {
             })
             .collect::<Vec<_>>();
 
-        // Same rule for fact groups: whether a group conflicts is decided over
-        // EVERY fact. Filtering first can hide a whole group, or leave one
-        // looking consistent because the fact that disagreed was restricted.
-        let all_facts = coordinator
+        // Fact conflicts are likewise derived only from caller-admissible
+        // facts, preventing chosen-input probes against protected values.
+        let facts = coordinator
             .recall_kg_facts(&admission.estate_handle)
-            .map_err(|_| ())?;
-        let mut all_facts_by_key = BTreeMap::<(String, String), Vec<_>>::new();
-        for fact in &all_facts {
-            all_facts_by_key
-                .entry((fact.subject.to_lowercase(), fact.predicate.to_lowercase()))
-                .or_default()
-                .push(fact.object.to_lowercase());
-        }
-        let all_conflicting_keys = all_facts_by_key
-            .into_iter()
-            .filter(|(_, objects)| objects.iter().collect::<BTreeSet<_>>().len() > 1)
-            .map(|(key, _)| key)
-            .collect::<BTreeSet<_>>();
-        let total_conflicting_fact_group_count = all_conflicting_keys.len() as i64;
-        let facts = all_facts
+            .map_err(|_| ())?
             .into_iter()
             .filter(|fact| fact.adjective_sensitivity().is_bulk_exportable())
             .collect::<Vec<_>>();
@@ -502,7 +481,7 @@ impl CoordinatorRecallLensLower {
                 .or_default()
                 .push(fact);
         }
-        let visible_conflicting_key_count = facts_by_key
+        let total_conflicting_fact_group_count = facts_by_key
             .iter()
             .filter(|(_, facts)| facts.iter().map(|fact| fact.object.to_lowercase()).collect::<BTreeSet<_>>().len() > 1)
             .count() as i64;
@@ -540,21 +519,16 @@ impl CoordinatorRecallLensLower {
             })
             .collect::<Vec<_>>();
 
-        let withheld_conflicting_fact_group_count =
-            total_conflicting_fact_group_count - visible_conflicting_key_count;
         Ok(result(
             request.operation,
             vec![row([
                 ("contradicts_tunnels", JsonValue::Array(contradicts_tunnels.into_iter().map(JsonValue::Object).collect())),
                 ("conflicting_facts", JsonValue::Array(conflicting_facts.into_iter().map(JsonValue::Object).collect())),
-                // Totals cover EVERY contradiction, including rows the caller
-                // may not read; the withheld counts say how much of that is
-                // redacted. Without them a hidden contradiction is
-                // indistinguishable from no contradiction.
                 ("total_contradiction_count", JsonValue::Integer(total_contradiction_count)),
                 ("total_conflicting_fact_group_count", JsonValue::Integer(total_conflicting_fact_group_count)),
-                ("withheld_contradiction_count", JsonValue::Integer(withheld_contradiction_count)),
-                ("withheld_conflicting_fact_group_count", JsonValue::Integer(withheld_conflicting_fact_group_count)),
+                // Compatibility fields cannot encode a protected population.
+                ("withheld_contradiction_count", JsonValue::Integer(0)),
+                ("withheld_conflicting_fact_group_count", JsonValue::Integer(0)),
             ])],
         ))
     }
