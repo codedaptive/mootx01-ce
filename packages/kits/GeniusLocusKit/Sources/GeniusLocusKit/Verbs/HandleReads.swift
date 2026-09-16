@@ -139,4 +139,12 @@ public extension GeniusLocusKit {
         let estate = try estate(for: handle)
         return try await estate.countSubjectDebt()
     }
+
+    /// Every drawer row in the estate, tombstoned or not. Delegates to
+    /// `Estate.countDrawerRows()`; the estate ping compares it with
+    /// `lsaRetrainingDocumentBackstop` to declare a degraded estate.
+    func countDrawerRows(in handle: EstateHandle) async throws -> Int {
+        let estate = try estate(for: handle)
+        return try await estate.countDrawerRows()
+    }
 }

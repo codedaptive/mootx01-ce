@@ -164,7 +164,7 @@ impl CorpusContentSource for FaultSource {
 }
 
 #[test]
-fn bounded_reindex_trains_on_sample_and_embeds_all() {
+fn bounded_reindex_refuses_cap_plus_one_and_retains_serving_generation() {
     let (storage, _guard) = make_scratch_storage();
     let source = FaultSource::new();
     for index in 1..=3 { source.put(&format!("bounded-{index}"), &format!("bounded corpus row {index}")); }
@@ -173,15 +173,10 @@ fn bounded_reindex_trains_on_sample_and_embeds_all() {
     let before = serving_generation(storage.as_ref(), RI_MODEL_ID);
     let report = engine.reindex_with_budget(
         NOW_MILLIS, &RetrainingBudget::new(2, 30, None)).expect("bounded report");
-    // The cap bounds the training sample (the source is asked for at most 2
-    // ids), not the estate: training completes, every one of the 3 documents
-    // is embedded, and the generation advances. Prior-generation rows stay
-    // until vacuum, so the table holds at least the full re-embed.
-    assert_eq!(report.completed_model_ids, vec![RI_MODEL_ID.to_string()]);
-    assert!(report.skipped_model_ids.is_empty());
-    assert_eq!(*source.last_requested_limit.lock().unwrap(), Some(2));
-    assert_ne!(serving_generation(storage.as_ref(), RI_MODEL_ID), before);
-    assert!(vector_row_count(storage.as_ref(), RI_MODEL_ID) >= 3 * LANES_PER_ITEM);
+    assert!(report.completed_model_ids.is_empty());
+    assert_eq!(*source.last_requested_limit.lock().unwrap(), Some(3));
+    assert_eq!(serving_generation(storage.as_ref(), RI_MODEL_ID), before);
+    assert_eq!(vector_row_count(storage.as_ref(), RI_MODEL_ID), 3 * LANES_PER_ITEM);
 }
 
 // ── Storage inspection helpers ──────────────────────────────────────────────
