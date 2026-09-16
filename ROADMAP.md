@@ -130,6 +130,11 @@ Apple Intelligence availability depends on supported hardware, software,
 language, region, and user settings. MOOTx01 will provide a useful fallback
 when the on-device model is unavailable.
 
+Two local-model workers run on every platform, in both the Swift and Rust
+editions: a cross-encoder reranker that orders recall evidence, and NuExtract,
+a small on-device model that extracts facts from what you capture. Neither
+sends your memories anywhere.
+
 ### Make Obsidian continuous
 
 Version 1.1 will build on the shipped, on-demand vault workflow with an
@@ -156,8 +161,15 @@ Windows and Linux users will not be left watching through an Apple-shaped
 window.
 
 The `moot-mgr` web app will provide the Review Center, estate health, and
-approved memory-management actions through the local resident host. The native MOOTx01-App is the Apple experience. The `moot-mgr`
-web app is the cross-platform experience. Both speak the same memory language.
+approved memory-management actions through the local resident host. The native
+MOOTx01-App is the Apple experience. The `moot-mgr` web app is the
+cross-platform experience. Both speak the same memory language.
+
+Through either one, 1.1 gives you:
+
+- scheduled memory reviews and housekeeping;
+- private comparison of bounded research results;
+- no automatic destructive memory cleanup: retirement waits for you.
 
 ## Version 1.2 — your MOOT can meet another MOOT
 
@@ -179,10 +191,10 @@ meeting between estates that remain independently owned.
 
 Version 1.2 also extends the local-agent idea beyond supported Apple devices:
 
-- local-model workers for Windows, Linux, Mac, and servers;
-- scheduled memory reviews and housekeeping;
-- private research-result comparison;
-- no automatic destructive memory cleanup.
+- a native Windows app carrying scheduled reviews, housekeeping, and research
+  comparison outside the browser;
+- a learned distiller, adopted only if it measures better than the exact one
+  that ships today.
 
 Version 1.2 also plans an optional embedded question answering capability.
 Ask a question, and MOOTx01 retrieves the relevant memories, hands their text
@@ -218,8 +230,8 @@ The contract remains the same:
 | Release | What changes for you |
 |---|---|
 | **1.0.x today** | Your AI can remember beyond one conversation and move eligible knowledge through Obsidian, Markdown, and OKF-compatible vaults |
-| **1.1** | MOOTx01-App brings native agentic memory to iPhone, iPad, and Mac; `moot-mgr` carries it to other platforms; optional automatic Obsidian synchronization builds on the shipped vault workflow |
-| **1.2** | Local agents and explicitly paired estates can collaborate safely |
+| **1.1** | MOOTx01-App brings native agentic memory to iPhone, iPad, and Mac; `moot-mgr` carries it to other platforms with scheduled reviews and research comparison; local-model fact extraction and reranking on every platform; optional automatic Obsidian synchronization builds on the shipped vault workflow |
+| **1.2** | Explicitly paired estates collaborate safely; a native Windows app; optional embedded question answering |
 | **1.3** | PGlite brings portable Postgres to the web; pgMOOT adds optional PostgreSQL server scale |
 
 ## Follow the build
