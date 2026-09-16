@@ -1430,7 +1430,10 @@ pub struct EstateCoordinator {
     ///
     /// Mirrors Swift actor's `dreamingQueues: [EstateHandle: QueueKit]` and
     /// `dreamingHLCs: [EstateHandle: HLCGenerator]`.
-    dreaming_queues: RefCell<HashMap<EstateHandle, (queuekit::QueueKit<Box<dyn queuekit::QueueBackend>>, substrate_types::hlc::HLCGenerator)>>,
+    pub(crate) dreaming_queues: RefCell<HashMap<EstateHandle, (queuekit::QueueKit<Box<dyn queuekit::QueueBackend>>, substrate_types::hlc::HLCGenerator)>>,
+    /// Duties this process has queued and not yet drained, per estate: the
+    /// single-occupancy guard for `enqueue_duty` (brain/duty_queue.rs).
+    pub(crate) duty_queued: crate::brain::duty_queue::DutyQueued,
 
     // ── Recall degradation test seams (P1 fail-loud contract) ──
     //
@@ -1634,6 +1637,7 @@ impl EstateCoordinator {
             migration_fault_token: None,
             sync_engines: HashMap::new(),
             dreaming_queues: RefCell::new(HashMap::new()),
+            duty_queued: std::cell::RefCell::new(HashMap::new()),
             // Test seams start clear; only `inject_*` methods set them.
             #[cfg(any(test, feature = "test-seams"))]
             test_force_vector_hamming_error: std::cell::RefCell::new(None),
@@ -4776,7 +4780,7 @@ impl EstateCoordinator {
     ///
     /// On SQLite open failure: falls back to a transient in-memory backend and
     /// logs to stderr. The dreaming lane degrades silently; recall is unaffected.
-    fn ensure_dreaming_queue(&self, handle: &EstateHandle) {
+    pub(crate) fn ensure_dreaming_queue(&self, handle: &EstateHandle) {
         // Fast path: entry already present — skip all construction work.
         if self.dreaming_queues.borrow().contains_key(handle) {
             return;
