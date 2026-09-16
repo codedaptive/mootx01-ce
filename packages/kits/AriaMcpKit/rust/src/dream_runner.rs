@@ -190,8 +190,8 @@ pub fn run_one_dreaming_cycle(
         fact_settings_directory,
     ) {
         match fact_cycle() {
-            Ok(filed) => eprintln!(
-                "mootx01 dream: fact extraction cycle complete — {filed} fact(s) filed"
+            Ok(settled) => eprintln!(
+                "mootx01 dream: fact extraction cycle complete — {settled} source(s) settled"
             ),
             Err(error) => eprintln!(
                 "mootx01 dream: fact extraction cycle failed: {error}"
