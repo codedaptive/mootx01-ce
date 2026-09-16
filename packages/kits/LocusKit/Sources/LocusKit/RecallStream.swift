@@ -53,6 +53,8 @@ public struct RecallStream: AsyncSequence, Sendable {
     /// reaches the caller. The GLK `RecallDirector` merges these into
     /// `GLKRecallResult.degradedStages`.
     public let degradedStages: [String]
+    /// Default-sensitivity exclusions from the already-retrieved candidate set.
+    public let withheldBySensitivity: Int
 
     /// Constructed by `Estate.recall`. `pageSize` is clamped to at
     /// least 1 — a non-positive page size would loop forever or
@@ -66,7 +68,8 @@ public struct RecallStream: AsyncSequence, Sendable {
         rows: [Drawer],
         pageSize: Int = RecallStream.defaultPageSize,
         hydrationLevel: HydrationLevel = .structured,
-        degradedStages: [String] = []
+        degradedStages: [String] = [],
+        withheldBySensitivity: Int = 0
     ) {
         self.rows = rows
         // `Swift.max` qualifier — `Sequence.max()` is an instance
@@ -75,6 +78,7 @@ public struct RecallStream: AsyncSequence, Sendable {
         self.pageSize = Swift.max(1, pageSize)
         self.hydrationLevel = hydrationLevel
         self.degradedStages = degradedStages
+        self.withheldBySensitivity = withheldBySensitivity
     }
 
     public func makeAsyncIterator() -> AsyncIterator {
