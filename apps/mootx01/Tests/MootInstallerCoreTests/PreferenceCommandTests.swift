@@ -33,7 +33,8 @@ struct PreferenceCommandTests {
             .appendingPathComponent("preference-command-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let directory = root.appendingPathComponent("nested/scratch")
-        #expect(try run(["set", "fact_extraction", "off"], estate: directory) == "fact_extraction off\n")
+        #expect(try run(["set", "fact_extraction", "off"], estate: directory) ==
+            "mootx01 preference: created estate 'scratch' UNENCRYPTED at \(directory.path). Run `mootx01 upgrade` at any time to encrypt it.\nfact_extraction off\n")
         #expect(try run(["get", "fact_extraction"], estate: directory) == "off\n")
         #expect(try Set(FileManager.default.contentsOfDirectory(atPath: directory.path))
             == Set(["estate.json", "estate.sqlite"]))
