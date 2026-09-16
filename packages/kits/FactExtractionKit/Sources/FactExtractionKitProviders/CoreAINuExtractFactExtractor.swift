@@ -26,30 +26,31 @@ enum NuExtractFactCodec {
         """
     }
 
+    /// Decode the model's raw output into candidates. NuExtract decodes
+    /// greedily, so its output for a chunk is a function of the chunk and the
+    /// recipe: output that carries no complete JSON object, or JSON that does
+    /// not decode, is that chunk's answer and yields a zero-candidate
+    /// response rather than an error. An error here would leave the source
+    /// as debt and the next cycle would produce the same output; a recipe
+    /// change re-clears the estate's debt and re-extracts. Fields the model
+    /// omitted are passed through empty and every bound (fact count, field
+    /// length, evidence grounding) is enforced by `FactGroundingValidator`,
+    /// which counts each rejection.
     static func response(
         from rawOutput: String,
         request: FactExtractionRequest,
         spec: FactExtractorModelSpec
-    ) throws -> FactExtractionResponse {
-        guard let object = firstJSONObject(in: rawOutput),
-              let data = object.data(using: .utf8) else {
-            throw FactExtractionError.malformedResponse(
-                "NuExtract output contains no complete JSON object")
+    ) -> FactExtractionResponse {
+        let rawFacts: [RawFact]
+        if let object = firstJSONObject(in: rawOutput),
+           let data = object.data(using: .utf8),
+           let batch = try? JSONDecoder().decode(RawBatch.self, from: data) {
+            rawFacts = batch.facts ?? batch.fact.map { [$0] } ?? []
+        } else {
+            rawFacts = []
         }
-        let batch: RawBatch
-        do {
-            batch = try JSONDecoder().decode(RawBatch.self, from: data)
-        } catch {
-            throw FactExtractionError.malformedResponse(
-                "decode NuExtract output: \(error)")
-        }
-        let rawFacts = batch.facts ?? batch.fact.map { [$0] } ?? []
-        guard rawFacts.count <= request.maximumFacts else {
-            throw FactExtractionError.malformedResponse(
-                "NuExtract returned \(rawFacts.count) facts above request bound \(request.maximumFacts)")
-        }
-        let candidates = try rawFacts.map {
-            try $0.candidate(sourceText: request.sourceText)
+        let candidates = rawFacts.map {
+            $0.candidate(sourceText: request.sourceText)
         }
         return FactExtractionResponse(
             sourceDigest: request.sourceDigest,
@@ -108,16 +109,12 @@ enum NuExtractFactCodec {
             case subject, predicate, object
             case evidenceQuote = "evidence"
         }
-        func candidate(sourceText: String) throws -> FactCandidate {
-            func required(_ name: String, _ value: String?) throws -> String {
-                guard let value, !value.isEmpty else {
-                    throw FactExtractionError.malformedResponse(
-                        "NuExtract fact is missing \(name)")
-                }
-                return value
-            }
-            let subject = try required("subject", subject)
-            let object = try required("object", object)
+        /// A missing field is passed through empty; the grounding validator
+        /// rejects the candidate as `emptyField` and the other candidates in
+        /// the same response survive.
+        func candidate(sourceText: String) -> FactCandidate {
+            let subject = self.subject ?? ""
+            let object = self.object ?? ""
             let evidence = evidenceQuote.flatMap {
                 !$0.isEmpty && sourceText.contains($0) ? $0 : nil
             }
@@ -129,9 +126,9 @@ enum NuExtractFactCodec {
                     }
             return FactCandidate(
                 subject: subject,
-                predicate: try required("predicate", predicate),
+                predicate: predicate ?? "",
                 object: object,
-                evidenceQuote: try required("evidence", evidence),
+                evidenceQuote: evidence ?? "",
                 // NuExtract is a pure extraction model. The host owns trust
                 // metadata; downstream grounding rejects unsupported output.
                 confidence: 1.0,
@@ -657,7 +654,7 @@ private actor CoreAINuExtractRuntime {
         do {
             let raw = try await engine.generate(
                 NuExtractFactCodec.prompt(for: request))
-            return try NuExtractFactCodec.response(
+            return NuExtractFactCodec.response(
                 from: raw, request: request, spec: spec)
         } catch let error as FactExtractionError {
             throw error
@@ -727,9 +724,12 @@ private final class CoreAINuExtractEngine: @unchecked Sendable {
         let promptCapacity = cacheLength - maximumNewTokens - 1
         let boundedPrompt = String(prompt.prefix(promptCapacity * 4))
         let encoded = tokenizer.encode(boundedPrompt)
+        // A chunk whose prompt exceeds the model context is that chunk's
+        // deterministic answer under this recipe: no output, decoded by the
+        // codec to zero candidates. An error would leave the source as debt
+        // that every later cycle re-fails identically.
         guard !encoded.isEmpty, encoded.count <= promptCapacity else {
-            throw FactExtractionError.invalidRequest(
-                "NuExtract prompt exceeds the model context")
+            return ""
         }
         let bucket = min(((encoded.count + 127) / 128) * 128, cacheLength)
         var inputIDs = [Int32](repeating: 0, count: bucket)
@@ -796,8 +796,12 @@ private final class CoreAINuExtractEngine: @unchecked Sendable {
             cachePosition += 1
             next = try argmax(stepLogits)
         }
-        throw FactExtractionError.malformedResponse(
-            "NuExtract stopped without complete JSON")
+        // The model stopped (stop token, new-token bound, or cache length)
+        // without a complete JSON object. Greedy decoding makes that this
+        // chunk's deterministic answer, so the raw output is returned and
+        // the codec decodes it to zero candidates; an error here would leave
+        // the source as debt that every later cycle re-fails identically.
+        return tokenizer.decode(generated)
     }
 
     private func argmax(_ logits: NDArray) throws -> Int32 {
