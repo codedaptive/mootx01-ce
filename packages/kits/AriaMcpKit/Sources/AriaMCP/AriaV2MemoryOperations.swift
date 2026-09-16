@@ -923,31 +923,24 @@ public struct AriaV2MemoryOperations: Sendable {
         } else {
             compactText = foundHeader
         }
-        // explain: append discrimination line when signal warrants it. v1 control
+        // explain: append discrimination line when requested and the signal warrants it. v1 control
         // line order: discrimination precedes degradation (ResultComposer.controlLines
         // §1 before §3). Only low and medium are surfaced in v2 compact text
         // (high/single/not_found are silent). Mirrors the Rust v2 execute_memory_search
         // explain branch.
-        // NOT gated behind `explain`. The discrimination line is a confidence
-        // signal the caller needs in order to judge the result it was just
-        // handed; hiding it until asked means the ordinary call gets a ranking
-        // with no indication of how much to trust it. v1 emitted it on every
-        // search and only for LOW and MEDIUM — high, single-result and
-        // not-found stay silent because there is nothing to warn about.
-        let scores = visible.map { $0.score }
-        var discrimination = RecallDiscrimination.classify(scores)
-        // A lexical-only ranking cannot support a high verdict. v1 applied the
-        // same cap; v2 could not, because nothing told it the span stage was
-        // unregistered, so it could report high confidence in an ordering no
-        // dense signal had informed.
-        if !result.spanRerankRegistered, discrimination == .high {
-            discrimination = .medium
-        }
-        switch discrimination {
-        case .low, .medium:
-            compactText += "\n" + RecallDiscrimination.resultLine(for: discrimination)
-        default:
-            break
+        if request.explain {
+            let scores = visible.map { $0.score }
+            var discrimination = RecallDiscrimination.classify(scores)
+            // A lexical-only ranking cannot support a high verdict.
+            if !result.spanRerankRegistered, discrimination == .high {
+                discrimination = .medium
+            }
+            switch discrimination {
+            case .low, .medium:
+                compactText += "\n" + RecallDiscrimination.resultLine(for: discrimination)
+            default:
+                break
+            }
         }
         // Degradation: append control line AFTER discrimination, matching the v1 S1
         // surface (ResultComposer.controlLines §3 follows §1). rrf on unionBest mode
