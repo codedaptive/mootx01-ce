@@ -92,7 +92,7 @@ struct DrawerStoreTests {
 
         let datasetKind = Int64(ContentKind.dataset.rawValue) << 6
         let rows = [
-            drawer("empty", content: "", filedAt: 1),
+            drawer("empty", content: "placeholder", filedAt: 1),
             drawer("dataset", content: "dataset", filedAt: 2, operationalBitmap: datasetKind),
             drawer("tombstoned", content: "removed", filedAt: 3, tombstonedAt: t(4)),
             drawer("beta", content: "beta", filedAt: 10),
@@ -100,6 +100,10 @@ struct DrawerStoreTests {
             drawer("gamma", content: "gamma", filedAt: 10),
         ]
         for row in rows { try await store.addDrawer(row) }
+        _ = try await store.storage.rowStore.update(
+            table: "drawers",
+            values: ["content": .text("")],
+            where: .eq(Column(table: "drawers", name: "id"), .text(TestStorage.tid("empty"))))
 
         let ids = try await store.activeCorpusContentIDs(limit: 2)
         #expect(ids == [TestStorage.tid("alpha"), TestStorage.tid("beta")])
