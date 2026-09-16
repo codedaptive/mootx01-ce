@@ -62,15 +62,16 @@ pub struct McpClient {
 pub const SERVER_NAME: &str = "mootx01";
 
 /// The server entry name inside a generated **plugin package**'s MCP
-/// manifest. Now identical to `SERVER_NAME`: both the plugin and the
-/// direct-install entry use `"mootx01"` so MOOT tools appear under a
-/// single `mcp__mootx01__*` prefix regardless of install path.
+/// manifest. In PLUGIN mode Claude Code uses `"memory"` as the server key,
+/// giving tools the `mcp__plugin_mootx01_memory__*` prefix. Direct installs
+/// (Cursor, Codex, Gemini, Continue) continue to use `SERVER_NAME`
+/// (`"mootx01"`), so the two install paths carry distinct prefixes.
 ///
 /// The generated packages are the authority for this value; it is mirrored
 /// here so the installer has one place to read it instead of a literal at
 /// each call site. `core::depth`'s `plugin_server_name_matches_generated_packages`
 /// asserts the mirror still matches what the packager emits.
-pub const PLUGIN_SERVER_NAME: &str = "mootx01";
+pub const PLUGIN_SERVER_NAME: &str = "memory";
 
 impl McpClient {
     /// Whether this client appears to be installed on this machine.

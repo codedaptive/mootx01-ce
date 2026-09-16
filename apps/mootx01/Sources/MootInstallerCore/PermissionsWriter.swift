@@ -16,14 +16,11 @@
 // `.deny` (nested under a `permissions` object), NOT top-level `allowedTools`.
 //
 // Each tool name takes the MCP prefix form: `mcp__mootx01__<tool_name>`,
-// e.g. `mcp__mootx01__moot_memory_search`. Since the v1.0.15 plugin-owned
-// connection, Claude Code ALSO routes calls made through the
-// installed plugin under a second, distinct namespace:
-// `mcp__plugin_mootx01_mootx01__<tool_name>` (empirically confirmed against
-// a live `~/.claude/settings.json` carrying both prefixes side by side —
-// the plugin prefix shape is `mcp__plugin_<marketplace>_<plugin>__`, and
-// this installer's marketplace and plugin are both named `mootx01`, see
-// `registerClaudeCodeMarketplace`). A rule written for only one namespace
+// e.g. `mcp__mootx01__moot_memory_search`. Claude Code ALSO routes calls made
+// through the installed plugin under a second, distinct namespace:
+// `mcp__plugin_mootx01_memory__<tool_name>` (v1.1.0+: the plugin registers
+// its server under the key `"memory"`, giving the concrete prefix
+// `mcp__plugin_mootx01_memory__`). A rule written for only one namespace
 // matches zero calls made through the other connection — the exact "moot is
 // unusable from permission prompts" defect this file now fixes: BOTH
 // namespaces must carry every tier entry, or whichever connection Claude
@@ -65,14 +62,18 @@ public enum PermissionsWriter {
     public static let mcpPrefix = "mcp__mootx01__"
 
     /// The MCP tool prefix Claude Code uses for calls routed through the
-    /// installed plugin (plugin-owned MCP connections, v1.0.15). Shape:
-    /// `mcp__plugin_<marketplace>__<plugin>__` — empirically confirmed
-    /// against a live settings.json (both this installer's marketplace and
-    /// plugin are named `mootx01`, so the concrete prefix is
-    /// `mcp__plugin_mootx01_mootx01__`). A settings file with rules ONLY
+    /// installed plugin (v1.1.0+: the plugin registers its server under the
+    /// key `"memory"`, giving the concrete prefix
+    /// `mcp__plugin_mootx01_memory__`). A settings file with rules ONLY
     /// under `mcpPrefix` matches nothing for a plugin-routed call — every
     /// tier write in this file must cover BOTH prefixes.
-    public static let pluginMcpPrefix = "mcp__plugin_mootx01_mootx01__"
+    public static let pluginMcpPrefix = "mcp__plugin_mootx01_memory__"
+
+    /// Pre-v1.1.0 plugin prefix. The plugin registered its server under
+    /// `"mootx01"` before this release. Kept ONLY in the remove list so
+    /// `remove` migrates away existing allow/deny entries on upgrade; never
+    /// written by any grant path.
+    public static let legacyPluginMcpPrefix = "mcp__plugin_mootx01_mootx01__"
 
     /// Every namespace prefix a tool name must be written under.
     public static let allPrefixes = [mcpPrefix, pluginMcpPrefix]
@@ -243,7 +244,7 @@ public enum PermissionsWriter {
     ///
     /// Backfilling at the classifier default instead would bypass a user's
     /// `deny`: someone who denies `mcp__mootx01__moot_memory_get` would get
-    /// `mcp__plugin_mootx01_mootx01__moot_memory_get` added to `allow` on
+    /// `mcp__plugin_mootx01_memory__moot_memory_get` added to `allow` on
     /// the next install or upgrade, because that exact string is "genuinely
     /// absent". A deny is a decision about a capability, not about a string
     /// prefix the user has never seen and cannot be expected to know exists.
@@ -467,15 +468,15 @@ public enum PermissionsWriter {
 
     // MARK: - Remove
 
-    /// Remove every `mcp__mootx01__*` AND `mcp__plugin_mootx01_mootx01__*`
-    /// entry from all three permission lists.
+    /// Remove every `mcp__mootx01__*`, `mcp__plugin_mootx01_memory__*`, and
+    /// `mcp__plugin_mootx01_mootx01__*` (pre-v1.1.0 plugin prefix) entry from
+    /// all three permission lists.
     ///
     /// Prefix-based (no name list needed) so uninstall cleans up even tools
-    /// that were renamed or removed since they were granted, and both
-    /// namespaces (direct + plugin — see the file header) so an uninstall
-    /// after this fix does not strand the plugin-prefixed twin entries
-    /// `mergeTiered`/`merge` now write. No-ops gracefully if the file is
-    /// absent or nothing of ours is present.
+    /// that were renamed or removed since they were granted. The legacy prefix
+    /// is included so an upgrade on a machine installed before v1.1.0 migrates
+    /// away existing allow/deny entries rather than stranding them.
+    /// No-ops gracefully if the file is absent or nothing of ours is present.
     ///
     /// - Parameter settingsURL: path to the `settings.json` file.
     public static func remove(from settingsURL: URL) throws {
@@ -486,10 +487,13 @@ public enum PermissionsWriter {
         }
         guard var permissions = root["permissions"] as? [String: Any] else { return }
 
+        // All prefixes to strip: current direct, current plugin, and the
+        // pre-v1.1.0 plugin prefix for migration.
+        let removePrefixes = allPrefixes + [legacyPluginMcpPrefix]
         for key in ["allow", "ask", "deny"] {
             guard var list = permissions[key] as? [String] else { continue }
             list = list.filter { entry in
-                !allPrefixes.contains { entry.hasPrefix($0) }
+                !removePrefixes.contains { entry.hasPrefix($0) }
             }
             permissions[key] = list.isEmpty ? nil : list
         }
