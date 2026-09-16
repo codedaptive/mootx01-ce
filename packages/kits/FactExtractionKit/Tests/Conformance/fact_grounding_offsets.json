@@ -1,0 +1,11 @@
+{
+  "source": "A😀B facts.",
+  "evidenceQuote": "B facts.",
+  "subject": "B",
+  "predicate": "describes",
+  "object": "facts",
+  "expectedStart": 2,
+  "expectedEnd": 10,
+  "expectedStartUtf8Byte": 5,
+  "expectedEndUtf8Byte": 13
+}
