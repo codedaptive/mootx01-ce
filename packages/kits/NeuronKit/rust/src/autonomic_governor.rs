@@ -1629,7 +1629,25 @@ impl AutonomicGovernor {
         // it does not break proposal/diary functions).
         if let Some((corpus, live_vocab)) = theta_retrain_pending {
             let now_millis = (now_epoch_secs * 1000.0) as i64;
-            if let Err(e) = genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&corpus, now_millis) {
+            // The retrain is a claimed QueueKit job (duty_queue `RetrainBasis`):
+            // claim under a short coordinator lock, run the body outside it as
+            // before, complete under another short lock. A governor that dies
+            // mid-retrain leaves a reclaimable job, not a silently skipped day.
+            let claimed = match self.coord.lock() {
+                Ok(coord) => {
+                    use genius_locus_kit::brain::duty_queue::DutyKind;
+                    let _ = coord.enqueue_duty(&self.handle, DutyKind::RetrainBasis, now_millis);
+                    coord.claim_duty_jobs(&self.handle, DutyKind::RetrainBasis, now_millis).unwrap_or_default()
+                }
+                Err(_) => Vec::new(),
+            };
+            let outcome = genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&corpus, now_millis);
+            if let Ok(coord) = self.coord.lock() {
+                for id in &claimed {
+                    coord.complete_duty_job(&self.handle, id, outcome.is_ok());
+                }
+            }
+            if let Err(e) = outcome {
                 eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e);
             } else {
                 // Advance the shared baseline so ALPHA's delta window starts
@@ -1651,12 +1669,31 @@ impl AutonomicGovernor {
             if let Some(corpus) = corpus {
                 let vocab_corpus = Arc::clone(&corpus);
                 let reindex_corpus = Arc::clone(&corpus);
+                let duty_coord = Arc::clone(&self.coord);
+                let duty_handle = self.handle.clone();
                 let mut probe = EstateCorpusGrowthProbe {
                     vocab_anchor: Box::new(move || {
                         vocab_corpus.maintained_vocab_anchor() as i64
                     }),
                     reindex: Box::new(move |now_secs| {
-                        match genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&reindex_corpus, (now_secs * 1_000.0).round() as i64) {
+                        // Same claim / run outside the lock / complete shape as
+                        // the THETA retrain above.
+                        let now_millis = (now_secs * 1_000.0).round() as i64;
+                        let claimed = match duty_coord.lock() {
+                            Ok(coord) => {
+                                use genius_locus_kit::brain::duty_queue::DutyKind;
+                                let _ = coord.enqueue_duty(&duty_handle, DutyKind::RetrainBasis, now_millis);
+                                coord.claim_duty_jobs(&duty_handle, DutyKind::RetrainBasis, now_millis).unwrap_or_default()
+                            }
+                            Err(_) => Vec::new(),
+                        };
+                        let outcome = genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&reindex_corpus, now_millis);
+                        if let Ok(coord) = duty_coord.lock() {
+                            for id in &claimed {
+                                coord.complete_duty_job(&duty_handle, id, outcome.is_ok());
+                            }
+                        }
+                        match outcome {
                             Ok(()) => true,
                             Err(error) => {
                                 eprintln!(
