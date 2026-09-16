@@ -1,4 +1,5 @@
 import Foundation
+import os
 import CorpusKit
 import MootProductIdentity
 import LocusKit
@@ -263,8 +264,12 @@ public extension GeniusLocusKit {
             maxSweeps: settings.corpusLSARetrainingMaxSweeps,
             deadline: ContinuousClock.now.advanced(by: .milliseconds(settings.corpusLSARetrainingTimeoutMilliseconds)))
         let report = try await corpus.reindex(now: now, budget: budget)
-        guard report.skippedModelIDs.isEmpty else {
-            throw CorpusKitError.invalidConfiguration("Retraining budget exhausted: \(report.skippedModelIDs)")
+        // A skipped provider (deadline or cancellation) keeps its serving basis
+        // and vectors; that is a bounded attempt doing its job, not a failure.
+        // Log it so an operator can raise `corpus.lsa_retraining` if it recurs.
+        if !report.skippedModelIDs.isEmpty {
+            Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit").warning(
+                "reindexCorpus: retraining skipped within budget, serving basis kept: \(String(describing: report.skippedModelIDs), privacy: .public)")
         }
     }
 }
