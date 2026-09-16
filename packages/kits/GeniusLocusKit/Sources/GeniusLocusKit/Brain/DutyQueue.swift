@@ -83,12 +83,9 @@ public extension GeniusLocusKit {
         Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
-    /// Batch sizes per job, sized for the resident's tick: the batch runs
-    /// inside `signalTick`, so it must return within the standing signals'
-    /// cadence. The Apple subject rider answers in seconds per subject, so
-    /// 32 subjects return in minutes; fact extraction matches the
-    /// resident's Signal 14 batch. Debt carries over; the next job pays on.
-    private static let dutySubjectBatch = 32
+    /// Batch sizes per job. The subject figure matches the `dream` finisher
+    /// (256 per pass); fact extraction matches the resident's Signal 14 batch.
+    private static let dutySubjectBatch = 256
     private static let dutyFactExtractionBatch = 16
 
     // MARK: - Debt
