@@ -198,6 +198,22 @@ pub fn run_one_dreaming_cycle(
             ),
         }
     }
+    // Span debt: one bounded batch per dreaming pass, the same call the
+    // resident's dreaming duty makes, so `dream` plus drain status settles an
+    // estate whose drawers still owe spans. The batch attempts encoder
+    // activation itself when none is registered; with no model it is a clean
+    // 0. Twin of the Swift dream command's span step.
+    match reg.coord.lock() {
+        Ok(mut coord) => match coord.run_span_encode_batch(&handle, (now_epoch_secs * 1000.0) as i64) {
+            Ok(encoded) if encoded > 0 => {
+                eprintln!("mootx01 dream: span encode — {encoded} drawer(s) encoded")
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("mootx01 dream: span encode error: {error}"),
+        },
+        Err(error) => eprintln!("mootx01 dream: span encode skipped — coordinator lock poisoned: {error}"),
+    }
+
     // The DrawerStore is the manifest-backed KV surface for policy persistence.
     let store = std::sync::Arc::clone(&reg.default.store);
 
