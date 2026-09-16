@@ -158,33 +158,42 @@ fn a_restricted_drawer_absent_from_default_recall() {
 }
 
 #[test]
-fn withheld_count_stops_at_the_recall_candidate_bound() {
-    let (mut coord, h) = open_one("withheld-bound");
+fn withheld_count_uses_queried_candidates_instead_of_storage_prefix() {
+    let (mut coord, h) = open_one("withheld-query");
     for index in 0..65 {
         coord
             .capture(
                 &h,
-                restricted_frame(&format!("bounded withheld candidate {index}")),
+                admissible_frame(&format!("unrelated storage prefix {index}")),
                 NOW + index,
             )
-            .expect("capture restricted candidate");
+            .expect("capture unrelated candidate");
     }
+    let restricted = coord
+        .capture(
+            &h,
+            restricted_frame("unique queried restricted needle"),
+            NOW + 65,
+        )
+        .expect("capture queried restricted candidate");
+    let corpus = make_corpus();
+    corpus
+        .ingest(&restricted.content, &restricted.id, NOW + 65)
+        .expect("ingest queried restricted candidate");
+    coord.register_corpus(&h, corpus);
 
-    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
-    let request = GLKRecallRequest::new(
-        frame,
-        GLKRecallMode::LocusOnly,
-        GLKRecallScoring::Raw,
-        1,
-        RecallFallbackPolicy::AllowDegraded,
-        RecallOrigin::Internal,
-    );
-    let result = coord.recall_scored(&h, request, NOW + 100).expect("recall");
+    let result = coord
+        .recall_scored(
+            &h,
+            default_request("unique queried restricted needle", 1),
+            NOW + 100,
+        )
+        .expect("recall");
 
     assert_eq!(
         result.withheld_by_sensitivity,
-        genius_locus_kit::recall::RecallShape::FRONTIER_K_FLOOR,
-        "withheld counting must stop at the plan's 64-row candidate floor"
+        1,
+        "withheld counting must evaluate the query candidate, not an arbitrary storage prefix"
     );
 }
 
