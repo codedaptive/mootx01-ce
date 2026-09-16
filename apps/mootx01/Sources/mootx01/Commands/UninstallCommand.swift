@@ -195,11 +195,14 @@ struct UninstallCommand: AsyncParsableCommand {
             throw ExitCode.failure
         case .trash:
             do {
-                try DataRetention.trashDataDirectory(dataDir)
-                print("  ✓ Data moved to \(DataRetention.trashName): \(dataDir.path)")
+                try DataRetention.trashDataDirectory(
+                    dataDir,
+                    registeredDatabaseURLs: records.map(\.databaseURL)
+                )
+                print("  ✓ All registered estate data moved to \(DataRetention.trashName).")
             } catch {
-                print("  ✗ Could not move \(dataDir.path) to \(DataRetention.trashName): \(error)")
-                print("    Data left in place.")
+                print("  ✗ Could not move all registered estate data to \(DataRetention.trashName): \(error)")
+                print("    Some data may remain in place; the catalog move is attempted only after every external estate moves.")
                 throw ExitCode.failure
             }
         }
