@@ -74,7 +74,7 @@ struct Sweep {
     after_source_id: Option<String>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct FactExtractionWorkStatus {
     pub runnable: usize,
     pub in_flight: usize,
@@ -84,12 +84,37 @@ pub struct FactExtractionWorkStatus {
     pub rejected: usize,
     pub not_applicable: usize,
     pub completed_empty: usize,
+    // False when no extractor is registered for the estate; the detail
+    // prepends the explanation so an operator reading moot_drain_status with
+    // pending rows sees "no extractor registered" ahead of the counts.
+    pub extractor_registered: bool,
+}
+impl Default for FactExtractionWorkStatus {
+    fn default() -> Self {
+        Self {
+            runnable: 0,
+            in_flight: 0,
+            partial: 0,
+            retrying: 0,
+            blocked: 0,
+            rejected: 0,
+            not_applicable: 0,
+            completed_empty: 0,
+            extractor_registered: true,
+        }
+    }
 }
 impl FactExtractionWorkStatus {
     pub fn detail(&self) -> String {
-        format!("ready: {}, running: {}, partial: {}, retrying: {}, blocked: {}, rejected: {}, not applicable: {}, empty: {}",
+        let counts = format!(
+            "ready: {}, running: {}, partial: {}, retrying: {}, blocked: {}, rejected: {}, not applicable: {}, empty: {}",
             self.runnable, self.in_flight, self.partial, self.retrying, self.blocked,
-            self.rejected, self.not_applicable, self.completed_empty)
+            self.rejected, self.not_applicable, self.completed_empty
+        );
+        if !self.extractor_registered {
+            return format!("no extractor registered; {counts}");
+        }
+        counts
     }
 }
 fn stream() -> StreamId {
@@ -246,6 +271,7 @@ impl EstateCoordinator {
         let Some(recipe_id) = self.fact_extractor_recipe_ids.get(handle) else {
             status.blocked = status.runnable;
             status.runnable = 0;
+            status.extractor_registered = false;
             return Ok(status);
         };
         let map = self.dreaming_queues.borrow();
