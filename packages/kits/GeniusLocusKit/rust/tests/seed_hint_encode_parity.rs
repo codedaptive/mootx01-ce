@@ -131,23 +131,41 @@ fn seed_hint_fresh_estate_drains_to_zero() {
         "the 7 seeded hints must stay indexed after the drain"
     );
     let statuses = coord.drain_statuses(&handle).expect("drain_statuses");
-    // The seeded hints are drawers with content and bit 28 clear, so the
-    // fact_extraction row-debt lane is owed by construction until a dreaming
-    // cycle pays it; every encode-side lane settles.
+    // The seeded hints are drawers with content and bits 27 and 28 clear, so
+    // the span_encode and fact_extraction row-debt lanes are owed by
+    // construction until a dreaming cycle pays them; every queue-side lane
+    // settles. The span lane is rendered even though no encoder is loaded
+    // (the fixture has no model directory), so a settle loop sees the debt
+    // rather than an idle estate.
+    let row_debt = [
+        genius_locus_kit::DrainStatus::FACT_EXTRACTION_NAME,
+        genius_locus_kit::DrainStatus::SPAN_ENCODE_NAME,
+    ];
     assert!(
         statuses
             .iter()
-            .filter(|s| s.name != genius_locus_kit::DrainStatus::FACT_EXTRACTION_NAME)
+            .filter(|s| !row_debt.contains(&s.name.as_str()))
             .all(|s| !s.is_draining()),
-        "every encode-side drain lane settles on a fresh drained estate: {statuses:?}"
+        "every queue-side drain lane settles on a fresh drained estate: {statuses:?}"
     );
+    let span = statuses.iter()
+        .find(|s| s.name == genius_locus_kit::DrainStatus::SPAN_ENCODE_NAME)
+        .expect("span_encode lane is rendered while no encoder is loaded");
+    assert_eq!(span.detail.as_deref(), Some("encoder not loaded"));
+    assert!(span.pending > 0);
 }
 
 #[test]
 fn registered_span_encoder_exposes_true_row_debt_without_gating_corpus_finisher() {
     let (mut coord, handle) = provision_glk_estate();
+    // The encoder preference is provisioned but no encoder is loaded: the
+    // lane is already present, carrying the true debt, and says so.
     let before = coord.drain_statuses(&handle).expect("drain_statuses");
-    assert!(!before.iter().any(|s| s.name == genius_locus_kit::DrainStatus::SPAN_ENCODE_NAME));
+    let unloaded = before.iter()
+        .find(|s| s.name == genius_locus_kit::DrainStatus::SPAN_ENCODE_NAME)
+        .expect("span_encode lane before an encoder is registered");
+    assert_eq!(unloaded.pending, locus_kit::default_wings::DEFAULT_WINGS.len());
+    assert_eq!(unloaded.detail.as_deref(), Some("encoder not loaded"));
 
     coord.register_span_encoder(&handle, Arc::new(DrainSpanEncoder::new()));
     let statuses = coord.drain_statuses(&handle).expect("drain_statuses");

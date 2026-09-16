@@ -2763,9 +2763,17 @@ impl EstateCoordinator {
             });
         }
 
-        // Drain 4 of N: span encode. This is row debt, not the corpus queue;
-        // surface it only when a loaded encoder can actually pay it down.
-        if let Some(encoder) = self.span_encoders.get(handle) {
+        // Drain 4 of N: span encode. This is row debt, not the corpus queue.
+        // Rendered whenever the estate's embedding provider is the encoder,
+        // loaded or not: a settle loop must see the debt even while no
+        // encoder is registered, otherwise an estate with every drawer owed
+        // reads as idle. The detail says which it is.
+        let encoder = self.span_encoders.get(handle);
+        let encoder_provisioned = matches!(
+            estate.meta(Self::EMBEDDING_PROVIDER_META_KEY),
+            Ok(Some(ref id)) if id == Self::ENCODER_PROVIDER_ID
+        );
+        if encoder.is_some() || encoder_provisioned {
             let debt = estate.count_span_index_debt().map_err(|e| {
                 GeniusLocusKitError::UnderlyingEstateFailure {
                     reason: format!("count_span_index_debt: {e:?}"),
@@ -2775,7 +2783,10 @@ impl EstateCoordinator {
                 name: DrainStatus::SPAN_ENCODE_NAME.to_string(),
                 pending: debt,
                 in_flight: 0,
-                detail: Some(format!("model: {}", encoder.spec().model_id)),
+                detail: Some(match encoder {
+                    Some(encoder) => format!("model: {}", encoder.spec().model_id),
+                    None => "encoder not loaded".to_string(),
+                }),
             });
         }
 
@@ -4339,11 +4350,27 @@ impl EstateCoordinator {
     /// handle and the clock (`now_millis`, stamped on every span row). No
     /// VectorStore registered → nothing to write → 0. Returns the number of
     /// drawers encoded. Mirrors Swift `runSpanEncodeBatch(handle:now:)`.
-    pub fn run_span_encode_batch(&self, handle: &EstateHandle, now_millis: i64) -> Result<i64, String> {
-        let estate = self.estate_for(handle).map_err(|e| format!("{e:?}"))?;
+    pub fn run_span_encode_batch(&mut self, handle: &EstateHandle, now_millis: i64) -> Result<i64, String> {
         let Some(store) = self.vector_stores.get(handle).cloned() else {
             return Ok(0);
         };
+        // No encoder registered (the model was absent or failed to load when
+        // the estate opened): attempt activation before walking the bit-27
+        // debt, so a model that arrives later is picked up on the next cycle.
+        // A failed attempt is the same clean skip as before; the directory
+        // probe runs before any model load, so retrying is free. Twin of
+        // Swift `runSpanEncodeBatch(handle:now:)`. The estate is borrowed
+        // again afterwards because activation takes `&mut self`.
+        if !self.span_encoders.contains_key(handle) {
+            let provisioned = matches!(
+                self.estate_for(handle).map_err(|e| format!("{e:?}"))?.meta(Self::EMBEDDING_PROVIDER_META_KEY),
+                Ok(Some(ref id)) if id == Self::ENCODER_PROVIDER_ID
+            );
+            if provisioned {
+                self.activate_span_encoder(handle);
+            }
+        }
+        let estate = self.estate_for(handle).map_err(|e| format!("{e:?}"))?;
         let encoder = self.span_encoders.get(handle).cloned();
         let limit = self.provisioned_encoder_batch(handle);
         let context = crate::brain::span_encode_duty::EstateSpanContext { estate };

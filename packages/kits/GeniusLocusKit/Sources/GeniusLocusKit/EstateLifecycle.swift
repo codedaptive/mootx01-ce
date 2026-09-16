@@ -927,7 +927,7 @@ public extension GeniusLocusKit {
     /// to the store. Absent or other keys do nothing; the failure contract of
     /// `activateSpanEncoder` applies (seed failure logged once, activation
     /// reads the registry as it stands).
-    private func activateSpanEncoderIfProvisioned(for handle: EstateHandle, frozen: Bool = false) async {
+    func activateSpanEncoderIfProvisioned(for handle: EstateHandle, frozen: Bool = false) async {
         guard let provisionedID = try? await provisionedEmbeddingProvider(for: handle),
               provisionedID == Self.encoderProviderID else {
             return
