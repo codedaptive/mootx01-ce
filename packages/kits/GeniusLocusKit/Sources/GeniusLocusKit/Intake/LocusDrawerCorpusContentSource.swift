@@ -133,4 +133,11 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
             return $0.content < $1.content
         }.map { $0.id }
     }
+
+    /// Budget probe used by retraining. The estate pushes the eligibility
+    /// predicates, deterministic order, ID-only projection, and LIMIT into
+    /// storage before any document body can be loaded.
+    public func activeContentIDs(limit: Int) async throws -> [CorpusContentID] {
+        try await estate.activeCorpusContentIDs(limit: max(0, limit))
+    }
 }

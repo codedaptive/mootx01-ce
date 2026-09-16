@@ -143,6 +143,15 @@ impl CorpusContentSource for LocusDrawerContentSource {
         entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         Ok(entries.into_iter().map(|(_, _, id)| id).collect())
     }
+
+    fn active_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        self.estate
+            .active_corpus_content_ids_limited(limit)
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))
+    }
 }
 use locus_kit::drawer::Drawer;
 

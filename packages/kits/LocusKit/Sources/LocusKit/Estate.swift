@@ -685,6 +685,12 @@ public actor Estate {
         try await store.allDrawers(hydrationLevel: hydrationLevel, limit: limit)
     }
 
+    /// Active, non-dataset IDs in deterministic `(filedAt, content, id)` order.
+    /// The store applies `limit` before any content body is materialized.
+    public func activeCorpusContentIDs(limit: Int) async throws -> [String] {
+        try await store.activeCorpusContentIDs(limit: limit)
+    }
+
     /// Bounded page of active (non-tombstoned) drawers ordered by `id`
     /// ascending, optionally starting strictly after `afterID`. Exposes
     /// `DrawerStore.activeDrawersAfter(id:limit:)` through the `Estate`
