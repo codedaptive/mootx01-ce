@@ -166,9 +166,10 @@ struct EstateDreamingSinkTests {
             let storedProposal = try #require(proposals.first,
                 "propose must persist a Proposal row")
 
+            let estateID = handle.estateUUID.uuidString
             let events = capturingSink.samples.filter {
-                if case .event = $0 { return true }
-                return false
+                guard case let .event(_, _, _, estate, _) = $0 else { return false }
+                return estate == estateID
             }
             #expect(events.count == 1,
                 "propose must emit exactly one .event sample; got \(events.count)")
@@ -181,7 +182,7 @@ struct EstateDreamingSinkTests {
                 "nounType must be \(Int(NounType.proposal.rawValue)) (NounType.proposal); got \(nounType)")
             #expect(rowID == storedProposal.id,
                 "rowID must equal stored proposal id \(storedProposal.id); got \(rowID)")
-            #expect(estate == handle.estateUUID.uuidString,
+            #expect(estate == estateID,
                 "estate must equal handle.estateUUID.uuidString; got \(estate)")
         }
     }
