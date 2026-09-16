@@ -17,6 +17,7 @@ struct UpgradeCommandSourceTests {
             .deletingLastPathComponent()   // Commands
             .deletingLastPathComponent()   // mootx01 target
             .deletingLastPathComponent()   // Sources
+            .deletingLastPathComponent()   // package root
     }
 
     @Test("both product manifests compile the legacy flat-layout migration call sites")

@@ -52,7 +52,7 @@ public enum ToolMutationInventory {
     /// every pure read; this table exists so only genuine mutations land here.
     public static let mutationTools: Set<String> = [
         "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
-        "moot_retire_fact", "moot_migration_confirm",
+        "moot_retire_fact", "moot_migration_confirm", "moot_migration_run",
         "moot_reindex", "moot_reclassify_fdc", "moot_dream",
         "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
         // Seed-file JSON import (MXE-JI-1): reads a seed file from the
@@ -125,8 +125,6 @@ public enum ToolMutationInventory {
         "moot_monitoring_status",
         // Grant-authorized federated read (v2 name: moot_federated_recall).
         "moot_federated_recall",
-        // Migration candidate evaluation (read-only, does not commit).
-        "moot_migration_run",
         // Recipe reads: catalogs and the recall family.
         "moot_list_lenses", "moot_list_recipes",
         "moot_recall_precise", "moot_recall_temporal", "moot_recall_shaped",
