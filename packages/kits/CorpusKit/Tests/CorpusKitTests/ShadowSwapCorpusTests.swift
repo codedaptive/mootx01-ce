@@ -46,6 +46,7 @@ private let vectorLanesPerItem: Int = {
 private actor SimpleContentSource: CorpusContentSource {
     private var records: [String: CorpusContentRecord] = [:]
     var shouldThrowOnFetch = false
+    private(set) var lastRequestedLimit: Int?
 
     func put(id: String, text: String) {
         let digest = CorpusContentDigest.digest(text)
@@ -61,6 +62,11 @@ private actor SimpleContentSource: CorpusContentSource {
 
     func activeContentIDs() async throws -> [CorpusContentID] {
         records.keys.sorted()
+    }
+
+    func activeContentIDs(limit: Int) async throws -> [CorpusContentID] {
+        lastRequestedLimit = limit
+        return Array(records.keys.sorted().prefix(limit))
     }
 
     func changes(since cursor: String?, limit: Int) async throws -> CorpusContentChangeBatch {
@@ -135,6 +141,28 @@ private func makeRIEngine(
 @Suite("ShadowSwap CorpusContentEngine — c1 generation advance, c2 recall stable, c3 failure path",
        .serialized)
 struct ShadowSwapCorpusTests {
+
+    @Test("bounded reindex refuses cap+1 before training and retains serving generation")
+    func boundedReindexRetainsServingGeneration() async throws {
+        let storage = try makeScratchStorage()
+        let source = SimpleContentSource()
+        for index in 1...3 {
+            await source.put(id: "bounded-\(index)", text: "bounded corpus row \(index)")
+        }
+        let engine = try await makeRIEngine(storage: storage, source: source)
+        let now = Date(timeIntervalSinceReferenceDate: 21_000_000)
+        try await engine.reindex(now: now)
+        let before = try await servingGeneration(storage: storage, modelID: "random-indexing-v1")
+
+        let report = try await engine.reindex(
+            now: now, budget: RetrainingBudget(maxDocuments: 2, maxSweeps: 30))
+        #expect(report.completedModelIDs.isEmpty)
+        #expect(report.skippedModelIDs["random-indexing-v1"] ==
+            .documentLimit(actual: 3, limit: 2))
+        #expect(await source.lastRequestedLimit == 3)
+        #expect(try await servingGeneration(storage: storage, modelID: "random-indexing-v1") == before)
+        #expect(try await vectorRowCount(storage: storage, modelID: "random-indexing-v1") == 3 * vectorLanesPerItem)
+    }
 
     // ── c1: serving_generation advances across two reindex passes ─────────
 
