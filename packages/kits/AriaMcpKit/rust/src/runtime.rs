@@ -393,7 +393,7 @@ pub fn run(
                         .unwrap_or_default()
                         .as_millis() as i64;
                     match span_coord.lock() {
-                        Ok(coord) => coord.run_span_encode_batch(&span_handle, now_ms),
+                        Ok(mut coord) => coord.run_span_encode_batch(&span_handle, now_ms),
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
                 });
