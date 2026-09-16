@@ -26,7 +26,7 @@ struct AriaV2ProposedTunnelParityTests {
     // MARK: - Harness
 
     /// Build a ToolDispatcher wired to a clean in-memory estate.
-    private func makeDispatcher() async throws -> ToolDispatcher {
+    private func makeDispatcher(serverIdentity: String = "user") async throws -> ToolDispatcher {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "proposed-tunnel-tests")
         let storage = InMemoryStorage(
@@ -36,7 +36,7 @@ struct AriaV2ProposedTunnelParityTests {
         let handle = try await kit.open(
             storage: storage, owner: owner,
             identityKeyStore: InMemoryEstateIdentityKeyStore())
-        return ToolDispatcher(kit: kit, handle: handle)
+        return ToolDispatcher(kit: kit, handle: handle, serverIdentity: serverIdentity)
     }
 
     /// File a memory and return its row ID, parsed from the "filed memory <id>" line.
@@ -251,7 +251,7 @@ struct AriaV2ProposedTunnelParityTests {
         #expect(afterCount == 0, "withdrawn tunnel must be invisible after reject; got \(afterCount)")
     }
 
-    /// Gate: moot_review_tunnel reject with reviewed_by != "user" routes to the
+    /// Gate: moot_review_tunnel reject from a trusted non-user context routes to the
     /// model-objection branch (object_to_tunnel), not the user-verdict branch
     /// (respond_to_tunnel).
     ///
@@ -268,7 +268,14 @@ struct AriaV2ProposedTunnelParityTests {
     /// aria_v2_wire_parity_tests.rs. Change both or neither.
     @Test("review_tunnel model reject routes to object_to_tunnel")
     func reviewTunnelModelRejectRoutesToObjectToTunnel() async throws {
-        let dispatcher = try await makeDispatcher()
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "proposed-tunnel-model-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+        let model1 = ToolDispatcher(kit: kit, handle: handle, serverIdentity: "model-1")
+        let model2 = ToolDispatcher(kit: kit, handle: handle, serverIdentity: "model-2")
+        let dispatcher = model1
         let fromID = try await fileMemory(dispatcher, content: "model-reject source")
         let toID   = try await fileMemory(dispatcher, content: "model-reject target")
 
@@ -294,7 +301,6 @@ struct AriaV2ProposedTunnelParityTests {
             arguments: .object([
                 "tunnel_id": .string(tunnelID),
                 "decision": .string("endorse"),
-                "reviewed_by": .string("model-1"),
             ])
         )
         let endorseError = endorse.objectValue?["isError"]?.boolValue ?? true
@@ -305,13 +311,12 @@ struct AriaV2ProposedTunnelParityTests {
             "endorse envelope text must be 'Endorsed tunnel <id>.'; got: \(String(describing: contentText(endorse)))"
         )
 
-        // model-2 objects (reject with reviewed_by != "user") → model-objection branch.
-        let reject = try await dispatcher.dispatch(
+        // model-2's trusted context objects → model-objection branch.
+        let reject = try await model2.dispatch(
             name: "moot_review_tunnel",
             arguments: .object([
                 "tunnel_id": .string(tunnelID),
                 "decision": .string("reject"),
-                "reviewed_by": .string("model-2"),
             ])
         )
         let rejectError = reject.objectValue?["isError"]?.boolValue ?? true
