@@ -3033,25 +3033,30 @@ public actor CorpusContentEngine {
     ///     unchanged — this skips the BM25 write and binary rows, embedding only the
     ///     float-vector lane. Mirrors `recomposeDenseFloat` but applied corpus-wide.
     public func reindex(now: Date, laneScope: LaneScope = .all) async throws {
-        _ = try await reindexImpl(now: now, laneScope: laneScope, budget: nil, trainingIDs: nil)
+        _ = try await reindexImpl(now: now, laneScope: laneScope, budget: nil, boundedIDs: nil)
     }
 
     @discardableResult
     public func reindex(
         now: Date, budget: RetrainingBudget, laneScope: LaneScope = .all
     ) async throws -> CorpusRetrainingReport {
-        // The document cap bounds the TRAINING sample, never the estate: a
-        // basis is trained on at most `maxDocuments` documents (the source's
-        // deterministic order, so the sample is stable across attempts) and
-        // every active document is then embedded with it. Refusing to retrain
-        // an estate larger than the cap left every real estate's dense basis
-        // frozen and made the facts-backfill rebuild fail (2026-09-16); the
-        // bound on work is the sample size plus the deadline and cancellation
-        // checks inside training.
-        let trainingIDs = try await source.activeContentIDs(limit: budget.maxDocuments)
+        let admissionLimit = budget.maxDocuments == Int.max
+            ? Int.max : budget.maxDocuments + 1
+        let ids = try await source.activeContentIDs(limit: admissionLimit)
         let trainableIDs = slots
             .filter { $0.provider is (any TrainableEmbeddingBasis) }
             .map { $0.provider.modelID }
+        guard ids.count <= budget.maxDocuments else {
+            let reason = RetrainingSkipReason.documentLimit(
+                actual: ids.count, limit: budget.maxDocuments)
+            guard !trainableIDs.isEmpty else {
+                throw CorpusKitError.retrainingSkipped(reason)
+            }
+            return CorpusRetrainingReport(
+                completedModelIDs: [],
+                skippedModelIDs: Dictionary(uniqueKeysWithValues:
+                    trainableIDs.map { ($0, reason) }))
+        }
         if let reason = budget.cancellationReason {
             guard !trainableIDs.isEmpty else {
                 throw CorpusKitError.retrainingSkipped(reason)
@@ -3062,15 +3067,12 @@ public actor CorpusContentEngine {
                     trainableIDs.map { ($0, reason) }))
         }
         return try await reindexImpl(
-            now: now, laneScope: laneScope, budget: budget, trainingIDs: trainingIDs)
+            now: now, laneScope: laneScope, budget: budget, boundedIDs: ids)
     }
 
-    /// `trainingIDs` bounds only the documents the trainable bases learn
-    /// from; the re-embed pass below always covers every active document so
-    /// the published generation is complete.
     private func reindexImpl(
         now: Date, laneScope: LaneScope,
-        budget: RetrainingBudget?, trainingIDs: [CorpusContentID]?
+        budget: RetrainingBudget?, boundedIDs: [CorpusContentID]?
     ) async throws -> CorpusRetrainingReport {
         // Identify trainable model IDs: slots whose provider is a TrainableEmbeddingBasis
         // (RI, LSA). Their new vectors will be written into a shadow
@@ -3114,7 +3116,7 @@ public actor CorpusContentEngine {
             // Retrain all trainable slots from scratch — produces the new basis blobs
             // that the subsequent re-embed pass will use. No vector rows are written here.
             _ = try await trainTrainableSlots(
-                now: now, force: true, budget: budget, boundedIDs: trainingIDs)
+                now: now, force: true, budget: budget, boundedIDs: boundedIDs)
 
             // Bulk-write bracket for non-trainable model writes (stateless
             // slots): defers resident dense-index updates for the O(corpus) pass and
@@ -3123,10 +3125,9 @@ public actor CorpusContentEngine {
             // float indices, or HNSW structures during the build phase).
             try await vectorStore.beginDeferredIndex()
 
-            // Every active document is re-embedded, whatever the training
-            // sample was: a bounded training set must never leave part of the
-            // estate without vectors in the published generation.
-            let ids = try await source.activeContentIDs()
+            let ids: [CorpusContentID]
+            if let boundedIDs { ids = boundedIDs }
+            else { ids = try await source.activeContentIDs() }
             if case .wholeContent = configuration.indexUnit {
                 // Bound both task admission and prepared-result memory. The batch
                 // kernel preserves input order and advances each checkpoint only
