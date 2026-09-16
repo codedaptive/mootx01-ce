@@ -6107,14 +6107,13 @@ fn link_memories_bad_relationship_carries_allowed_and_correction() {
     );
 }
 
-/// moot_review_tunnel with decision 'accept' and reviewed_by 'model' must
-/// return a -32602 error whose data carries `allowed` equal to ["user"] and
-/// a non-empty `correction`.
+/// moot_review_tunnel with the retired reviewed_by argument must return a
+/// -32602 unknown-argument error naming the live request keys.
 ///
 /// Parity: `enumRefusalCarriesBothFields` (case moot_review_tunnel/reviewed_by)
 /// in Tests/AriaMCPTests/AriaV2RefusalParityTests.swift.
 #[test]
-fn review_tunnel_model_accept_carries_allowed_and_correction() {
+fn review_tunnel_rejects_caller_supplied_reviewer_identity() {
     let response = call_tool_response(
         "moot_review_tunnel",
         serde_json::json!({
@@ -6127,7 +6126,7 @@ fn review_tunnel_model_accept_carries_allowed_and_correction() {
     assert_eq!(
         response["error"]["code"],
         serde_json::json!(-32602),
-        "model accept must yield -32602 INVALID_PARAMS; response: {response:?}"
+        "reviewed_by must yield -32602 INVALID_PARAMS; response: {response:?}"
     );
 
     let data = &response["error"]["data"];
@@ -6136,11 +6135,10 @@ fn review_tunnel_model_accept_carries_allowed_and_correction() {
         .expect("data.correction must be present and a string");
     assert!(!correction.is_empty(), "data.correction must be non-empty; response: {response:?}");
 
-    // Cross-port value equality: the only acceptable reviewer for activation is
-    // "user".  Sorted list is ["user"].
+    // Cross-port value equality: the strict decoder reports the live key set.
     assert_eq!(
         data["allowed"],
-        serde_json::json!(["user"]),
+        serde_json::json!(["decision", "estate_id", "note", "tunnel_id"]),
         "reviewed_by allowed must match Swift's sorted emission; response: {response:?}"
     );
 }

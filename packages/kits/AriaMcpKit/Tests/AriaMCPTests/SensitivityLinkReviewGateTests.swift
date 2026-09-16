@@ -299,7 +299,6 @@ struct SensitivityLinkReviewGateTests {
             arguments: .object([
                 "tunnel_id": .string(tunnel.id),
                 "decision": .string("endorse"),
-                "reviewed_by": .string("test-reviewer"),
             ])
         )
 
@@ -345,7 +344,6 @@ struct SensitivityLinkReviewGateTests {
             arguments: .object([
                 "tunnel_id": .string(tunnel.id),
                 "decision": .string("endorse"),
-                "reviewed_by": .string("test-reviewer"),
             ])
         )
         let nonexistentResponse = try await dispatcher.dispatch(
@@ -353,7 +351,6 @@ struct SensitivityLinkReviewGateTests {
             arguments: .object([
                 "tunnel_id": .string(nonexistentTunnelID.uuidString),
                 "decision": .string("endorse"),
-                "reviewed_by": .string("test-reviewer"),
             ])
         )
 
@@ -429,7 +426,6 @@ struct SensitivityLinkReviewGateTests {
             arguments: .object([
                 "tunnel_id": .string(captured.id),
                 "decision": .string("endorse"),
-                "reviewed_by": .string("test-reviewer"),
             ])
         )
 
@@ -502,7 +498,6 @@ struct SensitivityLinkReviewGateTests {
             arguments: .object([
                 "tunnel_id": .string(captured.id),
                 "decision": .string("endorse"),
-                "reviewed_by": .string("test-reviewer"),
             ])
         )
 
