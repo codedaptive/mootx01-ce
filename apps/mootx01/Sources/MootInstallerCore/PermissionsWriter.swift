@@ -154,8 +154,6 @@ public enum PermissionsWriter {
         "moot_recall_similar",
         // Monitoring inspection: reads daemon telemetry state without changing it.
         "moot_monitoring_status",
-        // Migration candidate evaluation (read-only, does not commit).
-        "moot_migration_run",
         // Dataset reads (MX-TAB-7): query rows / column stats are read-only.
         "moot_dataset_query", "moot_dataset_stats",
         "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
