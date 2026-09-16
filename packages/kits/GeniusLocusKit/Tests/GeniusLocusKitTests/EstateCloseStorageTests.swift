@@ -11,8 +11,8 @@
 //       read-write immediately after close (file-lock release verification).
 //   T2  close() clears storages[handle] — the map entry is nil after close.
 //   T3  close() empties every per-estate map (registry, auditLogs, diaryStores,
-//       kgStores, fingerprintStores, matrixTiers, calibrationRegistries,
-//       matrixPersistenceBackends, nodeTopologyProviders, corpusKits,
+//       kgStores, fingerprintStores, matrixTiers, matrixRecordStores,
+//       matrixRefreshWorkers, nodeTopologyProviders, corpusKits,
 //       vectorStores, mountStates, grantStores, scopeVaults).
 //   T4  Double-close is safe — second close raises estateNotOpen, not a crash.
 //   T5  Subsequent verb call on a closed handle raises estateNotOpen.
@@ -169,8 +169,8 @@ struct EstateCloseStoragesMapTests {
 ///
 /// Maps censused:
 ///   registry, auditLogs, mountStates, storages, diaryStores, kgStores,
-///   fingerprintStores, matrixTiers, calibrationRegistries,
-///   matrixPersistenceBackends, nodeTopologyProviders, corpusKits,
+///   fingerprintStores, matrixTiers, matrixRecordStores,
+///   matrixRefreshWorkers, nodeTopologyProviders, corpusKits,
 ///   vectorStores, grantStores, scopeVaults
 /// (The encode queue/drain/HLC now live inside the Corpus — CorpusKit owns the
 /// ingest pipeline — and are torn down when corpusKits[handle] is released.)
@@ -248,11 +248,11 @@ struct EstateCloseMapCensusTests {
         let matrixAfter = await kit.matrixTiers[handle]
         #expect(matrixAfter == nil, "matrixTiers[handle] must be nil after close")
 
-        let calRegAfter = await kit.calibrationRegistries[handle]
-        #expect(calRegAfter == nil, "calibrationRegistries[handle] must be nil after close")
+        let calRegAfter = await kit.matrixRecordStores[handle]
+        #expect(calRegAfter == nil, "matrixRecordStores[handle] must be nil after close")
 
-        let matPersAfter = await kit.matrixPersistenceBackends[handle]
-        #expect(matPersAfter == nil, "matrixPersistenceBackends[handle] must be nil after close")
+        let matPersAfter = await kit.matrixRefreshWorkers[handle]
+        #expect(matPersAfter == nil, "matrixRefreshWorkers[handle] must be nil after close")
 
         let nodeTopoAfter = await kit.nodeTopologyProviders[handle]
         #expect(nodeTopoAfter == nil, "nodeTopologyProviders[handle] must be nil after close")

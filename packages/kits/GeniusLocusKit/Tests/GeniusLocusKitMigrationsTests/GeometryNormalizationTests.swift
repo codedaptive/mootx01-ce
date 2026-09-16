@@ -164,7 +164,7 @@ struct GeometryNormalizationTests {
 
         // RED: prepare() throws noHistoricalMigrationsCompiled for fresh estates until Part 3
         // adds (a) the geometry capsule call and (b) fresh-estate stamping without the trait.
-        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
 
         // GREEN assertions (reached only after Part 3 lands):
         let reserveAfter = try #require(try readReserveBytes(at: url))
@@ -217,7 +217,7 @@ struct GeometryNormalizationTests {
         try? FileManager.default.removeItem(at: url)
         let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 3)
 
-        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
 
         let reserveAfter = try #require(try readReserveBytes(at: url))
         #expect(reserveAfter == 0, "Apple-provenance estate must normalize to reserve=0")
@@ -239,10 +239,10 @@ struct GeometryNormalizationTests {
         let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 3)
 
         // First run — normalizes.
-        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
 
         // Second run — estate is already current; must not perform further work.
-        let prep2 = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        let prep2 = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
         #expect(prep2.migrated == false, "second prepare must not report migration work")
     }
 
@@ -260,7 +260,7 @@ struct GeometryNormalizationTests {
 
         let expectedRowCount = 7
         let (kit, handle, storage) = try await makeGeometryEstate(at: url, rowCount: expectedRowCount)
-        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
 
         // All rows survive the sqlcipher_export swap.
         let rows = try await storage.rowStore.query(
@@ -289,7 +289,7 @@ struct GeometryNormalizationTests {
             storage: storage, owner: geoTestOwner,
             identityKeyStore: InMemoryEstateIdentityKeyStore())
 
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
         #expect(prep.migrated == false, "reserve=0 estate must not trigger normalization")
     }
 
@@ -321,7 +321,7 @@ struct GeometryNormalizationTests {
             identityKeyStore: InMemoryEstateIdentityKeyStore())
         _ = keyHex // used for encryption config; suppress warning
 
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
         #expect(prep.migrated == false, "encrypted estate must not be geometry-patched")
     }
 
@@ -349,7 +349,7 @@ struct GeometryNormalizationTests {
             [.posixPermissions: 0o444], ofItemAtPath: url.path)
 
         // Should not throw — the capsule parks and returns migrated=false.
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
         #expect(prep.migrated == false, "parked capsule must report migrated=false")
     }
 
@@ -379,7 +379,7 @@ struct GeometryNormalizationTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
 
         // Should not throw — the capsule catches the createFile error and parks.
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
         #expect(prep.migrated == false, "parked capsule must report migrated=false")
     }
 
@@ -399,7 +399,7 @@ struct GeometryNormalizationTests {
         }
 
         let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 3)
-        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
 
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
 
@@ -447,7 +447,7 @@ struct GeometryNormalizationTests {
         }
         defer { _geometryNormalizationTestHookAfterSiblingCreation = nil }
 
-        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
 
         #expect(captured.value == 0o600,
                 "sibling must be 0600 at creation; got \(String(format: "%o", max(0, captured.value)))")
@@ -466,7 +466,7 @@ struct GeometryNormalizationTests {
         }
 
         let (kit, handle, _) = try await makeGeometryEstate(at: url, rowCount: 3)
-        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
 
         let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
         let perms = (attrs[.posixPermissions] as? Int) ?? -1
@@ -513,7 +513,7 @@ struct GeometryNormalizationTests {
         }
 
         // The capsule catches the ATTACH failure and parks.
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
         #expect(prep.migrated == false, "capsule must park on ATTACH failure")
 
         // No stale sibling must remain after the failure path ran.
