@@ -1,5 +1,6 @@
-//! Production retraining boundary: load settings once and preserve the caller's
-//! baseline on a skipped attempt. Callers must release their coordinator lock.
+//! Production retraining boundary: load settings once, train on a bounded
+//! sample, re-embed every document, and keep the caller's baseline on a
+//! skipped attempt. Callers must release their coordinator lock.
 use corpus_kit::{CorpusContentEngine, RetrainingBudget};
 use corpus_kit::error::CorpusKitError;
 use moot_product_identity::{settings, storage};
@@ -11,7 +12,12 @@ pub fn reindex_with_settings(engine: &CorpusContentEngine, now: i64) -> Result<(
     let budget = RetrainingBudget::new(settings.corpus_lsa_retraining_max_documents,
         settings.corpus_lsa_retraining_max_sweeps, deadline);
     let report = engine.reindex_with_budget(now, &budget)?;
-    if report.skipped_model_ids.is_empty() { Ok(()) } else {
-        Err(CorpusKitError::InvalidConfiguration(format!("Retraining budget exhausted: {:?}", report.skipped_model_ids)))
+    // A skipped provider (deadline or cancellation) keeps its serving basis
+    // and vectors; that is a bounded attempt doing its job, not a failure.
+    // Log it so an operator can raise `corpus.lsa_retraining` if it recurs.
+    // Twin of Swift `reindexCorpus(handle:now:)`.
+    if !report.skipped_model_ids.is_empty() {
+        eprintln!("mootx01 reindex: retraining skipped within budget, serving basis kept: {:?}", report.skipped_model_ids);
     }
+    Ok(())
 }
