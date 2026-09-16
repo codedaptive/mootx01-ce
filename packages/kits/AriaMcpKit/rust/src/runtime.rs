@@ -933,14 +933,11 @@ fn parse_max_body_bytes(banner: &str) -> usize {
 /// setting is needed.
 const FACT_EXTRACTION_BATCH_LIMIT: usize = 20;
 
-/// Activate an already-built fact extractor and return the signal-14 cycle
-/// closure, or `None` when the estate setting is `Off`.
-///
-/// This is the testable seam for signal 14. It holds:
-///   1. The estate setting decision (`Off` → `None`).
-///   2. The `activate_fact_extractor` call (derives recipe ID from the extractor
-///      spec, clears stale extraction debt when the recipe changes).
-///   3. The cycle closure construction.
+/// Prepare the signal-14 cycle for an already-built fact extractor.
+/// Each invocation re-reads the live estate preference: Off returns zero without
+/// activation; On activates the selected extractor and runs a bounded batch.
+/// Deferring activation allows a later Off-to-On transition without rebuilding
+/// the resident and prevents an Off tick from changing extraction state.
 ///
 /// Called by `build_fact_extraction_cycle` in production after the
 /// `NuExtractWorkerClient` is built. Called directly by tests with a stub
@@ -1090,15 +1087,14 @@ pub fn build_contradiction_sweep_cycle(
     }))
 }
 
-/// Decide whether fact-extraction signal 14 should run for `handle`, and if so
-/// build the worker client, activate, and return the cycle closure.
+/// Build a fact-extraction signal-14 cycle when the selected Rust provider and
+/// its assets are available. The returned cycle checks FactExtraction on every
+/// tick and activates the provider only while enabled.
 ///
-/// Three cases:
-/// - Estate setting `Off` → `None`. No activation.
-/// - Estate setting `On`, selector `Nuextract`, and configured or bundled
-///   worker assets reachable → activate and return `Some(cycle)`.
-/// - Estate setting `On` with selector `Apple`, or with unavailable NuExtract
-///   assets → log and return `None`; the daemon continues serving.
+/// - Selector `Nuextract` with configured or bundled readable worker assets
+///   returns `Some(cycle)` without activation at construction.
+/// - Selector `Apple` or unavailable NuExtract assets returns `None`; the daemon
+///   continues serving.
 ///
 /// `config_dir` is the settings-module directory selected by the host. Product
 /// serve passes the install directory for registered estates and the estate's
@@ -1207,8 +1203,8 @@ pub fn build_fact_extraction_cycle(
     };
 
     // Step 4: delegate activation and cycle construction to the testable seam.
-    // `activate_and_build_extraction_cycle` re-reads the estate setting (it is
-    // the authoritative gate) and calls `activate_fact_extractor`.
+    // The returned closure re-reads the authoritative estate setting before
+    // each activation and extraction batch.
     let client: Arc<dyn fact_extraction_kit::contract::FactExtractor> = Arc::new(client);
     activate_and_build_extraction_cycle(client, coord, handle)
 }
