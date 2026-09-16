@@ -247,6 +247,10 @@ public extension GeniusLocusKit {
     ///     never call `Date()` inside the engine (CLAUDE.md determinism rule).
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale;
     ///   a `CorpusKitError` if the retrain or re-embed fails.
+    /// The document backstop for the LSA retrain; see `reindexCorpus`. Read
+    /// by the estate ping to declare a degraded estate. Both ports.
+    public static let lsaRetrainingDocumentBackstop = 10_000_000
+
     func reindexCorpus(handle: EstateHandle, now: Date) async throws {
         guard registry[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
@@ -258,18 +262,25 @@ public extension GeniusLocusKit {
         // moot_rebuild_status span: the basis retrain + re-embed window.
         derivedRebuildSpan(handle, open: true)
         defer { derivedRebuildSpan(handle, open: false) }
-        let settings = MootProductIdentity.Settings.load()
+        // BACKSTOPS AGAINST THE ABSURD, not working limits (Bob, 2026-09-16).
+        // The dense basis must be learned from every document, so the retrain
+        // is never capped in normal use: if the data is there it is processed.
+        // Ten million documents is more than an order of magnitude past a
+        // decade of heavy filing plus palace imports; a retrain running past a
+        // day on a daily cadence is a broken system, not a slow one. Thirty
+        // sweeps is the SVD's fixed iteration count, unchanged since it
+        // shipped. An estate that reaches the document backstop is declared
+        // LSA-degraded on every estate ping (`lsaRetrainingDocumentBackstop`).
         let budget = RetrainingBudget(
-            maxDocuments: settings.corpusLSARetrainingMaxDocuments,
-            maxSweeps: settings.corpusLSARetrainingMaxSweeps,
-            deadline: ContinuousClock.now.advanced(by: .milliseconds(settings.corpusLSARetrainingTimeoutMilliseconds)))
+            maxDocuments: Self.lsaRetrainingDocumentBackstop,
+            maxSweeps: 30,
+            deadline: ContinuousClock.now.advanced(by: .seconds(24 * 60 * 60)))
         let report = try await corpus.reindex(now: now, budget: budget)
-        // A skipped provider (deadline or cancellation) keeps its serving basis
-        // and vectors; that is a bounded attempt doing its job, not a failure.
-        // Log it so an operator can raise `corpus.lsa_retraining` if it recurs.
+        // Reaching a backstop keeps the serving basis and vectors and is an
+        // error-level event: the estate is degraded until it is looked at.
         if !report.skippedModelIDs.isEmpty {
-            Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit").warning(
-                "reindexCorpus: retraining skipped within budget, serving basis kept: \(String(describing: report.skippedModelIDs), privacy: .public)")
+            Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit").error(
+                "reindexCorpus: LSA retraining DEGRADED, a backstop was reached and the serving basis was kept: \(String(describing: report.skippedModelIDs), privacy: .public)")
         }
     }
 }
