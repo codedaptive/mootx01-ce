@@ -6344,13 +6344,8 @@ public actor DrawerStore {
     /// leaves the predicate (the producer's own tier is never in its
     /// list), so settled-skip still holds. Mirrors Rust
     /// `subject_debt_batch_including`.
-    ///
-    /// `offset` is the sweep's cursor into the (filedAt, id)-ordered debt:
-    /// rows the producer could not settle stay in the predicate, so a sweep
-    /// that always read from the head would re-enumerate the same
-    /// inadmissible rows forever; the caller advances past what it skipped.
     public func subjectDebtBatch(
-        limit: Int, includingPipelines pipelines: [String], offset: Int = 0
+        limit: Int, includingPipelines pipelines: [String]
     ) async throws -> [Drawer] {
         let rows = try await storage.rowStore.query(
             table: "drawers",
@@ -6359,7 +6354,7 @@ public actor DrawerStore {
                 OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
                 OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
             ],
-            limit: limit, offset: offset > 0 ? offset : nil, columns: nil
+            limit: limit, offset: nil, columns: nil
         )
         return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "subjectDebtBatch")
     }
