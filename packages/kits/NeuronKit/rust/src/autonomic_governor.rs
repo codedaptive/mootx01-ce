@@ -1629,7 +1629,7 @@ impl AutonomicGovernor {
         // it does not break proposal/diary functions).
         if let Some((corpus, live_vocab)) = theta_retrain_pending {
             let now_millis = (now_epoch_secs * 1000.0) as i64;
-            if let Err(e) = corpus.reindex(now_millis) {
+            if let Err(e) = genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&corpus, now_millis) {
                 eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e);
             } else {
                 // Advance the shared baseline so ALPHA's delta window starts
@@ -1656,7 +1656,7 @@ impl AutonomicGovernor {
                         vocab_corpus.maintained_vocab_anchor() as i64
                     }),
                     reindex: Box::new(move |now_secs| {
-                        match reindex_corpus.reindex((now_secs * 1_000.0).round() as i64) {
+                        match genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&reindex_corpus, (now_secs * 1_000.0).round() as i64) {
                             Ok(()) => true,
                             Err(error) => {
                                 eprintln!(
