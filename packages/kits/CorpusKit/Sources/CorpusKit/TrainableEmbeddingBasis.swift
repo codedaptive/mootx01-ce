@@ -36,6 +36,39 @@
 import Foundation
 import SynapseKit
 
+/// Work limits applied to one full-corpus provider retraining attempt.
+public struct RetrainingBudget: Sendable {
+    public let maxDocuments: Int
+    public let maxSweeps: Int
+    public let deadline: ContinuousClock.Instant?
+
+    public init(maxDocuments: Int, maxSweeps: Int, deadline: ContinuousClock.Instant? = nil) {
+        self.maxDocuments = max(1, maxDocuments)
+        self.maxSweeps = max(1, maxSweeps)
+        self.deadline = deadline
+    }
+
+    public static let unbounded = RetrainingBudget(
+        maxDocuments: .max, maxSweeps: .max, deadline: nil)
+
+    public var cancellationReason: RetrainingSkipReason? {
+        if Task<Never, Never>.isCancelled { return .cancelled }
+        if let deadline, ContinuousClock.now >= deadline { return .deadlineExceeded }
+        return nil
+    }
+}
+
+public enum RetrainingSkipReason: Sendable, Equatable {
+    case documentLimit(actual: Int, limit: Int)
+    case cancelled
+    case deadlineExceeded
+}
+
+public enum RetrainingOutcome: Sendable, Equatable {
+    case completed
+    case skipped(RetrainingSkipReason)
+}
+
 /// A provider whose embedding basis is trained from a corpus and can be
 /// serialized to / reconstructed from a versioned basis blob.
 ///
@@ -68,6 +101,11 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     ///
     /// - Parameter texts: raw document texts (NOT pre-tokenized term arrays).
     func trainOnCorpus(texts: [String])
+
+    /// Bounded, cooperatively cancellable retraining. A skipped attempt must
+    /// leave the receiver unpublished; Corpus trains a fresh instance and only
+    /// swaps it into service after this method returns `.completed`.
+    func trainOnCorpus(texts: [String], budget: RetrainingBudget) -> RetrainingOutcome
 
     // MARK: - Streamed training (GLK shared-content 1.1 corrective pass)
     //
@@ -295,6 +333,16 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
 }
 
 public extension TrainableEmbeddingBasis {
+
+    func trainOnCorpus(texts: [String], budget: RetrainingBudget) -> RetrainingOutcome {
+        guard texts.count <= budget.maxDocuments else {
+            return .skipped(.documentLimit(actual: texts.count, limit: budget.maxDocuments))
+        }
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        trainOnCorpus(texts: texts)
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        return .completed
+    }
 
     /// Default: no term decomposition. The provider is persisted as one blob,
     /// which is correct for every provider whose counts do not scale with

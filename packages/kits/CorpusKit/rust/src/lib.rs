@@ -87,6 +87,7 @@ pub use content_engine::passage_ranges;
 #[cfg(feature = "standalone-passages")]
 pub use index_configuration_store::CorpusIndexConfigurationStore;
 pub use corpus::Corpus;
+pub use corpus::CorpusRetrainingReport;
 pub use corpus::CorpusPathReason;
 pub use corpus::EmbeddingModelConfig;
 pub use corpus::FloatDiscriminationSignal;
@@ -123,3 +124,4 @@ pub use sub_span_scoring::{
 pub use sync_manifest::*;
 pub use tokenizer::*;
 pub use trainable_embedding_basis::TrainableEmbeddingBasis;
+pub use trainable_embedding_basis::{RetrainingBudget, RetrainingOutcome, RetrainingSkipReason};
