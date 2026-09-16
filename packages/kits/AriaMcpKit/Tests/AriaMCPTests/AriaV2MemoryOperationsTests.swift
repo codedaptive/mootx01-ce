@@ -87,6 +87,24 @@ struct AriaV2MemoryOperationsTests {
         #expect(surfaced == [firstID])
     }
 
+    @Test func searchDiscriminationIsStrictlyOptIn() async throws {
+        let backend = FakeMemoryBackend(records: [record(firstID), record(hiddenID)])
+        let operations = service(backend: backend)
+        let omitted = try await operations.search(arguments: .object(["query": .string("find planning")]))
+        let disabled = try await operations.search(arguments: .object([
+            "query": .string("find planning"), "explain": .bool(false),
+        ]))
+        let enabled = try await operations.search(arguments: .object([
+            "query": .string("find planning"), "explain": .bool(true),
+        ]))
+        let text: (JSONValue) -> String = { response in
+            response.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        }
+        #expect(!text(omitted).contains("discrimination:"))
+        #expect(!text(disabled).contains("discrimination:"))
+        #expect(text(enabled).contains("discrimination:"))
+    }
+
     // ITEM 6: `subject` key must be present in compact search result rows.
     //
     // MootMemoryTools.swift:127-129 documents "subject" as part of the live key
