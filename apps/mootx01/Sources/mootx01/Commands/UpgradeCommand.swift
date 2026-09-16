@@ -192,7 +192,7 @@ struct UpgradeCommand: AsyncParsableCommand {
         // --converge-only: we ARE the freshly installed binary, re-executed by the
         // upgrade that placed us. Run the convergence steps and nothing else.
         if convergeOnly {
-            await runConvergence(
+            try await runConvergence(
                 estate: estate, home: home,
                 binaryPath: MootPaths.installedBinaryURL(homeDirectory: home).path)
             return
@@ -215,6 +215,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 print("Transient estate '\(estate.name)' at \(estate.directory.path): running the estate migration steps only.")
             }
             guard await runSchemaUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
+            guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
             retireLegacyEncryptionOptOut(estate: estate)
             refreshManifest(estate: estate)
             let okKG     = await runKGFactIdentityBackfill(estate: estate, home: home)
@@ -345,6 +346,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // may have placed a new binary but left the Claude Code plugin
                 // cache stale (version_skew advisory firing on every ping).
                 if await runSchemaUpgrade(estate: estate, home: home) {
+                    guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
                     retireLegacyEncryptionOptOut(estate: estate)
                     refreshManifest(estate: estate)
                     await runKGFactIdentityBackfill(estate: estate, home: home)
@@ -445,7 +447,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             // back to converging in THIS image: the pre-existing behaviour, so a
             // failed re-exec never leaves an upgrade less converged than before.
             print("Note: converging with the previous binary — the installed one could not run.")
-            await runConvergence(estate: estate, home: home, binaryPath: binaryPath)
+            try await runConvergence(estate: estate, home: home, binaryPath: binaryPath)
         }
 
         #if os(macOS)
@@ -475,6 +477,52 @@ struct UpgradeCommand: AsyncParsableCommand {
         estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore()
     }
 
+    /// Offline matrix upgrade: preserve calibration, rebuild records and reclaim before serving.
+    @discardableResult
+    private func runMatrixRecordsUpgrade(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        guard FileManager.default.fileExists(atPath: estate.databaseURL.path) else { return true }
+        let configuration: EstateConfiguration
+        do {
+            configuration = EstateConfiguration(estateID: UUID(),
+                backend: .sqlite(url: estate.databaseURL, busyTimeout: 5.0),
+                encryptionConfig: try EstateOpenPosture.resolve(for: estate).encryption)
+        } catch {
+            print("  ✗ matrix storage upgrade: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(estatePIDURL: estate.pidURL,
+            step: "matrix storage upgrade", daemon: .launchd(homeDirectory: home)) {
+            do {
+                let storage = try SQLiteStorage(configuration: configuration)
+                let kit = GeniusLocusKit()
+                var handle: EstateHandle?
+                do {
+                    let opened = try await kit.open(storage: storage,
+                        owner: OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier),
+                        identityKeyStore: Self.identityKeyStore(for: estate))
+                    handle = opened
+                    _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: opened,
+                        now: Date(), offlineUpgrade: true)
+                    try await kit.close(opened)
+                    await storage.close()
+                    print("  ✓ matrix records prepared; required retirement and reclamation complete")
+                    return true
+                } catch {
+                    if let handle { try? await kit.close(handle) }
+                    await storage.close()
+                    throw error
+                }
+            } catch {
+                print("  ✗ matrix storage upgrade failed: \(error); serving remains gated until upgrade succeeds")
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
     /// Schema upgrade: the one product schema migration. Reads the LocusKit
     /// ledger row RAW, before any schema open, and decides with
     /// `LocusKitSchema.upgradePath(storedVersion:)`:
@@ -495,6 +543,7 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
     /// Returns `true` when the estate is at 20 afterwards (or absent).
     @discardableResult
+
     private func runSchemaUpgrade(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
         let estateURL = estate.databaseURL
@@ -1618,13 +1667,14 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// reclaim both need a quiesced estate and run BEFORE `restartAgents`, so the
     /// restarted daemon hydrates migrated rows rather than serving the
     /// pre-migration shape from RAM until its next restart.
-    private func runConvergence(estate: EstateRecord, home: URL, binaryPath: String) async {
+    private func runConvergence(estate: EstateRecord, home: URL, binaryPath: String) async throws {
         rematerializePluginDepth(home: home, binaryPath: binaryPath)
         migratePermissionTiers(home: home)
         removeRedundantCodexDirectEntry(home: home)
         // A refused schema version skips every data step: each of them would
         // open the LocusKit schema and stamp the estate current.
         if await runSchemaUpgrade(estate: estate, home: home) {
+            guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
             retireLegacyEncryptionOptOut(estate: estate)
             refreshManifest(estate: estate)
             await runKGFactIdentityBackfill(estate: estate, home: home)

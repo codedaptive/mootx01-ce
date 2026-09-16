@@ -1,5 +1,9 @@
 @_exported import GeniusLocusKit
 
+#if GLK_MIGRATION_V1_9_TO_V1_10
+@_exported import GLKMigrationV1_9ToV1_10
+#endif
+
 #if GLK_MIGRATION_V1_0_TO_V1_1
 @_exported import GLKMigrationV1_0ToV1_1
 #endif
@@ -42,9 +46,12 @@ public enum GLKMigrationCatalogError: Error, Sendable, Equatable,
     case noHistoricalMigrationsCompiled(current: EstateFormatVersion)
     case belowCompiledFloor(found: EstateFormatVersion, floor: EstateFormatVersion)
     case unsupportedFuture(found: EstateFormatVersion, current: EstateFormatVersion)
+    case offlineUpgradeRequired
 
     public var description: String {
         switch self {
+        case .offlineUpgradeRequired:
+            return "matrix storage upgrade required; run mootx01 upgrade with the estate stopped"
         case let .noHistoricalMigrationsCompiled(current):
             return "this GLK \(current) build contains no historical migration capsules"
         case let .belowCompiledFloor(found, floor):
@@ -93,6 +100,8 @@ public enum GLKMigrationCatalog {
         #elseif GLK_MIGRATION_V1_8_TO_V1_9
         // Only the 1.8→1.9 preference-seed capsule is compiled.
         .v1_8
+        #elseif GLK_MIGRATION_V1_9_TO_V1_10
+        .v1_9
         #else
         nil
         #endif
@@ -111,7 +120,8 @@ public enum GLKMigrationCatalog {
     public static func prepare(
         kit: GeniusLocusKit,
         handle: EstateHandle,
-        now: Date = Date()
+        now: Date = Date(),
+        offlineUpgrade: Bool = false
     ) async throws -> GLKMigrationPreparation {
         let storage = try await kit.migrationStorage(for: handle)
 
@@ -144,6 +154,7 @@ public enum GLKMigrationCatalog {
                 format: .current, migrated: false, migrationState: nil)
         }
 
+        guard offlineUpgrade else { throw GLKMigrationCatalogError.offlineUpgradeRequired }
         return try await runCompiledChain(kit: kit, handle: handle, from: found, now: now)
     }
 
@@ -167,9 +178,10 @@ public enum GLKMigrationCatalog {
         from found: EstateFormatVersion,
         now: Date
     ) async throws -> GLKMigrationPreparation {
-        #if GLK_MIGRATION_V1_8_TO_V1_9
+        #if GLK_MIGRATION_V1_9_TO_V1_10
         var migrated = false
         var migrationState: String? = nil
+        #if GLK_MIGRATION_V1_8_TO_V1_9
         #if GLK_MIGRATION_V1_7_TO_V1_8
         #if GLK_MIGRATION_V1_6_TO_V1_7
         #if GLK_MIGRATION_V1_5_TO_V1_6
@@ -195,12 +207,12 @@ public enum GLKMigrationCatalog {
         // Step 2 of the 1.4 -> 1.5 capsule: the rewrite again (a no-op after
         // the call at the top of the chain) and the v1_5 stamp, written only
         // now that every older capsule has stamped its own format.
-        try await kit.runStorageLedgerKitIDMigration(handle: handle, now: now)
+        if found < .v1_5 { try await kit.runStorageLedgerKitIDMigration(handle: handle, now: now) }
         #endif
         // The 1.5 -> 1.6 capsule: replay CorpusKit's checkpoint ladder (v4
         // drops corpus_index_state.composition_policy) and write the v1_6
         // stamp (I-25).
-        try await kit.runIndexCompositionColumnDropMigration(handle: handle, now: now)
+        if found < .v1_6 { try await kit.runIndexCompositionColumnDropMigration(handle: handle, now: now) }
         #endif
         // The 1.6 -> 1.7 capsule: vacuum the whole-record float rows and the
         // hnsw_graph rows, rebuild the binary sidecar, release the float
@@ -218,7 +230,11 @@ public enum GLKMigrationCatalog {
         // The 1.8 -> 1.9 capsule: seed the five remaining preferences "on"
         // when absent, create recall_ratings and write the v1_9 stamp, the
         // last write of the chain (I-28).
-        try await kit.runPreferenceSeedMigration(handle: handle, now: now)
+        if found < .v1_9 { try await kit.runPreferenceSeedMigration(handle: handle, now: now) }
+        #endif
+        try await kit.runMatrixRecordMigration(handle: handle, now: now)
+        migrated = true
+        migrationState = "complete"
         return GLKMigrationPreparation(
             format: .current,
             migrated: migrated,
