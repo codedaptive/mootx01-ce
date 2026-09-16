@@ -477,6 +477,17 @@ public actor BundleStore {
         return rows.compactMap(Self.decodeChunk)
     }
 
+    /// Read at most `limit` chunk bodies while excluding recall-suppressed sources.
+    public func activeChunks(limit: Int, excludingSourceIDs removed: Set<String>) async throws -> [Chunk] {
+        let predicate: StoragePredicate? = removed.isEmpty ? nil : .not(.in(
+            Column(table: "chunks", name: "source_id"), removed.sorted().map(TypedValue.text)))
+        let rows = try await storage.rowStore.query(
+            table: "chunks", where: predicate,
+            orderBy: [OrderClause(column: Column(table: "chunks", name: "hlc"), direction: .ascending)],
+            limit: limit, offset: nil, asOf: nil)
+        return rows.compactMap(Self.decodeChunk)
+    }
+
     // MARK: - Hard-delete erasure (secfix/ws2-coredelete)
 
     /// Zero the verbatim text of every chunk belonging to `sourceID`.
