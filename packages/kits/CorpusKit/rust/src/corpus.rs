@@ -2112,7 +2112,13 @@ impl Corpus {
         let mut report = CorpusRetrainingReport::default();
         // Active chunks only: a source cleared by `remove` must NOT be re-embedded
         // back into recall by a (possibly auto-triggered) reindex.
-        let chunks = self.active_chunks()?;
+        let chunks = if budget.max_documents == usize::MAX {
+            self.active_chunks()?
+        } else {
+            let removed = self.removed_source_store.removed_ids()?;
+            self.bundle_store.active_chunks_limited(
+                budget.max_documents.saturating_add(1), &removed)?
+        };
         let filed_at_secs = now_millis / 1000;
 
         // Phase logging throughout: on a large corpus this call legitimately

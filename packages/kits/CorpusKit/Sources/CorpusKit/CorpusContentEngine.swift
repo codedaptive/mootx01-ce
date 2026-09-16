@@ -2394,8 +2394,9 @@ public actor CorpusContentEngine {
         allIDs: [CorpusContentID],
         indexedStates: [CorpusContentID: CorpusIndexState],
         source: any CorpusContentSource,
-        now: Date
-    ) async throws -> PreparedProviderTraining {
+        now: Date,
+        budget: RetrainingBudget?
+    ) async throws -> (PreparedProviderTraining, RetrainingOutcome) {
         let provider = try job.witness.reconstructBasis(from: job.freshBasisBlob)
         guard let trainable = provider as? any TrainableEmbeddingBasis else {
             throw CorpusKitError.notTrainable(
@@ -2417,6 +2418,8 @@ public actor CorpusContentEngine {
         // by construction. The actor logs them at warning level before upserting.
         var skippedIDs: [CorpusContentID] = []
         var documentCount = 0
+        var allTexts: [String] = []
+        if budget != nil { allTexts.reserveCapacity(allIDs.count) }
         var cursor = 0
         while cursor < allIDs.count {
             let end = min(cursor + Self.trainingPageSize, allIDs.count)
@@ -2457,16 +2460,23 @@ public actor CorpusContentEngine {
                     skippedIDs.append(id)
                 }
             }
-            trainable.accumulateTraining(texts: texts)
+            if budget == nil { trainable.accumulateTraining(texts: texts) }
+            else { allTexts.append(contentsOf: texts) }
             for text in texts { countsAccumulator.addToCounts(text: text) }
             documentCount += texts.count
             cursor = end
         }
-        trainable.finalizeTraining()
+        let outcome: RetrainingOutcome
+        if let budget {
+            outcome = trainable.trainOnCorpus(texts: allTexts, budget: budget)
+        } else {
+            trainable.finalizeTraining()
+            outcome = .completed
+        }
 
         let basisBlob = trainable.serializeBasis()
         let digest = CorpusContentDigest.digest(basisBlob)
-        return PreparedProviderTraining(
+        return (PreparedProviderTraining(
             job: job,
             provider: provider,
             countsAccumulator: countsAccumulator,
@@ -2485,7 +2495,7 @@ public actor CorpusContentEngine {
                 updatedAt: now),
             basisDigest: digest,
             subsumedReferences: subsumedPendingReferences,
-            skippedIDs: skippedIDs)
+            skippedIDs: skippedIDs), outcome)
     }
 
     /// Stream-train every trainable slot that lacks a CURRENT basis (or
@@ -2507,7 +2517,9 @@ public actor CorpusContentEngine {
     ///   trained and already-current alike).
     @discardableResult
     public func trainTrainableSlots(
-        now: Date, force: Bool = false
+        now: Date, force: Bool = false,
+        budget: RetrainingBudget? = nil,
+        boundedIDs: [CorpusContentID]? = nil
     ) async throws -> [String: String] {
         // Publication replaces the base snapshot and deletes only reference
         // deltas represented by that snapshot. Prevent a reentrant admission
@@ -2542,7 +2554,9 @@ public actor CorpusContentEngine {
                 witness: fresh))
         }
 
-        let allIDs = try await source.activeContentIDs()
+        let allIDs: [CorpusContentID]
+        if let boundedIDs { allIDs = boundedIDs }
+        else { allIDs = try await source.activeContentIDs() }
         guard !allIDs.isEmpty else { return digests }
 
         // Part B — counts-path attempt (serial, on actor) before the corpus-path
@@ -2555,6 +2569,11 @@ public actor CorpusContentEngine {
         var trainedSlotsCount = 0
 
         for job in jobs {
+            if budget != nil {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
             // Load the persisted basis row once; used for the firstTrain check and Guard 5.
             let basisRow = try await basisStore.load(
                 modelID: job.modelID, modelVersion: job.modelVersion)
@@ -2788,8 +2807,10 @@ public actor CorpusContentEngine {
         // Remaining jobs (counts-path failures) go to the corpus-path fan-out.
         jobs = remainingJobs
 
-        let cap = Self.providerTrainingParallelism(
-            contentCount: allIDs.count, providerCount: jobs.count)
+        let cap = budget == nil
+            ? Self.providerTrainingParallelism(
+                contentCount: allIDs.count, providerCount: jobs.count)
+            : max(1, jobs.count)
         let trainingSource = source
 
         var start = 0
@@ -2798,20 +2819,28 @@ public actor CorpusContentEngine {
             var prepared = [PreparedProviderTraining?](
                 repeating: nil, count: end - start)
             try await withThrowingTaskGroup(
-                of: (Int, PreparedProviderTraining).self
+                of: (Int, PreparedProviderTraining, RetrainingOutcome).self
             ) { group in
                 for offset in 0..<(end - start) {
                     let job = jobs[start + offset]
                     group.addTask {
-                        (offset, try await Self.prepareProviderTraining(
+                        let (prepared, outcome) = try await Self.prepareProviderTraining(
                             job: job,
                             allIDs: allIDs,
                             indexedStates: indexedStates,
                             source: trainingSource,
-                            now: now))
+                            now: now,
+                            budget: budget)
+                        return (offset, prepared, outcome)
                     }
                 }
-                for try await (offset, result) in group {
+                for try await (offset, result, outcome) in group {
+                    guard outcome == .completed else {
+                        if case .skipped(let reason) = outcome {
+                            throw CorpusKitError.retrainingSkipped(reason)
+                        }
+                        continue
+                    }
                     prepared[offset] = result
                 }
             }
@@ -3004,6 +3033,47 @@ public actor CorpusContentEngine {
     ///     unchanged — this skips the BM25 write and binary rows, embedding only the
     ///     float-vector lane. Mirrors `recomposeDenseFloat` but applied corpus-wide.
     public func reindex(now: Date, laneScope: LaneScope = .all) async throws {
+        _ = try await reindexImpl(now: now, laneScope: laneScope, budget: nil, boundedIDs: nil)
+    }
+
+    @discardableResult
+    public func reindex(
+        now: Date, budget: RetrainingBudget, laneScope: LaneScope = .all
+    ) async throws -> CorpusRetrainingReport {
+        let admissionLimit = budget.maxDocuments == Int.max
+            ? Int.max : budget.maxDocuments + 1
+        let ids = try await source.activeContentIDs(limit: admissionLimit)
+        let trainableIDs = slots
+            .filter { $0.provider is (any TrainableEmbeddingBasis) }
+            .map { $0.provider.modelID }
+        guard ids.count <= budget.maxDocuments else {
+            let reason = RetrainingSkipReason.documentLimit(
+                actual: ids.count, limit: budget.maxDocuments)
+            guard !trainableIDs.isEmpty else {
+                throw CorpusKitError.retrainingSkipped(reason)
+            }
+            return CorpusRetrainingReport(
+                completedModelIDs: [],
+                skippedModelIDs: Dictionary(uniqueKeysWithValues:
+                    trainableIDs.map { ($0, reason) }))
+        }
+        if let reason = budget.cancellationReason {
+            guard !trainableIDs.isEmpty else {
+                throw CorpusKitError.retrainingSkipped(reason)
+            }
+            return CorpusRetrainingReport(
+                completedModelIDs: [],
+                skippedModelIDs: Dictionary(uniqueKeysWithValues:
+                    trainableIDs.map { ($0, reason) }))
+        }
+        return try await reindexImpl(
+            now: now, laneScope: laneScope, budget: budget, boundedIDs: ids)
+    }
+
+    private func reindexImpl(
+        now: Date, laneScope: LaneScope,
+        budget: RetrainingBudget?, boundedIDs: [CorpusContentID]?
+    ) async throws -> CorpusRetrainingReport {
         // Identify trainable model IDs: slots whose provider is a TrainableEmbeddingBasis
         // (RI, LSA). Their new vectors will be written into a shadow
         // generation and published atomically. Stateless slots are not swapped.
@@ -3045,7 +3115,8 @@ public actor CorpusContentEngine {
         do {
             // Retrain all trainable slots from scratch — produces the new basis blobs
             // that the subsequent re-embed pass will use. No vector rows are written here.
-            _ = try await trainTrainableSlots(now: now, force: true)
+            _ = try await trainTrainableSlots(
+                now: now, force: true, budget: budget, boundedIDs: boundedIDs)
 
             // Bulk-write bracket for non-trainable model writes (stateless
             // slots): defers resident dense-index updates for the O(corpus) pass and
@@ -3054,7 +3125,9 @@ public actor CorpusContentEngine {
             // float indices, or HNSW structures during the build phase).
             try await vectorStore.beginDeferredIndex()
 
-            let ids = try await source.activeContentIDs()
+            let ids: [CorpusContentID]
+            if let boundedIDs { ids = boundedIDs }
+            else { ids = try await source.activeContentIDs() }
             if case .wholeContent = configuration.indexUnit {
                 // Bound both task admission and prepared-result memory. The batch
                 // kernel preserves input order and advances each checkpoint only
@@ -3090,6 +3163,14 @@ public actor CorpusContentEngine {
             if !trainableModelIDs.isEmpty {
                 try await vectorStore.publishShadowGeneration(modelIDs: trainableModelIDs)
             }
+        } catch CorpusKitError.retrainingSkipped(let reason) {
+            if !trainableModelIDs.isEmpty {
+                _ = try? await vectorStore.abandonShadowGeneration(modelIDs: trainableModelIDs)
+            }
+            return CorpusRetrainingReport(
+                completedModelIDs: [],
+                skippedModelIDs: Dictionary(uniqueKeysWithValues:
+                    trainableModelIDs.map { ($0, reason) }))
         } catch {
             // Abort the shadow generation before rethrowing: delete shadow vectors and
             // clear shadow_generation / shadow_state in the registry. abandonShadowGeneration
@@ -3108,6 +3189,8 @@ public actor CorpusContentEngine {
 
         try await providerConfigurationStore.markCurrent(
             providerGenerationToken(), now: now)
+        return CorpusRetrainingReport(
+            completedModelIDs: trainableModelIDs.sorted())
     }
 
     // MARK: - Maintained counts

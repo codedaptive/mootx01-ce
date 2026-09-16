@@ -30,4 +30,5 @@ public enum CorpusKitError: Error, Sendable, Equatable {
     /// advancing the index checkpoint (identity and indexing contract,
     /// GLK shared-content 1.1).
     case staleRevision(String)
+    case retrainingSkipped(RetrainingSkipReason)
 }
