@@ -1,4 +1,19 @@
 use fact_extraction_kit::*;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OffsetVector {
+    source: String,
+    evidence_quote: String,
+    subject: String,
+    predicate: String,
+    object: String,
+    expected_start: usize,
+    expected_end: usize,
+    expected_start_utf8_byte: usize,
+    expected_end_utf8_byte: usize,
+}
 
 fn spec() -> FactExtractorModelSpec {
     FactExtractorModelSpec {
@@ -165,6 +180,51 @@ fn source_offsets_distinguish_unicode_scalars_from_utf8_bytes() {
     assert_eq!(report.accepted[0].evidence_span.start, 2);
     assert_eq!(report.accepted[0].evidence_span.start_utf8_byte, 5);
     assert_eq!(report.accepted[0].evidence_span.end_utf8_byte, source.len());
+}
+
+#[test]
+fn non_bmp_grounding_offsets_match_the_shared_scalar_vector() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../Tests/Conformance/fact_grounding_offsets.json");
+    let vector: OffsetVector =
+        serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+    let source = vector.source.as_str();
+    let request = FactExtractionRequest {
+        source_id: "drawer-shared-vector".into(),
+        source_digest: "digest".into(),
+        source_text: source.into(),
+        eligible_source_spans: vec![FactSourceSpan {
+            start: 0,
+            end: source.chars().count(),
+            start_utf8_byte: 0,
+            end_utf8_byte: source.len(),
+        }],
+        maximum_facts: 1,
+    };
+    let response = FactExtractionResponse {
+        source_digest: "digest".into(),
+        provider_id: "test".into(),
+        model_id: "fixture".into(),
+        model_version: "1".into(),
+        schema_version: "fact-v1".into(),
+        candidates: vec![FactCandidate {
+            subject: vector.subject,
+            predicate: vector.predicate,
+            object: vector.object,
+            evidence_quote: vector.evidence_quote,
+            confidence: 1.0,
+            assertion_kind: FactAssertionKind::Asserted,
+            search_aliases: vec![],
+        }],
+    };
+
+    let report = FactGroundingValidator::validate(&response, &request, source, &spec());
+    assert!(report.rejected.is_empty());
+    let span = &report.accepted[0].evidence_span;
+    assert_eq!(span.start, vector.expected_start);
+    assert_eq!(span.end, vector.expected_end);
+    assert_eq!(span.start_utf8_byte, vector.expected_start_utf8_byte);
+    assert_eq!(span.end_utf8_byte, vector.expected_end_utf8_byte);
 }
 
 fn candidate(subject: &str, object: &str, evidence: &str) -> FactCandidate {

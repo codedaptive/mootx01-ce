@@ -1,9 +1,22 @@
+import Foundation
 import FactExtractionKit
 import FactExtractionKitProviders
 import Testing
 
 @Suite("Source-grounded fact extraction contract")
 struct FactGroundingTests {
+    private struct OffsetVector: Decodable {
+        let source: String
+        let evidenceQuote: String
+        let subject: String
+        let predicate: String
+        let object: String
+        let expectedStart: Int
+        let expectedEnd: Int
+        let expectedStartUtf8Byte: Int
+        let expectedEndUtf8Byte: Int
+    }
+
     let spec = FactExtractorModelSpec(
         providerID: "test", modelID: "fixture", modelVersion: "1",
         schemaVersion: "fact-v1", extractorKind: .specializedModel,
@@ -123,5 +136,37 @@ struct FactGroundingTests {
         #expect(report.accepted[0].evidenceSpan.start == 2)
         #expect(report.accepted[0].evidenceSpan.startUTF8Byte == 5)
         #expect(report.accepted[0].evidenceSpan.endUTF8Byte == source.utf8.count)
+    }
+
+    @Test("non-BMP grounding offsets match the shared scalar vector")
+    func sharedNonBMPOffsetVector() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Conformance/fact_grounding_offsets.json")
+        let vector = try JSONDecoder().decode(
+            OffsetVector.self, from: Data(contentsOf: fixtureURL))
+        let request = FactExtractionRequest(
+            sourceID: "drawer-shared-vector", sourceDigest: "digest", sourceText: vector.source,
+            eligibleSourceSpans: [FactSourceSpan(
+                start: 0, end: vector.source.unicodeScalars.count,
+                startUTF8Byte: 0, endUTF8Byte: vector.source.utf8.count)],
+            maximumFacts: 1)
+        let response = FactExtractionResponse(
+            sourceDigest: "digest", providerID: "test", modelID: "fixture",
+            modelVersion: "1", schemaVersion: "fact-v1",
+            candidates: [FactCandidate(
+                subject: vector.subject, predicate: vector.predicate, object: vector.object,
+                evidenceQuote: vector.evidenceQuote, confidence: 1)])
+
+        let report = FactGroundingValidator.validate(
+            response: response, request: request, originalSource: vector.source, expectedSpec: spec)
+
+        #expect(report.rejected.isEmpty)
+        let span = try #require(report.accepted.first?.evidenceSpan)
+        #expect(span.start == vector.expectedStart)
+        #expect(span.end == vector.expectedEnd)
+        #expect(span.startUTF8Byte == vector.expectedStartUtf8Byte)
+        #expect(span.endUTF8Byte == vector.expectedEndUtf8Byte)
     }
 }
