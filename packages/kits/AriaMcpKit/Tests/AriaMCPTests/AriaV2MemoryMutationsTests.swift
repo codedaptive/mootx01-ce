@@ -200,6 +200,30 @@ struct AriaV2MemoryMutationsTests {
             "moot_move_memory content[0].text; got: \(String(describing: contentText(move)))")
     }
 
+    @Test("authenticated non-user reviewer cannot activate a proposed tunnel")
+    func nonUserReviewerCannotAccept() async throws {
+        let storage = InMemoryStorage(configuration: .init(estateID: UUID(), backend: .inMemory))
+        let kit = GeniusLocusKit()
+        let handle = try await kit.open(storage: storage, owner: .init(ownerIdentifier: "mutation-test"))
+        let context = AriaV2MemoryOperationContext(
+            estateID: handle.estateUUID, callerID: "authenticated-model", serverIdentity: "test-server",
+            now: { Date(timeIntervalSince1970: 1_700_000_000) })
+        let service = AriaV2MemoryMutations(kit: kit, handle: handle, context: context)
+        let proposed = try await kit.captureTunnel(handle, TunnelCaptureFrame(
+            sourceWing: "Inbox", sourceRoom: "Inbox",
+            targetWing: "Inbox", targetRoom: "Inbox",
+            label: "user-only activation", addedBy: "test",
+            kind: .contradicts, originClass: .derived, lifecycle: .proposed))
+
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await service.review(arguments: .object([
+                "tunnel_id": .string(proposed.id), "decision": .string("accept"),
+            ]))
+        }
+        let unchanged = try #require(try await kit.getTunnel(in: handle, id: proposed.id))
+        #expect(unchanged.lifecycle == .proposed)
+    }
+
     /// Parity gate: moot_erase_memory content[0].text for the partial erase path.
     ///
     /// "Partially erased memory <id>; 1 sibling(s) refused by the audit gate."
