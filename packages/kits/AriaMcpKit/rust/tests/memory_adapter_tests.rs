@@ -527,6 +527,23 @@ fn path_not_under_memories_is_rejected() {
     });
 }
 
+#[test]
+fn unicode_immediately_after_memories_root_is_rejected_without_panicking() {
+    with_memory_enabled(|registry, ledger| {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch_memory(
+                &args! {"command" => "view", "path" => "/memoriesé"},
+                registry,
+                true,
+                ledger,
+            )
+        }));
+        let result = outcome.expect("malformed Unicode path must not panic");
+        let error = result.expect_err("path without the /memories/ boundary must be rejected");
+        assert_eq!(error.code, aria_mcp::jsonrpc::JSONRPCErrorCode::INVALID_PARAMS);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Missing-argument parity: absent required args return isError:false textResult
 // ---------------------------------------------------------------------------
