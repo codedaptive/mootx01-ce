@@ -281,7 +281,7 @@ struct DataRetentionTests {
             registeredEstateFiles: [inTree, externalDB, externalWAL, externalDB, absentExternalDB]
         ) { url in
             recorder.record(url.path)
-            try fm.removeItem(at: url)
+            try FileManager.default.removeItem(at: url)
         }
 
         #expect(Set(recorder.moved) == Set([dir.path, externalDB.path, externalWAL.path]))
