@@ -96,7 +96,7 @@ fn g1_migration_seeds_five_preferences_creates_table_and_stamps_v1_9() {
         .read_if_present()
         .expect("read_if_present");
     assert_eq!(stamp, Some(EstateFormatVersion::V1_9), "capsule must stamp V1_9");
-    assert_eq!(EstateFormatVersion::CURRENT, EstateFormatVersion::V1_9);
+    assert_eq!(EstateFormatVersion::CURRENT, EstateFormatVersion::V1_10);
 }
 
 // ---------------------------------------------------------------------------

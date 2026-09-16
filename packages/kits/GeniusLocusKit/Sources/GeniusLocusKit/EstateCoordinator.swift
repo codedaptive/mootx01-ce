@@ -112,6 +112,7 @@ public extension GeniusLocusKit {
         // back a GrantStore with the estate's own database. The grant
         // store and scope vault are built lazily on first use.
         storages[handle] = storage
+        if frozen { matrixFrozenHandles.insert(handle) }
         // Mark the estate mounted (GLK_PROVISION_001) so the admin plane
         // can observe mount state without polling the registry directly.
         mountStates[handle] = .mounted
@@ -201,6 +202,12 @@ public extension GeniusLocusKit {
         // after all registry cleanup. Closing AFTER cleanup ensures no concurrent
         // actor-isolated path can read through the storage once close() is in flight.
         let storage = storages[handle]
+        // Fence and join matrix work before either underlying estate or storage
+        // can close. A reopened equal handle must never inherit its worker.
+        mountStates[handle] = .draining
+        let matrixWorker = matrixRefreshWorkers[handle]
+        await matrixWorker?.close()
+        matrixRecordStores[handle] = nil
         do {
             try await estate.close()
         } catch {
@@ -214,8 +221,9 @@ public extension GeniusLocusKit {
             kgStores[handle] = nil
             fingerprintStores[handle] = nil
             matrixTiers[handle] = nil
-            calibrationRegistries[handle] = nil
-            matrixPersistenceBackends[handle] = nil
+            matrixRefreshWorkers[handle] = nil
+            matrixFrozenHandles.remove(handle)
+            matrixRecordStores[handle] = nil
             nodeTopologyProviders[handle] = nil
             // Drop the recall accelerators. Both are caller-registered pure
             // score lookups with no lazy re-mint, so a reopened estate scores
@@ -273,8 +281,9 @@ public extension GeniusLocusKit {
         kgStores[handle] = nil
         fingerprintStores[handle] = nil
         matrixTiers[handle] = nil
-        calibrationRegistries[handle] = nil
-        matrixPersistenceBackends[handle] = nil
+        matrixRefreshWorkers[handle] = nil
+        matrixFrozenHandles.remove(handle)
+        matrixRecordStores[handle] = nil
         nodeTopologyProviders[handle] = nil
         // Drop the recall accelerators. Both are caller-registered pure
         // score lookups with no lazy re-mint, so a reopened estate scores
