@@ -1160,9 +1160,11 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // The corpus must be wired for the rebuild below; the wire is
                 // idempotent and does not re-stamp the manifest.
                 try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
-                let written = try await kit.backfillSSCFacts(handle: handle)
+                // Both run as claimed QueueKit jobs (DutyQueue): the facts pass
+                // and the lane rebuild are resumable if the upgrade dies here.
+                let written = try await kit.payDutyUntilSettled(.factsBackfill, in: handle, now: Date())
                 if written > 0 {
-                    try await kit.reindexCorpus(handle: handle, now: Date())
+                    try await kit.payDutyUntilSettled(.retrainBasis, in: handle, now: Date())
                 }
                 try await kit.close(handle)
                 await storage.close()
