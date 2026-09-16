@@ -4526,11 +4526,10 @@ mod tests {
         );
 
         // Capture tunnel count AFTER the refused link.
-        let (after, origin_class) = {
+        let after = {
             let coord = registry.coord.lock().expect("coord lock after");
             let estate = coord.estate_for(&handle).expect("estate_for after");
-            let tunnels = estate.all_tunnels().expect("all_tunnels after");
-            (tunnels.len(), tunnels.last().expect("captured tunnel").origin_class())
+            estate.all_tunnels().expect("all_tunnels after").len()
         };
 
         assert_eq!(
@@ -5042,10 +5041,11 @@ mod tests {
              between two Normal rows; got: {response}"
         );
 
-        let after = {
+        let (after, origin_class) = {
             let coord = registry.coord.lock().expect("coord lock after");
             let estate = coord.estate_for(&handle).expect("estate_for after");
-            estate.all_tunnels().expect("all_tunnels after").len()
+            let tunnels = estate.all_tunnels().expect("all_tunnels after");
+            (tunnels.len(), tunnels.last().expect("captured tunnel").origin_class())
         };
 
         assert_eq!(
