@@ -99,9 +99,11 @@ pub struct DutyDrainReport {
     pub remaining_debt: usize,
 }
 
-/// Batch sizes per job. The subject figure matches the `dream` finisher
-/// (256 per pass); fact extraction keeps this port's Signal 14 batch (20).
-const DUTY_SUBJECT_BATCH: usize = 256;
+/// Batch sizes per job, sized for the resident's tick: the batch runs inside
+/// the governor's tick, so it must return within the standing signals'
+/// cadence. 32 subjects return in minutes; fact extraction keeps this
+/// port's Signal 14 batch (20). Debt carries over; the next job pays on.
+const DUTY_SUBJECT_BATCH: usize = 32;
 const DUTY_FACT_EXTRACTION_BATCH: usize = 20;
 
 impl EstateCoordinator {

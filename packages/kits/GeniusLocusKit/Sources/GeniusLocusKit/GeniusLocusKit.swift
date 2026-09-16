@@ -334,6 +334,10 @@ public actor GeniusLocusKit {
     /// Duties this process has queued and not yet drained, per estate: the
     /// single-occupancy guard for `enqueueDuty` (DutyQueue.swift).
     internal var dutyQueued: [EstateHandle: Set<DutyKind>] = [:]
+    /// Per-estate cursor of the subject backfill sweep into the ordered debt
+    /// (SubjectBackfillCycle.swift): rows the producer could not settle stay
+    /// owed, and the sweep moves past them instead of re-reading them.
+    internal var subjectSweepOffsets: [EstateHandle: Int] = [:]
 
     // The encode QUEUE + DRAIN worker + per-estate HLC + at-least-once ingest
     // failure hook used to live here. They were relocated into CorpusKit: a
