@@ -113,7 +113,7 @@ fn fact_extraction_lane_reports_row_debt_without_an_extractor() {
     assert!(lane.is_draining());
     assert_eq!(
         lane.detail.as_deref(),
-        Some("drawers awaiting fact extraction for the active recipe; no extractor registered")
+        Some("no extractor registered; ready: 0, running: 0, partial: 0, retrying: 0, blocked: 2, rejected: 0, not applicable: 0, empty: 0")
     );
     assert!(
         DrainStatus::encode_settled(&drains),
