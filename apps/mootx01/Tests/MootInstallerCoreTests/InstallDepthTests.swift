@@ -289,8 +289,10 @@ struct InstallDepthTests {
     /// still gets `MOOTX01_VAULT=0` injected; an HTTP-shaped entry does not.
     @Test("injectVaultEnv still patches a command-shaped entry; skips an HTTP-shaped one")
     func injectVaultEnvShapeCheck() {
+        // Entries are keyed under pluginServerName ("memory") — injectVaultEnv looks
+        // up by MCPClients.pluginServerName; entries under any other key are untouched.
         let commandEntry = """
-        {"mcpServers":{"mootx01":{"command":"mootx01","args":["proxy"]}}}
+        {"mcpServers":{"memory":{"command":"mootx01","args":["proxy"]}}}
         """
         let patched = DepthInstaller.injectVaultEnv(in: commandEntry, rel: ".mcp.json")
         let patchedObj = try? JSONSerialization.jsonObject(with: Data(patched.utf8)) as? [String: Any]
@@ -299,7 +301,7 @@ struct InstallDepthTests {
                 "a command-shaped entry must still get MOOTX01_VAULT=0 injected")
 
         let httpEntry = """
-        {"mcpServers":{"mootx01":{"type":"http","url":"http://127.0.0.1:4242"}}}
+        {"mcpServers":{"memory":{"type":"http","url":"http://127.0.0.1:4242"}}}
         """
         let unchanged = DepthInstaller.injectVaultEnv(in: httpEntry, rel: ".mcp.json")
         let unchangedObj = try? JSONSerialization.jsonObject(with: Data(unchanged.utf8)) as? [String: Any]
