@@ -363,11 +363,11 @@ struct PermissionsWriterTests {
         let ask = perms["ask"] as? [String] ?? []
         let deny = perms["deny"] as? [String] ?? []
         #expect(allow.contains("mcp__mootx01__moot_estate_ping"))
-        #expect(allow.contains("mcp__plugin_mootx01_mootx01__moot_estate_ping"))
+        #expect(allow.contains("mcp__plugin_mootx01_memory__moot_estate_ping"))
         #expect(ask.contains("mcp__mootx01__moot_withdraw_memory"))
-        #expect(ask.contains("mcp__plugin_mootx01_mootx01__moot_withdraw_memory"))
+        #expect(ask.contains("mcp__plugin_mootx01_memory__moot_withdraw_memory"))
         #expect(deny.contains("mcp__mootx01__moot_erase_memory"))
-        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_erase_memory"))
+        #expect(deny.contains("mcp__plugin_mootx01_memory__moot_erase_memory"))
     }
 
     @Test("mergeTiered is idempotent")
@@ -419,10 +419,10 @@ struct PermissionsWriterTests {
         #expect(!deny.contains("mcp__mootx01__moot_erase_memory"), "must not duplicate the direct entry into deny")
         // The plugin-namespace twin was absent — it inherits the sibling's
         // tier (allow), NOT classify's default (ask / deny respectively).
-        #expect(allow.contains("mcp__plugin_mootx01_mootx01__moot_withdraw_memory"), "absent plugin twin must inherit the sibling's allow, not classify's ask")
-        #expect(!ask.contains("mcp__plugin_mootx01_mootx01__moot_withdraw_memory"), "absent plugin twin must not take the classifier default")
-        #expect(allow.contains("mcp__plugin_mootx01_mootx01__moot_erase_memory"), "absent plugin twin must inherit the sibling's allow, not classify's deny")
-        #expect(!deny.contains("mcp__plugin_mootx01_mootx01__moot_erase_memory"), "absent plugin twin must not take the classifier default")
+        #expect(allow.contains("mcp__plugin_mootx01_memory__moot_withdraw_memory"), "absent plugin twin must inherit the sibling's allow, not classify's ask")
+        #expect(!ask.contains("mcp__plugin_mootx01_memory__moot_withdraw_memory"), "absent plugin twin must not take the classifier default")
+        #expect(allow.contains("mcp__plugin_mootx01_memory__moot_erase_memory"), "absent plugin twin must inherit the sibling's allow, not classify's deny")
+        #expect(!deny.contains("mcp__plugin_mootx01_memory__moot_erase_memory"), "absent plugin twin must not take the classifier default")
     }
 
     // MARK: - mergeTiered — a placement under either namespace binds its twin
@@ -455,11 +455,11 @@ struct PermissionsWriterTests {
         let deny = perms["deny"] as? [String] ?? []
         #expect(deny.contains("mcp__mootx01__moot_memory_search"), "the user's deny must survive untouched")
         #expect(
-            deny.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"),
+            deny.contains("mcp__plugin_mootx01_memory__moot_memory_search"),
             "the absent plugin twin must inherit deny — a user cannot place an entry for a namespace they have never seen"
         )
         #expect(
-            !allow.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"),
+            !allow.contains("mcp__plugin_mootx01_memory__moot_memory_search"),
             "the denied capability must not reappear in allow under the sibling namespace"
         )
     }
@@ -483,8 +483,8 @@ struct PermissionsWriterTests {
         let allow = perms["allow"] as? [String] ?? []
         let ask = perms["ask"] as? [String] ?? []
         #expect(ask.contains("mcp__mootx01__moot_memory_search"), "the user's ask must survive untouched")
-        #expect(ask.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the absent plugin twin must inherit ask")
-        #expect(!allow.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "must not take classify's allow default")
+        #expect(ask.contains("mcp__plugin_mootx01_memory__moot_memory_search"), "the absent plugin twin must inherit ask")
+        #expect(!allow.contains("mcp__plugin_mootx01_memory__moot_memory_search"), "must not take classify's allow default")
     }
 
     @Test("inheritance is symmetric: a plugin-namespace deny binds the absent direct twin")
@@ -495,7 +495,7 @@ struct PermissionsWriterTests {
         // The mirror image. Neither prefix is privileged — whichever one
         // carries the user's decision is the one the other inherits from.
         let existing: [String: Any] = [
-            "permissions": ["deny": ["mcp__plugin_mootx01_mootx01__moot_memory_search"]]
+            "permissions": ["deny": ["mcp__plugin_mootx01_memory__moot_memory_search"]]
         ]
         let settingsURL = dir.appendingPathComponent("settings.json")
         try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
@@ -505,7 +505,7 @@ struct PermissionsWriterTests {
         let perms = try readPermissions(settingsURL)
         let allow = perms["allow"] as? [String] ?? []
         let deny = perms["deny"] as? [String] ?? []
-        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the user's deny must survive untouched")
+        #expect(deny.contains("mcp__plugin_mootx01_memory__moot_memory_search"), "the user's deny must survive untouched")
         #expect(deny.contains("mcp__mootx01__moot_memory_search"), "the absent direct twin must inherit deny")
         #expect(!allow.contains("mcp__mootx01__moot_memory_search"), "must not take classify's allow default")
     }
@@ -527,7 +527,7 @@ struct PermissionsWriterTests {
         let existing: [String: Any] = [
             "permissions": [
                 "allow": ["mcp__mootx01__moot_memory_search"],
-                "deny": ["mcp__plugin_mootx01_mootx01__moot_memory_search"],
+                "deny": ["mcp__plugin_mootx01_memory__moot_memory_search"],
             ]
         ]
         let settingsURL = dir.appendingPathComponent("settings.json")
@@ -540,10 +540,10 @@ struct PermissionsWriterTests {
         let ask = perms["ask"] as? [String] ?? []
         let deny = perms["deny"] as? [String] ?? []
         #expect(allow.contains("mcp__mootx01__moot_memory_search"), "the user's allow must stay put")
-        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the user's deny must stay put")
+        #expect(deny.contains("mcp__plugin_mootx01_memory__moot_memory_search"), "the user's deny must stay put")
         #expect(!deny.contains("mcp__mootx01__moot_memory_search"), "the allowed entry must not be duplicated into deny")
-        #expect(!allow.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"), "the denied entry must not be duplicated into allow")
-        #expect(!ask.contains("mcp__mootx01__moot_memory_search") && !ask.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"))
+        #expect(!allow.contains("mcp__plugin_mootx01_memory__moot_memory_search"), "the denied entry must not be duplicated into allow")
+        #expect(!ask.contains("mcp__mootx01__moot_memory_search") && !ask.contains("mcp__plugin_mootx01_memory__moot_memory_search"))
     }
 
     @Test("with neither namespace present the classifier default still decides")
@@ -566,13 +566,13 @@ struct PermissionsWriterTests {
         let allow = perms["allow"] as? [String] ?? []
         let ask = perms["ask"] as? [String] ?? []
         let deny = perms["deny"] as? [String] ?? []
-        for prefix in ["mcp__mootx01__", "mcp__plugin_mootx01_mootx01__"] {
+        for prefix in ["mcp__mootx01__", "mcp__plugin_mootx01_memory__"] {
             #expect(deny.contains("\(prefix)moot_erase_memory"), "destructive default unchanged under \(prefix)")
             #expect(ask.contains("\(prefix)moot_withdraw_memory"), "mutation default unchanged under \(prefix)")
             #expect(allow.contains("\(prefix)moot_memory_search"), "read default unchanged under \(prefix)")
         }
         // The unrelated tool's own inheritance still applies to ITS twin.
-        #expect(deny.contains("mcp__plugin_mootx01_mootx01__moot_estate_ping"))
+        #expect(deny.contains("mcp__plugin_mootx01_memory__moot_estate_ping"))
     }
 
     @Test("inheritance stays idempotent: a second run adds nothing")
@@ -613,13 +613,13 @@ struct PermissionsWriterTests {
         // moot_file_memory) that now belong in allow.
         let old: [String: Any] = [
             "permissions": [
-                "allow": ["mcp__mootx01__moot_estate_ping", "mcp__plugin_mootx01_mootx01__moot_estate_ping"],
+                "allow": ["mcp__mootx01__moot_estate_ping", "mcp__plugin_mootx01_memory__moot_estate_ping"],
                 "ask": [
-                    "mcp__mootx01__moot_memory_search", "mcp__plugin_mootx01_mootx01__moot_memory_search",
-                    "mcp__mootx01__moot_file_memory", "mcp__plugin_mootx01_mootx01__moot_file_memory",
-                    "mcp__mootx01__moot_withdraw_memory", "mcp__plugin_mootx01_mootx01__moot_withdraw_memory",
+                    "mcp__mootx01__moot_memory_search", "mcp__plugin_mootx01_memory__moot_memory_search",
+                    "mcp__mootx01__moot_file_memory", "mcp__plugin_mootx01_memory__moot_file_memory",
+                    "mcp__mootx01__moot_withdraw_memory", "mcp__plugin_mootx01_memory__moot_withdraw_memory",
                 ],
-                "deny": ["mcp__mootx01__moot_erase_memory", "mcp__plugin_mootx01_mootx01__moot_erase_memory"],
+                "deny": ["mcp__mootx01__moot_erase_memory", "mcp__plugin_mootx01_memory__moot_erase_memory"],
             ]
         ]
         let settingsURL = dir.appendingPathComponent("settings.json")
@@ -634,9 +634,9 @@ struct PermissionsWriterTests {
         let ask = perms["ask"] as? [String] ?? []
         let deny = perms["deny"] as? [String] ?? []
         #expect(allow.contains("mcp__mootx01__moot_memory_search"))
-        #expect(allow.contains("mcp__plugin_mootx01_mootx01__moot_memory_search"))
+        #expect(allow.contains("mcp__plugin_mootx01_memory__moot_memory_search"))
         #expect(allow.contains("mcp__mootx01__moot_file_memory"))
-        #expect(allow.contains("mcp__plugin_mootx01_mootx01__moot_file_memory"))
+        #expect(allow.contains("mcp__plugin_mootx01_memory__moot_file_memory"))
         // The genuine mutation and the destructive tool are untouched.
         #expect(ask.contains("mcp__mootx01__moot_withdraw_memory"), "a genuine mutation must stay in ask")
         #expect(deny.contains("mcp__mootx01__moot_erase_memory"), "deny must be unaffected when it already matches the default")
@@ -772,7 +772,7 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.hasAnyMootEntries(at: directURL))
 
         let pluginURL = dir.appendingPathComponent("plugin.json")
-        try JSONSerialization.data(withJSONObject: ["permissions": ["deny": ["mcp__plugin_mootx01_mootx01__moot_erase_memory"]]])
+        try JSONSerialization.data(withJSONObject: ["permissions": ["deny": ["mcp__plugin_mootx01_memory__moot_erase_memory"]]])
             .write(to: pluginURL)
         #expect(PermissionsWriter.hasAnyMootEntries(at: pluginURL))
     }
@@ -792,7 +792,7 @@ struct PermissionsWriterTests {
         #expect(allow.count == toolNames.count * 2)
         for tool in toolNames {
             #expect(allow.contains("mcp__mootx01__\(tool)"))
-            #expect(allow.contains("mcp__plugin_mootx01_mootx01__\(tool)"))
+            #expect(allow.contains("mcp__plugin_mootx01_memory__\(tool)"))
         }
     }
 
@@ -861,7 +861,7 @@ struct PermissionsWriterTests {
         for key in ["allow", "ask", "deny"] {
             let list = perms[key] as? [String] ?? []
             #expect(!list.contains { $0.hasPrefix("mcp__mootx01__") }, "\(key) must hold no direct-namespace entries")
-            #expect(!list.contains { $0.hasPrefix("mcp__plugin_mootx01_mootx01__") }, "\(key) must hold no plugin-namespace entries")
+            #expect(!list.contains { $0.hasPrefix("mcp__plugin_mootx01_memory__") }, "\(key) must hold no plugin-namespace entries")
         }
     }
 
@@ -876,7 +876,7 @@ struct PermissionsWriterTests {
         let existing: [String: Any] = [
             "permissions": ["allow": [
                 "mcp__mootx01__moot_capture_drawer",
-                "mcp__plugin_mootx01_mootx01__moot_capture_drawer",
+                "mcp__plugin_mootx01_memory__moot_capture_drawer",
                 "mcp__other__tool",
             ]]
         ]
@@ -890,7 +890,7 @@ struct PermissionsWriterTests {
         let allow = (obj?["permissions"] as? [String: Any])?["allow"] as? [String] ?? []
         #expect(allow.contains("mcp__other__tool"), "non-ARIA entry must be preserved")
         #expect(!allow.contains("mcp__mootx01__moot_capture_drawer"), "stale direct-namespace entry must be removed")
-        #expect(!allow.contains("mcp__plugin_mootx01_mootx01__moot_capture_drawer"), "stale plugin-namespace entry must be removed")
+        #expect(!allow.contains("mcp__plugin_mootx01_memory__moot_capture_drawer"), "stale plugin-namespace entry must be removed")
     }
 
     @Test("remove is a no-op when settings.json does not exist")
