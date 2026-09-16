@@ -233,6 +233,12 @@ impl DrawerStore for PostgresDrawerStore {
     ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.0.active_drawers_after(after_id, limit)
     }
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.0.active_corpus_content_ids_limited(limit)
+    }
 
     // Forwarding overrides for the DESC bounded scan methods. Without these,
     // trait-object dispatch (Arc<dyn DrawerStore>) hits the O(estate) default

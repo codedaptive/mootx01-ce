@@ -920,6 +920,40 @@ public actor DrawerStore {
         return try decodeDrawerRowsResilient(rows, scan: "activeDrawersAfter(id:limit:)")
     }
 
+    /// Active, non-dataset drawer IDs in deterministic training order.
+    /// The filter, ordering, projection, and limit all execute in storage so a
+    /// retraining budget probe never loads document bodies or enumerates the
+    /// full estate before applying its cap.
+    public func activeCorpusContentIDs(limit: Int) async throws -> [String] {
+        guard limit > 0 else { return [] }
+        let id = Column(table: "drawers", name: "id")
+        let filedAt = Column(table: "drawers", name: "filedAt")
+        let content = Column(table: "drawers", name: "content")
+        let operational = Column(table: "drawers", name: "operationalBitmap")
+        let embeddingModelID = Column(table: "drawers", name: "embeddingModelID")
+        let contentKindMask: Int64 = 0xFC0
+        let datasetKind = Int64(ContentKind.dataset.rawValue) << 6
+        let predicate = StoragePredicate.all([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .neq(content, .text("")),
+            .not(.bitwiseEq(operational, expected: datasetKind, mask: contentKindMask)),
+            .neq(embeddingModelID, .text(datasetHandleEmbeddingModelID)),
+        ])
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
+            table: "drawers",
+            where: predicate,
+            orderBy: [
+                OrderClause(column: filedAt, direction: .ascending),
+                OrderClause(column: content, direction: .ascending),
+                OrderClause(column: id, direction: .ascending),
+            ],
+            limit: limit,
+            offset: nil,
+            columns: ["id"]
+        )
+        return rows.map { Self.string($0["id"]) }
+    }
+
     /// Bounded active-drawer page for maintenance operations that must not
     /// skip a corrupt row and then mistake a short decoded page for EOF.
     /// Unlike the recall-facing resilient scan above, any malformed drawer
