@@ -503,7 +503,7 @@ pub(crate) fn execute(
         SurfaceRequest::EstateDiagnostics { operation, request } =>
             execute_estate_diagnostics(operation, request, registry, build_id, now_millis, version_skew, update_advisory, &meta),
         SurfaceRequest::VaultLifecycle(request) =>
-            execute_vault_lifecycle(request, registry, vault_ledger, &meta, now_millis),
+            execute_vault_lifecycle(request, registry, vault_ledger, sensitivity_ledger, &meta, now_millis),
         SurfaceRequest::TranscriptRecall(request) =>
             crate::v2::transcript_recall::execute(request, registry, &meta, now_millis,
                 sensitivity_ledger.ceiling_sensitivity(now_millis)
@@ -597,14 +597,13 @@ fn execute_memory_mutation(
         MemoryMutationRequest::Review(request) => (
             crate::v2::memory_mutations::REVIEW_TUNNEL_TOOL, service.review(request)),
     };
-    // Fire the reward-trace dereference write for every outcome EXCEPT NotFound.
-    // NotFound means the row was absent or above the sensitivity ceiling — the
-    // caller was never entitled to name it, so no reward trace.  Every other
-    // outcome (Ok, Unavailable, OutcomeUnverified) cleared the ceiling: a
+    // Fire the reward-trace dereference write only after estate admission and
+    // sensitivity resolution. NotFound and AdmissionRefused did not clear both
+    // gates. Every other outcome (Ok, Unavailable, OutcomeUnverified) did: a
     // successful write, an unrelated write failure, or a write that landed but
     // whose readback failed all preserve the entitlement the caller demonstrated
     // by surfacing the row's id at recall time.
-    if !matches!(&result, Err(V2MemoryMutationError::NotFound)) {
+    if !matches!(&result, Err(V2MemoryMutationError::NotFound | V2MemoryMutationError::AdmissionRefused)) {
         if let Some(memory_id) = dereference_id {
             let canonical = memory_id.hyphenated().to_string();
             // Both spellings: the two portable writers disagree on UUID case and
@@ -766,7 +765,7 @@ fn execute_memory_mutation(
         }
         Err(error) => {
             let (code, message, retryable) = match error {
-                V2MemoryMutationError::Unavailable => (
+                V2MemoryMutationError::Unavailable | V2MemoryMutationError::AdmissionRefused => (
                     "estate_unavailable", "The requested memory mutation is unavailable.", true),
                 V2MemoryMutationError::OutcomeUnverified(_) => (
                     "outcome_unverified", "The mutation may have landed but its outcome could not be revalidated.", false),
@@ -791,6 +790,7 @@ fn execute_memory_mutation(
 struct SelectedVaultMobilityAuthority<'a> {
     registry: &'a crate::estate_registry::EstateRegistry,
     now_millis: i64,
+    maximum_sensitivity: locus_kit::adjectives::AdjectiveSensitivity,
 }
 
 impl crate::v2::data_mobility::V2DataMobilityAuthority for SelectedVaultMobilityAuthority<'_> {
@@ -863,7 +863,8 @@ impl crate::v2::data_mobility::V2DataMobilityLower for SelectedVaultMobilityLowe
         request: &crate::v2::data_mobility::V2ReclassifyFdcRequest,
     ) -> Result<crate::v2::data_mobility::V2ReclassifyFdcReport, ()> {
         crate::v2::data_mobility::V2DataMobilityLower::reclassify_fdc(
-            &crate::v2::data_mobility_lower::DirectDataMobilityLower::new(self.registry), admission, request,
+            &crate::v2::data_mobility_lower::DirectDataMobilityLower::with_maximum_sensitivity(
+                self.registry, self.maximum_sensitivity), admission, request,
         )
     }
 
@@ -1034,12 +1035,19 @@ fn execute_vault_lifecycle(
     request: VaultLifecycleRequest,
     registry: &crate::estate_registry::EstateRegistry,
     ledger: &crate::vault_tools::VaultJobLedger,
+    sensitivity_ledger: &crate::sensitivity_grant_ledger::SensitivityGrantLedger,
     meta: &crate::v2::render::V2ResultMeta,
     now_millis: i64,
 ) -> Result<serde_json::Value, JSONRPCError> {
     use crate::v2::data_mobility::{V2DataMobilityError, V2DataMobilityService};
     let service = V2DataMobilityService::new(
-        SelectedVaultMobilityAuthority { registry, now_millis },
+        SelectedVaultMobilityAuthority {
+            registry,
+            now_millis,
+            maximum_sensitivity: sensitivity_ledger
+                .ceiling_sensitivity(now_millis)
+                .unwrap_or(locus_kit::adjectives::AdjectiveSensitivity::Elevated),
+        },
         SelectedVaultMobilityLower { registry, ledger },
     );
     // return_id_map is read before the match consumes `request`. True only for
@@ -3619,13 +3627,13 @@ mod tests {
         );
     }
 
-    /// Ledger ordering proof: a refused write against a Restricted row must NOT
+    /// Ledger ordering proof: an estate-admission refusal must NOT
     /// fire the reward-trace dereference write (note_usage / mark_recall_used).
     ///
     /// Setup: seed a normal row, insert a recall trace row for it so
     /// mark_recall_used has something to mark, pre-populate the
-    /// SurfacedRecallLedger so note_usage fires when called, then raise the
-    /// row to Restricted — making it above the ceiling.
+    /// SurfacedRecallLedger so note_usage fires when called, then submit the
+    /// mutation with a mismatched estate id.
     ///
     /// After the refused write, probe mark_recall_used with a wide window.
     /// If the probe returns > 0, the trace row was NOT yet marked used, proving
@@ -3635,11 +3643,10 @@ mod tests {
     /// Pre-fix failure: probe returns 0 (all trace rows marked used by the
     /// pre-gate note_usage call despite the write being refused).
     #[test]
-    fn sensitivity_write_gate_does_not_dereference_refused_row() {
-        use locus_kit::adjectives::AdjectiveSensitivity;
+    fn estate_admission_refusal_does_not_dereference_row() {
         use locus_kit::drawer_operational::CaptureChannel;
         use locus_kit::estate_types::LatticeAnchor;
-        use locus_kit::frames::{CaptureFrame, MutationKind};
+        use locus_kit::frames::CaptureFrame;
         use locus_kit::recall_trace_item::RecallTraceItem;
         use crate::estate_posture::EstatePosture;
         use crate::estate_registry::EstateRegistry;
@@ -3687,21 +3694,12 @@ mod tests {
         let ledger = SurfacedRecallLedger::new();
         ledger.record_surfaced(&[id_str.clone(), id_str.to_uppercase()], NOW / 1000);
 
-        // 4. Raise the row to Restricted — now above the Elevated ceiling.
-        {
-            let coord = registry.coord.lock().expect("coord lock");
-            coord.mutate(
-                &handle, &id_str,
-                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted), None,
-            ).expect("raise to Restricted");
-        }
-
-        // 5. Run a refused write (empty ledger → ceiling Elevated, row Restricted).
+        // 4. Run a refused write whose estate id does not match the selected estate.
         let grant_ledger = crate::sensitivity_grant_ledger::SensitivityGrantLedger::new();
         let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
         let response = execute_memory_mutation(
             MemoryMutationRequest::Withdraw(V2WithdrawMemoryRequest {
-                memory_id: uuid, reason: None, estate_id: None,
+                memory_id: uuid, reason: None, estate_id: Some(Uuid::new_v4()),
             }),
             &registry, &meta, NOW + 100,
             EstatePosture::Live, &ledger, &grant_ledger,
@@ -4161,7 +4159,6 @@ mod tests {
                 tunnel_id,
                 decision: V2TunnelDecision::Endorse,
                 note: None,
-                reviewed_by: "test-reviewer".to_string(),
                 estate_id: None,
             }),
             &registry,
@@ -4254,7 +4251,7 @@ mod tests {
                 relationship: "relates".to_string(),
                 confidence: None,
                 evidence: None,
-                proposed: false,
+                proposed: true,
                 estate_id: None,
             }),
             &registry,
@@ -4452,10 +4449,11 @@ mod tests {
         );
 
         // Capture tunnel count AFTER the refused link.
-        let after = {
+        let (after, origin_class) = {
             let coord = registry.coord.lock().expect("coord lock after");
             let estate = coord.estate_for(&handle).expect("estate_for after");
-            estate.all_tunnels().expect("all_tunnels after").len()
+            let tunnels = estate.all_tunnels().expect("all_tunnels after");
+            (tunnels.len(), tunnels.last().expect("captured tunnel").origin_class())
         };
 
         assert_eq!(
@@ -4586,7 +4584,6 @@ mod tests {
                 tunnel_id,
                 decision: V2TunnelDecision::Endorse,
                 note: None,
-                reviewed_by: "test-reviewer".to_string(),
                 estate_id: None,
             }),
             &registry, &meta, NOW + 4,
@@ -4702,7 +4699,6 @@ mod tests {
                 tunnel_id,
                 decision: V2TunnelDecision::Endorse,
                 note: None,
-                reviewed_by: "test-reviewer".to_string(),
                 estate_id: None,
             }),
             &registry, &meta, NOW + 4,
@@ -4716,7 +4712,6 @@ mod tests {
                 tunnel_id: nonexistent_id,
                 decision: V2TunnelDecision::Endorse,
                 note: None,
-                reviewed_by: "test-reviewer".to_string(),
                 estate_id: None,
             }),
             &registry, &meta, NOW + 4,
@@ -4850,7 +4845,6 @@ mod tests {
                 tunnel_id,
                 decision: V2TunnelDecision::Endorse,
                 note: None,
-                reviewed_by: "test-reviewer".to_string(),
                 estate_id: None,
             }),
             &registry, &meta, NOW + 4,
@@ -4982,6 +4976,11 @@ mod tests {
             "link_succeeds_between_two_readable_rows: expected exactly one new tunnel \
              (before={before}, after={after})"
         );
+        assert_eq!(
+            origin_class,
+            locus_kit::tunnel_operational::TunnelOriginClass::Derived,
+            "caller-proposed links must persist derived provenance",
+        );
     }
 
     /// Gate: `moot_review_tunnel` reject with `reviewed_by != "user"` routes to the
@@ -5089,7 +5088,6 @@ mod tests {
                 tunnel_id,
                 decision: V2TunnelDecision::Endorse,
                 note: None,
-                reviewed_by: "model-1".to_string(),
                 estate_id: None,
             }),
             &registry, &meta, NOW + 3,
@@ -5106,7 +5104,6 @@ mod tests {
                 tunnel_id,
                 decision: V2TunnelDecision::Reject,
                 note: None,
-                reviewed_by: "model-2".to_string(),
                 estate_id: None,
             }),
             &registry, &meta, NOW + 4,
@@ -5610,7 +5607,7 @@ mod tests {
         let endorse = execute_memory_mutation(
             MemoryMutationRequest::Review(V2ReviewTunnelRequest {
                 tunnel_id, decision: V2TunnelDecision::Endorse, note: None,
-                reviewed_by: "model-1".to_owned(), estate_id: None,
+                estate_id: None,
             }),
             &registry, &meta, NOW + 3, EstatePosture::Live, &ledger, &grant_ledger,
         ).expect("endorse must succeed");
@@ -5677,7 +5674,7 @@ mod tests {
         execute_memory_mutation(
             MemoryMutationRequest::Review(V2ReviewTunnelRequest {
                 tunnel_id, decision: V2TunnelDecision::Endorse, note: None,
-                reviewed_by: "model-1".to_owned(), estate_id: None,
+                estate_id: None,
             }),
             &registry, &meta, NOW + 3, EstatePosture::Live, &ledger, &grant_ledger,
         ).expect("endorse must succeed");
@@ -5686,7 +5683,7 @@ mod tests {
         let objection = execute_memory_mutation(
             MemoryMutationRequest::Review(V2ReviewTunnelRequest {
                 tunnel_id, decision: V2TunnelDecision::Reject, note: None,
-                reviewed_by: "model-2".to_owned(), estate_id: None,
+                estate_id: None,
             }),
             &registry, &meta, NOW + 4, EstatePosture::Live, &ledger, &grant_ledger,
         ).expect("model objection must succeed");
@@ -5750,7 +5747,7 @@ mod tests {
         let settle = execute_memory_mutation(
             MemoryMutationRequest::Review(V2ReviewTunnelRequest {
                 tunnel_id, decision: V2TunnelDecision::Accept, note: None,
-                reviewed_by: "user".to_owned(), estate_id: None,
+                estate_id: None,
             }),
             &registry, &meta, NOW + 3, EstatePosture::Live, &ledger, &grant_ledger,
         ).expect("user accept must succeed");
