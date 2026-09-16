@@ -14,18 +14,54 @@
 //! the estate catalog (`--db`, `--in-memory`), and no environment value names
 //! an estate here.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use neuron_kit::autonomic_governor::AutonomicGovernor;
 use crate::dream_runner::configure_hnsw_from_registry;
 use crate::governor_topology_adapter::StatsStoreTopologySink;
 use crate::http_server::{
-    bind_loopback, run_http_loop, GLOBAL_4XX_COUNTER, GLOBAL_5XX_COUNTER,
-    GLOBAL_INFLIGHT_COUNTER, GLOBAL_INFLIGHT_HWM, GLOBAL_LATENCY_FAST, GLOBAL_LATENCY_MID,
-    GLOBAL_LATENCY_NS_TOTAL, GLOBAL_LATENCY_SLOW, GLOBAL_RPC_COUNTER, GLOBAL_SHED_COUNTER,
+    bind_loopback, run_http_loop, GLOBAL_4XX_COUNTER, GLOBAL_5XX_COUNTER, GLOBAL_INFLIGHT_COUNTER,
+    GLOBAL_INFLIGHT_HWM, GLOBAL_LATENCY_FAST, GLOBAL_LATENCY_MID, GLOBAL_LATENCY_NS_TOTAL,
+    GLOBAL_LATENCY_SLOW, GLOBAL_RPC_COUNTER, GLOBAL_SHED_COUNTER,
 };
 use crate::server::{run_stdio_loop, ServerConfig};
+use genius_locus_kit::brain::scheduler::api::{
+    SignalID as SchedulerSignalID, SignalSpec as SchedulerSignalSpec,
+};
+use genius_locus_kit::brain::signals::{
+    ByReferenceValiditySignal, ConsolidationSignal, ContradictionSweepSignal, DecaySweepSignal,
+    EndOfDayTournamentSignal, FactExtractionSignal, MaintenanceSignal, TemporalCausalitySignal,
+    TrainingSignal,
+};
+use neuron_kit::autonomic_governor::AutonomicGovernor;
+
+fn reconcile_runtime_signal<F>(
+    governor: &mut AutonomicGovernor,
+    registered: &mut HashMap<String, SchedulerSignalID>,
+    name: &str,
+    enabled: bool,
+    now: SystemTime,
+    make_spec: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Option<SchedulerSignalSpec>,
+{
+    match (enabled, registered.get(name).cloned()) {
+        (false, Some(id)) => {
+            governor.unregister_standing_signal(&id);
+            registered.remove(name);
+        }
+        (true, None) => {
+            if let Some(spec) = make_spec() {
+                let id = governor.register_standing_signal(spec, now);
+                registered.insert(name.to_string(), id);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
 /// Bound for the observer program's in-process recent window (DEBT-3).
 /// 256 samples proves liveness and shows a recent slice without retaining
@@ -125,7 +161,9 @@ pub fn run(
     // is_http_mode = MOOTX01_HTTP_PORT is set (determined here before the
     // transport branch below so telemetry is wired once before the governor
     // thread is spawned).
-    let is_http_mode = !std::env::var("MOOTX01_HTTP_PORT").unwrap_or_default().is_empty();
+    let is_http_mode = !std::env::var("MOOTX01_HTTP_PORT")
+        .unwrap_or_default()
+        .is_empty();
     let mut gov_stats_store: Option<Arc<observer_sink::StatsStore>> = None;
     let stats_store_path_opt = stats_store_path(is_http_mode, None);
     if let Some(ref stats_store_path) = stats_store_path_opt {
@@ -140,12 +178,8 @@ pub fn run(
                     // The moot-mgr manager sets the flag to "1" when it is ready to
                     // receive data; the daemon respects the persisted value so a
                     // restart does not toggle the operator's monitoring setting.
-                    let store_flag = store.is_monitoring_enabled()
-                        .unwrap_or(false);
-                    let dropbox_id = format!(
-                        "mootx01-rust-{}",
-                        config.registry.default.estate_id
-                    );
+                    let store_flag = store.is_monitoring_enabled().unwrap_or(false);
+                    let dropbox_id = format!("mootx01-rust-{}", config.registry.default.estate_id);
                     let store_arc = Arc::new(store);
                     gov_stats_store = Some(Arc::clone(&store_arc));
                     // The observer program (DEBT-3): a bounded RecentWindowSink
@@ -153,11 +187,9 @@ pub fn run(
                     // installed sink both retains the in-process recent window AND
                     // persists. The window proves emitted samples are not dead
                     // letters; the store is the durable record moot-mgr reads.
-                    let persistence_sink: Arc<dyn intellectus_lib::StatsSink> =
-                        Arc::new(observer_sink::PersistenceStatsSink::new(
-                            store_arc,
-                            dropbox_id,
-                        ));
+                    let persistence_sink: Arc<dyn intellectus_lib::StatsSink> = Arc::new(
+                        observer_sink::PersistenceStatsSink::new(store_arc, dropbox_id),
+                    );
                     let window = Arc::new(intellectus_lib::RecentWindowSink::new(
                         OBSERVER_WINDOW_CAPACITY,
                         Some(persistence_sink),
@@ -189,7 +221,9 @@ pub fn run(
         let port: u16 = match http_port.parse() {
             Ok(p) => p,
             Err(_) => {
-                eprintln!("{banner}: MOOTX01_HTTP_PORT={http_port:?} is not a valid TCP port (0–65535)");
+                eprintln!(
+                    "{banner}: MOOTX01_HTTP_PORT={http_port:?} is not a valid TCP port (0–65535)"
+                );
                 std::process::exit(1);
             }
         };
@@ -210,9 +244,12 @@ pub fn run(
             // Build the host-injected topology sink from the stats store (if
             // configured). The governor holds the sink as Box<dyn
             // GovernorTopologySink>, keeping NeuronKit free of observer_sink.
-            let topology_sink: Option<Box<dyn neuron_kit::governor_topology_sink::GovernorTopologySink>> =
-                gov_stats_store.map(|s| Box::new(StatsStoreTopologySink::new(s))
-                    as Box<dyn neuron_kit::governor_topology_sink::GovernorTopologySink>);
+            let topology_sink: Option<
+                Box<dyn neuron_kit::governor_topology_sink::GovernorTopologySink>,
+            > = gov_stats_store.map(|s| {
+                Box::new(StatsStoreTopologySink::new(s))
+                    as Box<dyn neuron_kit::governor_topology_sink::GovernorTopologySink>
+            });
             // Snapshot the coord Arc and handle before they are moved into the
             // governor constructor. EstateHandle is Copy; Arc::clone is O(1).
             // These are used immediately after construction to inject the HNSW
@@ -220,7 +257,10 @@ pub fn run(
             let coord_for_hnsw = Arc::clone(&gov_coord);
             let handle_for_hnsw = gov_handle;
             let mut governor = AutonomicGovernor::new_with_topology_sink(
-                gov_coord, gov_handle, gov_store, topology_sink,
+                gov_coord,
+                gov_handle,
+                gov_store,
+                topology_sink,
             );
             // Wire the HNSW maintenance handle via the single named wiring point
             // (VEC-SHADOWSWAP-01, finding 13b8e1a). `configure_hnsw_from_registry`
@@ -277,9 +317,9 @@ pub fn run(
                             .hunt_contradictions(
                                 &hunt_handle,
                                 "minilm-v6",
-                                50,  // probe_limit: DEFAULT_PROBE_LIMIT from VectorSimilaritySignal
+                                50, // probe_limit: DEFAULT_PROBE_LIMIT from VectorSimilaritySignal
                                 Some(filed_after),
-                                64,  // proximity_threshold: architecture-spec Hamming cap
+                                64, // proximity_threshold: architecture-spec Hamming cap
                                 now_ms,
                             )
                             .map(|report| (report.proposed.len(), report.borderline.len()))
@@ -295,8 +335,8 @@ pub fn run(
             // count of drawers whose bit 26 (is_anomalous) changed state.
             let anomaly_coord = Arc::clone(&coord_for_hnsw);
             let anomaly_handle = handle_for_hnsw;
-            let anomaly_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> =
-                Arc::new(move || {
+            let anomaly_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(
+                move || {
                     let now_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -312,7 +352,8 @@ pub fn run(
                             .map_err(|e| format!("{e:?}")),
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
-                });
+                },
+            );
             // Live span-encode cycle (Encoder Rerank contract sheet §10):
             // mirrors the Swift resident's `spanEncodeCycle: { now in
             // kit.runSpanEncodeBatch(handle:now:) }`. Encodes drawers whose
@@ -342,8 +383,7 @@ pub fn run(
             // Signal 11 (ConsolidationSignal) and the contradiction sweep are
             // preference-gated: each cycle is built only when the estate's
             // switch is not Off, and `None` registers no signal at all.
-            let consolidation_cycle =
-                build_consolidation_cycle(&coord_for_hnsw, handle_for_hnsw);
+            let consolidation_cycle = build_consolidation_cycle(&coord_for_hnsw, handle_for_hnsw);
             let contradiction_sweep_cycle =
                 build_contradiction_sweep_cycle(&coord_for_hnsw, handle_for_hnsw);
             // Maintenance family (maintenance-daemon, decay-sweep,
@@ -360,15 +400,9 @@ pub fn run(
             )
             .map(|setting| setting != genius_locus_kit::EstatePreferenceValue::Off)
             .unwrap_or(false);
-            let (maintenance_cycle, decay_cycle, by_reference_cycle) = if maintenance_on {
-                (
-                    Some(governor.maintenance_tombstone_cycle()),
-                    Some(governor.maintenance_decay_cycle()),
-                    Some(governor.maintenance_by_reference_cycle()),
-                )
-            } else {
-                (None, None, None)
-            };
+            let maintenance_cycle = governor.maintenance_tombstone_cycle();
+            let decay_cycle = governor.maintenance_decay_cycle();
+            let by_reference_cycle = governor.maintenance_by_reference_cycle();
             // Adaptive-recall trio (temporal-causality-fold, training-daemon,
             // end-of-day-tournament): the hourly T-population fold, the hourly
             // training-daemon tick over the coordinator's matrix tier, and the
@@ -385,7 +419,7 @@ pub fn run(
             )
             .map(|setting| setting != genius_locus_kit::EstatePreferenceValue::Off)
             .unwrap_or(false);
-            let (fold_cycle, training_cycle, tournament_cycle) = if adaptive_recall_on {
+            let (fold_cycle, training_cycle, tournament_cycle) = {
                 let fold_coord = Arc::clone(&coord_for_hnsw);
                 let fold_handle = handle_for_hnsw;
                 let fold_cycle: Arc<dyn Fn() -> Result<(), String> + Send + Sync> =
@@ -436,39 +470,186 @@ pub fn run(
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
                 });
-                (Some(fold_cycle), Some(training_cycle), Some(tournament_cycle))
-            } else {
-                (None, None, None)
+                (fold_cycle, training_cycle, tournament_cycle)
             };
-            match governor.register_default_standing_signals(
+            let consolidation_on = read_estate_preference(
+                &coord_for_hnsw,
+                &handle_for_hnsw,
+                genius_locus_kit::EstatePreferenceKey::Consolidation,
+            )
+            .map(|v| v != genius_locus_kit::EstatePreferenceValue::Off)
+            .unwrap_or(false);
+            let contradiction_on = read_estate_preference(
+                &coord_for_hnsw,
+                &handle_for_hnsw,
+                genius_locus_kit::EstatePreferenceKey::ContradictionSweep,
+            )
+            .map(|v| v != genius_locus_kit::EstatePreferenceValue::Off)
+            .unwrap_or(false);
+            let fact_on = read_estate_preference(
+                &coord_for_hnsw,
+                &handle_for_hnsw,
+                genius_locus_kit::EstatePreferenceKey::FactExtraction,
+            )
+            .map(|v| v != genius_locus_kit::EstatePreferenceValue::Off)
+            .unwrap_or(false);
+
+            let registered = governor.register_default_standing_signals(
                 "minilm-v6",
                 SystemTime::now(),
                 Some(hunt_cycle),
                 Some(anomaly_cycle),
                 Some(span_encode_cycle),
-                fact_extraction_cycle,
-                consolidation_cycle,
-                contradiction_sweep_cycle,
-                maintenance_cycle,
-                decay_cycle,
-                by_reference_cycle,
-                fold_cycle,
-                training_cycle,
-                tournament_cycle,
-            ) {
+                if fact_on {
+                    fact_extraction_cycle.clone()
+                } else {
+                    None
+                },
+                if consolidation_on {
+                    consolidation_cycle.clone()
+                } else {
+                    None
+                },
+                if contradiction_on {
+                    contradiction_sweep_cycle.clone()
+                } else {
+                    None
+                },
+                maintenance_on.then(|| Arc::clone(&maintenance_cycle)),
+                maintenance_on.then(|| Arc::clone(&decay_cycle)),
+                maintenance_on.then(|| Arc::clone(&by_reference_cycle)),
+                adaptive_recall_on.then(|| Arc::clone(&fold_cycle)),
+                adaptive_recall_on.then(|| Arc::clone(&training_cycle)),
+                adaptive_recall_on.then(|| Arc::clone(&tournament_cycle)),
+            );
+            let mut registered_ids: HashMap<String, SchedulerSignalID> = match registered {
                 Ok(registered) => {
                     eprintln!(
                         "AriaResident standing signals registered ({} defaults)",
                         registered.len()
                     );
+                    registered.into_iter().collect()
                 }
                 Err(e) => {
                     eprintln!(
                         "AriaResident standing signals NOT registered (governor signal_tick will benign-skip): {e}"
                     );
+                    HashMap::new()
                 }
-            }
-            governor.run_loop();
+            };
+            let reconcile_coord = Arc::clone(&coord_for_hnsw);
+            governor.run_loop_with_before_tick(move |governor, now| {
+                let enabled = |key| {
+                    read_estate_preference(&reconcile_coord, &handle_for_hnsw, key)
+                        .map(|v| v != genius_locus_kit::EstatePreferenceValue::Off)
+                        .ok_or_else(|| format!("preference {} unreadable", key.as_str()))
+                };
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    FactExtractionSignal::SIGNAL_NAME,
+                    enabled(genius_locus_kit::EstatePreferenceKey::FactExtraction)?,
+                    now,
+                    || {
+                        fact_extraction_cycle
+                            .clone()
+                            .map(|cycle| FactExtractionSignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    ConsolidationSignal::SIGNAL_NAME,
+                    enabled(genius_locus_kit::EstatePreferenceKey::Consolidation)?,
+                    now,
+                    || {
+                        consolidation_cycle
+                            .clone()
+                            .map(|cycle| ConsolidationSignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    ContradictionSweepSignal::SIGNAL_NAME,
+                    enabled(genius_locus_kit::EstatePreferenceKey::ContradictionSweep)?,
+                    now,
+                    || {
+                        contradiction_sweep_cycle
+                            .clone()
+                            .map(|cycle| ContradictionSweepSignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                let maintenance = enabled(genius_locus_kit::EstatePreferenceKey::Maintenance)?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    MaintenanceSignal::SIGNAL_NAME,
+                    maintenance,
+                    now,
+                    || {
+                        let cycle = Arc::clone(&maintenance_cycle);
+                        Some(MaintenanceSignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    DecaySweepSignal::SIGNAL_NAME,
+                    maintenance,
+                    now,
+                    || {
+                        let cycle = Arc::clone(&decay_cycle);
+                        Some(DecaySweepSignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    ByReferenceValiditySignal::SIGNAL_NAME,
+                    maintenance,
+                    now,
+                    || {
+                        let cycle = Arc::clone(&by_reference_cycle);
+                        Some(ByReferenceValiditySignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                let adaptive = enabled(genius_locus_kit::EstatePreferenceKey::AdaptiveRecall)?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    TemporalCausalitySignal::SIGNAL_NAME,
+                    adaptive,
+                    now,
+                    || {
+                        let cycle = Arc::clone(&fold_cycle);
+                        Some(TemporalCausalitySignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    TrainingSignal::SIGNAL_NAME,
+                    adaptive,
+                    now,
+                    || {
+                        let cycle = Arc::clone(&training_cycle);
+                        Some(TrainingSignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                reconcile_runtime_signal(
+                    governor,
+                    &mut registered_ids,
+                    EndOfDayTournamentSignal::SIGNAL_NAME,
+                    adaptive,
+                    now,
+                    || {
+                        let cycle = Arc::clone(&tournament_cycle);
+                        Some(EndOfDayTournamentSignal::spec(Arc::new(move || cycle())))
+                    },
+                )?;
+                Ok(())
+            });
         });
 
         // Load the derived accelerators (matrix tier) once at launch so the
@@ -543,41 +724,77 @@ pub fn run(
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
                 use std::sync::atomic::Ordering;
-                let tags = std::collections::HashMap::from([
-                    ("kit".to_string(), "AriaResident".to_string()),
-                ]);
+                let tags = std::collections::HashMap::from([(
+                    "kit".to_string(),
+                    "AriaResident".to_string(),
+                )]);
                 let emit = |name: &str, value: f64| {
                     intellectus_lib::Intellectus::report_sample(
                         intellectus_lib::StatSample::metric(
-                            name.to_string(), value, tags.clone(), now,
-                        )
+                            name.to_string(),
+                            value,
+                            tags.clone(),
+                            now,
+                        ),
                     );
                 };
-                emit("server.rpc_count",          GLOBAL_RPC_COUNTER.load(Ordering::Relaxed) as f64);
-                emit("server.connections",         GLOBAL_INFLIGHT_COUNTER.load(Ordering::Relaxed) as f64);
-                emit("server.connections_hwm",     GLOBAL_INFLIGHT_HWM.load(Ordering::Relaxed) as f64);
-                emit("server.4xx_count",           GLOBAL_4XX_COUNTER.load(Ordering::Relaxed) as f64);
-                emit("server.5xx_count",           GLOBAL_5XX_COUNTER.load(Ordering::Relaxed) as f64);
-                emit("server.shed_count",          GLOBAL_SHED_COUNTER.load(Ordering::Relaxed) as f64);
-                emit("server.latency_ns_total",    GLOBAL_LATENCY_NS_TOTAL.load(Ordering::Relaxed) as f64);
-                emit("server.latency_fast_count",  GLOBAL_LATENCY_FAST.load(Ordering::Relaxed) as f64);
-                emit("server.latency_mid_count",   GLOBAL_LATENCY_MID.load(Ordering::Relaxed) as f64);
-                emit("server.latency_slow_count",  GLOBAL_LATENCY_SLOW.load(Ordering::Relaxed) as f64);
+                emit(
+                    "server.rpc_count",
+                    GLOBAL_RPC_COUNTER.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.connections",
+                    GLOBAL_INFLIGHT_COUNTER.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.connections_hwm",
+                    GLOBAL_INFLIGHT_HWM.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.4xx_count",
+                    GLOBAL_4XX_COUNTER.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.5xx_count",
+                    GLOBAL_5XX_COUNTER.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.shed_count",
+                    GLOBAL_SHED_COUNTER.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.latency_ns_total",
+                    GLOBAL_LATENCY_NS_TOTAL.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.latency_fast_count",
+                    GLOBAL_LATENCY_FAST.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.latency_mid_count",
+                    GLOBAL_LATENCY_MID.load(Ordering::Relaxed) as f64,
+                );
+                emit(
+                    "server.latency_slow_count",
+                    GLOBAL_LATENCY_SLOW.load(Ordering::Relaxed) as f64,
+                );
                 // Protocol and kernel presence metrics.
                 let mut ptags = tags.clone();
                 ptags.insert("version".to_string(), proto_version.to_string());
-                intellectus_lib::Intellectus::report_sample(
-                    intellectus_lib::StatSample::metric(
-                        "server.proto_version".to_string(), 1.0, ptags, now,
-                    )
-                );
+                intellectus_lib::Intellectus::report_sample(intellectus_lib::StatSample::metric(
+                    "server.proto_version".to_string(),
+                    1.0,
+                    ptags,
+                    now,
+                ));
                 let mut ktags = tags.clone();
                 ktags.insert("backend".to_string(), kernel_kind.to_string());
-                intellectus_lib::Intellectus::report_sample(
-                    intellectus_lib::StatSample::metric(
-                        "substrate.kernel.backend_selected".to_string(), 1.0, ktags, now,
-                    )
-                );
+                intellectus_lib::Intellectus::report_sample(intellectus_lib::StatSample::metric(
+                    "substrate.kernel.backend_selected".to_string(),
+                    1.0,
+                    ktags,
+                    now,
+                ));
             }
         });
 
@@ -652,9 +869,9 @@ pub fn stats_store_path(use_default: bool, config_dir: Option<&std::path::Path>)
     // Step 2: computed default — the same file `resolve_store_path` targets
     // in manager_config.rs when no setting is set, so both processes open the
     // same store out of the box.
-    Some(
-        moot_product_identity::paths::daemon_stats_store_default(dir),
-    )
+    Some(moot_product_identity::paths::daemon_stats_store_default(
+        dir,
+    ))
 }
 
 /// Resolve the HTTP request body cap from `MOOTX01_HTTP_MAX_BODY_BYTES`,
@@ -710,62 +927,20 @@ pub fn activate_and_build_extraction_cycle(
     coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
     handle: genius_locus_kit::EstateHandle,
 ) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
-    // Gate: Off means the user explicitly disabled extraction; no activation.
-    let setting = {
-        let coord_guard = coord.lock().ok()?;
-        coord_guard
-            .provisioned_preference(&handle, genius_locus_kit::EstatePreferenceKey::FactExtraction)
-            .ok()?
-    };
-    if setting == genius_locus_kit::EstatePreferenceValue::Off {
-        return None;
-    }
-
     // Derive the recipe ID from the extractor's spec. Format is the cross-port
     // contract: "<provider_id>:<model_id>:<model_version>", identical to the
     // Swift twin. A recipe change clears bit 28 on all drawers estate-wide so
     // the full corpus is re-extracted against the new model.
     let spec = extractor.spec();
-    let recipe_id = format!("{}:{}:{}", spec.provider_id, spec.model_id, spec.model_version);
+    let recipe_id = format!(
+        "{}:{}:{}",
+        spec.provider_id, spec.model_id, spec.model_version
+    );
 
     // Activate the extractor. A changed recipe clears bit 28 on all drawers
     // estate-wide so the full corpus is re-extracted against the new model. A
     // registration failure logs and degrades gracefully — the daemon continues
     // serving without signal 14.
-    {
-        let mut coord_guard = match coord.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!(
-                    "AriaResident: coordinator lock poisoned activating fact extractor: {e}; \
-                     signal 14 inactive"
-                );
-                return None;
-            }
-        };
-        match coord_guard.activate_fact_extractor(Arc::clone(&extractor), &recipe_id, &handle) {
-            Ok(cleared) => {
-                if cleared > 0 {
-                    eprintln!(
-                        "AriaResident: fact extractor activated (recipe changed, \
-                         {cleared} drawers cleared for re-extraction)"
-                    );
-                } else {
-                    eprintln!(
-                        "AriaResident: fact extractor activated (same recipe, \
-                         0 drawers cleared)"
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "AriaResident: activate_fact_extractor failed: {e:?}; signal 14 inactive"
-                );
-                return None;
-            }
-        }
-    }
-
     // Build the cycle closure that `register_default_standing_signals` schedules
     // as signal 14. Returns `facts_filed as i64` per the standing-signal
     // contract. The coordinator Arc is cloned into the closure; the Mutex
@@ -778,10 +953,24 @@ pub fn activate_and_build_extraction_cycle(
             .unwrap_or_default()
             .as_millis() as i64;
         match fact_coord.lock() {
-            Ok(coord) => coord
-                .run_fact_extraction_batch(&fact_handle, FACT_EXTRACTION_BATCH_LIMIT, now_ms)
-                .map(|r| r.facts_filed as i64)
-                .map_err(|e| format!("{e:?}")),
+            Ok(mut coord) => {
+                let setting = coord
+                    .provisioned_preference(
+                        &fact_handle,
+                        genius_locus_kit::EstatePreferenceKey::FactExtraction,
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                if setting == genius_locus_kit::EstatePreferenceValue::Off {
+                    return Ok(0);
+                }
+                coord
+                    .activate_fact_extractor(Arc::clone(&extractor), &recipe_id, &fact_handle)
+                    .map_err(|e| format!("{e:?}"))?;
+                coord
+                    .run_fact_extraction_batch(&fact_handle, FACT_EXTRACTION_BATCH_LIMIT, now_ms)
+                    .map(|r| r.facts_filed as i64)
+                    .map_err(|e| format!("{e:?}"))
+            }
             Err(e) => Err(format!("coordinator lock poisoned: {e}")),
         }
     });
@@ -800,8 +989,7 @@ fn read_estate_preference(
     coord_guard.provisioned_preference(handle, key).ok()
 }
 
-/// Build the consolidation-sweep cycle (signal 11) for `handle`, or `None`
-/// when the estate's `consolidation` preference is `Off` (or unreadable).
+/// Build the consolidation-sweep cycle (signal 11) for `handle`.
 /// Each fire runs one bounded `consolidation_sweep_report` pass under the
 /// default `ConsolidationConfig` with no candidate-limit override; the
 /// sweep persists its vague drawers itself and the closure returns only the
@@ -818,14 +1006,6 @@ pub fn build_consolidation_cycle(
             + Sync,
     >,
 > {
-    let setting = read_estate_preference(
-        coord,
-        &handle,
-        genius_locus_kit::EstatePreferenceKey::Consolidation,
-    )?;
-    if setting == genius_locus_kit::EstatePreferenceValue::Off {
-        return None;
-    }
     let sweep_coord = Arc::clone(coord);
     Some(Arc::new(move || {
         let now_ms = SystemTime::now()
@@ -846,8 +1026,8 @@ pub fn build_consolidation_cycle(
     }))
 }
 
-/// Build the contradiction-sweep cycle for `handle`, or `None` when the
-/// estate's `contradiction_sweep` preference is `Off` (or unreadable). Each
+/// Build the contradiction-sweep cycle for `handle`. Registration is reconciled
+/// against the live `contradiction_sweep` preference before every tick. Each
 /// fire runs one `propose_conflict_tunnels` pass under the resident's
 /// embedding model ("minilm-v6"), a 50-row probe limit and a lexical top-k
 /// of 10; the pass persists its tunnels itself and the closure returns only
@@ -864,14 +1044,6 @@ pub fn build_contradiction_sweep_cycle(
             + Sync,
     >,
 > {
-    let setting = read_estate_preference(
-        coord,
-        &handle,
-        genius_locus_kit::EstatePreferenceKey::ContradictionSweep,
-    )?;
-    if setting == genius_locus_kit::EstatePreferenceValue::Off {
-        return None;
-    }
     let sweep_coord = Arc::clone(coord);
     Some(Arc::new(move || {
         let now_ms = SystemTime::now()
@@ -907,24 +1079,15 @@ pub fn build_fact_extraction_cycle(
     handle: genius_locus_kit::EstateHandle,
     config_dir: Option<&std::path::Path>,
 ) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
-    // Step 1: read the estate-level opt-out setting. Off means user has
-    // explicitly disabled extraction; skip config loading entirely.
-    let setting = {
-        let coord_guard = coord.lock().ok()?;
-        coord_guard
-            .provisioned_preference(&handle, genius_locus_kit::EstatePreferenceKey::FactExtraction)
-            .ok()?
-    };
-    if setting == genius_locus_kit::EstatePreferenceValue::Off {
-        return None;
-    }
-
     // The second preference selects the provider. Apple Foundation Models is
     // an Apple-only runtime; the Rust product fails quiet when it is selected.
     let extractor_setting = {
         let coord_guard = coord.lock().ok()?;
         coord_guard
-            .provisioned_preference(&handle, genius_locus_kit::EstatePreferenceKey::FactExtractor)
+            .provisioned_preference(
+                &handle,
+                genius_locus_kit::EstatePreferenceKey::FactExtractor,
+            )
             .ok()?
     };
     if extractor_setting == genius_locus_kit::EstatePreferenceValue::Apple {
@@ -956,16 +1119,12 @@ pub fn build_fact_extraction_cycle(
         .and_then(std::path::Path::parent)
         .and_then(std::path::Path::parent)
         .map(|directory| directory.join("share/mootx01/models/nuextract-tiny-v1.5"));
-    let default_model_directory = [
-        Some(configured_model_directory),
-        bundled_model_directory,
-    ]
-    .into_iter()
-    .flatten()
-    .find(|directory| {
-        directory.join("model.gguf").is_file()
-            && directory.join("tokenizer.json").is_file()
-    });
+    let default_model_directory = [Some(configured_model_directory), bundled_model_directory]
+        .into_iter()
+        .flatten()
+        .find(|directory| {
+            directory.join("model.gguf").is_file() && directory.join("tokenizer.json").is_file()
+        });
 
     let worker_exe = settings
         .fact_extraction_worker_executable
@@ -974,11 +1133,19 @@ pub fn build_fact_extraction_cycle(
     let gguf = settings
         .fact_extraction_gguf
         .map(std::path::PathBuf::from)
-        .or_else(|| default_model_directory.as_ref().map(|d| d.join("model.gguf")));
+        .or_else(|| {
+            default_model_directory
+                .as_ref()
+                .map(|d| d.join("model.gguf"))
+        });
     let tokenizer = settings
         .fact_extraction_tokenizer
         .map(std::path::PathBuf::from)
-        .or_else(|| default_model_directory.as_ref().map(|d| d.join("tokenizer.json")));
+        .or_else(|| {
+            default_model_directory
+                .as_ref()
+                .map(|d| d.join("tokenizer.json"))
+        });
     let model_version = settings
         .fact_extraction_model_version
         .unwrap_or_else(|| "63e2e80c804d9c97f3f19a4aa25613e7beca83c9".into());
@@ -1003,9 +1170,7 @@ pub fn build_fact_extraction_cycle(
     let client = match fact_extraction_kit_providers::NuExtractWorkerClient::new(config) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "AriaResident: NuExtract worker unavailable (signal 14 inactive): {e}"
-            );
+            eprintln!("AriaResident: NuExtract worker unavailable (signal 14 inactive): {e}");
             return None;
         }
     };
@@ -1100,7 +1265,10 @@ mod tests {
 
         let config = crate::server::ServerConfig::default_inmemory();
         let result = run_http_loop(listener, 4 * 1024 * 1024, config, None, None);
-        assert!(result.is_err(), "expected Err from run_http_loop with a non-socket fd");
+        assert!(
+            result.is_err(),
+            "expected Err from run_http_loop with a non-socket fd"
+        );
 
         let err = result.unwrap_err();
         let line = http_serve_failure_line("mootx01", 8765, &err);
