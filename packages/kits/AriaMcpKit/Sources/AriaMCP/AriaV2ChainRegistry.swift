@@ -169,9 +169,9 @@ func ariaV2PreDecodeRegistrations(
 ///   - `"coaching"`: ingress at position 10, egress at position 10.
 ///   - `"report_withheld"`: conditional metadata egress at position 30.
 ///
-/// **Ingress order** (5 before 10): the mode ingress reads `pendingDeclaration`
+/// **Ingress order** (5 before 10): the mode ingress reads the call-local declaration
 /// and returns its `unknownHint` as per-concern state, before coaching at position 10
-/// reads the same stash and calls `recordCall`.
+/// reads the same immutable declaration and calls `recordCall`.
 ///
 /// **Egress order** (10 before 20): coaching hint fires first; mode hint appends
 /// after it, so coaching and mode hints appear in that order in the wire text.
@@ -183,7 +183,7 @@ func ariaV2PreDecodeRegistrations(
 /// - Parameters:
 ///   - request: The decoded `AriaSurfaceRequest` for this call.
 ///   - modeSessionState: The per-session state actor.
-/// - Returns: Two registrations, concern names `"mode"` and `"coaching"`.
+/// - Returns: Mode, coaching, and conditional withheld-report registrations.
 func ariaV2ProductionRegistrations(
     request: AriaSurfaceRequest,
     modeSessionState: ModeSessionState,
