@@ -25,6 +25,12 @@ struct AriaV2MemoryMutationsTests {
             ]))
         }
         #expect(throws: JSONRPCError.self) {
+            _ = try AriaV2ReviewTunnelRequest(arguments: .object([
+                "tunnel_id": .string(UUID().uuidString), "decision": .string("endorse"),
+                "reviewed_by": .string("forged-reviewer"),
+            ]))
+        }
+        #expect(throws: JSONRPCError.self) {
             _ = try AriaV2UpdateMemoryRequest(arguments: .object([
                 "memory_id": .string(UUID().uuidString), "mutation": .string("confirm"), "content": .string("unsupported"),
             ]))
@@ -240,7 +246,7 @@ struct AriaV2MemoryMutationsTests {
         let kit = GeniusLocusKit()
         let handle = try await kit.open(storage: storage, owner: .init(ownerIdentifier: "mutation-test"))
         let context = AriaV2MemoryOperationContext(
-            estateID: handle.estateUUID, callerID: "test-reviewer", serverIdentity: "test-server",
+            estateID: handle.estateUUID, callerID: "user", serverIdentity: "test-server",
             now: { Date(timeIntervalSince1970: 1_700_000_000) })
         return (kit, handle, .init(kit: kit, handle: handle, context: context))
     }
