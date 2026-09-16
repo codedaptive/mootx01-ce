@@ -185,7 +185,17 @@ jobs:
             bn="$(basename "$b")"
             [ -e "./$bn" ] || cp -R "$b" .
           done
-          tar -czf "${ASSET}" mootx01 moot-mgr ./*.bundle
+          # The span encoder and the fact extractor ship inside the artifact.
+          # fetch-release.sh verifies each tarball's sha256 and then every
+          # extracted file against the platform manifest, so a truncated or
+          # substituted asset fails the job here and not on a user's machine.
+          # The repository is resolved from GITHUB_REPOSITORY, so each edition
+          # fetches its own model releases.
+          bash tools/encoder-models/fetch-release.sh apple \
+            share/mootx01/models/arctic-embed-s-w60
+          bash tools/encoder-models/fetch-release.sh apple \
+            share/mootx01/models/nuextract-tiny-v1.5 nuextract-tiny-v1.5
+          tar -czf "${ASSET}" mootx01 moot-mgr ./*.bundle share
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
 
@@ -429,7 +439,17 @@ jobs:
             bn="$(basename "$b")"
             [ -e "./$bn" ] || cp -R "$b" .
           done
-          tar -czf "${ASSET}" mootx01 moot-mgr ./*.bundle
+          # The span encoder and the fact extractor ship inside the artifact.
+          # fetch-release.sh verifies each tarball's sha256 and then every
+          # extracted file against the platform manifest, so a truncated or
+          # substituted asset fails the job here and not on a user's machine.
+          # The repository is resolved from GITHUB_REPOSITORY, so each edition
+          # fetches its own model releases.
+          bash tools/encoder-models/fetch-release.sh apple \
+            share/mootx01/models/arctic-embed-s-w60
+          bash tools/encoder-models/fetch-release.sh apple \
+            share/mootx01/models/nuextract-tiny-v1.5 nuextract-tiny-v1.5
+          tar -czf "${ASSET}" mootx01 moot-mgr ./*.bundle share
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
           echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
 
@@ -590,7 +610,19 @@ jobs:
           ASSET="mootx01-${VERSION}-linux-x86_64.tar.gz"
           cp apps/mootx01/rust/target/release/mootx01 mootx01
           cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
-          tar -czf "${ASSET}" mootx01 moot-mgr
+          # The fact-extraction worker is a sibling binary the daemon spawns.
+          cp apps/mootx01/rust/target/release/moot-nuextract-worker moot-nuextract-worker
+          # The span encoder and the fact extractor ship inside the artifact.
+          # fetch-release.sh verifies each tarball's sha256 and then every
+          # extracted file against the platform manifest, so a truncated or
+          # substituted asset fails the job here and not on a user's machine.
+          # The repository is resolved from GITHUB_REPOSITORY, so each edition
+          # fetches its own model releases.
+          bash tools/encoder-models/fetch-release.sh linux \
+            share/mootx01/models/arctic-embed-s-w60
+          bash tools/encoder-models/fetch-release.sh linux \
+            share/mootx01/models/nuextract-tiny-v1.5 nuextract-tiny-v1.5
+          tar -czf "${ASSET}" mootx01 moot-mgr moot-nuextract-worker share
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
@@ -642,7 +674,19 @@ jobs:
           ASSET="mootx01-${VERSION}-linux-arm64.tar.gz"
           cp apps/mootx01/rust/target/release/mootx01 mootx01
           cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
-          tar -czf "${ASSET}" mootx01 moot-mgr
+          # The fact-extraction worker is a sibling binary the daemon spawns.
+          cp apps/mootx01/rust/target/release/moot-nuextract-worker moot-nuextract-worker
+          # The span encoder and the fact extractor ship inside the artifact.
+          # fetch-release.sh verifies each tarball's sha256 and then every
+          # extracted file against the platform manifest, so a truncated or
+          # substituted asset fails the job here and not on a user's machine.
+          # The repository is resolved from GITHUB_REPOSITORY, so each edition
+          # fetches its own model releases.
+          bash tools/encoder-models/fetch-release.sh linux \
+            share/mootx01/models/arctic-embed-s-w60
+          bash tools/encoder-models/fetch-release.sh linux \
+            share/mootx01/models/nuextract-tiny-v1.5 nuextract-tiny-v1.5
+          tar -czf "${ASSET}" mootx01 moot-mgr moot-nuextract-worker share
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
@@ -711,6 +755,8 @@ jobs:
           # sign-windows-x86_64 downloads them, signs them (when creds present),
           # and embeds the signed exes in the zip and the installer.
           Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
+          # The fact-extraction worker is a sibling binary the daemon spawns.
+          Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/moot-nuextract-worker.exe" "moot-nuextract-worker.exe"
           Copy-Item "apps/moot-mgr/rust/target/x86_64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
 
       - name: Smoke test
@@ -728,6 +774,7 @@ jobs:
           path: |
             mootx01.exe
             moot-mgr.exe
+            moot-nuextract-worker.exe
 
   # ── Windows code signing + installer (x86_64) ─────────────────────────────
   # Trusted, cargo-free sign job. Holds the OIDC id-token capability for Azure
@@ -821,6 +868,82 @@ jobs:
           files: |
             ${{ github.workspace }}\mootx01.exe
             ${{ github.workspace }}\moot-mgr.exe
+            ${{ github.workspace }}\moot-nuextract-worker.exe
+
+      - name: Fetch encoder and fact-extraction models (linux/windows)
+        # Windows ships the Rust binary, so the Linux model files are the
+        # correct ones. gh resolves the release from the repository the
+        # workflow is running in, so each edition fetches its own.
+        # A sha256 mismatch or incomplete extraction fails the job here
+        # rather than on a user's machine.
+        # No step guard: the whole sign job is already tag-gated.
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $modelDir = "share\mootx01\models\arctic-embed-s-w60"
+          New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+          gh release download models-arctic-embed-s-w60 `
+            -R "${{ github.repository }}" `
+            -p "arctic-embed-s-w60-linux.tar.gz" `
+            -O arctic-embed-s-w60-linux.tar.gz
+          # Verify tarball sha256 against the pinned value.
+          $actual = (Get-FileHash -Algorithm SHA256 "arctic-embed-s-w60-linux.tar.gz").Hash.ToLowerInvariant()
+          $expected = "5f71131f1452c15da4f94481b7b1e3fbf7d9ad9b67289e39a3e8b964f100533c"
+          if ($actual -ne $expected) {
+            Write-Error "Encoder model tarball sha256 mismatch: expected $expected got $actual"
+            exit 1
+          }
+          # Extract into a staging directory, then move files into the share slot.
+          $staging = "arctic-embed-s-w60-staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          tar -xzf "arctic-embed-s-w60-linux.tar.gz" -C $staging
+          # The tarball root may be the model directory itself or a bare flat layout.
+          $extractedModel = Join-Path $staging "arctic-embed-s-w60"
+          if (Test-Path $extractedModel) {
+            Copy-Item -Recurse -Path "$extractedModel\*" -Destination $modelDir -Force
+          } else {
+            Copy-Item -Recurse -Path "$staging\*" -Destination $modelDir -Force
+          }
+          # Verify expected linux files are present.
+          $required = @("config.json", "tokenizer.json", "model.safetensors", "vocab.txt")
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $modelDir $f))) {
+              Write-Error "Encoder model missing required file: $f"
+              exit 1
+            }
+          }
+          Write-Host "Encoder model fetched and verified at $modelDir"
+
+          # Fact-extraction model: the Linux asset (GGUF + tokenizer) serves Windows too.
+          $factDir = "share\mootx01\models\nuextract-tiny-v1.5"
+          New-Item -ItemType Directory -Force -Path $factDir | Out-Null
+          gh release download models-nuextract-tiny-v1.5 `
+            -R "${{ github.repository }}" `
+            -p "nuextract-tiny-v1.5-linux.tar.gz" `
+            -O nuextract-tiny-v1.5-linux.tar.gz
+          $factActual = (Get-FileHash -Algorithm SHA256 "nuextract-tiny-v1.5-linux.tar.gz").Hash.ToLowerInvariant()
+          $factExpected = "249523f61aa36a3fbef9ce9fcb38b30f88b4a16b9728cbb3bb990a2c48892030"
+          if ($factActual -ne $factExpected) {
+            Write-Error "Fact-extraction model tarball sha256 mismatch: expected $factExpected got $factActual"
+            exit 1
+          }
+          $factStaging = "nuextract-tiny-v1.5-staging"
+          New-Item -ItemType Directory -Force -Path $factStaging | Out-Null
+          tar -xzf "nuextract-tiny-v1.5-linux.tar.gz" -C $factStaging
+          $factExtracted = Join-Path $factStaging "nuextract-tiny-v1.5"
+          if (Test-Path $factExtracted) {
+            Copy-Item -Recurse -Path "$factExtracted\*" -Destination $factDir -Force
+          } else {
+            Copy-Item -Recurse -Path "$factStaging\*" -Destination $factDir -Force
+          }
+          foreach ($f in @("model.gguf", "tokenizer.json")) {
+            if (-not (Test-Path (Join-Path $factDir $f))) {
+              Write-Error "Fact-extraction model missing required file: $f"
+              exit 1
+            }
+          }
+          Write-Host "Fact-extraction model fetched and verified at $factDir"
 
       - name: Package binaries
         shell: pwsh
@@ -828,7 +951,7 @@ jobs:
           # Zips the (now-signed when creds present) exes. RELEASE_TAG was validated
           # in Derive version above; the job would have failed there if malformed.
           $asset = "mootx01-$($env:RELEASE_TAG)-windows-x86_64.zip"
-          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
+          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe", "moot-nuextract-worker.exe", "share" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
@@ -945,6 +1068,8 @@ jobs:
           # sign-windows-arm64 downloads them, signs them (when creds present),
           # and embeds the signed exes in the zip and the installer.
           Copy-Item "apps/mootx01/rust/target/aarch64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
+          # The fact-extraction worker is a sibling binary the daemon spawns.
+          Copy-Item "apps/mootx01/rust/target/aarch64-pc-windows-msvc/release/moot-nuextract-worker.exe" "moot-nuextract-worker.exe"
           Copy-Item "apps/moot-mgr/rust/target/aarch64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
 
       - name: Smoke test
@@ -962,6 +1087,7 @@ jobs:
           path: |
             mootx01.exe
             moot-mgr.exe
+            moot-nuextract-worker.exe
 
   # ── Windows code signing + installer (arm64) ──────────────────────────────
   # Trusted, cargo-free sign job (see sign-windows-x86_64 for the full rationale).
@@ -1046,6 +1172,82 @@ jobs:
           files: |
             ${{ github.workspace }}\mootx01.exe
             ${{ github.workspace }}\moot-mgr.exe
+            ${{ github.workspace }}\moot-nuextract-worker.exe
+
+      - name: Fetch encoder and fact-extraction models (linux/windows)
+        # Windows ships the Rust binary, so the Linux model files are the
+        # correct ones. gh resolves the release from the repository the
+        # workflow is running in, so each edition fetches its own.
+        # A sha256 mismatch or incomplete extraction fails the job here
+        # rather than on a user's machine.
+        # No step guard: the whole sign job is already tag-gated.
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $modelDir = "share\mootx01\models\arctic-embed-s-w60"
+          New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+          gh release download models-arctic-embed-s-w60 `
+            -R "${{ github.repository }}" `
+            -p "arctic-embed-s-w60-linux.tar.gz" `
+            -O arctic-embed-s-w60-linux.tar.gz
+          # Verify tarball sha256 against the pinned value.
+          $actual = (Get-FileHash -Algorithm SHA256 "arctic-embed-s-w60-linux.tar.gz").Hash.ToLowerInvariant()
+          $expected = "5f71131f1452c15da4f94481b7b1e3fbf7d9ad9b67289e39a3e8b964f100533c"
+          if ($actual -ne $expected) {
+            Write-Error "Encoder model tarball sha256 mismatch: expected $expected got $actual"
+            exit 1
+          }
+          # Extract into a staging directory, then move files into the share slot.
+          $staging = "arctic-embed-s-w60-staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          tar -xzf "arctic-embed-s-w60-linux.tar.gz" -C $staging
+          # The tarball root may be the model directory itself or a bare flat layout.
+          $extractedModel = Join-Path $staging "arctic-embed-s-w60"
+          if (Test-Path $extractedModel) {
+            Copy-Item -Recurse -Path "$extractedModel\*" -Destination $modelDir -Force
+          } else {
+            Copy-Item -Recurse -Path "$staging\*" -Destination $modelDir -Force
+          }
+          # Verify expected linux files are present.
+          $required = @("config.json", "tokenizer.json", "model.safetensors", "vocab.txt")
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $modelDir $f))) {
+              Write-Error "Encoder model missing required file: $f"
+              exit 1
+            }
+          }
+          Write-Host "Encoder model fetched and verified at $modelDir"
+
+          # Fact-extraction model: the Linux asset (GGUF + tokenizer) serves Windows too.
+          $factDir = "share\mootx01\models\nuextract-tiny-v1.5"
+          New-Item -ItemType Directory -Force -Path $factDir | Out-Null
+          gh release download models-nuextract-tiny-v1.5 `
+            -R "${{ github.repository }}" `
+            -p "nuextract-tiny-v1.5-linux.tar.gz" `
+            -O nuextract-tiny-v1.5-linux.tar.gz
+          $factActual = (Get-FileHash -Algorithm SHA256 "nuextract-tiny-v1.5-linux.tar.gz").Hash.ToLowerInvariant()
+          $factExpected = "249523f61aa36a3fbef9ce9fcb38b30f88b4a16b9728cbb3bb990a2c48892030"
+          if ($factActual -ne $factExpected) {
+            Write-Error "Fact-extraction model tarball sha256 mismatch: expected $factExpected got $factActual"
+            exit 1
+          }
+          $factStaging = "nuextract-tiny-v1.5-staging"
+          New-Item -ItemType Directory -Force -Path $factStaging | Out-Null
+          tar -xzf "nuextract-tiny-v1.5-linux.tar.gz" -C $factStaging
+          $factExtracted = Join-Path $factStaging "nuextract-tiny-v1.5"
+          if (Test-Path $factExtracted) {
+            Copy-Item -Recurse -Path "$factExtracted\*" -Destination $factDir -Force
+          } else {
+            Copy-Item -Recurse -Path "$factStaging\*" -Destination $factDir -Force
+          }
+          foreach ($f in @("model.gguf", "tokenizer.json")) {
+            if (-not (Test-Path (Join-Path $factDir $f))) {
+              Write-Error "Fact-extraction model missing required file: $f"
+              exit 1
+            }
+          }
+          Write-Host "Fact-extraction model fetched and verified at $factDir"
 
       - name: Package binaries
         shell: pwsh
@@ -1053,7 +1255,7 @@ jobs:
           # Zips the (now-signed when creds present) exes. RELEASE_TAG was validated
           # in Derive version above; the job would have failed there if malformed.
           $asset = "mootx01-$($env:RELEASE_TAG)-windows-arm64.zip"
-          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
+          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe", "moot-nuextract-worker.exe", "share" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset
