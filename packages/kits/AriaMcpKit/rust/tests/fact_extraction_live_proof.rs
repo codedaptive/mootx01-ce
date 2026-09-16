@@ -36,14 +36,80 @@
 //!   a typical user would write. Whether the product ships a model that
 //!   requires cue words is a ruling, not a coding change.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::path::Path;
+
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn new(prefix: &str) -> std::io::Result<Self> {
+        for _ in 0..16 {
+            let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a unique scratch directory after 16 attempts",
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            eprintln!(
+                "warning: failed to remove scratch directory {}: {error}",
+                self.0.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn live_proof_scratch_directories_are_unique_and_private() {
+    let first =
+        ScratchDir::new("fact-extraction-security").expect("create first scratch directory");
+    let second =
+        ScratchDir::new("fact-extraction-security").expect("create second scratch directory");
+
+    assert_ne!(first.path(), second.path(), "scratch paths must be unique");
+    assert!(first.path().is_dir(), "scratch path must be a directory");
+    assert!(second.path().is_dir(), "scratch path must be a directory");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(first.path())
+                .expect("read scratch directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "scratch directory must be owner-only",
+        );
+    }
+}
 
 use aria_mcp::{build_fact_extraction_cycle, estate_registry::EstateRegistry};
 use genius_locus_kit::{EstatePreferenceKey, EstatePreferenceValue};
-use locus_kit::frames::CaptureFrame;
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::estate_types::LatticeAnchor;
+use locus_kit::frames::CaptureFrame;
 
 /// Live end-to-end proof: the cycle obtained from `build_fact_extraction_cycle`
 /// files at least one KG fact when invoked against a drawer with cued content.
@@ -99,9 +165,9 @@ fn live_proof_cycle_from_build_fact_extraction_cycle_files_at_least_one_fact() {
     //    uses in production; `config_dir` is injected so no real
     //    ~/Library/Application Support is read.
     // ----------------------------------------------------------------
-    let scratch_root = std::env::temp_dir().join("mootx01-fact-extraction-live-proof");
-    let scratch_dir = scratch_root.as_path();
-    std::fs::create_dir_all(scratch_dir).expect("create scratch dir");
+    let scratch_root = ScratchDir::new("mootx01-fact-extraction-live-proof")
+        .expect("create private, unique scratch dir");
+    let scratch_dir = scratch_root.path();
 
     // Write config.json with all four fact_extraction paths.
     let config_json = format!(
@@ -119,14 +185,9 @@ fn live_proof_cycle_from_build_fact_extraction_cycle_files_at_least_one_fact() {
     let estate_dir = scratch_dir.join("estate");
     std::fs::create_dir_all(&estate_dir).expect("create estate dir");
     let db_path = estate_dir.join("live-proof.sqlite");
-    // Remove any stale estate from a prior run so we start clean.
-    let _ = std::fs::remove_file(&db_path);
-
-    let registry = EstateRegistry::new_sqlite(
-        db_path.to_str().expect("UTF-8 path"),
-        "live-proof-owner",
-    )
-    .expect("open SQLite estate");
+    let registry =
+        EstateRegistry::new_sqlite(db_path.to_str().expect("UTF-8 path"), "live-proof-owner")
+            .expect("open SQLite estate");
 
     let coord = Arc::clone(&registry.coord);
     let handle = registry.default.handle;
@@ -137,7 +198,11 @@ fn live_proof_cycle_from_build_fact_extraction_cycle_files_at_least_one_fact() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::On)
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::On,
+            )
             .expect("provision fact extraction On");
     }
 
@@ -202,7 +267,10 @@ fn live_proof_cycle_from_build_fact_extraction_cycle_files_at_least_one_fact() {
     // ----------------------------------------------------------------
     let facts_filed = cycle().expect("cycle closure must return Ok");
 
-    eprintln!("live proof: cycle returned facts_filed={facts_filed} for drawer {}", drawer.id);
+    eprintln!(
+        "live proof: cycle returned facts_filed={facts_filed} for drawer {}",
+        drawer.id
+    );
 
     assert!(
         facts_filed >= 1,
@@ -212,7 +280,6 @@ fn live_proof_cycle_from_build_fact_extraction_cycle_files_at_least_one_fact() {
 
     eprintln!(
         "live proof PASS: {} KG fact(s) filed via build_fact_extraction_cycle for drawer {}",
-        facts_filed,
-        drawer.id,
+        facts_filed, drawer.id,
     );
 }
