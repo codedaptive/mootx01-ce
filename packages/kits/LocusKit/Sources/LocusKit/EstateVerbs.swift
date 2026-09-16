@@ -734,6 +734,7 @@ public extension Estate {
         }
 
         let filtered: [Drawer]
+        var withheldBySensitivity = 0
         if degradedStages.isEmpty {
             // Only attempt evaluation when liveRows succeeded; on a failed
             // read `live` is empty and evaluation would just re-confirm empty.
@@ -756,9 +757,11 @@ public extension Estate {
                 } else {
                     nodeNames = [:]
                 }
-                filtered = try await BitmapEvaluator.evaluate(
+                let evaluation = try await BitmapEvaluator.evaluateResult(
                     frame: frame, drawers: live, store: store, nodeNames: nodeNames
                 )
+                filtered = evaluation.rows
+                withheldBySensitivity = evaluation.withheldBySensitivity
             } catch {
                 // BitmapEvaluator's throwable failure modes (substrate errors
                 // during historical reconstruction) DEGRADE rather than masquerade
@@ -814,7 +817,8 @@ public extension Estate {
             rows: filtered,
             pageSize: pageSize,
             hydrationLevel: frame.hydrationLevel,
-            degradedStages: degradedStages
+            degradedStages: degradedStages,
+            withheldBySensitivity: withheldBySensitivity
         )
     }
 

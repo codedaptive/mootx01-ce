@@ -94,6 +94,8 @@ pub struct FrameFilteredDrawers {
     pub admissible: Vec<Drawer>,
     /// Every id whose row was returned by storage, regardless of frame filter.
     pub loaded_ids: HashSet<String>,
+    /// Default-sensitivity exclusions among these physically loaded IDs.
+    pub withheld_by_sensitivity: usize,
 }
 
 /// Maximum candidate count for the recall locus-lane scan.
@@ -1161,14 +1163,18 @@ impl Estate {
         // degraded_stages is the channel. Skipped when an upstream read already
         // failed (candidates is empty for a named reason; re-evaluating would
         // only re-confirm empty).
+        let mut withheld_by_sensitivity = 0;
         let filtered: Vec<Drawer> = if !degraded_stages.is_empty() {
             Vec::new()
         } else if force_bitmap_eval {
             degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
             Vec::new()
         } else {
-            match BitmapEvaluator::evaluate(&frame, &candidates, self.store.as_ref(), &self.resolve_node_names_for_drawers(&candidates)) {
-                Ok(f) => f,
+            match BitmapEvaluator::evaluate_result(&frame, &candidates, self.store.as_ref(), &self.resolve_node_names_for_drawers(&candidates)) {
+                Ok(evaluation) => {
+                    withheld_by_sensitivity = evaluation.withheld_by_sensitivity;
+                    evaluation.rows
+                },
                 Err(_) => {
                     degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
                     Vec::new()
@@ -1223,6 +1229,7 @@ impl Estate {
         let page_size = frame.limit.unwrap_or(RecallStream::DEFAULT_PAGE_SIZE);
         RecallStream::new(filtered, page_size, frame.hydration_level)
             .with_degraded_stages(degraded_stages)
+            .with_withheld_by_sensitivity(withheld_by_sensitivity)
     }
 
     /// FRAME-AWARE by-id load. Loads `ids` by row, then applies the frame's
@@ -1270,8 +1277,9 @@ impl Estate {
         }
         let node_names = self.resolve_node_names_for_drawers(&loaded);
         // Evaluate with full content available for ContentMatches predicates.
-        let mut admissible =
-            BitmapEvaluator::evaluate(frame, &loaded, self.store.as_ref(), &node_names)?;
+        let evaluation = BitmapEvaluator::evaluate_result(frame, &loaded, self.store.as_ref(), &node_names)?;
+        let withheld_by_sensitivity = evaluation.withheld_by_sensitivity;
+        let mut admissible = evaluation.rows;
         // Honor BitmapOnly stripping AFTER evaluation so the hydration contract
         // for the requested level is applied to the already-filtered result set.
         if frame.hydration_level == HydrationLevel::BitmapOnly {
@@ -1282,6 +1290,7 @@ impl Estate {
         Ok(FrameFilteredDrawers {
             admissible,
             loaded_ids,
+            withheld_by_sensitivity,
         })
     }
 
