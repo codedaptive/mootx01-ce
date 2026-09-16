@@ -392,7 +392,7 @@ pub fn run(
     //                          before grant_tiered adds anything still
     //                          missing; both write BOTH the direct
     //                          (mcp__mootx01__) and plugin
-    //                          (mcp__plugin_mootx01_mootx01__) namespaces —
+    //                          (mcp__plugin_mootx01_memory__) namespaces —
     //                          a rule under only one matches zero calls made
     //                          through the other Claude Code connection.
     //   --grant-permissions  → every tool into allow (explicit opt-in).

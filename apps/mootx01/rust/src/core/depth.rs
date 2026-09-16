@@ -1226,7 +1226,9 @@ mod tests {
     /// gets `MOOTX01_VAULT=0` injected; an HTTP-shaped entry does not.
     #[test]
     fn inject_vault_env_shape_check() {
-        let command_entry = r#"{"mcpServers":{"mootx01":{"command":"mootx01","args":["proxy"]}}}"#;
+        // Entries use PLUGIN_SERVER_NAME ("memory") as the key — inject_vault_env
+        // looks up by clients::PLUGIN_SERVER_NAME; entries under other keys are untouched.
+        let command_entry = r#"{"mcpServers":{"memory":{"command":"mootx01","args":["proxy"]}}}"#;
         let patched = inject_vault_env(".mcp.json", command_entry);
         let patched_json: serde_json::Value = serde_json::from_str(&patched).unwrap();
         assert_eq!(
@@ -1234,7 +1236,7 @@ mod tests {
             "a command-shaped entry must still get MOOTX01_VAULT=0 injected"
         );
 
-        let http_entry = r#"{"mcpServers":{"mootx01":{"type":"http","url":"http://127.0.0.1:4242"}}}"#;
+        let http_entry = r#"{"mcpServers":{"memory":{"type":"http","url":"http://127.0.0.1:4242"}}}"#;
         let unchanged = inject_vault_env(".mcp.json", http_entry);
         let unchanged_json: serde_json::Value = serde_json::from_str(&unchanged).unwrap();
         assert!(
@@ -1473,6 +1475,11 @@ mod tests {
         // the loop body into a per-file helper would let the count-guard
         // drift away from the assertions it certifies, which is the precise
         // failure this suite exists to prevent.
+        //
+        // Key split (2026-09-16): the Claude Code plugin registers its server
+        // under PLUGIN_SERVER_NAME ("memory"), giving tools the
+        // mcp__plugin_mootx01_memory__ prefix. Every other manifestBundle host
+        // is a direct install and keeps SERVER_NAME ("mootx01").
         let bundle = InstallBundle::embedded();
         let mut hosts: Vec<&str> = bundle.plugin_capable_hosts().map(|h| h.id.as_str()).collect();
         hosts.sort_unstable();
@@ -1489,20 +1496,27 @@ mod tests {
                 "{host_id} is plugin-capable but its package declares no MCP server map"
             );
 
+            // claude-code's plugin package registers under PLUGIN_SERVER_NAME ("memory");
+            // every other manifestBundle host is a direct install and uses SERVER_NAME ("mootx01").
+            let expected_key = if *host_id == "claude-code" {
+                clients::PLUGIN_SERVER_NAME
+            } else {
+                clients::SERVER_NAME
+            };
+
             for (rel, map_key, servers) in maps {
                 let at = format!("{host_id}/{rel} [{map_key}]");
                 let keys: Vec<&str> = servers.keys().map(|k| k.as_str()).collect();
                 assert_eq!(
                     keys,
-                    vec![clients::PLUGIN_SERVER_NAME],
-                    "{at}: must declare exactly the plugin server key '{}'",
-                    clients::PLUGIN_SERVER_NAME
+                    vec![expected_key],
+                    "{at}: must declare exactly the expected server key '{expected_key}'"
                 );
 
                 let entry = servers
-                    .get(clients::PLUGIN_SERVER_NAME)
+                    .get(expected_key)
                     .and_then(|v| v.as_object())
-                    .unwrap_or_else(|| panic!("{at}: no object entry under the plugin server key"));
+                    .unwrap_or_else(|| panic!("{at}: no object entry under the expected server key"));
 
                 assert!(
                     URL_KEYS.iter().any(|k| entry.contains_key(*k)),
@@ -1536,15 +1550,19 @@ mod tests {
         );
     }
 
-    /// The constant the installer reads must be the key the packager writes.
-    /// `PLUGIN_SERVER_NAME` mirrors generated data; this keeps the mirror
-    /// honest. Direct tripwire for a repeat of 7f64973aa, where the generated
-    /// key moved and the installer's copy did not.
+    /// The constant the installer reads must be the key the packager writes for
+    /// the Claude Code plugin package specifically. `PLUGIN_SERVER_NAME` mirrors
+    /// generated data; this keeps the mirror honest. Direct tripwire for a repeat
+    /// of 7f64973aa, where the generated key moved and the installer's copy did not.
+    ///
+    /// Only the claude-code package is checked here because claude-code is the
+    /// only host whose plugin package uses PLUGIN_SERVER_NAME ("memory"). Direct-
+    /// install packages for other hosts use SERVER_NAME ("mootx01") and are
+    /// covered by `plugin_package_entries_are_http_shaped`.
     #[test]
     fn plugin_server_name_matches_generated_packages() {
-        let mut emitted: Vec<String> = InstallBundle::embedded()
-            .plugin_capable_hosts()
-            .flat_map(|h| server_maps(&h.id))
+        let mut emitted: Vec<String> = server_maps("claude-code")
+            .into_iter()
             .flat_map(|(_, _, servers)| servers.keys().cloned().collect::<Vec<_>>())
             .collect();
         emitted.sort_unstable();
@@ -1552,17 +1570,19 @@ mod tests {
         assert_eq!(
             emitted,
             vec![clients::PLUGIN_SERVER_NAME.to_string()],
-            "the generated packages are the authority for the plugin server key; \
-             PLUGIN_SERVER_NAME is '{}' but the packages emit {emitted:?}",
+            "the generated claude-code package is the authority for the plugin server key; \
+             PLUGIN_SERVER_NAME is '{}' but the claude-code package emits {emitted:?}",
             clients::PLUGIN_SERVER_NAME
         );
     }
 
-    /// The two keys are intentionally the same: both the plugin and the direct
-    /// install entry use `"mootx01"` so MOOT tools surface under a single
-    /// `mcp__mootx01__*` prefix regardless of install path.
+    /// The plugin and direct server keys are intentionally distinct: the plugin
+    /// registers under `"memory"` (prefix `mcp__plugin_mootx01_memory__`) while
+    /// direct installs continue to use `"mootx01"` (prefix `mcp__mootx01__`).
     #[test]
-    fn plugin_and_direct_server_keys_are_identical() {
-        assert_eq!(clients::PLUGIN_SERVER_NAME, clients::SERVER_NAME);
+    fn plugin_and_direct_server_keys_are_distinct() {
+        assert_ne!(clients::PLUGIN_SERVER_NAME, clients::SERVER_NAME);
+        assert_eq!(clients::PLUGIN_SERVER_NAME, "memory");
+        assert_eq!(clients::SERVER_NAME, "mootx01");
     }
 }
