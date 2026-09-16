@@ -3630,7 +3630,7 @@ mod tests {
         );
     }
 
-+    /// A row above the active sensitivity ceiling must not receive a reward
+    /// A row above the active sensitivity ceiling must not receive a reward
     /// trace when its mutation is refused.
     #[test]
     fn sensitivity_write_gate_does_not_dereference_refused_row() {
