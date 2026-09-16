@@ -63,6 +63,31 @@ where
     Ok(())
 }
 
+const MANAGED_PREFERENCE_SIGNAL_NAMES: [&str; 9] = [
+    FactExtractionSignal::SIGNAL_NAME,
+    ConsolidationSignal::SIGNAL_NAME,
+    ContradictionSweepSignal::SIGNAL_NAME,
+    MaintenanceSignal::SIGNAL_NAME,
+    DecaySweepSignal::SIGNAL_NAME,
+    ByReferenceValiditySignal::SIGNAL_NAME,
+    TemporalCausalitySignal::SIGNAL_NAME,
+    TrainingSignal::SIGNAL_NAME,
+    EndOfDayTournamentSignal::SIGNAL_NAME,
+];
+
+fn fail_closed_runtime_signals(
+    governor: &mut AutonomicGovernor,
+    registered: &mut HashMap<String, SchedulerSignalID>,
+) {
+    for name in MANAGED_PREFERENCE_SIGNAL_NAMES {
+        if let Some(id) = registered.get(name) {
+            if governor.unregister_standing_signal(id) {
+                registered.remove(name);
+            }
+        }
+    }
+}
+
 /// Bound for the observer program's in-process recent window (DEBT-3).
 /// 256 samples proves liveness and shows a recent slice without retaining
 /// meaningful memory. Mirrors Swift `Observer.defaultWindowCapacity`.
@@ -539,116 +564,122 @@ pub fn run(
             };
             let reconcile_coord = Arc::clone(&coord_for_hnsw);
             governor.run_loop_with_before_tick(move |governor, now| {
-                let enabled = |key| {
-                    read_estate_preference(&reconcile_coord, &handle_for_hnsw, key)
-                        .map(|v| v != genius_locus_kit::EstatePreferenceValue::Off)
-                        .ok_or_else(|| format!("preference {} unreadable", key.as_str()))
-                };
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    FactExtractionSignal::SIGNAL_NAME,
-                    enabled(genius_locus_kit::EstatePreferenceKey::FactExtraction)?,
-                    now,
-                    || {
-                        fact_extraction_cycle
-                            .clone()
-                            .map(|cycle| FactExtractionSignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    ConsolidationSignal::SIGNAL_NAME,
-                    enabled(genius_locus_kit::EstatePreferenceKey::Consolidation)?,
-                    now,
-                    || {
-                        consolidation_cycle
-                            .clone()
-                            .map(|cycle| ConsolidationSignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    ContradictionSweepSignal::SIGNAL_NAME,
-                    enabled(genius_locus_kit::EstatePreferenceKey::ContradictionSweep)?,
-                    now,
-                    || {
-                        contradiction_sweep_cycle
-                            .clone()
-                            .map(|cycle| ContradictionSweepSignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                let maintenance = enabled(genius_locus_kit::EstatePreferenceKey::Maintenance)?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    MaintenanceSignal::SIGNAL_NAME,
-                    maintenance,
-                    now,
-                    || {
-                        let cycle = Arc::clone(&maintenance_cycle);
-                        Some(MaintenanceSignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    DecaySweepSignal::SIGNAL_NAME,
-                    maintenance,
-                    now,
-                    || {
-                        let cycle = Arc::clone(&decay_cycle);
-                        Some(DecaySweepSignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    ByReferenceValiditySignal::SIGNAL_NAME,
-                    maintenance,
-                    now,
-                    || {
-                        let cycle = Arc::clone(&by_reference_cycle);
-                        Some(ByReferenceValiditySignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                let adaptive = enabled(genius_locus_kit::EstatePreferenceKey::AdaptiveRecall)?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    TemporalCausalitySignal::SIGNAL_NAME,
-                    adaptive,
-                    now,
-                    || {
-                        let cycle = Arc::clone(&fold_cycle);
-                        Some(TemporalCausalitySignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    TrainingSignal::SIGNAL_NAME,
-                    adaptive,
-                    now,
-                    || {
-                        let cycle = Arc::clone(&training_cycle);
-                        Some(TrainingSignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                reconcile_runtime_signal(
-                    governor,
-                    &mut registered_ids,
-                    EndOfDayTournamentSignal::SIGNAL_NAME,
-                    adaptive,
-                    now,
-                    || {
-                        let cycle = Arc::clone(&tournament_cycle);
-                        Some(EndOfDayTournamentSignal::spec(Arc::new(move || cycle())))
-                    },
-                )?;
-                Ok(())
+                let reconciliation = (|| -> Result<(), String> {
+                    let enabled = |key| {
+                        read_estate_preference(&reconcile_coord, &handle_for_hnsw, key)
+                            .map(|v| v != genius_locus_kit::EstatePreferenceValue::Off)
+                            .ok_or_else(|| format!("preference {} unreadable", key.as_str()))
+                    };
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        FactExtractionSignal::SIGNAL_NAME,
+                        enabled(genius_locus_kit::EstatePreferenceKey::FactExtraction)?,
+                        now,
+                        || {
+                            fact_extraction_cycle
+                                .clone()
+                                .map(|cycle| FactExtractionSignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        ConsolidationSignal::SIGNAL_NAME,
+                        enabled(genius_locus_kit::EstatePreferenceKey::Consolidation)?,
+                        now,
+                        || {
+                            consolidation_cycle
+                                .clone()
+                                .map(|cycle| ConsolidationSignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        ContradictionSweepSignal::SIGNAL_NAME,
+                        enabled(genius_locus_kit::EstatePreferenceKey::ContradictionSweep)?,
+                        now,
+                        || {
+                            contradiction_sweep_cycle.clone().map(|cycle| {
+                                ContradictionSweepSignal::spec(Arc::new(move || cycle()))
+                            })
+                        },
+                    )?;
+                    let maintenance = enabled(genius_locus_kit::EstatePreferenceKey::Maintenance)?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        MaintenanceSignal::SIGNAL_NAME,
+                        maintenance,
+                        now,
+                        || {
+                            let cycle = Arc::clone(&maintenance_cycle);
+                            Some(MaintenanceSignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        DecaySweepSignal::SIGNAL_NAME,
+                        maintenance,
+                        now,
+                        || {
+                            let cycle = Arc::clone(&decay_cycle);
+                            Some(DecaySweepSignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        ByReferenceValiditySignal::SIGNAL_NAME,
+                        maintenance,
+                        now,
+                        || {
+                            let cycle = Arc::clone(&by_reference_cycle);
+                            Some(ByReferenceValiditySignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    let adaptive = enabled(genius_locus_kit::EstatePreferenceKey::AdaptiveRecall)?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        TemporalCausalitySignal::SIGNAL_NAME,
+                        adaptive,
+                        now,
+                        || {
+                            let cycle = Arc::clone(&fold_cycle);
+                            Some(TemporalCausalitySignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        TrainingSignal::SIGNAL_NAME,
+                        adaptive,
+                        now,
+                        || {
+                            let cycle = Arc::clone(&training_cycle);
+                            Some(TrainingSignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    reconcile_runtime_signal(
+                        governor,
+                        &mut registered_ids,
+                        EndOfDayTournamentSignal::SIGNAL_NAME,
+                        adaptive,
+                        now,
+                        || {
+                            let cycle = Arc::clone(&tournament_cycle);
+                            Some(EndOfDayTournamentSignal::spec(Arc::new(move || cycle())))
+                        },
+                    )?;
+                    Ok(())
+                })();
+                if reconciliation.is_err() {
+                    fail_closed_runtime_signals(governor, &mut registered_ids);
+                }
+                reconciliation
             });
         });
 
@@ -1208,6 +1239,79 @@ fn http_serve_failure_line(banner: &str, port: u16, error: &std::io::Error) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::estate_registry::EstateRegistry;
+
+    fn preference_test_governor() -> AutonomicGovernor {
+        let registry = EstateRegistry::new_inmemory();
+        let base = std::env::temp_dir().join(format!("sec11-reconcile-{}", uuid::Uuid::new_v4()));
+        AutonomicGovernor::new_for_testing_with_pool(
+            Arc::clone(&registry.coord),
+            registry.default.handle,
+            Arc::clone(&registry.default.store),
+            300_000,
+            None,
+            0,
+            base.join("pool"),
+            base.join("WordClassTable.json"),
+        )
+    }
+
+    #[test]
+    fn preference_signal_reconciles_on_off_on() {
+        let mut governor = preference_test_governor();
+        let mut ids = HashMap::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1);
+        let make_spec = || Some(FactExtractionSignal::spec(Arc::new(|| Ok(0))));
+
+        reconcile_runtime_signal(
+            &mut governor,
+            &mut ids,
+            FactExtractionSignal::SIGNAL_NAME,
+            true,
+            now,
+            make_spec,
+        )
+        .unwrap();
+        assert!(ids.contains_key(FactExtractionSignal::SIGNAL_NAME));
+        reconcile_runtime_signal(
+            &mut governor,
+            &mut ids,
+            FactExtractionSignal::SIGNAL_NAME,
+            false,
+            now,
+            || None,
+        )
+        .unwrap();
+        assert!(!ids.contains_key(FactExtractionSignal::SIGNAL_NAME));
+        reconcile_runtime_signal(
+            &mut governor,
+            &mut ids,
+            FactExtractionSignal::SIGNAL_NAME,
+            true,
+            now,
+            make_spec,
+        )
+        .unwrap();
+        assert!(ids.contains_key(FactExtractionSignal::SIGNAL_NAME));
+    }
+
+    #[test]
+    fn preference_read_failure_unregisters_managed_signals() {
+        let mut governor = preference_test_governor();
+        let mut ids = HashMap::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1);
+        for name in [
+            FactExtractionSignal::SIGNAL_NAME,
+            MaintenanceSignal::SIGNAL_NAME,
+        ] {
+            reconcile_runtime_signal(&mut governor, &mut ids, name, true, now, || {
+                Some(FactExtractionSignal::spec(Arc::new(|| Ok(0))))
+            })
+            .unwrap();
+        }
+        fail_closed_runtime_signals(&mut governor, &mut ids);
+        assert!(ids.is_empty());
+    }
 
     /// The serve-failure message must NOT claim a bind failure.  A bind
     /// failure and a serve failure are distinct: the bind arm fires before any
