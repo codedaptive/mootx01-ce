@@ -203,27 +203,18 @@ public struct AriaV2ReviewTunnelRequest: Sendable {
         case endorse
     }
 
-    /// The reviewer identity recorded in the review ledger. Defaults to
-    /// `"user"`; model reviewers pass their own id (e.g. "claude").
-    ///
-    /// Edge activation is user-only, so this is the argument the `accept`
-    /// gate reads. A model that wants to express a view uses `endorse` or
-    /// `reject`, both of which are reopenable; only a user settles an edge.
+    /// Edge activation is user-only. The service derives reviewer identity
+    /// from its authenticated context; it is never accepted from tool input.
     public static let userReviewer = "user"
 
     public let tunnelID: UUID
     public let decision: Decision
     public let note: String?
-    public let reviewedBy: String
     public let estateID: UUID?
-
-    /// True when the reviewer is the user rather than a model. Promotion of a
-    /// proposal to an active edge requires this; see `Decision.accept`.
-    public var isUserReviewer: Bool { reviewedBy == Self.userReviewer }
 
     public init(arguments: JSONValue) throws {
         let decoder = try AriaV2ArgumentDecoder(
-            arguments, allowedKeys: ["tunnel_id", "decision", "note", "reviewed_by", "estate_id"])
+            arguments, allowedKeys: ["tunnel_id", "decision", "note", "estate_id"])
         tunnelID = try decoder.requireUUID("tunnel_id")
         let rawDecision = try decoder.requireString("decision")
         guard let decision = Decision(rawValue: rawDecision) else {
@@ -231,33 +222,7 @@ public struct AriaV2ReviewTunnelRequest: Sendable {
         }
         self.decision = decision
         note = try decoder.optionalString("note")
-        reviewedBy = try Self.nonEmptyReviewer(decoder.optionalString("reviewed_by"))
         estateID = try decoder.optionalUUID("estate_id")
-        // Edge activation is user-only. Models endorse or reject; neither
-        // settles the edge, so a machine can never ratify another machine's
-        // inference. Checked at decode so the refusal names the argument.
-        guard decision != .accept || reviewedBy == Self.userReviewer else {
-            throw AriaV2InvalidArgument(
-                path: "reviewed_by",
-                message: "Edge activation is user-only: decision 'accept' requires reviewed_by "
-                    + "'user'. Model reviewers use 'endorse' or 'reject'.",
-                allowed: [Self.userReviewer],
-                correction: "set reviewed_by to 'user' to activate this edge"
-            ).jsonRPCError
-        }
-    }
-
-    /// An explicitly empty `reviewed_by` is a caller error, not a silent
-    /// fallback to the user identity — that would turn a typo into an edge
-    /// activation.
-    private static func nonEmptyReviewer(_ raw: String?) throws -> String {
-        guard let raw else { return userReviewer }
-        guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
-            throw AriaV2InvalidArgument(
-                path: "reviewed_by",
-                message: "Argument 'reviewed_by' must be a non-empty string.").jsonRPCError
-        }
-        return raw
     }
 }
 
@@ -473,6 +438,10 @@ public struct AriaV2MemoryMutations: Sendable {
 
     public func review(_ request: AriaV2ReviewTunnelRequest) async throws -> JSONValue {
         try validateEstate(request.estateID)
+        let reviewerID = context.callerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? context.serverIdentity
+            : context.callerID
+        let isUserReviewer = reviewerID == AriaV2ReviewTunnelRequest.userReviewer
         let tunnelID = id(request.tunnelID)
         do {
             var storedTunnel: Tunnel?
@@ -506,12 +475,12 @@ public struct AriaV2MemoryMutations: Sendable {
             let label = storedTunnel?.label ?? ""
             switch request.decision {
             case .endorse:
-                let outcome = try await kit.endorseTunnel(in: handle, tunnelID: storedTunnelID, endorserID: request.reviewedBy, tierLens: tierLens(for: label), now: context.now())
+                let outcome = try await kit.endorseTunnel(in: handle, tunnelID: storedTunnelID, endorserID: reviewerID, tierLens: tierLens(for: label), now: context.now())
                 return success(tool: "moot_review_tunnel", data: .object([
                     "tunnel_id": .string(tunnelID), "new_endorser": .bool(outcome.newEndorser),
                     "distinct_endorsers": .integer(Int64(outcome.distinctEndorsers)), "contested": .bool(outcome.contested),
                 ]), text: "Endorsed tunnel \(tunnelID).")
-            case .reject where !request.isUserReviewer:
+            case .reject where !isUserReviewer:
                 // A MODEL rejection is an objection, not a verdict. It withdraws
                 // only when no model endorsement stands; otherwise the tunnel
                 // stays `.proposed` and is marked contested so the user sees a
@@ -519,7 +488,7 @@ public struct AriaV2MemoryMutations: Sendable {
                 // this to respondToTunnel would give a machine the permanence of
                 // a user rejection, whose pairs are never re-proposed.
                 let outcome = try await kit.objectToTunnel(
-                    in: handle, tunnelID: storedTunnelID, reviewerID: request.reviewedBy,
+                    in: handle, tunnelID: storedTunnelID, reviewerID: reviewerID,
                     tierLens: tierLens(for: label), now: context.now())
                 return success(tool: "moot_review_tunnel", data: .object([
                     "tunnel_id": .string(tunnelID), "withdrawn": .bool(outcome.withdrawn),
@@ -533,7 +502,7 @@ public struct AriaV2MemoryMutations: Sendable {
                     handle,
                     tunnelID: storedTunnelID,
                     accept: request.decision == .accept,
-                    changedBy: request.reviewedBy,
+                    changedBy: reviewerID,
                     reason: request.note,
                     now: context.now())
                 return success(tool: "moot_review_tunnel", data: .object([
