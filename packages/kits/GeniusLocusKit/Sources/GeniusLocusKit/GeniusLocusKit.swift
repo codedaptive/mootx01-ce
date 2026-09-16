@@ -296,21 +296,10 @@ public actor GeniusLocusKit {
     /// separate facade to avoid cross-concern entanglement. Dropped in `close`.
     internal var fingerprintStores: [EstateHandle: DrawerStore] = [:]
 
-    /// Per-estate LLM calibration curve registries.
-    ///
-    /// Populated on first `glkRecordCalibrationOutcome` and readable via
-    /// `glkCalibrationCurve`. Holds the in-memory state; callers that need
-    /// persistence register a `MatrixPersistenceBackend` via
-    /// `registerMatrixPersistence(_:for:)`. Dropped in `close`.
-    internal var calibrationRegistries: [EstateHandle: MatrixCalibrationRegistry] = [:]
-
-    /// Optional per-estate matrix persistence backends for calibration snapshots.
-    ///
-    /// When present, `glkRecordCalibrationOutcome` saves a `MatrixSnapshot`
-    /// (tier + calibration registry) after each update so calibration survives
-    /// a process restart. Registered via `registerMatrixPersistence(_:for:)`.
-    /// Dropped in `close`.
-    internal var matrixPersistenceBackends: [EstateHandle: MatrixPersistenceBackend] = [:]
+    /// Per-estate refresh owners and independent keyed calibration stores.
+    internal var matrixRefreshWorkers: [EstateHandle: MatrixRefreshWorker] = [:]
+    internal var matrixFrozenHandles: Set<EstateHandle> = []
+    internal var matrixRecordStores: [EstateHandle: MatrixRecordStore] = [:]
 
     /// Per-estate dreaming QueueKit handles.
     ///
@@ -571,11 +560,9 @@ public extension GeniusLocusKit {
     ///
     /// The RecallDirector reads this registry to compute `fieldFit`,
     /// `coOccurrence`, and `temporal` score columns during the `unionBest`
-    /// scoring pass. Build the tier via `MatrixTier.rebuild(from:)` or
-    /// `MatrixPersistenceBackend.rebuild(from:)` after feeding the estate's
-    /// unified audit log. Re-registering with a fresh snapshot replaces the
-    /// existing entry; call with a fresh tier after each dreaming cycle to keep
-    /// recall scoring current.
+    /// scoring pass. Offline callers can build a tier via `MatrixTier.rebuild(from:)`.
+    /// Product refreshes use `requestMatrixRefresh`, whose worker loads records,
+    /// folds counts forward, and publishes the completed generation here.
     ///
     /// When no tier is registered for an estate, all matrix score columns
     /// remain 0.0 — correct behaviour for a fresh estate with no captured

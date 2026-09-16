@@ -86,7 +86,7 @@ use crate::audit::{
 use crate::coordinator::{EstateCoordinator, GeniusLocusKitError};
 use crate::grants::GrantStore;
 use crate::handle::EstateHandle;
-use crate::matrix::{MatrixTier, MatrixSnapshotStore};
+use crate::matrix::{MatrixTier, MatrixRecordStore};
 use uuid::Uuid;
 
 // MARK: - Composite GLK SchemaDeclaration
@@ -99,14 +99,14 @@ use uuid::Uuid;
 /// The composite schema aggregates all user-visible tables and uses the SUM of
 /// the component versions plus two GLK-owned addends:
 ///   +1 grants         — security-sensitive estate authorization state
-///   +1 matrix_snapshot — matrix tier calibration persistence
+///   +1 matrix_cells — matrix tier calibration persistence
 /// (BasisStore is the separate "CorpusKitBasis" kit-ID schema, not part of
 /// this composite, so its version is not summed.) The version is computed
 /// from the live component declarations below, so a future component bump
 /// self-corrects the composite without a hand-edited literal — matching
 /// Swift's sum convention.
 ///
-/// IMPORTANT: matrix_snapshot MUST be in this composite so replication::hydrate
+/// IMPORTANT: matrix_cells MUST be in this composite so replication::hydrate
 /// copies it from the durable SQLite backend into the in-memory backend before
 /// rebuild_derived_accelerators runs. Without it, hydrated estates silently
 /// cold-rebuild the matrix tier, discarding persisted calibration state.
@@ -141,9 +141,9 @@ pub fn composite_schema() -> SchemaDeclaration {
     // Composite version = sum of the three GLK-composed component versions
     // plus two GLK-owned addends:
     //   +1 grants        — security-sensitive estate authorization state
-    //   +1 matrix_snapshot — matrix tier calibration persistence
+    //   +1 matrix_cells — matrix tier calibration persistence
     //
-    // IMPORTANT: matrix_snapshot MUST be in this composite so replication::hydrate
+    // IMPORTANT: matrix_cells MUST be in this composite so replication::hydrate
     // copies it from the durable SQLite backend into the in-memory backend before
     // rebuild_derived_accelerators runs. Without it, hydrated estates always
     // cold-rebuild the matrix tier, discarding persisted calibration state.
@@ -151,13 +151,13 @@ pub fn composite_schema() -> SchemaDeclaration {
     // Mirrors Swift `GeniusLocusKitSchema.version` — the live sum, never a
     // copied number (stale-literal rule, GLK shared-content 1.1 P0).
     let grants_schema_version = 1;
-    let matrix_snapshot_schema_version = MatrixSnapshotStore::schema_declaration().version;
+    let matrix_records_schema_version = MatrixRecordStore::schema_declaration().version;
     let composite_version = lk.version + vk.version + claims.version + ck.version
         + estate_format.version
         + grants_schema_version
-        + matrix_snapshot_schema_version;
+        + matrix_records_schema_version;
 
-    let mx_snapshot = MatrixSnapshotStore::schema_declaration();
+    let mx_records = MatrixRecordStore::schema_declaration();
 
     let mut tables = Vec::new();
     tables.extend(lk.tables);
@@ -166,8 +166,8 @@ pub fn composite_schema() -> SchemaDeclaration {
     tables.extend(ck.tables);
     tables.extend(estate_format.tables);
     tables.push(GrantStore::grants_table());
-    // matrix_snapshot: must be last so version ordering matches Swift composite.
-    tables.extend(mx_snapshot.tables);
+    // matrix_cells: must be last so version ordering matches Swift composite.
+    tables.extend(mx_records.tables);
 
     let mut indices = Vec::new();
     indices.extend(lk.indices);
@@ -197,7 +197,7 @@ mod composite_version_tests {
     use super::*;
 
     /// The composite version is the SUM of the three GLK-composed component
-    /// versions plus two GLK-owned addends: grants (+1) and matrix_snapshot
+    /// versions plus two GLK-owned addends: grants (+1) and matrix_cells
     /// (+1) — computed from the LIVE declarations, never restated as a magic
     /// number (stale-literal rule, GLK shared-content 1.1 P0; the layout is
     /// frozen structurally by composite_schema_signature_tests.rs instead).
@@ -211,14 +211,14 @@ mod composite_version_tests {
         let vk = synapsekit::VectorStore::schema_declaration().version;
         let claims = synapsekit::VectorRepresentationClaims::schema_declaration().version;
         let ck = corpus_kit::attached_declaration().version;
-        let mx = MatrixSnapshotStore::schema_declaration().version;
+        let mx = MatrixRecordStore::schema_declaration().version;
         let s = composite_schema();
-        // Two GLK-owned addends: +1 grants, +matrix_snapshot version.
+        // Two GLK-owned addends: +1 grants, +matrix_cells version.
         let format = crate::estate_format::EstateFormatStore::schema_declaration().version;
         assert_eq!(s.version, lk + vk + claims + ck + format + 1 + mx);
         assert!(s.tables.iter().any(|t| t.name == "grants"));
-        // matrix_snapshot must be in composite for hydration to copy it from durable storage
-        assert!(s.tables.iter().any(|t| t.name == "matrix_snapshot"));
+        // matrix_cells must be in composite for hydration to copy it from durable storage
+        assert!(s.tables.iter().any(|t| t.name == "matrix_cells"));
         assert!(s.tables.iter().any(|t| t.name == "glk_estate_format"));
         assert_eq!(s.kit_id, "GeniusLocusKit");
     }
@@ -908,6 +908,23 @@ pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> V
         ));
     }
     entries
+}
+
+/// Storage-wide replay uses the same semantic bridge as per-drawer replay.
+/// It includes synthetic audit rows and does not hydrate Drawer bodies.
+pub(crate) fn bridge_storage_audit_event(e: &persistence_kit::AuditEvent) -> Vec<UnifiedAuditEntry> {
+    use substrate_types::{audit_event::AuditEvent, row::RowId, lattice_anchor::LatticeAnchor};
+    bridge_audit_event(&AuditEvent {
+        event_id: e.event_id.as_u128(), estate_uuid: e.estate_uuid.as_u128(),
+        row_id: RowId(e.row_id.as_u128()), hlc: e.hlc, verb: e.verb.clone(),
+        before_bitmaps: match (e.before_adjective, e.before_operational, e.before_provenance) {
+            (Some(a), Some(o), Some(p)) => Some((a,o,p)), _ => None
+        },
+        after_bitmaps: (e.after_adjective, e.after_operational, e.after_provenance),
+        before_lattice_anchor: e.before_lattice_anchor.map(|a| LatticeAnchor::new(a,e.before_lattice_qid.unwrap_or(0))),
+        after_lattice_anchor: LatticeAnchor::new(e.after_lattice_anchor,e.after_lattice_qid),
+        actor: e.actor.clone(), reason: e.reason.clone(),
+    })
 }
 
 /// Map a free-form verb string from the substrate layer to the unified log's

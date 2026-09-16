@@ -339,7 +339,7 @@ fn v1_4_estate_runs_both_capsules_to_current() {
 
     let (mut coord, handle, storage) = make_estate(EstateFormatVersion::V1_4, true);
     coord
-        .run_migration_chain(&handle, NOW, default_ensemble())
+        .run_offline_migration_chain(&handle, NOW, default_ensemble())
         .expect("chain from V1_4");
     assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_row_intact_without_column(&checkpoint_row(&storage));
