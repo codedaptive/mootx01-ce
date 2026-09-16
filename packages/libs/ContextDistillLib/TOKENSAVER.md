@@ -40,6 +40,25 @@ Invalid reserved representation syntax fails unchanged at the standard dispatch
 and records `fallback_unchanged` in selection details; the pure reducer returns
 an error. An explicitly supplied enrichment trailer remains complete.
 
+## Bounded attributed recall
+
+ARIA's `RecallDistillation` helpers use the v23.2 attributed recipe for both
+`distilled` reads and the distilled field of `full` reads. Before classification,
+they admit at most 32,768 UTF-8 bytes. The product setting
+`recall_distillation.max_source_bytes` can lower this ceiling, not raise it.
+Invalid values use the default; nonpositive integers clamp to one byte.
+
+Recall enables `boundedSelection: true` in Swift and
+`distill_with_selection_budget(input, converter, true)` in Rust. The selector
+admits at most 256 atoms and charges at most 100,000 deterministic work units.
+On any budget exhaustion the helper returns the **complete original**, not a
+prefix or a partially selected result. Savings may be zero. Authorization,
+full-depth fields, CompleteFormV6 hydration and explicit Skim do not change.
+
+The ordinary offline `distill` invocation retains its frozen selection behavior;
+the bounded option does not replace the recall helper's pre-classification byte
+check. New request-facing consumers must use that admission check too.
+
 ## Prototype orderReducer and Skim
 
 Both operate on **already distilled text**; neither calls the Distiller again.

@@ -316,9 +316,13 @@ public struct ContextDistiller: Sendable {
     ///     record.content, trailer)
     /// combined = _combine(intent_text, intent_trailer)
     /// ```
+    /// `boundedSelection` is for recall after its source-byte admission check.
+    /// It preserves the complete source core if selector budgets are exhausted.
+    /// Offline callers retain the frozen recipe by leaving this false.
     public func distill(
         _ input: DistillationInput,
-        converter: ContextDistillConverter
+        converter: ContextDistillConverter,
+        boundedSelection: Bool = false
     ) -> DistilledRepresentation {
         let source = input.original
         let trailer = input.enrichmentTrailer
@@ -337,7 +341,8 @@ public struct ContextDistiller: Sendable {
         let spanResult = intentSpan(
             source,
             trailer: trailer,
-            peerDialogue: useAttributedPeerDialogue
+            peerDialogue: useAttributedPeerDialogue,
+            bounded: boundedSelection
         )
         var intentText    = spanResult.core
         let intentSpans   = spanResult.selectedSpans

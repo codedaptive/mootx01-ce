@@ -979,6 +979,23 @@ private func scalarsToString(_ scalars: [Unicode.Scalar]) -> String {
 
 // MARK: - intentSpan
 
+/// Deterministic work ceilings, shared in value with the Rust selector. Above
+/// these limits compression is declined: the complete source is retained.
+private let selectionMaxSourceBytes = 32768
+private let selectionMaxAtoms = 256
+private let selectionMaxWork = 100_000
+
+private func selectionBudgetFallback(_ source: String, reason: String) -> IntentSpanResult {
+    IntentSpanResult(core: source, selectedSpans: [[
+        "start": 0, "end": source.unicodeScalars.count,
+        "start_utf8_byte": 0, "end_utf8_byte": source.utf8.count,
+        "kind": "complete-source-budget-fallback",
+    ]], selectionDetails: [
+        "mode": "resource-budget", "exact_source_spans": true,
+        "unsupported_shapes": [reason], "compression_skipped": true,
+    ], projectedTrailer: "")
+}
+
 /// Selects complete exact source atoms with deterministic dependencies.
 ///
 /// Mirrors Python's ``intent_span`` (without the _combine call and without
@@ -991,13 +1008,20 @@ private func scalarsToString(_ scalars: [Unicode.Scalar]) -> String {
 public func intentSpan(
     _ source: String,
     trailer: String,
-    peerDialogue: Bool = false
+    peerDialogue: Bool = false,
+    bounded: Bool = false
 ) -> IntentSpanResult {
+    if bounded && source.utf8.prefix(selectionMaxSourceBytes + 1).count > selectionMaxSourceBytes {
+        return selectionBudgetFallback(source, reason: "source-byte-budget")
+    }
     let scalars = Array(source.unicodeScalars)
 
     // --- atoms, hard, coverage, unsupported, mode_details ---
     let atomsResult = intentAtoms(scalars, peerDialogue: peerDialogue)
     let atoms = atomsResult.atoms
+    if bounded && atoms.count > selectionMaxAtoms {
+        return selectionBudgetFallback(source, reason: "atom-budget")
+    }
     let hard = atomsResult.hardIDs
     let coverage = atomsResult.coverageIDs
     let unsupported = atomsResult.unsupported
@@ -1084,7 +1108,15 @@ public func intentSpan(
     }
     var budgetRejected: [[String: Any]] = []
 
+    var workRemaining = selectionMaxWork
     while !remaining.isEmpty {
+        // Charge the entire scan before starting it, independent of Set order.
+        // Include closure/render scans as well as candidate/selected comparisons.
+        let cost = remaining.count * (selected.count + 1) + atoms.count * 2
+        if bounded && cost > workRemaining {
+            return selectionBudgetFallback(source, reason: "selector-work-budget")
+        }
+        if bounded { workRemaining -= cost }
         // Compute selected_terms and selected_normalized for this iteration.
         var selectedTerms = Set<String>()
         for id in selected { selectedTerms.formUnion(termsByID[id] ?? []) }
