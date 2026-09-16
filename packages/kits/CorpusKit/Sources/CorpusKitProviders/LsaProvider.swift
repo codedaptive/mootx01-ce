@@ -257,8 +257,20 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     ///
     /// Natural log on both sides; add-1 smoothing in IDF denominator.
     public func finalize() {
+        _ = finalize(budget: .unbounded)
+    }
+
+    /// Finalize within the caller's document, sweep, deadline, and task-
+    /// cancellation budget. Cancellation is checked inside the Jacobi sweep so
+    /// a resident retrain does not have to wait for the full factorization.
+    @discardableResult
+    public func finalize(budget: RetrainingBudget) -> RetrainingOutcome {
         let N = counts.documentCount
-        guard N > 0, counts.vocabularySize > 0 else { return }
+        guard N <= budget.maxDocuments else {
+            return .skipped(.documentLimit(actual: N, limit: budget.maxDocuments))
+        }
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        guard N > 0, counts.vocabularySize > 0 else { return .completed }
 
         // factor over a reduced, informative sub-vocabulary so the
         // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
@@ -274,7 +286,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         )
         basisVocab = reduced.termToColumn
         let vocabSize = reduced.size
-        guard vocabSize > 0 else { svd = nil; idfWeights = []; return }
+        guard vocabSize > 0 else { svd = nil; idfWeights = []; return .completed }
 
         // IDF over REDUCED columns, using the full-corpus df (informativeness is
         // corpus-wide), through the one smoothed IDF every distributional
@@ -307,7 +319,13 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         // for on-device estates; we handle both orientations.
         if N >= vocabSize {
             // Tall matrix: SVD on M directly (numDocs × vocabSize).
-            svd = JacobiSVD.decompose(A: M, rank: effectiveRank, sweeps: svdSweeps)
+            do {
+                svd = try JacobiSVD.decompose(
+                    A: M, rank: effectiveRank, sweeps: min(svdSweeps, budget.maxSweeps),
+                    shouldCancel: { budget.cancellationReason != nil })
+            } catch {
+                return .skipped(budget.cancellationReason ?? .cancelled)
+            }
         } else {
             // Wide matrix: SVD on Mᵀ (vocabSize × numDocs), then swap U/Vt.
             var Mt: [[Float]] = [[Float]](repeating: [Float](repeating: 0, count: N), count: vocabSize)
@@ -316,7 +334,14 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
                     Mt[j][i] = M[i][j]
                 }
             }
-            let transposedSVD = JacobiSVD.decompose(A: Mt, rank: effectiveRank, sweeps: svdSweeps)
+            let transposedSVD: SVDResult
+            do {
+                transposedSVD = try JacobiSVD.decompose(
+                    A: Mt, rank: effectiveRank, sweeps: min(svdSweeps, budget.maxSweeps),
+                    shouldCancel: { budget.cancellationReason != nil })
+            } catch {
+                return .skipped(budget.cancellationReason ?? .cancelled)
+            }
             // Swap: U becomes Vt, Vt becomes U (transposed).
             // For the wide case: M = V Σ Uᵀ where V is vocabSize × k,
             // U is numDocs × k. We want docVec = U[d] · Σ and queryVec
@@ -335,6 +360,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
             }
             svd = SVDResult(U: uNew, singularValues: transposedSVD.singularValues, Vt: vtNew, rank: k)
         }
+        return .completed
     }
 
     // MARK: EmbeddingProvider
@@ -682,6 +708,20 @@ extension LsaProvider: TrainableEmbeddingBasis {
         finalize()
     }
 
+    public func trainOnCorpus(
+        texts: [String], budget: RetrainingBudget
+    ) -> RetrainingOutcome {
+        guard texts.count <= budget.maxDocuments else {
+            return .skipped(.documentLimit(actual: texts.count, limit: budget.maxDocuments))
+        }
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        for text in texts {
+            if let reason = budget.cancellationReason { return .skipped(reason) }
+            train(document: text)
+        }
+        return finalize(budget: budget)
+    }
+
     /// Streamed-training page: the same per-document accumulation
     /// `trainOnCorpus` runs, finalization deferred to `finalizeTraining`.
     public func accumulateTraining(texts: [String]) {
@@ -739,4 +779,3 @@ extension LsaProvider: TrainableEmbeddingBasis {
         counts.vocab[term] != nil
     }
 }
-

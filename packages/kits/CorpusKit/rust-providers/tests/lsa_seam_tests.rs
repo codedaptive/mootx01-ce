@@ -5,7 +5,7 @@
 //! results to the 6a-i Swift canonical basis blob, and that the counts-seam
 //! round-trips correctly.
 
-use corpus_kit::{EmbeddingModelConfig, TrainableEmbeddingBasis};
+use corpus_kit::{EmbeddingModelConfig, RetrainingBudget, RetrainingOutcome, RetrainingSkipReason, TrainableEmbeddingBasis};
 use corpus_kit_providers::{LsaProvider, LSA_PROJECTION_SEED};
 use serde::Deserialize;
 use synapsekit::EmbeddingProvider;
@@ -118,4 +118,22 @@ fn lsa_anchor_tracks_document_count() {
         COUNTS_CORPUS.len(),
         "anchor must bump document_count once per non-empty chunk"
     );
+}
+
+#[test]
+fn bounded_retraining_refuses_oversized_corpus_without_publishing_basis() {
+    let mut lsa = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);
+    let outcome = lsa.train_on_corpus_with_budget(COUNTS_CORPUS, &RetrainingBudget::new(4, 30, None));
+    assert_eq!(outcome, RetrainingOutcome::Skipped(RetrainingSkipReason::DocumentLimit { actual: 5, limit: 4 }));
+    assert!(!lsa.is_finalized());
+    assert_eq!(lsa.document_count(), 0);
+}
+
+#[test]
+fn bounded_retraining_observes_cancellation_before_training() {
+    let mut lsa = LsaProvider::new(3, 30, LSA_PROJECTION_SEED);
+    let budget = RetrainingBudget::new(10, 30, None);
+    budget.cancel();
+    assert_eq!(lsa.train_on_corpus_with_budget(COUNTS_CORPUS, &budget), RetrainingOutcome::Skipped(RetrainingSkipReason::Cancelled));
+    assert!(!lsa.is_finalized());
 }
