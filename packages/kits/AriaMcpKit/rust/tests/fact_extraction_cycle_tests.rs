@@ -21,12 +21,15 @@
 
 use std::sync::Arc;
 
-use aria_mcp::{activate_and_build_extraction_cycle, build_fact_extraction_cycle, estate_registry::EstateRegistry};
-use genius_locus_kit::{EstateCoordinator, EstatePreferenceKey, EstatePreferenceValue};
-use fact_extraction_kit::contract::{
-    FactExtractor, FactExtractorKind, FactExtractorModelSpec,
-    FactExtractionRequest, FactExtractionResponse, FactExtractionError,
+use aria_mcp::{
+    activate_and_build_extraction_cycle, build_fact_extraction_cycle,
+    estate_registry::EstateRegistry,
 };
+use fact_extraction_kit::contract::{
+    FactExtractionError, FactExtractionRequest, FactExtractionResponse, FactExtractor,
+    FactExtractorKind, FactExtractorModelSpec,
+};
+use genius_locus_kit::{EstateCoordinator, EstatePreferenceKey, EstatePreferenceValue};
 
 // ---------------------------------------------------------------------------
 // Stub extractor (deterministic, no subprocess)
@@ -91,11 +94,7 @@ fn open_estate() -> (
 /// Write a minimal config.json into `dir` that does NOT contain a
 /// `fact_extraction` block (all four paths are absent).
 fn write_no_fact_extraction_config(dir: &std::path::Path) {
-    std::fs::write(
-        dir.join("config.json"),
-        r#"{"daemon":{}}"#,
-    )
-    .expect("write config.json");
+    std::fs::write(dir.join("config.json"), r#"{"daemon":{}}"#).expect("write config.json");
 }
 
 // ---------------------------------------------------------------------------
@@ -119,15 +118,16 @@ fn fact_extraction_cycle_is_none_when_setting_is_off() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::Off)
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::Off,
+            )
             .expect("provision Off");
     }
 
     // config.json is irrelevant when the setting is Off — inject an empty dir.
-    let scratch = std::env::temp_dir().join(format!(
-        "aria-fec-off-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let scratch = std::env::temp_dir().join(format!("aria-fec-off-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&scratch).unwrap();
     write_no_fact_extraction_config(&scratch);
 
@@ -171,7 +171,11 @@ fn fact_extraction_cycle_is_some_when_setting_is_on_and_extractor_provided() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::On)
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::On,
+            )
             .expect("provision On");
     }
 
@@ -181,22 +185,64 @@ fn fact_extraction_cycle_is_some_when_setting_is_on_and_extractor_provided() {
     let cycle = activate_and_build_extraction_cycle(Arc::clone(&extractor), &coord, handle);
 
     // 1. The return must be Some.
-    assert!(cycle.is_some(), "setting On with an extractor must produce Some(cycle)");
-
-    // 2. The extractor must be registered on the coordinator.
-    let registered = coord.lock().unwrap().registered_fact_extractor(&handle);
     assert!(
-        registered.is_some(),
-        "extractor must be registered on the coordinator after activation"
+        cycle.is_some(),
+        "setting On with an extractor must produce Some(cycle)"
     );
 
-    // 3. The returned closure must be callable and return Ok.
+    // 2. The returned closure must be callable and activate lazily.
     //    Fresh estate has no drawers, so facts_filed = 0 — that is still Ok.
     let result = cycle.unwrap()();
     assert!(
         result.is_ok(),
         "cycle closure must return Ok on a fresh estate; got {result:?}"
     );
+    assert!(coord
+        .lock()
+        .unwrap()
+        .registered_fact_extractor(&handle)
+        .is_some());
+}
+
+#[test]
+fn fact_extraction_cycle_tracks_runtime_preference_without_restart() {
+    let (coord, handle) = open_estate();
+    {
+        let coord_guard = coord.lock().unwrap();
+        coord_guard
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::Off,
+            )
+            .expect("provision Off");
+    }
+    let extractor: Arc<dyn FactExtractor> = Arc::new(StubExtractor::new());
+    let cycle = activate_and_build_extraction_cycle(extractor, &coord, handle)
+        .expect("available extractor retains a lazy cycle while Off");
+    assert_eq!(cycle().expect("Off is a no-op"), 0);
+    assert!(coord
+        .lock()
+        .unwrap()
+        .registered_fact_extractor(&handle)
+        .is_none());
+
+    {
+        let coord_guard = coord.lock().unwrap();
+        coord_guard
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::On,
+            )
+            .expect("provision On");
+    }
+    assert_eq!(cycle().expect("On runs after live preference change"), 0);
+    assert!(coord
+        .lock()
+        .unwrap()
+        .registered_fact_extractor(&handle)
+        .is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -222,14 +268,15 @@ fn build_fact_extraction_cycle_is_none_when_setting_on_and_no_config_paths() {
     {
         let coord_guard = coord.lock().unwrap();
         coord_guard
-            .provision_preference(&handle, EstatePreferenceKey::FactExtraction, EstatePreferenceValue::On)
+            .provision_preference(
+                &handle,
+                EstatePreferenceKey::FactExtraction,
+                EstatePreferenceValue::On,
+            )
             .expect("provision On");
     }
 
-    let scratch = std::env::temp_dir().join(format!(
-        "aria-fec-noconfig-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let scratch = std::env::temp_dir().join(format!("aria-fec-noconfig-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&scratch).unwrap();
     // Config.json exists but has no fact_extraction paths — the common install.
     write_no_fact_extraction_config(&scratch);
@@ -258,10 +305,7 @@ fn build_fact_extraction_cycle_is_none_when_setting_on_and_no_config_paths() {
 /// same estate under `fact_extractor=apple` stays inactive on the Rust port.
 #[test]
 fn builder_selects_and_activates_only_nuextract_on_rust() {
-    let scratch = std::env::temp_dir().join(format!(
-        "aria-fec-selection-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let scratch = std::env::temp_dir().join(format!("aria-fec-selection-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&scratch).unwrap();
     let worker = scratch.join("moot-nuextract-worker");
     let gguf = scratch.join("model.gguf");
@@ -297,7 +341,10 @@ fn builder_selects_and_activates_only_nuextract_on_rust() {
             .unwrap();
     }
     let cycle = build_fact_extraction_cycle(&coord, handle, Some(&scratch));
-    assert!(cycle.is_some(), "configured NuExtract must activate signal 14");
+    assert!(
+        cycle.is_some(),
+        "configured NuExtract must activate signal 14"
+    );
     let registered = coord
         .lock()
         .unwrap()
