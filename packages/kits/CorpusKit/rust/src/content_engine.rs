@@ -38,7 +38,7 @@ use crate::schema_profile::{
     CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
 use crate::tokenizer::default_keyword_tokens;
-use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
+use crate::trainable_embedding_basis::{RetrainingBudget, RetrainingOutcome, TrainableEmbeddingBasis};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -2782,7 +2782,8 @@ impl CorpusContentEngine {
         all_ids: &[CorpusContentId],
         indexed_states: &BTreeMap<String, CorpusIndexState>,
         now_millis: i64,
-    ) -> CorpusKitResult<PreparedProviderTraining> {
+        budget: Option<&RetrainingBudget>,
+    ) -> CorpusKitResult<(PreparedProviderTraining, RetrainingOutcome)> {
         let slot = &self.slots[job.slot_index];
         let (mut fresh, mut counts_accumulator) = {
             let counts = slot.counts.lock().map_err(|_| {
@@ -2814,6 +2815,8 @@ impl CorpusContentEngine {
         // can resolve it again.
         let mut skipped_references = Vec::new();
         let mut document_count = 0usize;
+        let mut all_texts: Vec<String> = Vec::new();
+        if budget.is_some() { all_texts.reserve(all_ids.len()); }
         let mut cursor = 0usize;
         while cursor < all_ids.len() {
             let end = (cursor + Self::TRAINING_PAGE_SIZE).min(all_ids.len());
@@ -2870,18 +2873,25 @@ impl CorpusContentEngine {
                 }
             }
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-            fresh.accumulate_training(&refs);
+            if budget.is_none() { fresh.accumulate_training(&refs); }
+            else { all_texts.extend(texts.iter().cloned()); }
             for text in &texts {
                 counts_accumulator.add_to_counts(text);
             }
             document_count += texts.len();
             cursor = end;
         }
-        fresh.finalize_training();
+        let outcome = if let Some(budget) = budget {
+            let refs: Vec<&str> = all_texts.iter().map(String::as_str).collect();
+            fresh.train_on_corpus_with_budget(&refs, budget)
+        } else {
+            fresh.finalize_training();
+            RetrainingOutcome::Completed
+        };
 
         let basis_blob = fresh.serialize_basis();
         let basis_digest = crate::content::content_digest_bytes(&basis_blob);
-        Ok(PreparedProviderTraining {
+        Ok((PreparedProviderTraining {
             basis_row: PersistedBasis {
                 model_id: job.model_id.clone(),
                 model_version: job.model_version.clone(),
@@ -2903,7 +2913,7 @@ impl CorpusContentEngine {
             basis_digest,
             subsumed_references,
             skipped_references,
-        })
+        }, outcome))
     }
 
     /// Stream-train every trainable slot that lacks a CURRENT basis (or
@@ -2924,6 +2934,16 @@ impl CorpusContentEngine {
         &self,
         now_millis: i64,
         force: bool,
+    ) -> CorpusKitResult<std::collections::BTreeMap<String, String>> {
+        self.train_trainable_slots_impl(now_millis, force, None, None)
+    }
+
+    fn train_trainable_slots_impl(
+        &self,
+        now_millis: i64,
+        force: bool,
+        budget: Option<&RetrainingBudget>,
+        bounded_ids: Option<Vec<CorpusContentId>>,
     ) -> CorpusKitResult<std::collections::BTreeMap<String, String>> {
         // Publication replaces the base snapshot and deletes only reference
         // deltas represented by that snapshot. Exclude admission while the
@@ -2951,7 +2971,7 @@ impl CorpusContentEngine {
             decisions.clear();
         }
 
-        let all_ids = self.source.active_content_ids()?;
+        let all_ids = match bounded_ids { Some(ids) => ids, None => self.source.active_content_ids()? };
         if all_ids.is_empty() {
             return Ok(digests);
         }
@@ -3027,6 +3047,15 @@ impl CorpusContentEngine {
                 fresh_basis_blob: candidate.fresh_basis_blob.clone(),
             };
 
+            if budget.is_some() {
+                let _ = self.record_path_decision(
+                    &candidate.model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::NotCountsCapable),
+                );
+                jobs.push(job_proto);
+                continue;
+            }
+
             // Non-force + already trained (has a persisted basis) → skip.
             // The drift gate owns when retraining happens; skip without recording
             // a decision (absent from seam = skip semantics, see seam doc).
@@ -3078,9 +3107,10 @@ impl CorpusContentEngine {
             }
         }
 
-        let cap = Self::provider_training_parallelism(all_ids.len(), jobs.len());
+        let cap = if budget.is_some() { jobs.len().max(1) }
+            else { Self::provider_training_parallelism(all_ids.len(), jobs.len()) };
         for job_batch in jobs.chunks(cap) {
-            let prepared: Vec<PreparedProviderTraining> = std::thread::scope(|scope| {
+            let attempts: Vec<(PreparedProviderTraining, RetrainingOutcome)> = std::thread::scope(|scope| {
                 let handles: Vec<_> = job_batch
                     .iter()
                     .map(|job| {
@@ -3096,6 +3126,7 @@ impl CorpusContentEngine {
                                 &all_ids,
                                 &indexed_states,
                                 now_millis,
+                                budget,
                             )
                         })
                     })
@@ -3111,6 +3142,16 @@ impl CorpusContentEngine {
                     })
                     .collect::<CorpusKitResult<Vec<_>>>()
             })?;
+
+            let mut prepared = Vec::with_capacity(attempts.len());
+            for (result, outcome) in attempts {
+                match outcome {
+                    RetrainingOutcome::Completed => prepared.push(result),
+                    RetrainingOutcome::Skipped(reason) => {
+                        return Err(CorpusKitError::RetrainingSkipped(reason));
+                    }
+                }
+            }
 
             for result in prepared {
                 let model_id = result.job.model_id.clone();
@@ -3592,6 +3633,48 @@ impl CorpusContentEngine {
     /// the abandon error in its place would hide the real cause. The old serving
     /// generation remains intact and keeps serving.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
+        self.reindex_impl(now_millis, None, None).map(|_| ())
+    }
+
+    pub fn reindex_with_budget(
+        &self,
+        now_millis: i64,
+        budget: &RetrainingBudget,
+    ) -> CorpusKitResult<crate::CorpusRetrainingReport> {
+        let ids = self.source.active_content_ids_limited(budget.max_documents.saturating_add(1))?;
+        let trainable_ids: Vec<String> = self.slots.iter()
+            .filter(|slot| slot.fresh_basis_blob.is_some())
+            .map(|slot| slot.model_id.clone()).collect();
+        if ids.len() > budget.max_documents {
+            let reason = crate::RetrainingSkipReason::DocumentLimit {
+                actual: ids.len(), limit: budget.max_documents,
+            };
+            if trainable_ids.is_empty() {
+                return Err(CorpusKitError::RetrainingSkipped(reason));
+            }
+            return Ok(crate::CorpusRetrainingReport {
+                completed_model_ids: Vec::new(),
+                skipped_model_ids: trainable_ids.into_iter().map(|id| (id, reason.clone())).collect(),
+            });
+        }
+        if let Some(reason) = budget.cancellation_reason() {
+            if trainable_ids.is_empty() {
+                return Err(CorpusKitError::RetrainingSkipped(reason));
+            }
+            return Ok(crate::CorpusRetrainingReport {
+                completed_model_ids: Vec::new(),
+                skipped_model_ids: trainable_ids.into_iter().map(|id| (id, reason.clone())).collect(),
+            });
+        }
+        self.reindex_impl(now_millis, Some(budget), Some(ids))
+    }
+
+    fn reindex_impl(
+        &self,
+        now_millis: i64,
+        budget: Option<&RetrainingBudget>,
+        bounded_ids: Option<Vec<CorpusContentId>>,
+    ) -> CorpusKitResult<crate::CorpusRetrainingReport> {
         // Identify trainable model IDs: slots whose fresh_basis_blob is Some
         // (RandomIndexing, LSA). Their new vectors will be written
         // into a shadow generation and published atomically. Non-trainable
@@ -3637,7 +3720,11 @@ impl CorpusContentEngine {
         let span_result: CorpusKitResult<()> = (|| {
             // Retrain all trainable slots from scratch — produces the new basis blobs
             // that the subsequent re-embed pass will use. No vector rows are written here.
-            self.train_trainable_slots(now_millis, true)?;
+            if let Err(error) = self.train_trainable_slots_impl(
+                now_millis, true, budget, bounded_ids.clone())
+            {
+                return Err(error);
+            }
 
             // Bulk-write bracket for non-trainable model writes (stateless slots):
             // defers resident dense-index updates for the O(corpus) pass and publishes
@@ -3647,7 +3734,10 @@ impl CorpusContentEngine {
             self.vector_store
                 .begin_deferred_index()
                 .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
-            let ids = self.source.active_content_ids()?;
+            let ids = match &bounded_ids {
+                Some(ids) => ids.clone(),
+                None => self.source.active_content_ids()?,
+            };
             if matches!(
                 self.configuration.index_unit(),
                 CorpusIndexUnitPolicy::WholeContent
@@ -3706,6 +3796,13 @@ impl CorpusContentEngine {
                 let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
                 let _ = self.vector_store.abandon_shadow_generation(&refs);
             }
+            if let CorpusKitError::RetrainingSkipped(reason) = original_error {
+                return Ok(crate::CorpusRetrainingReport {
+                    completed_model_ids: Vec::new(),
+                    skipped_model_ids: trainable_model_ids.iter().cloned()
+                        .map(|id| (id, reason.clone())).collect(),
+                });
+            }
             return Err(original_error);
         }
 
@@ -3718,7 +3815,12 @@ impl CorpusContentEngine {
 
         self.provider_configuration_store
             .mark_current(&self.provider_generation_token(), now_millis)?;
-        Ok(())
+        let mut completed_model_ids = trainable_model_ids;
+        completed_model_ids.sort();
+        Ok(crate::CorpusRetrainingReport {
+            completed_model_ids,
+            skipped_model_ids: BTreeMap::new(),
+        })
     }
 
     /// Persist the maintained counts snapshot — the BATCH-boundary write.
