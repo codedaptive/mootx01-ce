@@ -358,6 +358,11 @@ public enum MootProductIdentity {
         /// the safety ceiling; nonpositive integers clamp to 1, invalid values default.
         public let recallDistillationMaxSourceBytes: Int
 
+        /// Maximum expanded reference output bytes (`context_distill.reference_expansion_max_bytes`).
+        public let contextDistillReferenceExpansionMaxBytes: Int
+        /// Maximum output/input UTF-8 expansion ratio (`context_distill.reference_expansion_max_ratio`).
+        public let contextDistillReferenceExpansionMaxRatio: Int
+
         // MARK: Loading
 
         /// Load settings from `config.json` in the given configuration directory.
@@ -399,6 +404,7 @@ public enum MootProductIdentity {
                 .flatMap { $0.isEmpty ? nil : $0 }
             let modelVersion = (factExtraction?["model_version"] as? String)
                 .flatMap { $0.isEmpty ? nil : $0 }
+            let distill = root["context_distill"] as? [String: Any]
             let lsa = (root["corpus"] as? [String: Any])?["lsa_retraining"] as? [String: Any]
             return Settings(
                 daemonStatsStore: storeOrNil,
@@ -408,6 +414,8 @@ public enum MootProductIdentity {
                 corpusLSARetrainingMaxDocuments: positiveInteger(lsa?["max_documents"], fallback: 2048),
                 corpusLSARetrainingMaxSweeps: positiveInteger(lsa?["max_sweeps"], fallback: 30),
                 corpusLSARetrainingTimeoutMilliseconds: positiveInteger(lsa?["timeout_milliseconds"], fallback: 30000),
+                contextDistillReferenceExpansionMaxBytes: positiveIntegerOrDefault(distill?["reference_expansion_max_bytes"], fallback: 8_388_608),
+                contextDistillReferenceExpansionMaxRatio: positiveIntegerOrDefault(distill?["reference_expansion_max_ratio"], fallback: 64),
                 recallDistillationMaxSourceBytes: min(32768, positiveInteger(
                     (root["recall_distillation"] as? [String: Any])?["max_source_bytes"], fallback: 32768)))
         }
@@ -475,6 +483,13 @@ public enum MootProductIdentity {
             return max(1, integer)
         }
 
+        private static func positiveIntegerOrDefault(_ value: Any?, fallback: Int) -> Int {
+            guard let number = value as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let integer = Int(number.stringValue), integer > 0 else { return fallback }
+            return integer
+        }
+
         // MARK: Private init
 
         private init(
@@ -485,6 +500,8 @@ public enum MootProductIdentity {
             corpusLSARetrainingMaxDocuments: Int = 2048,
             corpusLSARetrainingMaxSweeps: Int = 30,
             corpusLSARetrainingTimeoutMilliseconds: Int = 30000,
+            contextDistillReferenceExpansionMaxBytes: Int = 8_388_608,
+            contextDistillReferenceExpansionMaxRatio: Int = 64,
             recallDistillationMaxSourceBytes: Int = 32768
         ) {
             self.daemonStatsStore = daemonStatsStore
@@ -494,6 +511,8 @@ public enum MootProductIdentity {
             self.corpusLSARetrainingMaxDocuments = corpusLSARetrainingMaxDocuments
             self.corpusLSARetrainingMaxSweeps = corpusLSARetrainingMaxSweeps
             self.corpusLSARetrainingTimeoutMilliseconds = corpusLSARetrainingTimeoutMilliseconds
+            self.contextDistillReferenceExpansionMaxBytes = contextDistillReferenceExpansionMaxBytes
+            self.contextDistillReferenceExpansionMaxRatio = contextDistillReferenceExpansionMaxRatio
             self.recallDistillationMaxSourceBytes = recallDistillationMaxSourceBytes
         }
     }
