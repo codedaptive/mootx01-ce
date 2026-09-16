@@ -173,9 +173,16 @@ public protocol CorpusContentSource: Sendable {
     /// Every live content ID, in deterministic ascending ID order — the
     /// streaming order rebuilds use.
     func activeContentIDs() async throws -> [CorpusContentID]
+
+    /// At most `limit` live IDs in the same deterministic order. Storage-backed
+    /// production sources must push the limit into their query.
+    func activeContentIDs(limit: Int) async throws -> [CorpusContentID]
 }
 
 public extension CorpusContentSource {
+    func activeContentIDs(limit: Int) async throws -> [CorpusContentID] {
+        Array(try await activeContentIDs().prefix(max(0, limit)))
+    }
     /// Default N-serial fallback. Implementations backed by a SQL store
     /// should override with a single WHERE…IN query.
     func records(for ids: [CorpusContentID]) async throws -> [CorpusContentID: CorpusContentRecord] {
