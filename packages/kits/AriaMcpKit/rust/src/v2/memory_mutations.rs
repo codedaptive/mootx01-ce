@@ -12,7 +12,7 @@ use locus_kit::{
     adjectives::{AdjectiveExportability, AdjectiveSensitivity},
     drawer_store::{subject_length, SUBJECT_LENGTH_CONTRACT},
     frames::{MutationKind, TunnelCaptureFrame},
-    tunnel_operational::{TunnelKind, TunnelLifecycle},
+    tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass},
 };
 use uuid::Uuid;
 
@@ -327,46 +327,21 @@ impl V2LinkMemoriesRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2TunnelDecision { Accept, Endorse, Reject }
-/// The reviewer identity recorded in the review ledger.  Edge activation is
-/// user-only, so this is the value the `accept` gate reads.
+/// The authenticated user binding recognized by the review ladder.
 pub const USER_REVIEWER: &str = "user";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct V2ReviewTunnelRequest { pub tunnel_id: Uuid, pub decision: V2TunnelDecision, pub note: Option<String>, pub reviewed_by: String, pub estate_id: Option<Uuid> }
+pub struct V2ReviewTunnelRequest { pub tunnel_id: Uuid, pub decision: V2TunnelDecision, pub note: Option<String>, pub estate_id: Option<Uuid> }
 impl V2ReviewTunnelRequest {
-    /// True when the reviewer is the user rather than a model.
-    pub fn is_user_reviewer(&self) -> bool { self.reviewed_by == USER_REVIEWER }
-
     pub fn decode(value: &JsonValue) -> V2DecodeResult<Self> {
-        let object = strict_object(value, ["tunnel_id", "decision", "note", "reviewed_by", "estate_id"])?;
+        let object = strict_object(value, ["tunnel_id", "decision", "note", "estate_id"])?;
         let decision = match required_string(object, "decision")? {
             "accept" => V2TunnelDecision::Accept,
             "endorse" => V2TunnelDecision::Endorse,
             "reject" => V2TunnelDecision::Reject,
             _ => return Err(V2InvalidArgument::new("$.decision", "must be accept, endorse, or reject")),
         };
-        // An explicitly empty reviewed_by is a caller error, not a silent
-        // fallback to the user identity — that would turn a typo into an edge
-        // activation.
-        let reviewed_by = match optional_string(object, "reviewed_by")? {
-            None => USER_REVIEWER.to_owned(),
-            Some(raw) if raw.trim().is_empty() => {
-                return Err(V2InvalidArgument::new("$.reviewed_by", "must be a non-empty string"))
-            }
-            Some(raw) => raw.to_owned(),
-        };
-        // Edge activation is user-only.  Models endorse or reject; neither
-        // settles the edge, so a machine can never ratify another machine's
-        // inference.  Checked at decode so the refusal names the argument.
-        if matches!(decision, V2TunnelDecision::Accept) && reviewed_by != USER_REVIEWER {
-            return Err(V2InvalidArgument::new(
-                "$.reviewed_by",
-                "edge activation is user-only: decision 'accept' requires reviewed_by 'user'; model reviewers use 'endorse' or 'reject'",
-            )
-            .allowed([USER_REVIEWER.to_owned()])
-            .correction("set reviewed_by to 'user' to activate this edge"));
-        }
-        Ok(Self { tunnel_id: required_uuid(object, "tunnel_id")?, decision, note: optional_string(object, "note")?.map(str::to_owned), reviewed_by, estate_id: optional_uuid(object, "estate_id")? })
+        Ok(Self { tunnel_id: required_uuid(object, "tunnel_id")?, decision, note: optional_string(object, "note")?.map(str::to_owned), estate_id: optional_uuid(object, "estate_id")? })
     }
 }
 
@@ -443,6 +418,9 @@ pub struct V2MemoryMutationResult {
 pub enum V2MemoryMutationError {
     /// The mutation cannot be applied, or the estate is unreachable.
     Unavailable,
+    /// Estate admission failed before the target and sensitivity were resolved.
+    /// The public renderer intentionally keeps the `Unavailable` wire shape.
+    AdmissionRefused,
     /// The mutation landed but the readback confirmation failed.
     OutcomeUnverified(V2MemoryMutationOperation),
     /// No row matched the requested ID, OR the row exists but sits above the
@@ -552,7 +530,7 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn review(&self, request: V2ReviewTunnelRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::ReviewTunnel, request.estate_id)?;
-        let tunnel_review = self.lower.review(&admitted, request.tunnel_id, request.decision, request.note.as_deref(), &request.reviewed_by).map_err(|_| V2MemoryMutationError::Unavailable)?;
+        let tunnel_review = self.lower.review(&admitted, request.tunnel_id, request.decision, request.note.as_deref(), &admitted.caller_binding).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let outcome = match request.decision {
             V2TunnelDecision::Accept => V2MemoryMutationOutcome::TunnelAccepted,
             V2TunnelDecision::Endorse => V2MemoryMutationOutcome::TunnelEndorsed,
@@ -562,7 +540,7 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
         result.tunnel_review = Some(tunnel_review);
         Ok(result)
     }
-    fn admit(&self, operation: V2MemoryMutationOperation, estate_id: Option<Uuid>) -> Result<V2MemoryMutationAdmission, V2MemoryMutationError> { self.authority.admit(operation, estate_id).map_err(|_| V2MemoryMutationError::Unavailable) }
+    fn admit(&self, operation: V2MemoryMutationOperation, estate_id: Option<Uuid>) -> Result<V2MemoryMutationAdmission, V2MemoryMutationError> { self.authority.admit(operation, estate_id).map_err(|_| V2MemoryMutationError::AdmissionRefused) }
     fn finish(&self, admission: V2MemoryMutationAdmission, operation: V2MemoryMutationOperation, outcome: V2MemoryMutationOutcome, memory_id: Option<Uuid>, tunnel_id: Option<Uuid>) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         self.authority.revalidate(&admission).map_err(|_| V2MemoryMutationError::OutcomeUnverified(operation))?;
         // refused_sibling_ids is set by the caller for erase operations; all other
@@ -611,6 +589,7 @@ impl V2MemoryMutationLower for CoordinatorMemoryMutationLower {
         frame.source_drawer_id = Some(request.from_id.to_string());
         frame.target_drawer_id = Some(request.to_id.to_string());
         frame.kind = relationship_kind(&request.relationship);
+        frame.origin_class = TunnelOriginClass::Derived;
         // Carry the proposed flag through to the tunnel frame so the stored row
         // reflects the correct lifecycle. Proposed tunnels await user adjudication
         // via moot_review_tunnel; absent or false means Active (the default).
