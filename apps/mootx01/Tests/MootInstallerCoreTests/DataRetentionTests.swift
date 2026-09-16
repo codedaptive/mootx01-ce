@@ -256,6 +256,38 @@ struct DataRetentionTests {
 
     // MARK: - Apply actions (injected mover; never the real Trash)
 
+    @Test("uninstall trashes external registered estates and collapses in-tree estates")
+    func uninstallTrashScope() throws {
+        let dir = try makeDataDir("uninstall")
+        let external = try makeDataDir("uninstall-external")
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.removeItem(at: external)
+        }
+        let fm = FileManager.default
+        let inTree = dir.appendingPathComponent("databases/default/estate.sqlite")
+        let externalDB = external.appendingPathComponent("work/estate.sqlite")
+        let absentExternalDB = external.appendingPathComponent("absent/estate.sqlite")
+        for database in [inTree, externalDB] {
+            try fm.createDirectory(at: database.deletingLastPathComponent(), withIntermediateDirectories: true)
+            fm.createFile(atPath: database.path, contents: Data("x".utf8))
+        }
+
+        let recorder = MoveRecorder()
+        try DataRetention.trashDataDirectory(
+            dir,
+            registeredDatabaseURLs: [inTree, externalDB, externalDB, absentExternalDB]
+        ) { url in
+            recorder.record(url.path)
+            try fm.removeItem(at: url)
+        }
+
+        #expect(Set(recorder.moved) == Set([dir.path, externalDB.deletingLastPathComponent().path]))
+        #expect(recorder.moved.last == dir.path, "the catalog moves only after external estates")
+        #expect(!fm.fileExists(atPath: dir.path))
+        #expect(!fm.fileExists(atPath: externalDB.path))
+    }
+
     @Test("applyReplace moves the estate's files + mgr store, keeps the directory and other estates")
     func applyReplaceScope() throws {
         let dir = try makeDataDir("replace")
