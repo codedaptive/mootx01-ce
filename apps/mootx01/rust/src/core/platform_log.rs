@@ -13,14 +13,39 @@ pub enum Level {
     Information,
 }
 
-/// Submit fatal text without changing it or writing to stderr.
+/// Submit fatal text after removing path-shaped private metadata. Callers keep
+/// the complete diagnostic on stderr.
 pub fn report_fatal(message: &str) {
-    report_event(Level::Error, message);
+    report_event(Level::Error, &redact_private_metadata(message));
+}
+
+/// Submit a path-free fatal diagnostic for an estate operation.
+pub fn report_estate_fatal(kind: &str, estate_name: Option<&str>) {
+    let message = match estate_name {
+        Some(name) => format!("mootx01 serve fatal: {kind}; estate '{}'", sanitize_field(name)),
+        None => format!("mootx01 serve fatal: {kind}"),
+    };
+    report_event(Level::Error, &message);
 }
 
 /// Submit an event to the platform sink; unsupported platforms do nothing.
 pub fn report_event(level: Level, message: &str) {
     platform::report(level, message);
+}
+
+fn sanitize_field(field: &str) -> String {
+    field.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or("unknown")
+        .chars().map(|ch| if ch.is_control() { '_' } else { ch }).collect()
+}
+
+fn redact_private_metadata(message: &str) -> String {
+    message.split_whitespace().map(|word| {
+        let path_shaped = word.contains('/') || word.contains('\\')
+            || word.eq_ignore_ascii_case("db.key")
+            || (word.as_bytes().get(1) == Some(&b':')
+                && word.as_bytes().first().is_some_and(u8::is_ascii_alphabetic));
+        if path_shaped { "[private-path]".to_string() } else { sanitize_field(word) }
+    }).collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
@@ -218,12 +243,21 @@ mod tests {
     }
 
     #[test]
-    fn platform_log_preserves_diagnostic_text() {
+    fn platform_log_preserves_sink_safe_text() {
         let text = "mootx01 serve fatal: path café 🦀 is 100% unavailable\nsecond line";
         assert_eq!(event_text(text), text);
         assert_eq!(event_text("before\0after"), "before\\0after");
         assert_eq!(event_text(""), "");
         assert_eq!(event_source(), "MOOTx01");
+    }
+
+    #[test]
+    fn platform_log_redacts_paths_and_sanitizes_estate_fields() {
+        let redacted = redact_private_metadata(
+            "catalog failed at /Users/alice/Private/estate and C:\\Users\\alice\\db.key",
+        );
+        assert_eq!(redacted, "catalog failed at [private-path] and [private-path]");
+        assert_eq!(sanitize_field("/Users/alice/estate\nname"), "estate_name");
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]

@@ -39,8 +39,13 @@ pub fn run(cmd: PreferenceCommand) -> ExitCode {
         PreferenceCommand::Get { key, db } => (db, Operation::Get { key }),
         PreferenceCommand::Set { key, value, db } => (db, Operation::Set { key, value }),
     };
-    let result = estate_path(db.as_deref()).and_then(|path| {
-        let estate = open_estate(&path)?;
+    let result = validate(&operation).and_then(|()| estate_path(db.as_deref())).and_then(|provisioned| {
+        if provisioned.created_plaintext {
+            eprintln!(
+                "mootx01 preference: created estate '{}' UNENCRYPTED at {}. Run `mootx01 upgrade` at any time to encrypt it.",
+                provisioned.name, provisioned.directory.display());
+        }
+        let estate = open_estate(&provisioned.path)?;
         apply(&operation, &estate.coordinator, &estate.handle)
     });
     match result {
@@ -63,6 +68,29 @@ enum Operation {
     Set { key: String, value: String },
 }
 
+fn validate(operation: &Operation) -> Result<(), String> {
+    match operation {
+        Operation::List => Ok(()),
+        Operation::Get { key } => parse_key(key).map(|_| ()),
+        Operation::Set { key, value } => {
+            let key = parse_key(key)?;
+            EstatePreferenceValue::from_str(value)
+                .filter(|v| key.allowed_values().contains(v)).map(|_| ())
+                .ok_or_else(|| {
+                    let allowed = key.allowed_values().iter().map(|v| v.as_str()).collect::<Vec<_>>();
+                    format!("invalid value '{value}' for '{}'; allowed: {}", key.as_str(), allowed.join(", "))
+                })
+        }
+    }
+}
+
+struct ProvisionedEstate {
+    path: PathBuf,
+    directory: PathBuf,
+    name: String,
+    created_plaintext: bool,
+}
+
 /// A coordinator holding exactly one estate open for the life of the command.
 struct OpenEstate {
     coordinator: EstateCoordinator,
@@ -74,11 +102,17 @@ struct OpenEstate {
 /// estate. Routes through the funnel (Windows base-directory adoption +
 /// catalog open), then provisions a missing database with its manifest and
 /// current estate-format stamp through the shared `db create` routine.
-fn estate_path(db: Option<&str>) -> Result<PathBuf, String> {
+fn estate_path(db: Option<&str>) -> Result<ProvisionedEstate, String> {
     let catalog = crate::core::estate_open::catalog(db)?;
     let record = catalog.active();
+    let was_missing = !record.database_path().exists();
+    let plaintext = genius_locus_kit::EstateOpenPosture::resolve(record)
+        .map_err(|e| e.to_string())?.is_plaintext();
     crate::commands::db::provision_database(record, wall_now_millis())?;
-    Ok(record.database_path())
+    Ok(ProvisionedEstate {
+        path: record.database_path(), directory: record.directory.clone(),
+        name: record.name.clone(), created_plaintext: was_missing && plaintext,
+    })
 }
 
 /// Open the estate at `path` through the substrate's real entry point:
@@ -198,13 +232,33 @@ mod tests {
         assert_eq!(manifest.format_version, EstateFormatVersion::CURRENT);
         assert!(EstateCatalog::open().unwrap().record_named("p1").is_none());
         assert!(!dir.join(aria_mcp::INSTALL_KEY_FILE).exists());
-        let path = estate_path(Some(&db)).unwrap();
+        let path = estate_path(Some(&db)).unwrap().path;
         let estate = open_estate(&path).unwrap();
         assert_eq!(apply(&Operation::Get { key: "fact_extraction".into() },
             &estate.coordinator, &estate.handle).unwrap(), "off\n");
         let store = SqliteDrawerStore::from_path(&path.to_string_lossy(), 0, None, 5.0).unwrap();
         assert_eq!(EstateFormatStore::new(store.storage().unwrap()).read_if_present().unwrap(),
             Some(EstateFormatVersion::CURRENT));
+    }
+
+    #[test]
+    fn invalid_set_does_not_create_an_estate() {
+        use genius_locus_kit::EstateCatalog;
+        let _guard = crate::core::estate_adoption::CONFIGURATION_TEST_LOCK
+            .lock().unwrap_or_else(|p| p.into_inner());
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) { EstateCatalog::set_configuration_directory_override(None); }
+        }
+        let root = tempfile::tempdir().unwrap();
+        EstateCatalog::set_configuration_directory_override(Some(root.path().join("config")));
+        let _reset = Reset;
+        let directory = root.path().join("missing/estate");
+        assert_eq!(run(PreferenceCommand::Set {
+            key: "not_a_preference".into(), value: "off".into(),
+            db: Some(directory.to_string_lossy().into_owned()),
+        }), ExitCode::from(exit::FAILURE));
+        assert!(!directory.exists());
     }
 
     #[test]
