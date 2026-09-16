@@ -231,8 +231,14 @@ impl EstateCoordinator {
                     filed += 1;
                 }
 
+                // A pass that accepted nothing retires nothing: unusable or
+                // ungrounded model output settles the source but is not
+                // evidence that the facts an earlier pass grounded are false.
                 for old in &active {
-                    if !old.extraction_schema_version.is_empty() && !desired_ids.contains(&old.id) {
+                    if !grounded_candidates.is_empty()
+                        && !old.extraction_schema_version.is_empty()
+                        && !desired_ids.contains(&old.id)
+                    {
                         self.withdraw_kg_fact(handle, &old.id, "fact-extraction-duty", None, now)
                             .map_err(|error| format!("{error:?}"))?;
                     }
