@@ -1751,7 +1751,14 @@ public actor Corpus {
 
         // Active chunks only: a source cleared by `remove(sourceID:)` must NOT be
         // re-embedded back into recall by a (possibly auto-triggered) reindex.
-        let chunks = try await activeChunks()
+        let chunks: [Chunk]
+        if budget.maxDocuments == Int.max {
+            chunks = try await activeChunks()
+        } else {
+            let removed = try await removedSourceStore.removedIDs()
+            chunks = try await bundleStore.activeChunks(
+                limit: budget.maxDocuments + 1, excludingSourceIDs: removed)
+        }
 
         // Phase logging throughout: on a large corpus this call legitimately
         // runs tens of minutes (full basis retrain + full re-embed); without
