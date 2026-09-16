@@ -57,8 +57,8 @@ struct PermissionsWriterTests {
         #expect(PermissionsWriter.classify("moot_federated_recall") == .allow)
         #expect(PermissionsWriter.classify("moot_lens_keystones") == .allow, "every lens is a read")
         #expect(PermissionsWriter.classify("moot_lens_apriori") == .allow)
-        // Migration candidate evaluation: benchmarks plans and returns ranked survivors without writing the estate.
-        #expect(PermissionsWriter.classify("moot_migration_run") == .allow)
+        // Migration candidate evaluation creates branches and captures corpus entries.
+        #expect(PermissionsWriter.classify("moot_migration_run") == .ask)
 
         // Additive-unconfirmed writes: create new content, alter nothing existing.
         #expect(PermissionsWriter.classify("moot_file_memory") == .allow)
@@ -137,7 +137,7 @@ struct PermissionsWriterTests {
             "moot_memory_list", "moot_memory_search",
             // Reads session transcript; no estate writes.
             "moot_memory_recall_transcript",
-            // Migration candidate evaluation: read-only, does not commit.
+            // Migration candidate evaluation mutates branch/storage state; Ask tier.
             "moot_migration_run",
             "moot_monitoring_status",
             // Write path for daemon telemetry; Ask tier.
