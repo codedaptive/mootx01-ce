@@ -132,6 +132,30 @@ struct RecallFrameGatedScoringTests {
             "the GLK result must carry the one default-ceiling exclusion")
     }
 
+    @Test func withheldCountStopsAtTheRecallCandidateBound() async throws {
+        let (kit, handle) = try await provision(ownerSuffix: "withheld-bound")
+        defer { Task { try? await kit.close(handle) } }
+
+        for index in 0..<65 {
+            _ = try await kit.capture(
+                handle,
+                restrictedFrame(content: "bounded withheld candidate \(index)"),
+                mode: .impatient)
+        }
+
+        let request = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed]),
+            mode: .locusOnly,
+            scoring: .raw,
+            limit: 1,
+            fallback: .allowDegraded,
+            origin: .internal)
+        let result = try await kit.recall(handle, request)
+
+        #expect(result.withheldBySensitivity == RecallShape.frontierKFloor,
+            "withheld counting must stop at the plan's 64-row candidate floor")
+    }
+
     // MARK: - B. Multiple restricted drawers — none surfaces, count is exact
 
     @Test func multipleRestrictedDrawersNeverSurface() async throws {
