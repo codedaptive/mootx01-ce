@@ -334,6 +334,14 @@ public extension GeniusLocusKit {
     /// → 0. Returns the number of drawers encoded.
     func runSpanEncodeBatch(handle: EstateHandle, now: Date) async throws -> Int {
         guard let store = vectorStores[handle] else { return 0 }
+        // No encoder registered (the model was absent or failed to load when
+        // the estate opened): attempt activation before walking the bit-27
+        // debt, so a model that arrives later is picked up on the next cycle.
+        // A failed attempt is the same clean skip as before; the directory
+        // probe runs before any model load, so retrying is free.
+        if registeredSpanEncoder(for: handle) == nil {
+            await activateSpanEncoderIfProvisioned(for: handle)
+        }
         let limit = await provisionedEncoderBatch(for: handle)
         return try await runSpanEncodeBatch(
             handle: handle, encoder: registeredSpanEncoder(for: handle),
