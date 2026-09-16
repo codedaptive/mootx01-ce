@@ -208,6 +208,20 @@ fn endorse_decodes_and_returns_the_typed_review_receipt() {
 }
 
 #[test]
+fn authenticated_non_user_reviewer_cannot_activate_tunnel() {
+    let lower = Lower::default();
+    let calls = Arc::clone(&lower.calls);
+    let service = V2MemoryMutationService::new(Authority::default(), lower);
+    let request = V2ReviewTunnelRequest::decode(&arguments([
+        ("tunnel_id", JsonValue::String(TUNNEL.to_owned())),
+        ("decision", JsonValue::String("accept".to_owned())),
+    ])).unwrap();
+
+    assert_eq!(service.review(request), Err(V2MemoryMutationError::Unavailable));
+    assert!(calls.lock().unwrap().is_empty(), "non-user accept reached lower review");
+}
+
+#[test]
 fn erase_confirmation_rejections_do_not_call_lower() {
     let lower = Lower::default();
     let calls = Arc::clone(&lower.calls);

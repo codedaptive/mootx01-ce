@@ -442,6 +442,13 @@ public struct AriaV2MemoryMutations: Sendable {
             ? context.serverIdentity
             : context.callerID
         let isUserReviewer = reviewerID == AriaV2ReviewTunnelRequest.userReviewer
+        guard request.decision != .accept || isUserReviewer else {
+            throw AriaV2InvalidArgument(
+                path: "decision",
+                message: "Edge activation is user-only: the authenticated reviewer may use 'endorse' or 'reject'.",
+                allowed: ["endorse", "reject"]
+            ).jsonRPCError
+        }
         let tunnelID = id(request.tunnelID)
         do {
             var storedTunnel: Tunnel?
