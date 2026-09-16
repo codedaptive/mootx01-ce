@@ -322,7 +322,8 @@ struct AriaMCPMain {
         // exactly what was imported into it (2026-08-24 ruling; ARIA_MCP_SPEC §6.6).
         // Extracted into a static helper so tests can verify the `registered` gate
         // directly without going through the full `run()` stack.
-        await AriaMCPMain.seedChartersIfRegistered(kit: kit, handle: handle, registered: registered, now: Date())
+        await AriaMCPMain.seedChartersIfRegistered(
+            kit: kit, handle: handle, registered: registered, frozen: frozen, now: Date())
 
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "0.1.0")
         // Server identity injected so facts/memories filed via this host are
@@ -382,14 +383,20 @@ struct AriaMCPMain {
         }
     }
 
-    /// Seed default wing charters into the estate when the opening is registered.
+    /// Seed default wing charters into a writable registered estate.
     /// Called by `run()` after the estate is open and semantic recall is wired.
     /// Extracted so `CharterSeedingTests` can exercise the `registered` gate
     /// without the full `run()` stack: removing the `guard registered` check
     /// makes `transientOpeningSeedsNoCharterDrawers` red; disabling the seeding
     /// call makes `registeredOpeningSeedsSevenCharterDrawers` red.
-    static func seedChartersIfRegistered(kit: GeniusLocusKit, handle: EstateHandle, registered: Bool, now: Date) async {
-        guard registered else { return }
+    static func seedChartersIfRegistered(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        registered: Bool,
+        frozen: Bool,
+        now: Date
+    ) async {
+        guard registered && !frozen else { return }
         do {
             try await kit.seedDefaultWings(for: handle, now: now)
         } catch {

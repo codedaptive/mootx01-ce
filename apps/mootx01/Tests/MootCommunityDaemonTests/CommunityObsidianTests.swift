@@ -239,6 +239,33 @@ struct CommunityObsidianTests {
         #expect(authState == "missing")
     }
 
+    @Test("authorization is bound to the estate that selected the vault")
+    func authorizationFromAnotherEstateIsRefused() async throws {
+        let estateA = try await ObsidianScratch()
+        let estateB = try await ObsidianScratch()
+        defer { estateA.remove(); estateB.remove() }
+
+        let coordinatorA = estateA.makeCoordinator()
+        let selected = await coordinatorA.selectVault(
+            bookmark: estateA.vaultBookmark,
+            displayName: "Estate A Vault")
+        #expect(structuredField(selected, "outcome") == "selected")
+
+        let coordinatorB = CommunityObsidianCoordinator(
+            layoutURL: estateA.layoutURL,
+            kit: estateB.kit,
+            handle: estateB.handle,
+            watcherPollSeconds: 60,
+            estatePollSeconds: 600,
+            healthCheckSeconds: 1)
+
+        #expect(structuredField(await coordinatorB.authorization(), "state") == "missing")
+        let enabled = await coordinatorB.enable()
+        #expect(structuredField(enabled, "outcome") == "refused")
+        #expect(structuredField(enabled, "reason") == "vault-authorization-missing")
+        #expect(countVaultMdFiles(estateA.vaultURL) == 0)
+    }
+
     // MARK: - C6-T2: select then enable ⇒ enabled + exportable capture converges
 
     @Test("C6-T2: select then enable ⇒ enabled; exportable capture converges to vault")
