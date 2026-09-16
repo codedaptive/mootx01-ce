@@ -11507,7 +11507,6 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<GLKRecallResult, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        let withheld_by_sensitivity = self.sensitivity_withheld_count(handle, &request.frame);
         // Only the central External-origin writer below may persist traces.
         // Inner Locus frames are candidate acquisition, even when callers
         // supply a legacy trace budget (for example temporal recall).
@@ -11544,6 +11543,8 @@ impl EstateCoordinator {
             frontier_k,
             weights: RecallWeights::UNIFORM,
         };
+        let withheld_by_sensitivity =
+            self.sensitivity_withheld_count(handle, &request.frame, frontier_k);
 
         // Extract test seam values before the multi-lane dispatch.
         // Each seam is single-use (consumed here, cleared in the RefCell) so the
@@ -14673,13 +14674,20 @@ impl EstateCoordinator {
         })
     }
 
-    /// Evaluates the persisted candidate set through LocusKit's public result
-    /// API solely to carry the default-ceiling exclusion count. A failed
-    /// companion evaluation leaves recall rows and scoring untouched and reports
-    /// the source-compatible zero default.
-    fn sensitivity_withheld_count(&self, handle: &EstateHandle, frame: &RecallFrame) -> usize {
+    /// Evaluates a bounded, body-free candidate window solely to carry the
+    /// default-ceiling exclusion count. A failed companion evaluation leaves
+    /// recall rows and scoring untouched and reports the source-compatible zero
+    /// default.
+    fn sensitivity_withheld_count(
+        &self,
+        handle: &EstateHandle,
+        frame: &RecallFrame,
+        candidate_limit: usize,
+    ) -> usize {
         let Some(store) = self.recall_stores.get(handle) else { return 0; };
-        let Ok(drawers) = store.all_drawers_bounded(None) else { return 0; };
+        let Ok(drawers) = store.all_drawers_bounded_projected(Some(candidate_limit)) else {
+            return 0;
+        };
         self.sensitivity_withheld_count_for_drawers(handle, frame, &drawers)
     }
 
