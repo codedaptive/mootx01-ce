@@ -52,6 +52,15 @@ public extension GeniusLocusKit {
         return await scheduler.register(spec, registeredAt: now)
     }
 
+    /// Remove a standing signal and its subscriptions. Unknown signals or an
+    /// estate without a scheduler return false; stale estate handles throw.
+    @discardableResult
+    func signalUnregister(_ signalID: SignalID, in handle: EstateHandle) async throws -> Bool {
+        _ = try estate(for: handle)
+        guard let scheduler = schedulers[handle] else { return false }
+        return await scheduler.unregister(signalID)
+    }
+
     /// Snapshot of every registered signal's status for the estate
     /// addressed by `handle`. Architecture spec §7.8.5:
     /// `signalStatus() -> [SignalReport]`. Raises
