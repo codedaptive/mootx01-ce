@@ -96,24 +96,34 @@ struct SeedHintEncodeTests {
         // The encode drain itself is also settled.
         let statuses = try await kit.drainStatuses(handle)
         #expect(DrainStatus.encodeSettled(statuses))
-        // The seeded hints are drawers with content and bit 28 clear, so the
-        // fact_extraction row-debt lane is owed by construction until a
-        // dreaming cycle pays it; every encode-side lane settles.
-        #expect(statuses.filter { $0.name != DrainStatus.factExtractionName }
+        // The seeded hints are drawers with content and bits 27 and 28 clear,
+        // so the span_encode and fact_extraction row-debt lanes are owed by
+        // construction until a dreaming cycle pays them; every queue-side
+        // lane settles. The span lane is rendered even though no encoder is
+        // loaded (the fixture has no model directory), so a settle loop sees
+        // the debt rather than an idle estate.
+        let rowDebtLanes: Set<String> = [DrainStatus.factExtractionName, DrainStatus.spanEncodeName]
+        #expect(statuses.filter { !rowDebtLanes.contains($0.name) }
                     .allSatisfy { !$0.isDraining },
-                "every encode-side drain lane settles on a fresh drained estate: \(statuses)")
+                "every queue-side drain lane settles on a fresh drained estate: \(statuses)")
+        let span = try #require(statuses.first { $0.name == DrainStatus.spanEncodeName })
+        #expect(span.detail == "encoder not loaded")
+        #expect(span.pending > 0)
     }
 
     @Test("a registered span encoder exposes true row debt without changing the corpus finisher gate")
     func spanEncodeDebtIsObservable() async throws {
         let (kit, handle) = try await provisionGLKEstate()
         defer { Task { try? await kit.close(handle) } }
-        let before = try await kit.drainStatuses(handle)
-        #expect(!before.contains { $0.name == DrainStatus.spanEncodeName })
-
         let estate = try await kit.estate(for: handle)
         let expectedDebt = try await estate.countSpanIndexDebt()
         #expect(expectedDebt > 0)
+        // The encoder preference is provisioned but no encoder is loaded: the
+        // lane is already present, carrying the true debt, and says so.
+        let before = try await kit.drainStatuses(handle)
+        let unloaded = try #require(before.first { $0.name == DrainStatus.spanEncodeName })
+        #expect(unloaded.pending == expectedDebt)
+        #expect(unloaded.detail == "encoder not loaded")
         await kit.registerSpanEncoder(DrainSpanEncoder(), for: handle)
 
         let statuses = try await kit.drainStatuses(handle)
