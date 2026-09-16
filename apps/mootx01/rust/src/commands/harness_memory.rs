@@ -1437,6 +1437,13 @@ fn restore_memories(
             .join(&slug)
             .join("memory");
         let dest = dest_dir.join(&filename);
+        if dest.strip_prefix(&dest_dir).is_err() {
+            collisions.push(format!(
+                "  {}: refused restore destination outside memory directory",
+                dest.display()
+            ));
+            continue;
+        }
 
         // Refuse to overwrite an existing file — report collision.
         if dest.exists() {
@@ -1521,12 +1528,15 @@ fn parse_restore_location(location: &str) -> Option<(String, String)> {
     let mut parts = after.splitn(2, '/');
     let slug = parts.next().filter(|s| !s.is_empty())?;
     // Slug traversal guard — mirrors parse_harness_path.
-    if slug.contains("..") || slug.starts_with('.') || slug.contains('/') {
+    if slug.contains("..") || slug.starts_with('.') || slug.contains(['/', '\\']) {
         return None;
     }
     let filename = parts.next().filter(|f| !f.is_empty())?;
     // Filename security: no hidden files, no traversal, no path separators.
-    if filename.starts_with('.') || filename.contains("..") || filename.contains('/') {
+    let drive_qualified = filename.as_bytes().get(1) == Some(&b':')
+        && filename.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+    if filename.starts_with('.') || filename.contains("..")
+        || filename.contains(['/', '\\']) || drive_qualified {
         return None;
     }
     Some((slug.to_string(), filename.to_string()))
@@ -2930,6 +2940,19 @@ mod tests {
         // Bare location from estate_list: harness/.evil/file.md
         let r = parse_restore_location("harness/.evil/file.md");
         assert!(r.is_none(), "bare location with dotfile slug must be rejected");
+    }
+
+    #[test]
+    fn parse_restore_location_rejects_windows_absolute_and_unc_filenames() {
+        for location in [
+            r"harness/x/C:\Users\Alice\Startup\evil.cmd",
+            r"harness/x/\\server\share\evil.cmd",
+            r"harness/x/subdir\evil.cmd",
+        ] {
+            assert_eq!(parse_restore_location(location), None, "accepted {location}");
+        }
+        assert_eq!(parse_restore_location("harness/x/MEMORY.md"),
+            Some(("x".into(), "MEMORY.md".into())));
     }
 
     // ── Sentinel parity: Rust SENTINEL_CONTENT == Swift HarnessMemoryCLAUDE.block body ──
