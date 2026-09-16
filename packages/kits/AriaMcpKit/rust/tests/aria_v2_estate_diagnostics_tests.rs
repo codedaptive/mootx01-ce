@@ -45,6 +45,7 @@ fn snapshot(mounted: bool) -> EstateDiagnosticsSnapshot {
         timing: EstateTiming { watermark_ms: 1_700_000_123_456, truncated: true },
         recall_trace_count: Some(7),
         sync_state: "local-only".to_owned(),
+        drawer_rows: None,
         subjects_bearing: 1,
         subjects_eligible: 2,
         shared_content_migration: None,

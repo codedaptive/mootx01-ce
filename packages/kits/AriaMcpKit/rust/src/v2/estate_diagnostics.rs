@@ -198,6 +198,9 @@ pub struct EstateDiagnosticsSnapshot {
     pub recall_trace_count: Option<u64>,
     /// Sync backend state, or `local-only` when no engine is wired.
     pub sync_state: String,
+    /// Every drawer row in the estate, read by `Ping` for the LSA backstop
+    /// declaration; `None` when the count could not be read.
+    pub drawer_rows: Option<u64>,
     /// Subject debt, counted over the sensitivity-visible, non-empty set.
     pub subjects_bearing: u64,
     pub subjects_eligible: u64,
@@ -300,6 +303,12 @@ pub struct EstatePingData {
     /// Swift `AriaV2EstatePingData.updateAdvisory`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_available: Option<String>,
+    /// Loud declaration that the estate has reached the LSA retrain document
+    /// backstop (`LSA_RETRAINING_DOCUMENT_BACKSTOP`): its dense basis no
+    /// longer retrains and recall is degraded until the estate is looked at.
+    /// Omitted under the backstop. Mirrors Swift `lsaRetrainingDegraded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsa_retraining_degraded: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -395,6 +404,12 @@ impl<P: EstateDiagnosticsAuthority> EstateDiagnosticsService<P> {
                 true,
             ));
         }
+        // The LSA retrain backstop is a hardcoded absurd size; an estate that
+        // reaches it says so on every ping (Bob, 2026-09-16).
+        let backstop = genius_locus_kit::brain::bounded_retraining::LSA_RETRAINING_DOCUMENT_BACKSTOP as u64;
+        let lsa_retraining_degraded = snapshot.drawer_rows.filter(|rows| *rows >= backstop).map(|rows| {
+            format!("LSA retraining DEGRADED due to size: {rows} drawers reach the {backstop} document backstop; the dense basis no longer retrains")
+        });
         Ok(EstatePingData {
             estate_id: canonical_uuid(snapshot.estate_id),
             estate_name: snapshot.estate_name,
@@ -402,6 +417,7 @@ impl<P: EstateDiagnosticsAuthority> EstateDiagnosticsService<P> {
             build_serial: context.build_serial.clone(),
             version_skew: if context.version_skew.is_empty() { None } else { Some(context.version_skew.clone()) },
             update_available: context.update_advisory.clone(),
+            lsa_retraining_degraded,
         })
     }
 

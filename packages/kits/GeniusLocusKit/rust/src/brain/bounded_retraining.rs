@@ -1,23 +1,29 @@
-//! Production retraining boundary: load settings once, train on a bounded
-//! sample, re-embed every document, and keep the caller's baseline on a
-//! skipped attempt. Callers must release their coordinator lock.
+//! Production retraining boundary. BACKSTOPS AGAINST THE ABSURD, not working
+//! limits (Bob, 2026-09-16): the dense basis must be learned from every
+//! document, so the retrain is never capped in normal use; if the data is
+//! there it is processed. Ten million documents is more than an order of
+//! magnitude past a decade of heavy filing plus palace imports; a retrain
+//! running past a day on a daily cadence is a broken system, not a slow one.
+//! Thirty sweeps is the SVD's fixed iteration count. Reaching a backstop keeps
+//! the serving basis and is an error-level event; the estate ping declares an
+//! estate at the document backstop LSA-degraded. Twin of Swift
+//! `GeniusLocusKit.reindexCorpus(handle:now:)`. Callers must release their
+//! coordinator lock.
 use corpus_kit::{CorpusContentEngine, RetrainingBudget};
 use corpus_kit::error::CorpusKitError;
-use moot_product_identity::{settings, storage};
 use std::time::{Duration, Instant};
 
+/// The document backstop for the LSA retrain; read by the estate ping.
+pub const LSA_RETRAINING_DOCUMENT_BACKSTOP: usize = 10_000_000;
+/// The time backstop for one retrain attempt.
+pub const LSA_RETRAINING_TIME_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
+
 pub fn reindex_with_settings(engine: &CorpusContentEngine, now: i64) -> Result<(), CorpusKitError> {
-    let settings = settings::load(&storage::configuration_directory());
-    let deadline = Instant::now().checked_add(Duration::from_millis(settings.corpus_lsa_retraining_timeout_milliseconds));
-    let budget = RetrainingBudget::new(settings.corpus_lsa_retraining_max_documents,
-        settings.corpus_lsa_retraining_max_sweeps, deadline);
+    let deadline = Instant::now().checked_add(LSA_RETRAINING_TIME_BACKSTOP);
+    let budget = RetrainingBudget::new(LSA_RETRAINING_DOCUMENT_BACKSTOP, 30, deadline);
     let report = engine.reindex_with_budget(now, &budget)?;
-    // A skipped provider (deadline or cancellation) keeps its serving basis
-    // and vectors; that is a bounded attempt doing its job, not a failure.
-    // Log it so an operator can raise `corpus.lsa_retraining` if it recurs.
-    // Twin of Swift `reindexCorpus(handle:now:)`.
     if !report.skipped_model_ids.is_empty() {
-        eprintln!("mootx01 reindex: retraining skipped within budget, serving basis kept: {:?}", report.skipped_model_ids);
+        eprintln!("mootx01 reindex: LSA retraining DEGRADED, a backstop was reached and the serving basis was kept: {:?}", report.skipped_model_ids);
     }
     Ok(())
 }

@@ -115,14 +115,22 @@ public struct AriaV2EstatePingData: Sendable, Equatable {
     /// omitted entirely when `nil`.  Defaults to `nil` so call sites that do
     /// not supply the provider need not change.
     public let updateAdvisory: String?
+    /// Loud declaration that the estate has reached the LSA retrain document
+    /// backstop (`GeniusLocusKit.lsaRetrainingDocumentBackstop`): its dense
+    /// basis no longer retrains and recall is degraded until the estate is
+    /// looked at. Surfaced as `lsa_retraining_degraded`; omitted when the
+    /// estate is under the backstop.
+    public let lsaRetrainingDegraded: String?
     public init(estateID: UUID, estateName: String, state: String, buildSerial: String,
-                versionSkewAdvisory: String? = nil, updateAdvisory: String? = nil) {
+                versionSkewAdvisory: String? = nil, updateAdvisory: String? = nil,
+                lsaRetrainingDegraded: String? = nil) {
         self.estateID = estateID
         self.estateName = estateName
         self.state = state
         self.buildSerial = buildSerial
         self.versionSkewAdvisory = versionSkewAdvisory
         self.updateAdvisory = updateAdvisory
+        self.lsaRetrainingDegraded = lsaRetrainingDegraded
     }
 }
 
@@ -269,13 +277,21 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
         let updateAdvisory = await context.updateAdvisoryProvider?()
         switch await kit.mountState(for: handle) {
         case .mounted:
+            // The LSA retrain backstop is a hardcoded absurd size; an estate
+            // that reaches it says so on every ping (Bob, 2026-09-16).
+            let rows = try await kit.countDrawerRows(in: handle)
+            let backstop = GeniusLocusKit.lsaRetrainingDocumentBackstop
+            let degraded = rows >= backstop
+                ? "LSA retraining DEGRADED due to size: \(rows) drawers reach the \(backstop) document backstop; the dense basis no longer retrains"
+                : nil
             return .mounted(AriaV2EstatePingData(
                 estateID: handle.estateUUID,
                 estateName: handle.estateName,
                 state: "mounted",
                 buildSerial: context.buildSerial,
                 versionSkewAdvisory: context.versionSkewAdvisory,
-                updateAdvisory: updateAdvisory))
+                updateAdvisory: updateAdvisory,
+                lsaRetrainingDegraded: degraded))
         case .quiesced, .draining:
             return .refusal(.init(
                 code: "estate_unavailable",
@@ -547,6 +563,8 @@ private extension AriaV2EstatePingData {
         // Omitted entirely when the provider is absent or returned nil (up-to-date
         // or feed unreachable).  Clients check for presence; absence means current.
         if let updateAdvisory { value["update_available"] = .string(updateAdvisory) }
+        // Omitted entirely under the backstop; presence is the declaration.
+        if let lsaRetrainingDegraded { value["lsa_retraining_degraded"] = .string(lsaRetrainingDegraded) }
         return .object(value)
     }
 }
