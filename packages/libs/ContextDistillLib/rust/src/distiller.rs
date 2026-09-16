@@ -39,7 +39,7 @@ use crate::digest::{estimate_tokens, source_digest};
 use crate::input::DistillationInput;
 use crate::python_text::{is_python_whitespace, py_strip, py_word_char};
 use crate::scanners::{scan_date_re, scan_quantity_value_re, ScannerMatch};
-use crate::selection::{intent_span_selection_with_peer_dialogue, sentence_initial};
+use crate::selection::{intent_span_selection_with_budget, sentence_initial};
 use crate::shape::classify_record;
 use crate::terms::normalized_terms;
 
@@ -929,6 +929,17 @@ impl ContextDistiller {
         input: &DistillationInput,
         converter: ContextDistillConverter,
     ) -> DistilledRepresentation {
+        self.distill_with_selection_budget(input, converter, false)
+    }
+
+    /// Recall callers bound source bytes before entering this path. The selector
+    /// then declines compression when its atom or work budget is exhausted.
+    pub fn distill_with_selection_budget(
+        &self,
+        input: &DistillationInput,
+        converter: ContextDistillConverter,
+        bounded: bool,
+    ) -> DistilledRepresentation {
         let source = &input.original;
         let trailer = &input.enrichment_trailer;
         if converter == ContextDistillConverter::CompleteFormV6 {
@@ -1005,8 +1016,8 @@ impl ContextDistiller {
         //   budget = max(512, len(source.encode("utf-8")) * budget_percent // 100
         //                     - len(projected_trailer.encode("utf-8")))
         let applied_trailer_bytes = projected_trailer.len(); // UTF-8 bytes (str::len())
-        let selection_result = intent_span_selection_with_peer_dialogue(
-            source, applied_trailer_bytes, peer_dialogue);
+        let selection_result = intent_span_selection_with_budget(
+            source, applied_trailer_bytes, peer_dialogue, bounded);
 
         // §10.5 — Add trailer_projection to selection_details.
         //
