@@ -1,8 +1,8 @@
 //! fact_extraction_cycle_tests.rs — Decision-gate tests for signal 14.
 //!
-//! Four tests cover the two public functions that compose signal 14:
+//! These tests cover the two public functions that compose signal 14:
 //!
-//!   GSS-14a  `build_fact_extraction_cycle` — Off → None (calls the real function)
+//!   GSS-14a  `build_fact_extraction_cycle` — unavailable assets → None while Off
 //!   GSS-14b  `activate_and_build_extraction_cycle` — On + stub extractor → Some
 //!   GSS-14c  `build_fact_extraction_cycle` — On + no config paths → None
 //!   GSS-14d  `build_fact_extraction_cycle` — provider selector + settings paths
@@ -98,20 +98,15 @@ fn write_no_fact_extraction_config(dir: &std::path::Path) {
 }
 
 // ---------------------------------------------------------------------------
-// GSS-14a: setting Off → cycle is None, no activation
+// GSS-14a: setting Off + unavailable assets → no cycle or activation
 //
 // Calls `build_fact_extraction_cycle` directly — the real production function.
 // ---------------------------------------------------------------------------
 
-/// GSS-14a: when the estate fact_extraction setting is explicitly Off, the
-/// cycle is `None` and `activate_fact_extractor` is never called, regardless
-/// of what config.json contains.
-///
-/// Goes red when: the Off branch is removed from `build_fact_extraction_cycle`
-/// (which would fall through to config loading even when Off), or when
-/// `activate_and_build_extraction_cycle` activates despite an Off setting.
+/// GSS-14a: the production builder returns no cycle without provider assets.
+/// Live Off-to-On behavior with an available extractor is tested separately.
 #[test]
-fn fact_extraction_cycle_is_none_when_setting_is_off() {
+fn fact_extraction_cycle_is_none_without_assets_while_off() {
     let (coord, handle) = open_estate();
 
     // Provision the estate with Off.
@@ -126,7 +121,7 @@ fn fact_extraction_cycle_is_none_when_setting_is_off() {
             .expect("provision Off");
     }
 
-    // config.json is irrelevant when the setting is Off — inject an empty dir.
+    // Omit model configuration; the builder must leave the provider inactive.
     let scratch = std::env::temp_dir().join(format!("aria-fec-off-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&scratch).unwrap();
     write_no_fact_extraction_config(&scratch);
@@ -135,7 +130,7 @@ fn fact_extraction_cycle_is_none_when_setting_is_off() {
 
     assert!(
         cycle.is_none(),
-        "setting Off must produce None; got Some(cycle)"
+        "missing assets must produce None; got Some(cycle)"
     );
 
     // Confirm no extractor was registered on the coordinator.
@@ -154,12 +149,11 @@ fn fact_extraction_cycle_is_none_when_setting_is_off() {
 // ---------------------------------------------------------------------------
 
 /// GSS-14b: when the estate setting is On and an extractor is supplied,
-/// `activate_and_build_extraction_cycle` returns `Some(cycle)`, registers the
-/// extractor on the coordinator, and the returned closure is callable.
+/// `activate_and_build_extraction_cycle` returns `Some(cycle)` and the first
+/// enabled invocation registers the extractor on the coordinator.
 ///
 /// Goes red when:
-///   - The Off/On branch in `activate_and_build_extraction_cycle` gates
-///     incorrectly (returns None for On).
+///   - An enabled invocation skips provider activation.
 ///   - The `activate_fact_extractor` call is removed (extractor not registered).
 ///   - The cycle closure is not built (Some returned with wrong body).
 ///   - `run_fact_extraction_batch` is not called inside the closure.
@@ -340,11 +334,12 @@ fn builder_selects_and_activates_only_nuextract_on_rust() {
             )
             .unwrap();
     }
-    let cycle = build_fact_extraction_cycle(&coord, handle, Some(&scratch));
-    assert!(
-        cycle.is_some(),
-        "configured NuExtract must activate signal 14"
-    );
+    let cycle = build_fact_extraction_cycle(&coord, handle, Some(&scratch))
+        .expect("configured NuExtract must prepare signal 14");
+    assert!(coord.lock().unwrap().registered_fact_extractor(&handle).is_none(),
+        "construction must defer activation until the live preference gate runs");
+    assert_eq!(cycle().expect("first enabled tick activates the configured provider"), 0,
+        "an empty estate must not invoke the worker");
     let registered = coord
         .lock()
         .unwrap()
