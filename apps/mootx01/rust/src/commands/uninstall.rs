@@ -266,8 +266,52 @@ pub(crate) fn data_inventory(
     Some(parts.join(", "))
 }
 
-/// Offer/confirm/trash the configuration directory. See the module doc for
-/// the policy; `decide_data_removal` holds the testable matrix. The inventory
+/// Return the smallest set of directories covering the configuration and
+/// every existing registered estate. This collapses in-tree estates and any
+/// other overlap so a descendant is never moved after its ancestor.
+fn data_trash_targets(configuration: &Path, registered_databases: &[PathBuf]) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = registered_databases
+        .iter()
+        .filter(|database| database.exists())
+        .filter_map(|database| database.parent().map(Path::to_path_buf))
+        .collect();
+    if configuration.exists() {
+        candidates.push(configuration.to_path_buf());
+    }
+    for candidate in &mut candidates {
+        if let Ok(canonical) = candidate.canonicalize() {
+            *candidate = canonical;
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    candidates.dedup();
+
+    let configuration = configuration
+        .canonicalize()
+        .unwrap_or_else(|_| configuration.to_path_buf());
+    let mut targets: Vec<PathBuf> = Vec::new();
+    for candidate in candidates {
+        if candidate != configuration
+            && !candidate.starts_with(&configuration)
+            && !targets.iter().any(|ancestor| candidate.starts_with(ancestor))
+        {
+            targets.push(candidate);
+        }
+    }
+    if configuration.exists() && !targets.iter().any(|ancestor| configuration.starts_with(ancestor)) {
+        targets.push(configuration);
+    }
+    targets
+}
+
+/// Offer/confirm/trash every registered estate and the configuration
+/// directory. See the module doc for the policy; `decide_data_removal` holds
+/// the testable matrix. The inventory
 /// is the catalog's: a missing or unreadable catalog means no estates to
 /// report, and the directory is offered on the strength of the mgr store
 /// alone.
@@ -320,20 +364,25 @@ fn remove_user_data(purge: bool, yes: bool) -> ExitCode {
             println!("Aborted — data left in place: {}", data.display());
             ExitCode::from(exit::FAILURE)
         }
-        DataDecision::Trash => match trash::delete(&data) {
+        DataDecision::Trash => {
+            let registered_databases: Vec<PathBuf> = records.iter().map(|r| r.database_path()).collect();
+            let targets = data_trash_targets(&data, &registered_databases);
+            let result = targets.iter().try_for_each(trash::delete);
+            match result {
             Ok(()) => {
-                println!("  ✓ Data moved to {}: {}", trash_name(), data.display());
+                println!("  ✓ All registered estate data moved to {}.", trash_name());
                 ExitCode::from(exit::OK)
             }
             Err(e) => {
                 eprintln!(
-                    "  ✗ Could not move {} to {}: {e}\n    Data left in place.",
-                    data.display(),
+                    "  ✗ Could not move all registered estate data to {}: {e}\n    \
+                     Some data may remain in place; the catalog move is attempted only after every external estate moves.",
                     trash_name()
                 );
                 ExitCode::from(exit::FAILURE)
             }
-        },
+            }
+        }
     }
 }
 
@@ -680,5 +729,33 @@ mod tests {
         assert!(inv.contains("1 named estate(s)"), "{inv}");
         assert!(inv.contains("moot-mgr history database"), "{inv}");
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn trash_targets_include_external_registered_estates_and_collapse_in_tree_estates() {
+        let data = tmp_home("trash-targets");
+        let external = tmp_home("trash-targets-external");
+        let in_tree = data.join("databases").join("default").join("estate.sqlite");
+        let external_db = external.join("work").join("estate.sqlite");
+        let absent_external_db = external.join("absent").join("estate.sqlite");
+        for database in [&in_tree, &external_db] {
+            std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+            std::fs::write(database, b"x").unwrap();
+        }
+
+        let targets = data_trash_targets(
+            &data,
+            &[in_tree, external_db.clone(), external_db.clone(), absent_external_db],
+        );
+        assert_eq!(
+            targets.iter().cloned().collect::<std::collections::HashSet<_>>(),
+            [data.canonicalize().unwrap(), external_db.parent().unwrap().canonicalize().unwrap()]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(targets.last(), Some(&data.canonicalize().unwrap()), "catalog moves last");
+
+        let _ = std::fs::remove_dir_all(&data);
+        let _ = std::fs::remove_dir_all(&external);
     }
 }
