@@ -360,7 +360,7 @@ public enum AriaResident {
         }
     }
 
-    private static func reconcilePreferenceSignal(
+    static func reconcilePreferenceSignal(
         name: String,
         enabled: Bool,
         ids: inout [String: SignalID],
@@ -374,6 +374,26 @@ public enum AriaResident {
             ids.removeValue(forKey: name)
         } else if enabled, ids[name] == nil, let spec = await makeSpec() {
             ids[name] = try await kit.registerStandingSignal(spec, in: handle, now: now)
+        }
+    }
+
+    static func failClosedPreferenceSignals(
+        names: [String],
+        ids: inout [String: SignalID],
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async {
+        for name in names {
+            do {
+                try await reconcilePreferenceSignal(
+                    name: name, enabled: false, ids: &ids,
+                    kit: kit, handle: handle, now: now
+                ) { nil }
+            } catch {
+                Logging.stderr.log(
+                    "AriaResident failed to unregister managed signal \(name); will retry: \(error)")
+            }
         }
     }
 
@@ -776,17 +796,9 @@ public enum AriaResident {
                         TrainingSignal.signalName,
                         EndOfDayTournamentSignal.signalName,
                     ]
-                    for name in managedNames {
-                        do {
-                            try await reconcilePreferenceSignal(
-                                name: name, enabled: false, ids: &ids,
-                                kit: kit, handle: handle, now: now
-                            ) { nil }
-                        } catch {
-                            Logging.stderr.log(
-                                "AriaResident failed to unregister managed signal \(name); will retry: \(error)")
-                        }
-                    }
+                    await failClosedPreferenceSignals(
+                        names: managedNames, ids: &ids,
+                        kit: kit, handle: handle, now: now)
                 }
                 do { try await Task.sleep(nanoseconds: intervalNs) } catch { break }
             }
