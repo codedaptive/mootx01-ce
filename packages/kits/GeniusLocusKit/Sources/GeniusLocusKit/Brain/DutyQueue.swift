@@ -63,7 +63,7 @@ public struct DutyDrainReport: Sendable, Equatable {
     /// Jobs claimed and completed on the duty's stream.
     public let jobsRun: Int
     /// Units the batches paid: drawers encoded, subjects written, facts rows
-    /// written, facts filed, or 1 per completed retrain.
+    /// written, sources settled by extraction, or 1 per completed retrain.
     public let unitsPaid: Int
     /// Debt still owed after the drain (0 for the retrain).
     public let remainingDebt: Int
@@ -225,7 +225,7 @@ public extension GeniusLocusKit {
         case .factsBackfill:
             return try await backfillSSCFacts(handle: handle)
         case .factExtraction:
-            return try await runFactExtractionBatch(handle, limit: Self.dutyFactExtractionBatch, now: now).factsFiled
+            return try await runFactExtractionBatch(handle, limit: Self.dutyFactExtractionBatch, now: now).completedSources
         case .retrainBasis:
             try await reindexCorpus(handle: handle, now: now)
             return 1

@@ -185,7 +185,7 @@ fn fact_extraction_cycle_is_some_when_setting_is_on_and_extractor_provided() {
     );
 
     // 2. The returned closure must be callable and activate lazily.
-    //    Fresh estate has no drawers, so facts_filed = 0 — that is still Ok.
+    //    Fresh estate has no drawers, so no source settles — that is still Ok.
     let result = cycle.unwrap()();
     assert!(
         result.is_ok(),
@@ -231,7 +231,16 @@ fn fact_extraction_cycle_tracks_runtime_preference_without_restart() {
             )
             .expect("provision On");
     }
-    assert_eq!(cycle().expect("On runs after live preference change"), 0);
+    // The cycle pays in sources settled: every drawer the fresh estate owes
+    // settles against the stub's empty output, so the debt reads zero after.
+    let settled = cycle().expect("On runs after live preference change");
+    let remaining = coord
+        .lock()
+        .unwrap()
+        .duty_debt(&handle, genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction)
+        .expect("debt readable");
+    assert_eq!(remaining, 0);
+    assert!(settled >= 0);
     assert!(coord
         .lock()
         .unwrap()

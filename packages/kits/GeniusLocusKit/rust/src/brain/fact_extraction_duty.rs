@@ -140,10 +140,14 @@ impl EstateCoordinator {
                         extractor.spec(),
                     );
                     rejected += grounding.rejected.len();
-                    if !response.candidates.is_empty() && grounding.accepted.is_empty() {
-                        rejected_on_failure = rejected;
-                        return Err("all non-empty model candidates failed grounding".into());
-                    }
+                    rejected_on_failure = rejected;
+                    // Whatever the validator rejects is counted and the
+                    // source settles on what it accepted, which may be
+                    // nothing: the model's output for this content and
+                    // recipe is deterministic, so a source whose every
+                    // candidate failed grounding is a zero-fact source, not
+                    // debt to retry. Only extractor errors (worker or model
+                    // runtime failures) leave the source as debt.
                     grounded_candidates.extend(grounding.accepted);
                 }
                 let mut seen_candidates = HashSet::new();
@@ -262,7 +266,14 @@ impl EstateCoordinator {
                         result.facts_filed += filed;
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    // Fail-open: the debt bit stays clear and the next cycle
+                    // retries. The failure is logged so a source that never
+                    // settles is visible rather than only a debt that never falls.
+                    eprintln!(
+                        "fact extraction source {} failed (estate {:02x?}): {error}",
+                        drawer.id, handle.estate_uuid
+                    );
                     result.candidates_rejected += rejected_on_failure;
                     result.failed_sources += 1;
                 }
