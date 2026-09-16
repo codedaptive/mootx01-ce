@@ -6,8 +6,9 @@ import PersistenceKitInMemory
 import Testing
 @testable import AriaMCP
 
-/// Verifies that every v2 refusal site that refuses a closed-set enum value
-/// emits BOTH data.allowed and data.correction in the JSONRPCError payload,
+/// Verifies that selected v2 refusal sites that reject a closed-set value or
+/// retired argument emit BOTH data.allowed and data.correction in the
+/// JSONRPCError payload,
 /// and, for the six cases that carry expectedAllowed, that the allowed list
 /// is byte-identical to the Rust port's sorted emission.
 ///
@@ -95,6 +96,8 @@ struct AriaV2RefusalParityTests {
                                   "elaborates", "exemplifies", "extends", "precedes",
                                   "references", "refines", "relates", "responds_to",
                                   "supersedes", "supports", "validates"]),
+            // reviewed_by is retired from the public request. The strict
+            // decoder reports the live request keys rather than a reviewer enum.
             RefusalCase(
                 tool: "moot_review_tunnel",
                 arguments: [
@@ -103,7 +106,7 @@ struct AriaV2RefusalParityTests {
                     "reviewed_by": .string("model"),
                 ],
                 description: "moot_review_tunnel/reviewed_by",
-                expectedAllowed: ["user"]),
+                expectedAllowed: ["decision", "estate_id", "note", "tunnel_id"]),
             // Group C — had neither field before this fix (generic enumValue helpers).
             RefusalCase(
                 tool: "moot_file_memory",

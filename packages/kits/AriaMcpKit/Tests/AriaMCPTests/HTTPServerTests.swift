@@ -1236,16 +1236,22 @@ struct FirstPartyHTTPLaneTests {
             authenticatedRequest(port: port, session: session, sequence: sequence,
                 body: #"{"jsonrpc":"2.0","id":\#(sequence),"method":"tools/call","params":{"name":"\#(name)","first_party_provider":\#(stableProviderCompatibilityJSON()),"arguments":\#(arguments)}}"#)
         }
-        let responses = [
+        let initialResponses = [
             call(1, "moot_update_memory", #"{"id":"\#(updateTarget.id)","mutation":"set_subject","subject":"updated through native id"}"#),
             call(2, "moot_withdraw_memory", #"{"id":"\#(withdrawTarget.id)"}"#),
             call(3, "moot_erase_memory", #"{"id":"\#(eraseTarget.id)","confirmed":true}"#),
             call(4, "moot_confirm_memory", #"{"id":"\#(confirmTarget.id)"}"#),
             call(5, "moot_move_memory", #"{"id":"\#(moveTarget.id)","location":"new room"}"#),
-            call(6, "moot_review_tunnel", #"{"tunnel_id":"\#(tunnel.id)","verdict":"accept"}"#),
-            call(7, "moot_retire_fact", #"{"id":"\#(fact.id)"}"#),
         ]
-        for response in responses { #expect(response?.contains("\"isError\":false") == true) }
+        for response in initialResponses { #expect(response?.contains("\"isError\":false") == true) }
+        // The authenticated first-party provider is bound to a session identity,
+        // not the trusted local-user identity required for activation. It cannot
+        // promote a proposal, and the wire has no reviewed_by override.
+        let agentAccept = call(6, "moot_review_tunnel", #"{"tunnel_id":"\#(tunnel.id)","verdict":"accept"}"#)
+        #expect(agentAccept?.contains("\"isError\":true") == true)
+        #expect(agentAccept?.contains("Edge activation is user-only") == true)
+        let retireFact = call(7, "moot_retire_fact", #"{"id":"\#(fact.id)"}"#)
+        #expect(retireFact?.contains("\"isError\":false") == true)
 
         let persisted = try await kit.allDrawers(in: handle)
         #expect(persisted.first(where: { $0.id == updateTarget.id })?.subject == "updated through native id")
@@ -1258,7 +1264,7 @@ struct FirstPartyHTTPLaneTests {
         let placement = try #require(try await kit.resolveNodeNames(handle, parentNodeIds: [moved.parentNodeId])[moved.parentNodeId])
         #expect(placement.wing == "Retained Native Wing")
         #expect(placement.room == "new room")
-        #expect(try await kit.getTunnel(in: handle, id: tunnel.id)?.lifecycle == .active)
+        #expect(try await kit.getTunnel(in: handle, id: tunnel.id)?.lifecycle == .proposed)
         #expect(try await kit.recallKGFacts(handle).contains(where: { $0.id == fact.id }) == false)
     }
 
