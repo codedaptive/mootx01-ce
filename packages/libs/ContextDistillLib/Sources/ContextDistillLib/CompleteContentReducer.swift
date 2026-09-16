@@ -1,4 +1,13 @@
 import Foundation
+import MootProductIdentity
+
+public struct ReferenceExpansionError: Codable, Equatable, Sendable {
+    public let code: String
+    public let message: String
+    public let attemptedBytes: Int
+    public let maxBytes: Int
+    public let maxRatio: Int
+}
 
 /// Complete representation, not a semantic quality qualification. Original text remains authoritative.
 public struct CompleteContentResult: Sendable {
@@ -9,6 +18,7 @@ public struct CompleteContentResult: Sendable {
     public let visibleRefs: Bool
     public let originalTokens: Int
     public let outputTokens: Int
+    public let referenceExpansionError: ReferenceExpansionError?
     public let qualityQualified = false
     public let modelAssistance = false
 }
@@ -21,40 +31,61 @@ public enum CompleteContentReducer {
     public static let version = "complete-form-visible-v6"
 
     public static func distill(_ source: String, count: (String) -> Int = estimateTokens) throws -> CompleteContentResult {
+        let settings = MootProductIdentity.Settings.load()
+        let expansionLimits = CompleteText.ExpansionLimits(
+            maxBytes: settings.contextDistillReferenceExpansionMaxBytes,
+            maxRatio: settings.contextDistillReferenceExpansionMaxRatio)
         var text = source
         var exposed = false
+        var expansionError: ReferenceExpansionError?
         if source.hasPrefix(CompleteText.notice + CompleteText.refLegend) {
-            _ = try CompleteText.expandVisible(source)
-            exposed = true
+            let expanded = try CompleteText.expandVisible(source, limits: expansionLimits)
+            expansionError = expanded.error
+            exposed = expanded.error == nil
         } else if !source.hasPrefix(CompleteText.timestampIntro) {
             text = CompleteText.clocks(text, count: count)
             text = CompleteJSON.tables(text, count: count)
             if !CompleteText.lines(source).contains(CompleteJSON.legend) {
-                text = try CompleteText.references(text, count: count)
+                let referenced = try CompleteText.references(text, count: count, limits: expansionLimits)
+                text = referenced.text
+                expansionError = referenced.error
             }
             text = CompleteJSON.blocks(text, count: count)
             text = CompleteJSON.declarations(text, count: count)
             text = CompleteText.timestamps(text, count: count)
             if text.hasPrefix(CompleteText.refLegend) {
-                let intermediate = try CompleteText.expandRefs(text)
-                let candidate = try CompleteText.visible(intermediate, count: count)
-                if candidate != intermediate && count(candidate) < count(source) {
-                    guard try CompleteText.expandVisible(candidate) == intermediate else {
-                        throw CompleteContentError.invalidRepresentation("Visible-reference reconstruction failed")
+                let expanded = try CompleteText.expandRefs(text, limits: expansionLimits)
+                if let error = expanded.error {
+                    text = source
+                    expansionError = error
+                } else {
+                    let intermediate = expanded.text
+                    let rendered = try CompleteText.visible(intermediate, count: count, limits: expansionLimits)
+                    if let error = rendered.error {
+                        text = source
+                        expansionError = error
+                    } else if rendered.text != intermediate && count(rendered.text) < count(source) {
+                        let candidate = rendered.text
+                        guard try CompleteText.expandVisible(candidate, limits: expansionLimits).text == intermediate else {
+                            throw CompleteContentError.invalidRepresentation("Visible-reference reconstruction failed")
+                        }
+                        text = candidate
+                        exposed = true
                     }
-                    text = candidate
-                    exposed = true
                 }
             }
         }
         return CompleteContentResult(version: version, text: text,
             sourceSHA256: sourceDigest(source), representationSHA256: sourceDigest(text),
-            visibleRefs: exposed, originalTokens: count(source), outputTokens: count(text))
+            visibleRefs: exposed, originalTokens: count(source), outputTokens: count(text),
+            referenceExpansionError: expansionError)
     }
 }
 
 /// Python splitlines/regex helpers used only by the complete representation grammar.
 enum CompleteText {
+    struct ExpansionLimits { let maxBytes: Int; let maxRatio: Int }
+    struct ExpansionResult { let text: String; let error: ReferenceExpansionError? }
     static let refLegend = "Repeated-text notation: [[TSREF:n DEFINE]] introduces one exact line; [[TSREF:n REPEAT]] repeats that complete line at its current position.\n"
     static let notice = "Linked repeats show their original numeric link prefix before the reference; the reference still denotes the whole original entry.\n"
     static let timestampIntro = "Timestamp prefixes: [Tn HH:MM] means template Tn below with HH:MM substituted. Templates are JSON strings; decode escapes. No timezone is implied.\n"
@@ -136,8 +167,8 @@ enum CompleteText {
         while carry > 0 { digits.append(UInt8(carry % 10) + 48); carry /= 10 }
         return String(decoding: digits.reversed(), as: UTF8.self)
     }
-    static func references(_ source: String, count: (String) -> Int) throws -> String {
-        guard !source.contains("[[TSREF:") else { return source }
+    static func references(_ source: String, count: (String) -> Int, limits: ExpansionLimits) throws -> ExpansionResult {
+        guard !source.contains("[[TSREF:") else { return ExpansionResult(text: source, error: nil) }
         let input = lines(source); var state: String?; var eligible: [[UInt8]: [Int]] = [:]; var order: [String] = []
         for (i, line) in input.enumerated() {
             if fence(line, state: &state) { continue }
@@ -158,27 +189,43 @@ enum CompleteText {
             for i in indexes.dropFirst() { output[i] = repeated }
         }
         let candidate = refLegend + output.joined()
-        guard n > 0, count(candidate) < count(source) else { return source }
-        guard try expandRefs(candidate) == source else { throw CompleteContentError.invalidRepresentation("Repeated-text reconstruction failed") }
-        return candidate
+        guard n > 0, count(candidate) < count(source) else { return ExpansionResult(text: source, error: nil) }
+        let expanded = try expandRefs(candidate, limits: limits)
+        if let error = expanded.error { return ExpansionResult(text: source, error: error) }
+        guard expanded.text == source else { throw CompleteContentError.invalidRepresentation("Repeated-text reconstruction failed") }
+        return ExpansionResult(text: candidate, error: nil)
     }
-    static func expandRefs(_ text: String) throws -> String {
-        guard text.hasPrefix(refLegend) else { return text }
-        var definitions: [String: String] = [:]; var output = ""
+    static func expandRefs(_ text: String, limits: ExpansionLimits, ratioBaseBytes: Int? = nil) throws -> ExpansionResult {
+        guard text.hasPrefix(refLegend) else { return ExpansionResult(text: text, error: nil) }
+        var definitions: [String: String] = [:]; var output = ""; var outputBytes = 0
+        let ratioLimit = (ratioBaseBytes ?? text.utf8.count).multipliedReportingOverflow(by: limits.maxRatio)
         for line in lines(String(text.dropFirst(refLegend.count))) {
+            let value: String
             if let m = match(#"^\[\[TSREF:(\d+) DEFINE\]\] "#, line) {
                 guard definitions[m[1]] == nil else { throw CompleteContentError.invalidRepresentation("Duplicate definition") }
-                let value = String(line[m.end...]); definitions[m[1]] = value; output += value
+                value = String(line[m.end...]); definitions[m[1]] = value
             } else if let m = match(#"^\[\[TSREF:(\d+) REPEAT\]\]\n\z"#, line) {
-                guard let value = definitions[m[1]] else { throw CompleteContentError.invalidRepresentation("Forward or unknown reference") }
-                output += value
-            } else { output += line }
+                guard let defined = definitions[m[1]] else { throw CompleteContentError.invalidRepresentation("Forward or unknown reference") }
+                value = defined
+            } else { value = line }
+            let attempted = outputBytes.addingReportingOverflow(value.utf8.count)
+            let exceedsRatio = ratioLimit.overflow ? false : attempted.partialValue > ratioLimit.partialValue
+            if attempted.overflow || attempted.partialValue > limits.maxBytes || exceedsRatio {
+                return ExpansionResult(text: text, error: ReferenceExpansionError(
+                    code: "reference_expansion_limit_exceeded",
+                    message: "Reference expansion limit exceeded",
+                    attemptedBytes: attempted.overflow ? Int.max : attempted.partialValue,
+                    maxBytes: limits.maxBytes,
+                    maxRatio: limits.maxRatio))
+            }
+            output += value
+            outputBytes = attempted.partialValue
         }
-        return output
+        return ExpansionResult(text: output, error: nil)
     }
     static let visibleDefine = #"^\[\[TSREF:(\d+) DEFINE\]\] - \[\[([0-9]+)-[^\]\n]+\]\]"#
-    static func expandVisible(_ text: String) throws -> String {
-        guard text.hasPrefix(notice + refLegend) else { return text }
+    static func expandVisible(_ text: String, limits: ExpansionLimits) throws -> ExpansionResult {
+        guard text.hasPrefix(notice + refLegend) else { return ExpansionResult(text: text, error: nil) }
         var definitions: [String: String] = [:]; var output = ""
         for line in lines(String(text.dropFirst((notice + refLegend).count))) {
             if let m = match(visibleDefine, line) { definitions[m[1]] = m[2] }
@@ -187,14 +234,16 @@ enum CompleteText {
                 output += m[2]
             } else { output += line }
         }
-        return try expandRefs(refLegend + output)
+        let expanded = try expandRefs(refLegend + output, limits: limits, ratioBaseBytes: text.utf8.count)
+        return expanded.error == nil ? expanded : ExpansionResult(text: text, error: expanded.error)
     }
-    static func visible(_ source: String, count: (String) -> Int) throws -> String {
-        guard !source.contains(notice) else { return source }
-        let prior = try references(source, count: count)
-        guard prior != source else { return source }
+    static func visible(_ source: String, count: (String) -> Int, limits: ExpansionLimits) throws -> ExpansionResult {
+        guard !source.contains(notice) else { return ExpansionResult(text: source, error: nil) }
+        let prior = try references(source, count: count, limits: limits)
+        if prior.error != nil { return prior }
+        guard prior.text != source else { return ExpansionResult(text: source, error: nil) }
         var definitions: [String: String] = [:]; var output = ""; var cues = 0
-        for var line in lines(String(prior.dropFirst(refLegend.count))) {
+        for var line in lines(String(prior.text.dropFirst(refLegend.count))) {
             if let m = match(visibleDefine, line) { definitions[m[1]] = m[2] }
             if let m = match(#"^\[\[TSREF:(\d+) REPEAT\]\]\n\z"#, line), let identifier = definitions[m[1]] {
                 line = "entry \(identifier): " + line; cues += 1
@@ -202,9 +251,9 @@ enum CompleteText {
             output += line
         }
         let candidate = notice + refLegend + output
-        guard cues > 0, count(candidate) < count(source) else { return source }
-        guard try expandVisible(candidate) == source else { throw CompleteContentError.invalidRepresentation("Reconstruction mismatch") }
-        return candidate
+        guard cues > 0, count(candidate) < count(source) else { return ExpansionResult(text: source, error: nil) }
+        guard try expandVisible(candidate, limits: limits).text == source else { throw CompleteContentError.invalidRepresentation("Reconstruction mismatch") }
+        return ExpansionResult(text: candidate, error: nil)
     }
     static func mapUnfenced(_ source: String, replace: (String) -> String) -> String {
         var state: String?
