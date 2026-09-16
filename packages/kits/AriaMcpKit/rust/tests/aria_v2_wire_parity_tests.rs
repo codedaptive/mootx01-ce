@@ -942,7 +942,8 @@ fn proposed_link_envelope_carries_lifecycle_proposed() {
 /// Entry point: Dispatcher::handle → surface::decode → execute_memory_mutation.
 #[test]
 fn review_tunnel_accept_flips_proposed_to_active() {
-    let registry = EstateRegistry::new_inmemory();
+    let mut registry = EstateRegistry::new_inmemory();
+    registry.server_identity = "user".to_owned();
     let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
 
     let from = file_api(&dispatcher, "accept-test source", None);
@@ -1003,7 +1004,8 @@ fn review_tunnel_accept_flips_proposed_to_active() {
 /// Entry point: Dispatcher::handle → surface::decode → execute_memory_mutation.
 #[test]
 fn review_tunnel_reject_withdraws_proposed_tunnel() {
-    let registry = EstateRegistry::new_inmemory();
+    let mut registry = EstateRegistry::new_inmemory();
+    registry.server_identity = "user".to_owned();
     let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
 
     let from = file_api(&dispatcher, "reject-test source", None);
@@ -1057,7 +1059,7 @@ fn review_tunnel_reject_withdraws_proposed_tunnel() {
     assert_eq!(after_count, 0, "withdrawn tunnel must be invisible after reject; got {after_count}");
 }
 
-/// Gate: moot_review_tunnel reject with reviewed_by != "user" routes to the
+/// Gate: moot_review_tunnel reject from a trusted non-user context routes to the
 /// model-objection branch (object_to_tunnel), not the user-verdict branch
 /// (respond_to_tunnel).
 ///
@@ -1075,14 +1077,18 @@ fn review_tunnel_reject_withdraws_proposed_tunnel() {
 /// AriaV2ProposedTunnelParityTests.swift. Change both or neither.
 #[test]
 fn review_tunnel_model_reject_routes_to_object_to_tunnel() {
-    let registry = EstateRegistry::new_inmemory();
-    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let mut model_1_registry = EstateRegistry::new_inmemory();
+    model_1_registry.server_identity = "model-1".to_owned();
+    let mut model_2_registry = model_1_registry.clone();
+    model_2_registry.server_identity = "model-2".to_owned();
+    let model_1 = Dispatcher::new(model_1_registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+    let model_2 = Dispatcher::new(model_2_registry, "ARIA_MCP_Rust", "test", "test-serial", None);
 
-    let from = file_api(&dispatcher, "model-reject source", None);
-    let to   = file_api(&dispatcher, "model-reject target", None);
+    let from = file_api(&model_1, "model-reject source", None);
+    let to   = file_api(&model_1, "model-reject target", None);
 
     // File proposed link.
-    let link_result = call(&dispatcher, "moot_link_memories", json!({
+    let link_result = call(&model_1, "moot_link_memories", json!({
         "from_id": from, "to_id": to, "relationship": "relates", "proposed": true,
     }));
     assert!(is_success(&link_result), "proposed link must succeed: {link_result}");
@@ -1093,14 +1099,14 @@ fn review_tunnel_model_reject_routes_to_object_to_tunnel() {
 
     // model-1 endorses. This creates a standing endorsement that object_to_tunnel
     // will preserve when model-2 objects.
-    let endorse = call(&dispatcher, "moot_review_tunnel", json!({
-        "tunnel_id": tunnel_id, "decision": "endorse", "reviewed_by": "model-1",
+    let endorse = call(&model_1, "moot_review_tunnel", json!({
+        "tunnel_id": tunnel_id, "decision": "endorse",
     }));
     assert!(is_success(&endorse), "model-1 endorse must succeed: {endorse}");
 
-    // model-2 objects (reject with reviewed_by != "user") → model-objection branch.
-    let reject = call(&dispatcher, "moot_review_tunnel", json!({
-        "tunnel_id": tunnel_id, "decision": "reject", "reviewed_by": "model-2",
+    // The authenticated model context objects → model-objection branch.
+    let reject = call(&model_2, "moot_review_tunnel", json!({
+        "tunnel_id": tunnel_id, "decision": "reject",
     }));
     assert!(is_success(&reject), "model reject must succeed: {reject}");
 
