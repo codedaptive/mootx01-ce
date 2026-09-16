@@ -530,6 +530,9 @@ impl<A: V2MemoryMutationAuthority, L: V2MemoryMutationLower> V2MemoryMutationSer
     }
     pub fn review(&self, request: V2ReviewTunnelRequest) -> Result<V2MemoryMutationResult, V2MemoryMutationError> {
         let admitted = self.admit(V2MemoryMutationOperation::ReviewTunnel, request.estate_id)?;
+        if matches!(request.decision, V2TunnelDecision::Accept) && admitted.caller_binding != USER_REVIEWER {
+            return Err(V2MemoryMutationError::Unavailable);
+        }
         let tunnel_review = self.lower.review(&admitted, request.tunnel_id, request.decision, request.note.as_deref(), &admitted.caller_binding).map_err(|_| V2MemoryMutationError::Unavailable)?;
         let outcome = match request.decision {
             V2TunnelDecision::Accept => V2MemoryMutationOutcome::TunnelAccepted,
