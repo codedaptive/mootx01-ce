@@ -1607,6 +1607,11 @@ impl Estate {
         self.store.set_facts_extracted_if_content_matches(drawer_id, expected_content)
     }
 
+    pub fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.store.publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
+    }
+
     /// The distilled-fact duty's active, non-empty work items, ordered by
     /// drawer id and paged by `after_drawer_id`.
     pub fn fact_extraction_debt_batch(

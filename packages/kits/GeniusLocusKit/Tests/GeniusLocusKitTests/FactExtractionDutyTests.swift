@@ -63,9 +63,8 @@ struct FactExtractionDutyTests {
         _ = try await kit.activateFactExtractor(
             extractor, recipeID: "nuextract-b1-q8-v1", for: handle)
         let report = try await kit.runFactExtractionBatch(handle, now: now)
-        #expect(report == FactExtractionBatchResult(
-            completedSources: 1, factsFiled: 1, candidatesRejected: 0,
-            skippedSources: 0, failedSources: 0))
+        #expect(report.completedSources == 1 && report.factsFiled == 1)
+        #expect(report.candidatesRejected == 0 && report.failedSources == 0)
 
         let estate = try await kit.estate(for: handle)
         let fact = try #require(try await estate.allKGFacts().first)
@@ -85,7 +84,7 @@ struct FactExtractionDutyTests {
         #expect(replay.completedSources == 0 && replay.factsFiled == 0)
     }
 
-    @Test("empty model result and wholly ungrounded output both settle")
+    @Test("valid empty settles; unusable output retries once then remains rejected")
     func zeroAndUngroundedOutcomes() async throws {
         let (zeroKit, zeroHandle) = try await openEstate(owner: "fact-zero")
         let zeroDrawer = try await capture(zeroKit, zeroHandle, content: "A friendly hello.")
@@ -119,15 +118,17 @@ struct FactExtractionDutyTests {
         }
         _ = try await badKit.activateFactExtractor(
             bad, recipeID: "apple-system-v1", for: badHandle)
-        // Wholly ungrounded output is the model's deterministic answer for
-        // this content: the source settles with zero facts and the rejection
-        // is counted; it is not debt to retry.
         let rejected = try await badKit.runFactExtractionBatch(badHandle, now: now)
-        #expect(rejected.completedSources == 1 && rejected.failedSources == 0
+        #expect(rejected.completedSources == 0 && rejected.failedSources == 1
                     && rejected.factsFiled == 0 && rejected.candidatesRejected == 1)
         let badEstate = try await badKit.estate(for: badHandle)
-        #expect(try await badEstate.getDrawers(ids: [badDrawer.id]).first?.areFactsExtracted == true)
-        #expect(try await badEstate.allKGFacts().isEmpty)
+        #expect(try await badEstate.getDrawers(ids: [badDrawer.id]).first?.areFactsExtracted == false)
+        #expect(try await badKit.factExtractionWorkStatus(badHandle, now: now).retrying == 1)
+        #expect(try await badKit.runFactExtractionBatch(badHandle, now: now).failedSources == 0)
+        let later = now.addingTimeInterval(31)
+        #expect(try await badKit.runFactExtractionBatch(badHandle, now: later).rejectedSources == 1)
+        #expect(try await badKit.factExtractionWorkStatus(badHandle, now: later).rejected == 1)
+        #expect(try await badKit.payDutyUntilSettled(.factExtraction, in: badHandle, now: later) == 0)
         #expect(try await badEstate.allKGFacts().isEmpty)
     }
 
@@ -188,13 +189,25 @@ struct FactExtractionDutyTests {
         let history = try await estate.allKGFactsIncludingRetired()
         #expect(history.count == 3)
         #expect(history.contains(where: { $0.id == oldMachineID }))
+
+        // A later valid empty result must not retract either grounded or manual facts.
+        let empty = ClosureFactExtractor(spec: replacementModel) { request in
+            FactExtractionResponse(sourceDigest: request.sourceDigest,
+                providerID: replacementModel.providerID, modelID: replacementModel.modelID,
+                modelVersion: replacementModel.modelVersion, schemaVersion: replacementModel.schemaVersion,
+                candidates: [])
+        }
+        _ = try await kit.activateFactExtractor(empty, recipeID: "empty-generation", for: handle)
+        #expect(try await kit.runFactExtractionBatch(handle, now: now).completedSources == 1)
+        #expect(Set(try await estate.allKGFacts().map(\.id)) == Set(active.map(\.id)))
     }
 
     @Test("source-exact chunking reaches a fact beyond the first model window")
     func extractsTailFactFromOriginalBody() async throws {
         let (kit, handle) = try await openEstate(owner: "fact-original-body")
         let factText = "Jack's birthday is June 20th."
-        let source = String(repeating: "Background material. ", count: 40) + factText
+        let prefix = String(repeating: "é😀 Background material. ", count: 40)
+        let source = prefix + factText
         let drawer = try await capture(kit, handle, content: source)
         let model = FactExtractorModelSpec(
             providerID: "test-provider", modelID: "nuextract-test",
@@ -215,10 +228,41 @@ struct FactExtractionDutyTests {
             extractor, recipeID: "nuextract-original-body-v1", for: handle)
 
         let report = try await kit.runFactExtractionBatch(handle, now: now)
-        #expect(report.completedSources == 1)
-        #expect(report.factsFiled == 1)
+        #expect(report.completedSources == 0 && report.factsFiled == 0 && report.chunksProcessed == 1)
+        #expect(try await kit.estate(for: handle).getDrawers(ids: [drawer.id]).first?.areFactsExtracted == false)
+        #expect(try await kit.payDutyUntilSettled(.factExtraction, in: handle, now: now) == 1)
         let fact = try #require(try await kit.estate(for: handle).allKGFacts().first)
         #expect(fact.sourceDrawerID == drawer.id)
         #expect(fact.evidenceQuote == factText)
+        #expect(fact.evidenceStart == prefix.unicodeScalars.count)
+        #expect(fact.evidenceStartUTF8Byte == prefix.utf8.count)
+    }
+
+    @Test("stale recipe cannot publish; blocked head does not starve later sources")
+    func staleRecipeAndFairCursor() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-fencing")
+        let a = try await capture(kit, handle, content: "Jack's birthday is June 20th.")
+        let b = try await capture(kit, handle, content: "Bob's birthday is July 4th.")
+        let firstID = [a.id, b.id].sorted()[0]
+        let model = spec()
+        let empty = ClosureFactExtractor(spec: model) { request in
+            FactExtractionResponse(sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion, candidates: [])
+        }
+        _ = try await kit.activateFactExtractor(empty, recipeID: "old", for: handle)
+        let stale = try #require(try await kit.prepareFactExtractionBatch(handle, limit: 2, now: now))
+        let blocked = ClosureFactExtractor(spec: model) { request in
+            if request.sourceID == firstID { throw FactExtractionError.unavailable("model unavailable") }
+            return try await empty.extract(request)
+        }
+        _ = try await kit.activateFactExtractor(blocked, recipeID: "new", for: handle)
+        #expect(try await stale.run().completedSources == 0)
+        let estate = try await kit.estate(for: handle)
+        #expect(try await estate.countFactExtractionDebt() == 2)
+        #expect(try await kit.runFactExtractionBatch(handle, limit: 1, now: now).failedSources == 1)
+        #expect(try await kit.runFactExtractionBatch(handle, limit: 1, now: now).completedSources == 1)
+        let status = try await kit.factExtractionWorkStatus(handle, now: now)
+        #expect(status.blocked == 1 && status.runnable == 0 && status.completedEmpty == 1)
     }
 }

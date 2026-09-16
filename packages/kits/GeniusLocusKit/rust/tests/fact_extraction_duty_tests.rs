@@ -189,10 +189,7 @@ fn empty_response_is_a_valid_zero_fact_completion() {
 }
 
 #[test]
-fn wholly_ungrounded_output_settles_with_zero_facts() {
-    // Wholly ungrounded output is the model's deterministic answer for this
-    // content: the source settles with zero facts and the rejection is
-    // counted; it is not debt to retry.
+fn wholly_ungrounded_output_retries_then_remains_rejected() {
     let (mut coordinator, handle, store) = open();
     let drawer_id = capture(&coordinator, &handle, SOURCE);
     coordinator
@@ -209,15 +206,21 @@ fn wholly_ungrounded_output_settles_with_zero_facts() {
     let result = coordinator
         .run_fact_extraction_batch(&handle, 16, NOW)
         .unwrap();
-    assert_eq!(result.completed_sources, 1);
-    assert_eq!(result.failed_sources, 0);
+    assert_eq!(result.completed_sources, 0);
+    assert_eq!(result.failed_sources, 1);
     assert_eq!(result.facts_filed, 0);
     assert_eq!(result.candidates_rejected, 1);
-    assert!(store
+    assert!(!store
         .get_drawer(&drawer_id)
         .unwrap()
         .unwrap()
         .are_facts_extracted());
+    assert_eq!(coordinator.fact_extraction_work_status(&handle, NOW).unwrap().retrying, 1);
+    assert_eq!(coordinator.run_fact_extraction_batch(&handle, 16, NOW).unwrap().failed_sources, 0);
+    assert_eq!(coordinator.run_fact_extraction_batch(&handle, 16, NOW + 31_000).unwrap().rejected_sources, 1);
+    assert_eq!(coordinator.fact_extraction_work_status(&handle, NOW + 31_000).unwrap().rejected, 1);
+    assert_eq!(coordinator.pay_duty_until_settled(&handle,
+        genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, NOW + 31_000).unwrap(), 0);
     assert!(store.all_kg_facts().unwrap().is_empty());
 }
 
@@ -288,12 +291,23 @@ fn recipe_replacement_retires_machine_fact_but_preserves_manual_fact() {
     let history = store.all_kg_facts_including_retired().unwrap();
     assert_eq!(history.len(), 3);
     assert!(history.iter().any(|fact| fact.id == old_machine_id));
+
+    coordinator.activate_fact_extractor(Arc::new(FakeExtractor {
+        spec: spec(), empty: true, grounded: true,
+    }), "empty-generation", &handle).unwrap();
+    assert_eq!(coordinator.run_fact_extraction_batch(&handle, 16, NOW).unwrap().completed_sources, 1);
+    let mut before: Vec<_> = active.iter().map(|fact| &fact.id).collect();
+    let after = store.all_kg_facts().unwrap();
+    let mut after: Vec<_> = after.iter().map(|fact| &fact.id).collect();
+    before.sort(); after.sort();
+    assert_eq!(before, after);
 }
 
 #[test]
 fn source_exact_chunking_reaches_a_fact_beyond_the_first_model_window() {
     let (mut coordinator, handle, store) = open();
-    let source = format!("{}{}", "Background material. ".repeat(40), SOURCE);
+    let prefix = "é😀 Background material. ".repeat(40);
+    let source = format!("{prefix}{SOURCE}");
     let drawer_id = capture(&coordinator, &handle, &source);
     let mut bounded_spec = spec();
     bounded_spec.maximum_input_characters = 700;
@@ -312,9 +326,45 @@ fn source_exact_chunking_reaches_a_fact_beyond_the_first_model_window() {
     let report = coordinator
         .run_fact_extraction_batch(&handle, 16, NOW)
         .unwrap();
-    assert_eq!(report.completed_sources, 1);
-    assert_eq!(report.facts_filed, 1);
+    assert_eq!(report.completed_sources, 0);
+    assert_eq!(report.facts_filed, 0);
+    assert_eq!(report.chunks_processed, 1);
+    assert!(!store.get_drawer(&drawer_id).unwrap().unwrap().are_facts_extracted());
+    assert_eq!(coordinator.pay_duty_until_settled(&handle,
+        genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, NOW).unwrap(), 1);
     let fact = &store.all_kg_facts().unwrap()[0];
     assert_eq!(fact.source_drawer_id, drawer_id);
     assert_eq!(fact.evidence_quote, SOURCE);
+    assert_eq!(fact.evidence_start, prefix.chars().count() as i64);
+    assert_eq!(fact.evidence_start_utf8_byte, prefix.len() as i64);
+}
+
+struct SelectivelyBlocked { inner: FakeExtractor, blocked_id: String }
+impl FactExtractor for SelectivelyBlocked {
+    fn spec(&self) -> &FactExtractorModelSpec { &self.inner.spec }
+    fn extract(&self, request: &FactExtractionRequest) -> Result<FactExtractionResponse, FactExtractionError> {
+        if request.source_id == self.blocked_id { return Err(FactExtractionError::Unavailable("model unavailable".into())); }
+        self.inner.extract(request)
+    }
+}
+
+#[test]
+fn stale_recipe_cannot_publish_and_blocked_head_does_not_starve_later_sources() {
+    let (mut coordinator, handle, store) = open();
+    let mut ids = vec![capture(&coordinator, &handle, SOURCE),
+        capture(&coordinator, &handle, "Bob's birthday is July 4th.")];
+    ids.sort();
+    coordinator.activate_fact_extractor(Arc::new(FakeExtractor {
+        spec: spec(), empty: true, grounded: true,
+    }), "old", &handle).unwrap();
+    let stale = coordinator.prepare_fact_extraction_batch(&handle, 2, NOW).unwrap().unwrap();
+    coordinator.activate_fact_extractor(Arc::new(SelectivelyBlocked {
+        inner: FakeExtractor { spec: spec(), empty: true, grounded: true }, blocked_id: ids[0].clone(),
+    }), "new", &handle).unwrap();
+    assert_eq!(stale.run().unwrap().completed_sources, 0);
+    assert_eq!(store.count_fact_extraction_debt().unwrap(), 2);
+    assert_eq!(coordinator.run_fact_extraction_batch(&handle, 1, NOW).unwrap().failed_sources, 1);
+    assert_eq!(coordinator.run_fact_extraction_batch(&handle, 1, NOW).unwrap().completed_sources, 1);
+    let status = coordinator.fact_extraction_work_status(&handle, NOW).unwrap();
+    assert_eq!((status.blocked, status.runnable, status.completed_empty), (1, 0, 1));
 }

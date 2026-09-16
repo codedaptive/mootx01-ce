@@ -36,6 +36,23 @@ struct PersistenceKitBackendTests {
         return PersistenceKitBackend(storage: storage)
     }
 
+    @Test func checkpointCASIsRetainedAndNotRunnable() async throws {
+        let backend = try await makeBackend()
+        let queue = QueueKit(backend: backend)
+        let store = try QueueCheckpointStore(queue: queue)
+        let id = JobID.generate(), stream = StreamID(rawValue: "checkpoints")
+        let stamp = HLC(physicalTime: 1, logicalCount: 0, nodeID: 1)
+        let first = Data("first".utf8), second = Data("second".utf8)
+        #expect(try await store.compareAndSwap(id: id, stream: stream, expected: nil, payload: first, stamp: stamp))
+        #expect(!(try await store.compareAndSwap(id: id, stream: stream, expected: nil, payload: second, stamp: stamp)))
+        #expect(try await store.compareAndSwap(id: id, stream: stream, expected: first, payload: second, stamp: stamp))
+        #expect(!(try await store.compareAndSwap(id: id, stream: stream, expected: first, payload: first, stamp: stamp)))
+        #expect(try await backend.drainAvailable().isEmpty)
+        #expect(try await backend.completed(streamID: nil).isEmpty)
+        let reopened = try QueueCheckpointStore(queue: QueueKit(backend: backend))
+        #expect(try await reopened.read(id: id, stream: stream) == second)
+    }
+
     @Test func writeThenDrain() async throws {
         let backend = try await makeBackend()
         let job = Job(

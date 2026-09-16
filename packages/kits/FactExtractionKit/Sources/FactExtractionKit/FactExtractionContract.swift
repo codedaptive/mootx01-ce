@@ -249,6 +249,9 @@ public enum FactExtractionError: Error, Sendable, Equatable {
     case invalidRequest(String)
     case inferenceFailed(String)
     case malformedResponse(String)
+    /// Context overflow or output exhaustion: retry a smaller source-exact slice.
+    case needsSubdivision(String)
+    case timedOut(String)
 }
 
 /// Provider-neutral extraction seam. Implementations include Apple's

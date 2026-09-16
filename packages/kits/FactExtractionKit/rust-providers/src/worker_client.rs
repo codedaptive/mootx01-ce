@@ -1,7 +1,9 @@
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::mpsc::{self, Sender, Receiver};
+use std::time::Duration;
 
 use fact_extraction_kit::{
     FactExtractionError, FactExtractionRequest, FactExtractionResponse, FactExtractor,
@@ -103,14 +105,17 @@ impl NuExtractWorkerConfig {
 
 struct WorkerProcess {
     child: Child,
-    stdin: ChildStdin,
-    stdout: ChildStdout,
+    requests: Option<Sender<WorkerRequest>>,
+    responses: Receiver<Result<WorkerResponse, String>>,
+    io_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WorkerProcess {
     fn stop(&mut self) {
+        self.requests.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(thread) = self.io_thread.take() { let _ = thread.join(); }
     }
 }
 
@@ -128,10 +133,18 @@ pub struct NuExtractWorkerClient {
     spec: FactExtractorModelSpec,
     process: Mutex<Option<WorkerProcess>>,
     next_request_id: AtomicU64,
+    request_timeout: Duration,
 }
 
 impl NuExtractWorkerClient {
     pub fn new(config: NuExtractWorkerConfig) -> Result<Self, FactExtractionError> {
+        Self::with_request_timeout(config, Duration::from_secs(60))
+    }
+
+    pub fn with_request_timeout(config: NuExtractWorkerConfig, request_timeout: Duration) -> Result<Self, FactExtractionError> {
+        if request_timeout.is_zero() {
+            return Err(FactExtractionError::InvalidRequest("request timeout must be positive".into()));
+        }
         config.validate()?;
         let spec = FactExtractorModelSpec {
             provider_id: "nuextract-candle-worker".into(),
@@ -147,6 +160,7 @@ impl NuExtractWorkerClient {
             spec,
             process: Mutex::new(None),
             next_request_id: AtomicU64::new(1),
+            request_timeout,
         })
     }
 
@@ -177,17 +191,23 @@ impl NuExtractWorkerClient {
         let mut child = command.spawn().map_err(|error| {
             FactExtractionError::Unavailable(format!("start NuExtract worker: {error}"))
         })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
             FactExtractionError::Unavailable("NuExtract worker stdin was not piped".into())
         })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
+        let mut stdout = child.stdout.take().ok_or_else(|| {
             FactExtractionError::Unavailable("NuExtract worker stdout was not piped".into())
         })?;
-        Ok(WorkerProcess {
-            child,
-            stdin,
-            stdout,
-        })
+        let (requests, receive_request) = mpsc::channel::<WorkerRequest>();
+        let (send_response, responses) = mpsc::channel();
+        let io_thread = std::thread::spawn(move || {
+            while let Ok(request) = receive_request.recv() {
+                let response = write_frame(&mut stdin, &request)
+                    .and_then(|_| read_frame::<WorkerResponse>(&mut stdout));
+                let failed = response.is_err();
+                if send_response.send(response).is_err() || failed { break; }
+            }
+        });
+        Ok(WorkerProcess { child, requests: Some(requests), responses, io_thread: Some(io_thread) })
     }
 
     fn exchange(
@@ -195,9 +215,13 @@ impl NuExtractWorkerClient {
         process: &mut WorkerProcess,
         request: &WorkerRequest,
     ) -> Result<FactExtractionResponse, FactExtractionError> {
-        write_frame(&mut process.stdin, request).map_err(FactExtractionError::InferenceFailed)?;
-        let response: WorkerResponse =
-            read_frame(&mut process.stdout).map_err(FactExtractionError::InferenceFailed)?;
+        process.requests.as_ref().ok_or_else(|| FactExtractionError::InferenceFailed("worker stopped".into()))?
+            .send(request.clone()).map_err(|error| FactExtractionError::InferenceFailed(error.to_string()))?;
+        let response = match process.responses.recv_timeout(self.request_timeout) {
+            Ok(result) => result.map_err(FactExtractionError::InferenceFailed)?,
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(FactExtractionError::TimedOut("worker request deadline exceeded".into())),
+            Err(error) => return Err(FactExtractionError::InferenceFailed(error.to_string())),
+        };
         if response.protocol_version != PROTOCOL_VERSION
             || response.request_id != request.request_id
         {
@@ -207,7 +231,7 @@ impl NuExtractWorkerClient {
         }
         match (response.result, response.error) {
             (Some(result), None) => Ok(result),
-            (None, Some(error)) => Err(FactExtractionError::InferenceFailed(error)),
+            (None, Some(error)) => Err(FactExtractionError::from_wire(response.error_code.as_deref(), error)),
             _ => Err(FactExtractionError::MalformedResponse(
                 "NuExtract worker returned an invalid result/error envelope".into(),
             )),
@@ -246,7 +270,7 @@ impl FactExtractor for NuExtractWorkerClient {
         let result = self.exchange(slot.as_mut().expect("worker was installed"), &request);
         let should_discard = match &result {
             Ok(_) => false,
-            Err(FactExtractionError::MalformedResponse(_)) => true,
+            Err(FactExtractionError::MalformedResponse(_) | FactExtractionError::TimedOut(_)) => true,
             Err(_) => slot
                 .as_mut()
                 .and_then(|process| process.child.try_wait().ok())
@@ -265,6 +289,28 @@ impl FactExtractor for NuExtractWorkerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unresponsive_worker_times_out_and_is_reaped() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("fact-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join("worker.sh");
+        std::fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let asset = root.join("asset"); std::fs::write(&asset, "{}").unwrap();
+        let config = NuExtractWorkerConfig::tiny_v1_5(&executable, &asset, &asset, "test");
+        let client = NuExtractWorkerClient::with_request_timeout(config, Duration::from_millis(100)).unwrap();
+        let started = std::time::Instant::now();
+        let result = client.extract(&FactExtractionRequest { source_id: "source".into(),
+            source_digest: "digest".into(), source_text: "hello".into(),
+            eligible_source_spans: vec![], maximum_facts: 4 });
+        assert!(matches!(result, Err(FactExtractionError::TimedOut(_))));
+        assert!(client.process.lock().unwrap().is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn missing_assets_fail_before_a_process_can_start() {
