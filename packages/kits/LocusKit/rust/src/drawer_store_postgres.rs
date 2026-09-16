@@ -432,14 +432,6 @@ impl DrawerStore for PostgresDrawerStore {
     ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.0.subject_debt_batch_including(limit, pipelines)
     }
-    fn subject_debt_batch_including_from(
-        &self,
-        limit: usize,
-        pipelines: &[String],
-        offset: usize,
-    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
-        self.0.subject_debt_batch_including_from(limit, pipelines, offset)
-    }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.0.set_anomalous_flag(drawer_id, anomalous)
     }

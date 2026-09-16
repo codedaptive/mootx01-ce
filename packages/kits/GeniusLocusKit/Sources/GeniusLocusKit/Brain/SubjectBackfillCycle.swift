@@ -101,20 +101,8 @@ extension GeniusLocusKit {
                     + "use the interactive backfill (missing_subject → setSubject)")
         }
         let estate = try estate(for: handle)
-        // The cursor: rows the producer could not settle (inadmissible
-        // output) stay in the debt predicate, so a sweep reading from the
-        // head every time would re-enumerate the same rows forever and the
-        // rest of the estate would never be reached. Read from the cursor,
-        // wrap to the head when the tail is exhausted, and advance past
-        // what this batch skipped (written rows leave the predicate).
-        var offset = subjectSweepOffsets[handle] ?? 0
-        var batch = try await estate.subjectDebtBatch(
-            limit: batchLimit, includingPipelines: producer.regeneratesPipelines, offset: offset)
-        if batch.isEmpty, offset > 0 {
-            offset = 0
-            batch = try await estate.subjectDebtBatch(
-                limit: batchLimit, includingPipelines: producer.regeneratesPipelines)
-        }
+        let batch = try await estate.subjectDebtBatch(
+            limit: batchLimit, includingPipelines: producer.regeneratesPipelines)
         var written = 0
         var skipped = 0
         for drawer in batch {
@@ -133,7 +121,6 @@ extension GeniusLocusKit {
                 at: now)
             written += 1
         }
-        subjectSweepOffsets[handle] = batch.isEmpty ? 0 : offset + skipped
         let remaining = try await estate.countSubjectDebt(
             includingPipelines: producer.regeneratesPipelines)
         return SubjectBackfillReport(

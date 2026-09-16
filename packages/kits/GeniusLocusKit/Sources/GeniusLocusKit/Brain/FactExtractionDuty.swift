@@ -2,6 +2,8 @@ import CryptoKit
 import FactExtractionKit
 import Foundation
 import LocusKit
+import MootProductIdentity
+import OSLog
 import SubstrateKernel
 
 /// Outcome of one bounded source-grounded fact duty invocation.
@@ -11,12 +13,6 @@ public struct FactExtractionBatchResult: Sendable, Equatable {
     public let candidatesRejected: Int
     public let skippedSources: Int
     public let failedSources: Int
-    public var chunksProcessed: Int = 0
-    public var scannedSources: Int = 0
-    public var deferredSources: Int = 0
-    public var inapplicableSources: Int = 0
-    public var rejectedSources: Int = 0
-    public var madeProgress: Bool = false
 
     public init(
         completedSources: Int, factsFiled: Int, candidatesRejected: Int,
@@ -47,7 +43,6 @@ public extension GeniusLocusKit {
         guard let storage = storages[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
-        let recipeID = Self.factWorkflowRecipe(recipeID, spec: extractor.spec)
         let registry = FactExtractorModelStore(storage: storage)
         let desired = FactExtractorModelRow(recipeID: recipeID, spec: extractor.spec)
         if let active = try await registry.active(), active == FactExtractorModelRow(
@@ -78,16 +73,174 @@ public extension GeniusLocusKit {
         factExtractors[handle]
     }
 
-    /// Each invocation pays at most one source-exact chunk per selected memory.
-    /// Queue checkpoints make both this compatibility entry and the duty resumable.
+    /// Run a bounded extraction batch. Models see only source-exact chunks of
+    /// the original drawer body, and grounding resolves evidence against that
+    /// same unchanged body.
     func runFactExtractionBatch(
-        _ handle: EstateHandle, limit: Int = 16, now: Date
+        _ handle: EstateHandle,
+        limit: Int = 16,
+        now: Date
     ) async throws -> FactExtractionBatchResult {
-        guard let work = try await prepareFactExtractionBatch(handle, limit: limit, now: now) else {
-            return FactExtractionBatchResult(completedSources: 0, factsFiled: 0,
-                candidatesRejected: 0, skippedSources: 0, failedSources: 0)
+        guard limit > 0 else {
+            return FactExtractionBatchResult(
+                completedSources: 0, factsFiled: 0, candidatesRejected: 0,
+                skippedSources: 0, failedSources: 0)
         }
-        return try await work.run()
+        guard let extractor = factExtractors[handle],
+              let recipeID = factExtractorRecipeIDs[handle] else {
+            return FactExtractionBatchResult(
+                completedSources: 0, factsFiled: 0, candidatesRejected: 0,
+                skippedSources: 0, failedSources: 0)
+        }
+        let estate = try estate(for: handle)
+        let pending = try await estate.factExtractionDebtBatch(limit: limit)
+        var completed = 0
+        var filed = 0
+        var rejected = 0
+        var skipped = 0
+        var failed = 0
+
+        for drawer in pending {
+            let source = drawer.content
+            guard !source.isEmpty, drawer.tombstonedAt == nil else {
+                skipped += 1
+                continue
+            }
+            do {
+                let sourceDigest = Self.factSourceDigest(source)
+                let chunks = FactSourceChunker.chunks(
+                    originalSource: source,
+                    maximumCharacters: extractor.spec.maximumInputCharacters)
+                var groundedCandidates: [GroundedFactCandidate] = []
+                var sourceRejected = 0
+                for chunk in chunks {
+                    let request = FactExtractionRequest(
+                        sourceID: drawer.id,
+                        sourceDigest: sourceDigest,
+                        sourceText: chunk.text,
+                        eligibleSourceSpans: [chunk.span],
+                        maximumFacts: extractor.spec.maximumFactsPerSource)
+                    let response = try await extractor.extract(request)
+                    let grounding = FactGroundingValidator.validate(
+                        response: response, request: request, originalSource: source,
+                        expectedSpec: extractor.spec)
+                    sourceRejected += grounding.rejected.count
+
+                    // Whatever the validator rejects is counted and the
+                    // source settles on what it accepted, which may be
+                    // nothing: the model's output for this content and
+                    // recipe is deterministic, so a source whose every
+                    // candidate failed grounding is a zero-fact source, not
+                    // debt to retry. Only extractor errors (worker or model
+                    // runtime failures) leave the source as debt.
+                    groundedCandidates.append(contentsOf: grounding.accepted)
+                }
+                rejected += sourceRejected
+                var seenCandidates = Set<String>()
+                groundedCandidates = groundedCandidates.filter { candidate in
+                    seenCandidates.insert([
+                        candidate.subject, candidate.predicate, candidate.object,
+                        candidate.evidenceQuote,
+                        String(candidate.evidenceSpan.start), String(candidate.evidenceSpan.end),
+                    ].joined(separator: "\u{0}")).inserted
+                }
+                if groundedCandidates.count > extractor.spec.maximumFactsPerSource {
+                    groundedCandidates = Array(
+                        groundedCandidates.prefix(extractor.spec.maximumFactsPerSource))
+                }
+                guard try await estate.getDrawers(ids: [drawer.id]).first?.content == source else {
+                    skipped += 1
+                    continue
+                }
+
+                let history = try await estate.allKGFactsIncludingRetired()
+                    .filter { $0.sourceDrawerID == drawer.id }
+                let active = try await estate.kgFacts(sourceDrawerIDEq: drawer.id)
+                var desiredIDs = Set<String>()
+                var newlyFiled: [String] = []
+
+                for candidate in groundedCandidates {
+                    let key = Self.factSemanticKey(
+                        candidate, digest: sourceDigest, spec: extractor.spec)
+                    if let existing = active.first(where: {
+                        Self.factSemanticKey($0) == key
+                    }) {
+                        desiredIDs.insert(existing.id)
+                        continue
+                    }
+                    let baseID = Self.distilledFactID(
+                        sourceID: drawer.id, recipeID: recipeID, semanticKey: key)
+                    var id = baseID
+                    if history.contains(where: { $0.id == id }) {
+                        let reactivationOrdinal = history.filter {
+                            Self.factSemanticKey($0) == key
+                        }.count
+                        id = Self.distilledFactID(
+                            sourceID: drawer.id, recipeID: recipeID,
+                            semanticKey: "\(key)|reactivated|\(reactivationOrdinal)")
+                    }
+                    let extraction = KGFactExtractionMetadata(
+                        evidenceQuote: candidate.evidenceQuote,
+                        evidenceStart: candidate.evidenceSpan.start,
+                        evidenceEnd: candidate.evidenceSpan.end,
+                        evidenceStartUTF8Byte: candidate.evidenceSpan.startUTF8Byte,
+                        evidenceEndUTF8Byte: candidate.evidenceSpan.endUTF8Byte,
+                        sourceDigest: sourceDigest,
+                        extractorProviderID: extractor.spec.providerID,
+                        extractorModelID: extractor.spec.modelID,
+                        extractorModelVersion: extractor.spec.modelVersion,
+                        extractionSchemaVersion: extractor.spec.schemaVersion,
+                        searchProjection: candidate.searchProjection,
+                        searchProjectionVersion: FactSearchProjection.version,
+                        operationalBitmap: Self.factOperationalBitmap(
+                            kind: extractor.spec.extractorKind,
+                            assertion: candidate.assertionKind,
+                            confidence: candidate.confidence))
+                    _ = try await captureKGFact(
+                        handle, id: id, subject: candidate.subject,
+                        predicate: candidate.predicate, object: candidate.object,
+                        sourceDrawerID: drawer.id, addedBy: "distilled-fact-duty",
+                        extraction: extraction, now: now)
+                    desiredIDs.insert(id)
+                    newlyFiled.append(id)
+                    filed += 1
+                }
+
+                // Retire only machine-extracted facts. Manual/imported facts
+                // anchored to the same source remain independent assertions.
+                for old in active where
+                    !old.extractionSchemaVersion.isEmpty && !desiredIDs.contains(old.id) {
+                    try await retireKGFact(handle, rowID: old.id, changedBy: "fact-extraction-duty", reason: nil, now: now)
+                }
+
+                let settled = try await estate.setFactsExtracted(
+                    drawerId: drawer.id, ifContentMatches: source)
+                guard settled == 1 else {
+                    // The source changed in the last race window. Do not leave
+                    // assertions from the stale snapshot active.
+                    for id in newlyFiled { try? await retireKGFact(handle, rowID: id, changedBy: "fact-extraction-duty", reason: nil, now: now) }
+                    skipped += 1
+                    continue
+                }
+                completed += 1
+            } catch {
+                // Fail-open for the product path: the debt bit remains clear
+                // and the next standing cycle may retry. The failure is logged
+                // at error level so a source that never settles is visible in
+                // the estate log rather than only as a debt that never falls.
+                Self.factExtractionLog.error(
+                    "fact extraction source \(drawer.id, privacy: .public) failed (estate \(handle.estateUUID, privacy: .public)): \(String(describing: error), privacy: .public)")
+                failed += 1
+            }
+        }
+        return FactExtractionBatchResult(
+            completedSources: completed, factsFiled: filed,
+            candidatesRejected: rejected, skippedSources: skipped,
+            failedSources: failed)
+    }
+
+    private static var factExtractionLog: Logger {
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     static func distilledFactID(
@@ -105,12 +258,12 @@ public extension GeniusLocusKit {
         )).uuidString.lowercased()
     }
 
-    static func factSourceDigest(_ source: String) -> String {
+    private static func factSourceDigest(_ source: String) -> String {
         SHA256.hash(data: Data(source.utf8))
             .map { String(format: "%02x", $0) }.joined()
     }
 
-    static func factSemanticKey(
+    private static func factSemanticKey(
         _ candidate: GroundedFactCandidate,
         digest: String,
         spec: FactExtractorModelSpec
@@ -123,7 +276,16 @@ public extension GeniusLocusKit {
         ].joined(separator: "\u{0}")
     }
 
-    static func factOperationalBitmap(
+    private static func factSemanticKey(_ fact: KGFact) -> String {
+        [
+            fact.sourceDigest, fact.extractorProviderID, fact.extractorModelID,
+            fact.extractorModelVersion, fact.extractionSchemaVersion,
+            fact.subject, fact.predicate, fact.object, fact.evidenceQuote,
+            String(fact.evidenceStart), String(fact.evidenceEnd),
+        ].joined(separator: "\u{0}")
+    }
+
+    private static func factOperationalBitmap(
         kind: FactExtractorKind,
         assertion: FactAssertionKind,
         confidence: Double
