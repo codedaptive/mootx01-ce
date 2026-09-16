@@ -256,7 +256,7 @@ struct DataRetentionTests {
 
     // MARK: - Apply actions (injected mover; never the real Trash)
 
-    @Test("uninstall trashes external registered estates and collapses in-tree estates")
+    @Test("uninstall trashes external owned files and preserves unrelated siblings")
     func uninstallTrashScope() throws {
         let dir = try makeDataDir("uninstall")
         let external = try makeDataDir("uninstall-external")
@@ -267,25 +267,30 @@ struct DataRetentionTests {
         let fm = FileManager.default
         let inTree = dir.appendingPathComponent("databases/default/estate.sqlite")
         let externalDB = external.appendingPathComponent("work/estate.sqlite")
+        let externalWAL = external.appendingPathComponent("work/estate.sqlite-wal")
+        let sentinel = external.appendingPathComponent("work/unrelated.txt")
         let absentExternalDB = external.appendingPathComponent("absent/estate.sqlite")
-        for database in [inTree, externalDB] {
-            try fm.createDirectory(at: database.deletingLastPathComponent(), withIntermediateDirectories: true)
-            fm.createFile(atPath: database.path, contents: Data("x".utf8))
+        for file in [inTree, externalDB, externalWAL, sentinel] {
+            try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            fm.createFile(atPath: file.path, contents: Data("x".utf8))
         }
 
         let recorder = MoveRecorder()
         try DataRetention.trashDataDirectory(
             dir,
-            registeredDatabaseURLs: [inTree, externalDB, externalDB, absentExternalDB]
+            registeredEstateFiles: [inTree, externalDB, externalWAL, externalDB, absentExternalDB]
         ) { url in
             recorder.record(url.path)
             try fm.removeItem(at: url)
         }
 
-        #expect(Set(recorder.moved) == Set([dir.path, externalDB.deletingLastPathComponent().path]))
+        #expect(Set(recorder.moved) == Set([dir.path, externalDB.path, externalWAL.path]))
         #expect(recorder.moved.last == dir.path, "the catalog moves only after external estates")
         #expect(!fm.fileExists(atPath: dir.path))
         #expect(!fm.fileExists(atPath: externalDB.path))
+        #expect(fm.fileExists(atPath: sentinel.path), "unrelated sibling files must survive purge")
+        #expect(fm.fileExists(atPath: sentinel.deletingLastPathComponent().path),
+                "an external estate's user-controlled parent directory must survive")
     }
 
     @Test("applyReplace moves the estate's files + mgr store, keeps the directory and other estates")
