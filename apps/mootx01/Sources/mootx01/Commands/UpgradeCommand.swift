@@ -1910,8 +1910,14 @@ struct UpgradeCommand: AsyncParsableCommand {
             throw ValidationError("resolveSource requires --from (remote path handles the default)")
         }
         let url = URL(fileURLWithPath: explicit, relativeTo: cwd).standardizedFileURL
-        guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            throw ValidationError("Binary not found or not executable: \(url.path)")
+        // `isExecutableFile` is true for any directory (the search bit), so a
+        // directory such as a repository root would pass and be copied whole
+        // over the installed binary; the source must be a regular executable.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              FileManager.default.isExecutableFile(atPath: url.path) else {
+            throw ValidationError("Binary not found or not an executable file: \(url.path)")
         }
         return url.path
     }
