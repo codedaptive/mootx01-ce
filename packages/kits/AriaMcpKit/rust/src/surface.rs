@@ -5790,7 +5790,8 @@ mod tests {
         use crate::v2::render::V2ResultMeta;
 
         const NOW: i64 = 1_700_000_000_000_i64;
-        let registry = EstateRegistry::new_inmemory();
+        let mut registry = EstateRegistry::new_inmemory();
+        registry.server_identity = "user".to_owned();
         let handle = registry.default.handle.clone();
         let meta = V2ResultMeta::incomplete("test-build", "test-digest", V2OperationEffect::Write);
         let ledger = SurfacedRecallLedger::new();
