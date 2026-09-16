@@ -1,6 +1,6 @@
 //! SEC-04 regressions for the selected v2 memory-search disclosure boundary.
 
-use aria_mcp::{dispatcher::Dispatcher, estate_registry::EstateRegistry, jsonrpc::JSONRPCRequest};
+use aria_mcp::{dispatcher::Dispatcher, estate_registry::{EstateOpening, EstateRegistry}, jsonrpc::JSONRPCRequest};
 use locus_kit::{
     drawer_operational::CaptureChannel, estate_types::LatticeAnchor, frames::CaptureFrame,
     provenance::Sensitivity,
@@ -20,7 +20,8 @@ fn call(dispatcher: &Dispatcher, arguments: serde_json::Value) -> serde_json::Va
 
 #[test]
 fn answer_always_cannot_cite_a_provenance_restricted_unique_hit() {
-    let registry = EstateRegistry::new_inmemory();
+    // A unique-hit disclosure fixture must not include unrelated seeded charter rows.
+    let registry = EstateRegistry::new_inmemory_with(EstateOpening::TRANSIENT);
     let sentinel = "sec04-hidden-citation-oracle-unique-marker";
     let hidden_id = {
         let mut frame = CaptureFrame::new(
