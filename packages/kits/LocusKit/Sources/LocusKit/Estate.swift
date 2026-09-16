@@ -828,9 +828,10 @@ public actor Estate {
         // historical reconstruction is honored too (BitmapEvaluator reads the
         // audit log via `store`), so a frame's `asOf` projects the same state
         // it would on the full recall path.
-        let admissible = try await BitmapEvaluator.evaluate(
+        let evaluation = try await BitmapEvaluator.evaluateResult(
             frame: frame, drawers: loaded, store: store, nodeNames: nodeNames)
-        return FrameFilteredDrawers(admissible: admissible, loadedIDs: loadedIDs)
+        return FrameFilteredDrawers(admissible: evaluation.rows, loadedIDs: loadedIDs,
+                                    withheldBySensitivity: evaluation.withheldBySensitivity)
     }
 
     /// Hydrate exactly these IDs and count only default-sensitivity exclusions.
