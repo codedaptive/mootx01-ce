@@ -4,6 +4,34 @@ import Foundation
 
 private func scalarCount(_ text: String) -> Int { text.unicodeScalars.count }
 
+private struct ReferenceExpansionVector: Decodable {
+    let definition_bytes: Int
+    let repeat_count: Int
+    let error_code: String
+    let error_message: String
+    let max_bytes: Int
+    let max_ratio: Int
+}
+
+@Test func completeReferenceExpansionIsBoundedBySharedSettingsVector() throws {
+    let url = try #require(Bundle.module.url(forResource: "reference-expansion-limits", withExtension: "json", subdirectory: "Vectors"))
+    let vector = try JSONDecoder().decode(ReferenceExpansionVector.self, from: Data(contentsOf: url))
+    let definition = String(repeating: "x", count: vector.definition_bytes) + "\n"
+    let body = "[[TSREF:1 DEFINE]] " + definition
+        + String(repeating: "[[TSREF:1 REPEAT]]\n", count: vector.repeat_count)
+    let source = CompleteText.notice + CompleteText.refLegend + body
+
+    let result = try CompleteContentReducer.distill(source, count: scalarCount)
+
+    #expect(result.text == source)
+    #expect(result.referenceExpansionError?.code == vector.error_code)
+    #expect(result.referenceExpansionError?.message == vector.error_message)
+    #expect(result.referenceExpansionError?.maxBytes == vector.max_bytes)
+    #expect(result.referenceExpansionError?.maxRatio == vector.max_ratio)
+    #expect(result.referenceExpansionError?.attemptedBytes ?? 0 <= vector.max_bytes + vector.definition_bytes)
+    #expect(!result.visibleRefs)
+}
+
 @Test func completePythonGoldenParity() throws {
     struct Fixture: Decodable { let vectors: [Vector] }
     struct Vector: Decodable {
@@ -45,7 +73,8 @@ private func scalarCount(_ text: String) -> Int { text.unicodeScalars.count }
     let result = try CompleteContentReducer.distill(source, count: scalarCount)
     #expect(result.visibleRefs)
     #expect(result.text.contains("entry 001: [[TSREF:1 REPEAT]]\n"))
-    #expect(try CompleteText.expandVisible(result.text) == source)
+    let limits = CompleteText.ExpansionLimits(maxBytes: 8_388_608, maxRatio: 64)
+    #expect(try CompleteText.expandVisible(result.text, limits: limits).text == source)
     #expect(try CompleteContentReducer.distill(result.text, count: scalarCount).text == result.text)
     #expect(result.outputTokens < result.originalTokens)
     let corrupt = result.text.replacingOccurrences(of: "entry 001:", with: "entry 002:")
