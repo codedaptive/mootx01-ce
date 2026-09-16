@@ -209,59 +209,53 @@ public enum DataRetention {
         #endif
     }
 
-    /// Uninstall removal: every registered estate directory that exists
-    /// outside the configuration directory moves to the Trash, followed by
-    /// the whole configuration directory (catalog, in-tree estates, manager
-    /// store, and config). Overlapping paths are collapsed so no descendant
-    /// is moved after an ancestor.
+    /// Uninstall removal: every existing owned file of an externally
+    /// registered estate moves to the Trash, followed by the whole controlled
+    /// configuration directory (catalog, in-tree estates, manager store, and
+    /// config). Unrelated siblings in an external estate's directory remain.
     public static func trashDataDirectory(
         _ configurationDirectory: URL,
-        registeredDatabaseURLs: [URL],
+        registeredEstateFiles: [URL],
         using move: Mover = systemTrash
     ) throws {
         for url in uninstallTrashTargets(
             configurationDirectory: configurationDirectory,
-            registeredDatabaseURLs: registeredDatabaseURLs
+            registeredEstateFiles: registeredEstateFiles
         ) {
             try move(url)
         }
     }
 
-    /// Existing registered estates expressed as the smallest set of
-    /// directories that covers them and the configuration directory.
-    /// Database files that do not exist are omitted, matching the inventory.
+    /// Existing external owned files, followed by the controlled
+    /// configuration directory. Paths are deduplicated without resolving
+    /// symlinks: the catalog-owned directory entry is the deletion boundary.
     static func uninstallTrashTargets(
         configurationDirectory: URL,
-        registeredDatabaseURLs: [URL]
+        registeredEstateFiles: [URL]
     ) -> [URL] {
         let fm = FileManager.default
-        var candidates = registeredDatabaseURLs
+        let configuration = configurationDirectory.standardizedFileURL
+        var targets = Dictionary(grouping: registeredEstateFiles
+            .map(\.standardizedFileURL)
             .filter { fm.fileExists(atPath: $0.path) }
-            .map { $0.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath() }
-        if fm.fileExists(atPath: configurationDirectory.path) {
-            candidates.append(configurationDirectory.standardizedFileURL.resolvingSymlinksInPath())
-        }
-
-        let configuration = configurationDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        let ordered = Dictionary(grouping: candidates, by: \.path)
+            .filter { !contains($0, in: configuration) }, by: \.path)
             .compactMap(\.value.first)
-            .sorted {
-                let lhsDepth = $0.pathComponents.count
-                let rhsDepth = $1.pathComponents.count
-                return lhsDepth == rhsDepth ? $0.path < $1.path : lhsDepth < rhsDepth
-            }
-        var targets: [URL] = []
-        for candidate in ordered
-        where candidate != configuration
-            && !contains(candidate, in: configuration)
-            && !targets.contains(where: { contains(candidate, in: $0) }) {
-            targets.append(candidate)
-        }
-        if fm.fileExists(atPath: configuration.path)
-            && !targets.contains(where: { contains(configuration, in: $0) }) {
+            .sorted { $0.path < $1.path }
+        if fm.fileExists(atPath: configuration.path) {
             targets.append(configuration)
         }
         return targets
+    }
+
+    /// Existing external owned files shown before destructive confirmation.
+    public static func externalEstateFiles(
+        configurationDirectory: URL,
+        registeredEstateFiles: [URL]
+    ) -> [URL] {
+        uninstallTrashTargets(
+            configurationDirectory: configurationDirectory,
+            registeredEstateFiles: registeredEstateFiles
+        ).filter { $0.standardizedFileURL != configurationDirectory.standardizedFileURL }
     }
 
     private static func contains(_ child: URL, in ancestor: URL) -> Bool {
