@@ -348,9 +348,10 @@ public enum AriaResident {
                 "AriaResident fact extraction activated: recipe=\(recipeID) " +
                 "provider=\(spec.providerID) cleared=\(cleared)")
             return { now in
-                let result = try await kit.runFactExtractionBatch(
-                    handle, limit: AriaResident.factExtractionBatchLimit, now: now)
-                return result.factsFiled
+                // The batch runs as a claimed QueueKit job (DutyQueue): queue
+                // the owed duty if the tick has not, then drain its stream.
+                _ = try await kit.enqueueDuty(.factExtraction, in: handle, now: now)
+                return try await kit.drainDuty(.factExtraction, in: handle, now: now).unitsPaid
             }
         } catch {
             Logging.stderr.log(
@@ -717,7 +718,10 @@ public enum AriaResident {
                     // registered encoder and writes their int8 span rows. A
                     // no-op (0) when no encoder is active for the estate.
                     spanEncodeCycle: { now in
-                        try await kit.runSpanEncodeBatch(handle: handle, now: now)
+                        // The batch runs as a claimed QueueKit job (DutyQueue):
+                        // queue the owed duty if the tick has not, then drain it.
+                        _ = try await kit.enqueueDuty(.spanEncode, in: handle, now: now)
+                        return try await kit.drainDuty(.spanEncode, in: handle, now: now).unitsPaid
                     },
                     // Live fact-extraction cycle (FACT_EXTRACTION_WIRE §2b):
                     // non-nil when setting=.on AND an extractor is provisioned;
