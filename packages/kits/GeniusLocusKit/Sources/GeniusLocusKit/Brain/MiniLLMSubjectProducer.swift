@@ -63,23 +63,49 @@ public struct MiniLLMSubjectProducer: SubjectProducer {
 
     public init() {}
 
+    /// Backstop against a wedged Apple Intelligence session, not a bound on
+    /// work: a subject normally returns in seconds, and a `respond` that has
+    /// not returned after this long never will (observed 2026-09-16: the
+    /// call stopped returning mid-batch and, because the batch runs inside
+    /// the resident's tick, every standing signal froze with it). On expiry
+    /// the call throws, the batch ends, the drawer stays owed and the next
+    /// batch retries it.
+    static let respondWatchdogSeconds: UInt64 = 120
+
     public func subject(forContent content: String) async throws -> String {
         // Bound the prompt: subjects summarise the assertion, and the
         // opening of a drawer carries it in practice; a full 100KB blob
         // would waste the on-device budget.
         let prompt = String(content.prefix(2000))
         let session = LanguageModelSession(instructions: Self.registerInstructions)
-        var candidate = Self.postProcess(try await session.respond(to: prompt).content)
+        var candidate = Self.postProcess(try await Self.respond(session, to: prompt))
         // ONE bounded retry on over-length: re-ask with the cap
         // restated. If the model still overruns, return the long form —
         // the sweep's register gate skips it (never stored) and the row
         // stays debt for a later pass.
         if candidate.count > DrawerStore.subjectLengthContract {
-            let retry = try await session.respond(
-                to: "Too long. Compress to at most 120 characters, one sentence, same claim.")
-            candidate = Self.postProcess(retry.content)
+            candidate = Self.postProcess(try await Self.respond(
+                session, to: "Too long. Compress to at most 120 characters, one sentence, same claim."))
         }
         return candidate
+    }
+
+    /// `session.respond` under the watchdog: whichever finishes first wins
+    /// and the other is cancelled.
+    private static func respond(_ session: LanguageModelSession, to prompt: String) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask { try await session.respond(to: prompt).content }
+            group.addTask {
+                try await Task.sleep(nanoseconds: respondWatchdogSeconds * 1_000_000_000)
+                throw GeniusLocusKitError.underlyingEstateFailure(
+                    reason: "subject producer stalled: Apple Intelligence did not respond within \(respondWatchdogSeconds)s")
+            }
+            guard let first = try await group.next() else {
+                throw GeniusLocusKitError.underlyingEstateFailure(reason: "subject producer returned nothing")
+            }
+            group.cancelAll()
+            return first
+        }
     }
 
     /// Deterministic post-pass: collapse to a single trimmed line and
