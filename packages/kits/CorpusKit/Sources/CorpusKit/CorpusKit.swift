@@ -213,6 +213,18 @@ public enum EmbeddingModel: Sendable {
     }
 }
 
+public struct CorpusRetrainingReport: Sendable, Equatable {
+    public let completedModelIDs: [String]
+    public let skippedModelIDs: [String: RetrainingSkipReason]
+
+    public init(
+        completedModelIDs: [String], skippedModelIDs: [String: RetrainingSkipReason] = [:]
+    ) {
+        self.completedModelIDs = completedModelIDs
+        self.skippedModelIDs = skippedModelIDs
+    }
+}
+
 // MARK: - Corpus
 
 /// Unified RAG entry point for CorpusKit.
@@ -1722,6 +1734,18 @@ public actor Corpus {
     ///   re-embedded vectors' filing timestamps. Pass `now` from the caller;
     ///   never call `Date()` inside the engine.
     public func reindex(now: Date) async throws {
+        _ = try await reindex(now: now, budget: .unbounded)
+    }
+
+    /// Retrain within an explicit work budget. Each provider trains on a fresh
+    /// instance; a skipped provider is never installed or persisted, so its
+    /// previously serving model remains intact.
+    @discardableResult
+    public func reindex(
+        now: Date, budget: RetrainingBudget
+    ) async throws -> CorpusRetrainingReport {
+        var completedModelIDs: [String] = []
+        var skippedModelIDs: [String: RetrainingSkipReason] = [:]
         // Reset the per-pass decision seam before any path is chosen.
         _trainingPathDecisions.removeAll()
 
@@ -1855,6 +1879,7 @@ public actor Corpus {
                 basis: countsTrainable.serializeBasis(),
                 trainedAt: now, trainedChunkCount: chunks.count))
             _trainingPathDecisions[modelID] = .countsRestore
+            completedModelIDs.append(modelID)
             corpusLog.info(
                 "reindex: counts path complete for \(modelID, privacy: .public)")
         }
@@ -1862,8 +1887,10 @@ public actor Corpus {
         if !trainInputs.isEmpty {
             corpusLog.info(
                 "reindex: training \(trainInputs.count, privacy: .public) corpus-path slots concurrently over \(texts.count, privacy: .public) texts")
-            let trained: [(Int, any EmbeddingProvider)] =
-                try await withThrowingTaskGroup(of: (Int, any EmbeddingProvider).self) { group in
+            let attempts: [(Int, any EmbeddingProvider, RetrainingOutcome)] =
+                try await withThrowingTaskGroup(
+                    of: (Int, any EmbeddingProvider, RetrainingOutcome).self
+                ) { group in
                     for input in trainInputs {
                         group.addTask {
                             // Reconstruct a fresh untrained provider from the
@@ -1875,16 +1902,28 @@ public actor Corpus {
                                 throw CorpusKitError.notTrainable(
                                     "reconstructed provider is not trainable — basis seam invariant violated")
                             }
-                            trainable.trainOnCorpus(texts: texts)
-                            corpusLog.info(
-                                "reindex: trained \(provider.modelID, privacy: .public)")
-                            return (input.index, provider)
+                            let outcome = trainable.trainOnCorpus(texts: texts, budget: budget)
+                            if outcome == .completed {
+                                corpusLog.info(
+                                    "reindex: trained \(provider.modelID, privacy: .public)")
+                            }
+                            return (input.index, provider, outcome)
                         }
                     }
-                    var out: [(Int, any EmbeddingProvider)] = []
+                    var out: [(Int, any EmbeddingProvider, RetrainingOutcome)] = []
                     for try await result in group { out.append(result) }
                     return out
                 }
+            let trained = attempts.compactMap { attempt
+                -> (Int, any EmbeddingProvider)? in
+                let (index, provider, outcome) = attempt
+                if case .skipped(let reason) = outcome {
+                    skippedModelIDs[provider.modelID] = reason
+                    return nil
+                }
+                completedModelIDs.append(provider.modelID)
+                return (index, provider)
+            }
             // Install + persist serially on the actor (cheap; the compute is done).
             for (index, provider) in trained.sorted(by: { $0.0 < $1.0 }) {
                 guard let trainable = provider as? any TrainableEmbeddingBasis else { continue }
@@ -1904,7 +1943,6 @@ public actor Corpus {
                 // (when no sources changed) and the counts path is eligible again.
                 //
                 // Uses the freshBasisBlob (empty factory) not the trained blob so the
-                // accumulator starts from scratch — trainOnCorpus is additive, so a
                 // healed accumulator must begin empty.
                 if let freshBlob = slots[index].freshBasisBlob,
                    let healed = try trainable.reconstructBasis(from: freshBlob)
@@ -1952,6 +1990,7 @@ public actor Corpus {
         }
 
         for index in slots.indices {
+            if skippedModelIDs[slots[index].provider.modelID] != nil { continue }
             // Non-trainable providers: vectors are item-local and basis-invariant;
             // re-embedding is wasted work (~20% of per-chunk embed cost in the
             // 5-provider default ensemble). However, stale vectors for removed
@@ -1989,6 +2028,9 @@ public actor Corpus {
 
         corpusLog.info(
             "reindex: complete — \(chunks.count, privacy: .public) chunks re-embedded across \(self.slots.count, privacy: .public) slots")
+        return CorpusRetrainingReport(
+            completedModelIDs: completedModelIDs.sorted(),
+            skippedModelIDs: skippedModelIDs)
     }
 
     /// Train a FRESH provider on the given chunks' texts and persist the
