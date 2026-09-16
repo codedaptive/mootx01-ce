@@ -15,6 +15,7 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 substrate-kernel = { path = "../../SubstrateKernel/rust" }
+moot-product-identity = { path = "../../MootProductIdentity/rust" }
 
 [dev-dependencies]
 serde_json = "1"
