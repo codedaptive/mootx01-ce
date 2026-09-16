@@ -21,8 +21,8 @@ pub mod calibration;
 // matrix module inside matrix/ is intentional — the matrix.rs file defines MatrixTier, the module's primary type
 pub mod matrix;
 pub mod nmf;
-pub mod persistence;
-pub mod snapshot_store;
+pub mod record_store;
+pub mod refresh;
 
 pub use calibration::{
     MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
@@ -32,7 +32,5 @@ pub use matrix::{
     MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
 };
 pub use nmf::{MatrixNMF, MatrixNMFFactorization};
-pub use persistence::{
-    MatrixPersistenceBackend, MatrixPersistenceError, MatrixPersistenceMode, MatrixSnapshot,
-};
-pub use snapshot_store::MatrixSnapshotStore;
+pub use record_store::MatrixRecordStore;
+pub use refresh::{MatrixRefreshWorker, MatrixRefreshTicket, MatrixRefreshLimits, MatrixRefreshStatus, MatrixRefreshDisposition};

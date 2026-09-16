@@ -1096,7 +1096,21 @@
       "data_schema": {
         "type": "object",
         "properties": {
+          "matrix": {
+            "type": "object",
+            "properties": {
+              "generation": { "type": ["string", "null"] },
+              "migration_phase": { "type": "string" },
+              "phase": { "type": "string", "enum": ["idle", "queued", "running", "deferred", "failed"] },
+              "reason": { "type": ["string", "null"] },
+              "reclaimed_bytes": { "type": "integer", "minimum": 0 },
+              "watermark": { "type": "string" }
+            },
+            "required": ["generation", "migration_phase", "phase", "reason", "reclaimed_bytes", "watermark"],
+            "additionalProperties": false
+          },
           "state": {
+            "type": "string",
             "enum": [
               "running",
               "idle"

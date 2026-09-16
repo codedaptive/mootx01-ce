@@ -155,7 +155,7 @@ struct WholeRecordFloatVacuumMigrationTests {
         let before = try await orderedIDs(storage)
         #expect(before == ["i1", "i2"])
 
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
@@ -179,7 +179,7 @@ struct WholeRecordFloatVacuumMigrationTests {
         let second = try await kit.runWholeRecordFloatVacuumMigration(handle: handle, now: testNow)
         #expect(second == WholeRecordFloatVacuumMigrationReport(
             floatRows: 0, graphRows: 0, claimsReleased: 0, vacuumed: true, format: .v1_7))
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(try await kindCount(storage, 0) == 2)
@@ -207,7 +207,7 @@ struct WholeRecordFloatVacuumMigrationTests {
         let kit = GeniusLocusKit()
         let handle = try await kit.open(
             storage: storage, owner: testOwner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
@@ -254,7 +254,7 @@ struct WholeRecordFloatVacuumMigrationTests {
     func v1_5EstateRunsBothCapsulesToCurrent() async throws {
         let storage = inMemory()
         let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_5)
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await kindCount(storage, 1) == 0)
@@ -303,7 +303,7 @@ struct WholeRecordFloatVacuumMigrationTests {
         let storage = inMemory()
         let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_7)
         let before = try await orderedIDs(storage)
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await kindCount(storage, 1) == 2, "the guard kept the float rows")

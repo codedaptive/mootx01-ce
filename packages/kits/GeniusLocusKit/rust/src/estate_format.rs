@@ -59,7 +59,8 @@ impl EstateFormatVersion {
     /// seeded "on" on every populated estate, and the recall_ratings table
     /// exists.
     pub const V1_9: Self = Self { major: 1, minor: 9 };
-    pub const CURRENT: Self = Self::V1_9;
+    pub const V1_10: Self = Self { major: 1, minor: 10 };
+    pub const CURRENT: Self = Self::V1_10;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

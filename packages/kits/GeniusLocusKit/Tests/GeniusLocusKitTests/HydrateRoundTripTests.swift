@@ -72,7 +72,7 @@ struct CompositeSchemaVersionTests {
             + CorpusSchemaProfile.attachedDeclaration.version
             + EstateFormatStore.schemaDeclaration.version
             + 1  // grants
-            + MatrixSnapshotStore.schemaDeclaration.version
+            + MatrixRecordStore.schemaDeclaration.version
         #expect(GeniusLocusKitSchema.version == componentSum)
         // The declaration the gate actually consumes carries the same version
         // and includes grant authorization state and matrix snapshot state
@@ -81,7 +81,7 @@ struct CompositeSchemaVersionTests {
         #expect(GeniusLocusKitSchema.estateSchemaDeclaration.tables.contains { $0.name == "grants" })
         // matrix_snapshot must be in the composite so hydration copies persisted
         // calibration state from the durable backend into the in-memory backend.
-        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.tables.contains { $0.name == "matrix_snapshot" })
+        #expect(GeniusLocusKitSchema.estateSchemaDeclaration.tables.contains { $0.name == "matrix_cells" })
     }
 
     /// A fresh in-memory estate opens with the composite schema and registers
@@ -323,9 +323,9 @@ struct HydrateRoundTripTests {
         #expect(hydratedTier.lastHLC != .zero)
 
         // Full-precision HLC equality: lastHLC flows losslessly through the
-        // `matrix_snapshot` JSON blob (MatrixTier's synthesized Codable encodes
-        // the full Int64 physicalTime), NOT through the lossy 40-bit-packed audit
-        // `hlc` column. Hydration prefers the snapshot (rebuildDerivedAccelerators
+        // explicit integer cursor columns in matrix_generations, NOT through
+        // the lossy 40-bit-packed `hlc` column. Hydration prefers stored records
+        // (rebuildDerivedAccelerators
         // loads it and folds only the tail), so the hydrated tier's lastHLC equals
         // the source's exactly — same contract the Rust port asserts in
         // hydrate_parity.rs. (`HLC.packed` is the lossy compact form for the
@@ -431,8 +431,8 @@ struct VectorSidecarUnificationTests {
 /// from the whole log on every launch. The store is exercised against a REAL
 /// SQLite backend so the primitive read-back path (BLOB→.blob, INTEGER→.int) is
 /// covered, not just the InMemory backend that preserves semantic TypedValues.
-@Suite("GLK matrix snapshot persistence")
-struct MatrixSnapshotPersistenceTests {
+@Suite("GLK matrix record persistence")
+struct MatrixRecordsPersistenceTests {
 
     /// First rebuild persists a snapshot; the row is present on disk afterwards,
     /// and a second rebuild (after more captures) loads it and folds the tail
@@ -468,11 +468,10 @@ struct MatrixSnapshotPersistenceTests {
         try await kit.rebuildDerivedAccelerators(for: handle, now: t0)
 
         // The snapshot row must now exist on disk and reflect the 3 captures.
-        let store = MatrixSnapshotStore(storage: sqlite)
+        let store = MatrixRecordStore(storage: sqlite)
         let persisted = try await store.load(estateID: handle.estateUUID)
         #expect(persisted != nil)
-        #expect(persisted?.tier.liveRowCount == 3)
-        #expect(persisted?.schemaVersion == MatrixSnapshot.currentSchemaVersion)
+        #expect(persisted?.liveRowCount == 3)
 
         // ── Second wave, then a rebuild that LOADS the snapshot + folds forward ──
         for i in 3..<5 {
@@ -519,34 +518,49 @@ struct MatrixSnapshotPersistenceTests {
 
         // The persisted snapshot must have advanced to the 5-capture state too.
         let persisted2 = try await store.load(estateID: handle.estateUUID)
-        #expect(persisted2?.tier.liveRowCount == 5)
-        #expect(persisted2?.tier == fromScratch)
+        #expect(persisted2?.liveRowCount == 5)
+        #expect(persisted2 == fromScratch)
+
+        // Admission failure must preserve the serving generation; closing this
+        // worker fences subsequent work without touching the valid records.
+        let generation = try await store.activeGeneration(estateID: handle.estateUUID)
+        let worker = MatrixRefreshWorker(storage: sqlite, estateID: handle.estateUUID)
+        _ = try await worker.request(now: t0, frozen: false,
+            limits: .init(auditEvents: 1), publish: { _ in })
+        do {
+            _ = try await worker.wait()
+            Issue.record("over-budget refresh was not deferred")
+        } catch MatrixRecordError.workingSetLimit {}
+        #expect(try await worker.status().phase == .deferred)
+        #expect(try await store.activeGeneration(estateID: handle.estateUUID) == generation)
+        await worker.close()
+        await #expect(throws: CancellationError.self) {
+            _ = try await worker.request(now: t0, frozen: false, limits: .init(), publish: { _ in })
+        }
+        try await kit.close(handle)
+        await sqlite.close()
     }
 
-    /// A snapshot row whose schema_version does not match the current format is
-    /// rejected on load (returns nil) so the caller falls back to a full rebuild.
     @Test
-    func staleSchemaVersionRejectedOnLoad() async throws {
+    func stagedGenerationIsInvisibleAndCalibrationSurvivesPublication() async throws {
         let (sqlite, url) = try makeSQLiteStorage()
         defer { cleanupSQLite(at: url) }
-
-        try await sqlite.migrate(to: MatrixSnapshotStore.schemaDeclaration)
-        let estateID = UUID()
-        // Write a row carrying a foreign schema_version directly. The cheap column
-        // gate must reject it without trusting the blob.
-        _ = try await sqlite.rowStore.upsert(
-            table: "matrix_snapshot",
-            values: [
-                "estate_id": .text(estateID.uuidString),
-                "schema_version": .int(Int64(MatrixSnapshot.currentSchemaVersion + 99)),
-                "snapshot": .blob(Data([0x00])),  // deliberately undecodable
-                "last_hlc": .text("0.0.0"),
-                "updated_at": .timestamp(t0)
-            ],
-            conflictColumns: ["estate_id"]
-        )
-        let store = MatrixSnapshotStore(storage: sqlite)
-        let loaded = try await store.load(estateID: estateID)
-        #expect(loaded == nil)
+        let store = MatrixRecordStore(storage: sqlite), estateID = UUID()
+        try await store.prepare()
+        _ = try await store.recordCalibration(estateID: estateID, modelID: "test",
+            confidence: 0.8, outcome: .success, now: t0)
+        let before = try await store.loadCalibration(estateID: estateID)
+        let tier = MatrixTier()
+        try await store.stage(estateID: estateID, tier: tier, generation: "ready", now: t0)
+        #expect(try await store.load(estateID: estateID) == nil)
+        try await store.publish(estateID: estateID, generation: "ready", expected: nil)
+        #expect(try await store.load(estateID: estateID) == tier)
+        #expect(try await store.loadCalibration(estateID: estateID) == before)
+        do {
+            try await store.publish(estateID: estateID, generation: "absent", expected: "ready")
+            Issue.record("incomplete generation was published")
+        } catch {}
+        #expect(try await store.activeGeneration(estateID: estateID) == "ready")
+        await sqlite.close()
     }
 }

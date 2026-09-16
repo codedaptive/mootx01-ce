@@ -315,7 +315,7 @@ fn v1_5_estate_runs_both_capsules_to_current() {
     use genius_locus_kit_migrations::MigrationChainExt;
     let (mut coord, handle, storage) = make_estate(EstateFormatVersion::V1_5);
     coord
-        .run_migration_chain(&handle, NOW, Vec::new())
+        .run_offline_migration_chain(&handle, NOW, Vec::new())
         .expect("chain from v1_5");
     assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(kind_count(&storage, 1), 0);
@@ -402,7 +402,7 @@ fn v1_7_estate_keeps_the_rows_because_the_chain_skips_the_capsule() {
     let (mut coord, handle, storage) = make_estate(EstateFormatVersion::V1_7);
     let before = ordered_ids(&storage);
     coord
-        .run_migration_chain(&handle, NOW, Vec::new())
+        .run_offline_migration_chain(&handle, NOW, Vec::new())
         .expect("chain from V1_7");
     assert_eq!(read_stamp(&storage), EstateFormatVersion::CURRENT);
     assert_eq!(kind_count(&storage, 1), 2, "the guard kept the float rows");

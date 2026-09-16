@@ -98,7 +98,7 @@ struct StorageLedgerKitIDMigrationTests {
         #expect(try await version(storage, pairs.representationClaims.from) == 1)
         #expect(try await version(storage, pairs.vectorStore.to) == 0)
 
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         // The chain continues past this capsule to the current format.
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
@@ -117,9 +117,9 @@ struct StorageLedgerKitIDMigrationTests {
     @Test
     func prepareTwiceIsNoOpAndDirectRerunReportsNoRow() async throws {
         let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_4)
-        let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(first.format == .current)
-        let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(second.format == .current)
         #expect(second.migrated == false)
 
@@ -169,7 +169,7 @@ struct StorageLedgerKitIDMigrationTests {
     @Test
     func freshEstateStampsCurrentWithoutRunningTheCapsule() async throws {
         let (kit, handle, storage) = try await makeEstate(stampedAt: nil, withOldRows: false)
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(prep.migrationState == nil)
@@ -184,7 +184,7 @@ struct StorageLedgerKitIDMigrationTests {
     @Test
     func v1_0EstateRunsFullChainToCurrent() async throws {
         let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_0)
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await version(storage, pairs.vectorStore.to) >= 6)
@@ -278,7 +278,7 @@ struct StorageLedgerKitIDMigrationTests {
         let handle = try await kit.open(
             storage: storage, owner: testOwner, identityKeyStore: InMemoryEstateIdentityKeyStore())
         if prepareFirst {
-            _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+            _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         }
         // The renamed store's open: its ladder applied under the new id.
         try await storage.migrate(to: current)

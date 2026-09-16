@@ -67,7 +67,7 @@ func migrationSeedsFivePreferencesCreatesTableAndStampsV1_9() async throws {
     // The stamp advanced to v1_9, the current format.
     let stamp = try await EstateFormatStore(storage: storage).readIfPresent()
     #expect(stamp == .v1_9, "capsule must stamp v1_9")
-    #expect(EstateFormatVersion.current == .v1_9, "current format is v1_9")
+    #expect(EstateFormatVersion.current == .v1_10, "current format includes matrix records")
 }
 
 // MARK: - G2 an existing "off" survives
@@ -122,7 +122,12 @@ func factExtractorPreferenceBehaviour() async throws {
 @Test("Chain from v1_8: reaches v1_9 with the preferences seeded")
 func chainFromV1_8EstateReachesCurrentFormat() async throws {
     let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_8)
-    let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+    do {
+        _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        Issue.record("historical estate migrated during ordinary preparation")
+    } catch GLKMigrationCatalogError.offlineUpgradeRequired {}
+    #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .v1_8)
+    let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
     #expect(prep.format == .current)
     #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
     let rawAfter = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.consolidation.rawValue)

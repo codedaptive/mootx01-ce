@@ -1915,9 +1915,17 @@ enum AriaV2SelectedCatalog {
     }
 
     private static func rebuildStatusDataSchema() -> JSONValue {
-        exactObjectSchema([
+        orderedExactObjectSchema([
             "state": enumSchema(["running", "idle"]),
-        ])
+            "matrix": exactObjectSchema([
+                "phase": enumSchema(["idle", "queued", "running", "deferred", "failed"]),
+                "generation": .object(["type": .array([.string("string"), .string("null")])]),
+                "watermark": stringSchema(),
+                "reason": .object(["type": .array([.string("string"), .string("null")])]),
+                "migration_phase": stringSchema(),
+                "reclaimed_bytes": nonnegativeIntegerSchema()
+            ])
+        ], required: ["state"])
     }
 
     private static func timingReportDataSchema() -> JSONValue {

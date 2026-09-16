@@ -56,6 +56,7 @@ impl<'a> SelectedEstateDiagnosticsAuthority<'a> {
             facts: Vec::new(),
             drains: Vec::new(),
             rebuild: EstateRebuildState::Idle,
+            matrix: None,
             timing: EstateTiming { watermark_ms: 0, truncated: false },
             // Populated by the Status arm via get_meta; left None for all
             // other operations (Ping, Map) which do not need the FDC floor.
@@ -279,11 +280,20 @@ impl EstateDiagnosticsAuthority for SelectedEstateDiagnosticsAuthority<'_> {
             }
             EstateDiagnosticsOperation::Drain => { snapshot.drains = Self::drains(&coord, handle)?; }
             EstateDiagnosticsOperation::Rebuild => {
-                snapshot.rebuild = if coord.derived_rebuild_active(handle) {
+                let matrix = coord.matrix_refresh_status(handle).map_err(|_| EstateDiagnosticsFailure::operational(
+                    "matrix_status_unavailable", "Matrix refresh status is unavailable.", true))?;
+                snapshot.rebuild = if coord.derived_rebuild_active(handle) || matrix.phase == "running" || matrix.phase == "queued" {
                     EstateRebuildState::Running
                 } else {
                     EstateRebuildState::Idle
                 };
+                let h = matrix.watermark;
+                snapshot.matrix = Some(serde_json::json!({
+                    "phase":matrix.phase, "generation":matrix.generation,
+                    "watermark":format!("{}.{}.{}",h.physical_time,h.logical_count,h.node_id),
+                    "reason":matrix.reason, "migration_phase":matrix.migration_phase,
+                    "reclaimed_bytes":matrix.reclaimed_bytes
+                }));
             }
             EstateDiagnosticsOperation::Timing => { snapshot.timing = Self::timing(&coord, handle)?; }
         }
