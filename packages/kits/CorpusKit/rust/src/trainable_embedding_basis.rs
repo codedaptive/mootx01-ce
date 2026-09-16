@@ -41,6 +41,35 @@
 
 use crate::error::CorpusKitError;
 use synapsekit::EmbeddingProvider;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::time::Instant;
+
+#[derive(Debug, Clone)]
+pub struct RetrainingBudget {
+    pub max_documents: usize,
+    pub max_sweeps: usize,
+    pub deadline: Option<Instant>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RetrainingBudget {
+    pub fn new(max_documents: usize, max_sweeps: usize, deadline: Option<Instant>) -> Self {
+        Self { max_documents: max_documents.max(1), max_sweeps: max_sweeps.max(1), deadline, cancelled: Arc::new(AtomicBool::new(false)) }
+    }
+    pub fn unbounded() -> Self { Self::new(usize::MAX, usize::MAX, None) }
+    pub fn cancel(&self) { self.cancelled.store(true, Ordering::Release); }
+    pub fn cancellation_reason(&self) -> Option<RetrainingSkipReason> {
+        if self.cancelled.load(Ordering::Acquire) { return Some(RetrainingSkipReason::Cancelled); }
+        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) { return Some(RetrainingSkipReason::DeadlineExceeded); }
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetrainingSkipReason { DocumentLimit { actual: usize, limit: usize }, Cancelled, DeadlineExceeded }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetrainingOutcome { Completed, Skipped(RetrainingSkipReason) }
 
 /// A provider whose embedding basis is trained from a corpus and can be
 /// serialized to / reconstructed from a versioned basis blob.
@@ -70,6 +99,15 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     ///
     /// `texts` are raw document texts (NOT pre-tokenized term arrays).
     fn train_on_corpus(&mut self, texts: &[&str]);
+
+    fn train_on_corpus_with_budget(&mut self, texts: &[&str], budget: &RetrainingBudget) -> RetrainingOutcome {
+        if texts.len() > budget.max_documents {
+            return RetrainingOutcome::Skipped(RetrainingSkipReason::DocumentLimit { actual: texts.len(), limit: budget.max_documents });
+        }
+        if let Some(reason) = budget.cancellation_reason() { return RetrainingOutcome::Skipped(reason); }
+        self.train_on_corpus(texts);
+        budget.cancellation_reason().map_or(RetrainingOutcome::Completed, RetrainingOutcome::Skipped)
+    }
 
     /// Streamed-training page (GLK shared-content 1.1 corrective pass): fold
     /// one page of raw document texts into the SAME accumulation
