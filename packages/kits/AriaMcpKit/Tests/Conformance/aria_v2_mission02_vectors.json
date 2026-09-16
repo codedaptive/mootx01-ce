@@ -9818,6 +9818,52 @@
             "data": {
               "additionalProperties": false,
               "properties": {
+                "matrix": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "generation": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "migration_phase": {
+                      "type": "string"
+                    },
+                    "phase": {
+                      "enum": [
+                        "idle",
+                        "queued",
+                        "running",
+                        "deferred",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "reclaimed_bytes": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "watermark": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "generation",
+                    "migration_phase",
+                    "phase",
+                    "reason",
+                    "reclaimed_bytes",
+                    "watermark"
+                  ],
+                  "type": "object"
+                },
                 "state": {
                   "enum": [
                     "running",
