@@ -307,6 +307,20 @@ struct DreamCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 dream warning: dreaming cycle error: \(error) — continuing")
         }
 
+        // Span debt: one bounded batch per dreaming pass, the same call the
+        // resident's dreaming duty makes, so `dream` plus drain status settles
+        // an estate whose drawers still owe spans. The duty attempts encoder
+        // activation itself when none is registered; with no model it is a
+        // clean 0. An error is non-fatal like the cycle error above.
+        do {
+            let encoded = try await kit.runSpanEncodeBatch(handle: handle, now: cycleNow)
+            if encoded > 0 {
+                Logging.stderr.log("mootx01 dream: span encode — \(encoded) drawer(s) encoded")
+            }
+        } catch {
+            Logging.stderr.log("mootx01 dream warning: span encode error: \(error) — continuing")
+        }
+
         // Release the lease explicitly (the defer also does this, but being
         // explicit here makes the lifecycle contract clear in code review).
         lease.release()
