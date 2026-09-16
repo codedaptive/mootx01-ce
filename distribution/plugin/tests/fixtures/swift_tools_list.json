@@ -10589,9 +10589,6 @@
           "note": {
             "type": "string"
           },
-          "reviewed_by": {
-            "type": "string"
-          },
           "tunnel_id": {
             "format": "uuid",
             "type": "string"
