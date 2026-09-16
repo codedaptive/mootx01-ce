@@ -172,11 +172,15 @@ struct DreamCommand: AsyncParsableCommand {
                 .factExtraction, for: handle)
             let factExtractorSetting = try await kit.provisionedPreference(
                 .factExtractor, for: handle)
+            guard let workerExecutableURL = ServeCommand.resolvedCurrentExecutableURL() else {
+                Logging.stderr.log("mootx01 dream fatal: could not resolve current executable path for fact extraction")
+                throw ExitCode.failure
+            }
             factExtractor = FactExtractorBuilder.build(
                 masterSetting: factExtractionSetting,
                 extractorSetting: factExtractorSetting,
                 settingsDirectory: factSettingsDirectory,
-                workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+                workerExecutableURL: workerExecutableURL)
         } catch {
             Logging.stderr.log("mootx01 dream fatal: fact-extraction preference read failed: \(error)")
             throw ExitCode.failure

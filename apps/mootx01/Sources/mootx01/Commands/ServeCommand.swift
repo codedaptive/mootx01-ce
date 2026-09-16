@@ -512,11 +512,15 @@ struct ServeCommand: AsyncParsableCommand {
                     .factExtraction, for: handle)
                 let factExtractorSetting = try await kit.provisionedPreference(
                     .factExtractor, for: handle)
+                guard let workerExecutableURL = Self.resolvedCurrentExecutableURL() else {
+                    Logging.stderr.log("mootx01 serve fatal: could not resolve current executable path for fact extraction")
+                    throw ExitCode.failure
+                }
                 factExtractor = FactExtractorBuilder.build(
                     masterSetting: factExtractionSetting,
                     extractorSetting: factExtractorSetting,
                     settingsDirectory: factSettingsDirectory,
-                    workerExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0]))
+                    workerExecutableURL: workerExecutableURL)
             } catch {
                 Logging.stderr.log("mootx01 serve fatal: fact-extraction preference read failed: \(error)")
                 throw ExitCode.failure
