@@ -1,16 +1,16 @@
-import Dispatch
+@preconcurrency import Dispatch
 import FactExtractionKit
 import Foundation
 
 enum NuExtractFactCodec {
     private static let template = """
     {
-      "fact": {
+      "facts": [{
         "subject": "",
         "predicate": "",
         "object": "",
         "evidence": ""
-      }
+      }]
     }
     """
 
@@ -26,30 +26,25 @@ enum NuExtractFactCodec {
         """
     }
 
-    /// Decode the model's raw output into candidates. NuExtract decodes
-    /// greedily, so its output for a chunk is a function of the chunk and the
-    /// recipe: output that carries no complete JSON object, or JSON that does
-    /// not decode, is that chunk's answer and yields a zero-candidate
-    /// response rather than an error. An error here would leave the source
-    /// as debt and the next cycle would produce the same output; a recipe
-    /// change re-clears the estate's debt and re-extracts. Fields the model
-    /// omitted are passed through empty and every bound (fact count, field
-    /// length, evidence grounding) is enforced by `FactGroundingValidator`,
-    /// which counts each rejection.
+    /// A valid explicit empty batch is different from unusable model output.
     static func response(
         from rawOutput: String,
         request: FactExtractionRequest,
         spec: FactExtractorModelSpec
-    ) -> FactExtractionResponse {
+    ) throws -> FactExtractionResponse {
         let rawFacts: [RawFact]
         if let object = firstJSONObject(in: rawOutput),
            let data = object.data(using: .utf8),
            let batch = try? JSONDecoder().decode(RawBatch.self, from: data) {
+            guard batch.facts != nil || batch.fact != nil else {
+                throw FactExtractionError.malformedResponse("missing fact collection")
+            }
             rawFacts = batch.facts ?? batch.fact.map { [$0] } ?? []
         } else {
-            rawFacts = []
+            throw FactExtractionError.malformedResponse("invalid or incomplete extraction JSON")
         }
-        let candidates = rawFacts.map {
+        // NuExtract represents absence with an empty template as well as [].
+        let candidates = rawFacts.filter { !$0.isExplicitEmpty }.map {
             $0.candidate(sourceText: request.sourceText)
         }
         return FactExtractionResponse(
@@ -105,6 +100,10 @@ enum NuExtractFactCodec {
         let object: String?
         let evidenceQuote: String?
 
+        var isExplicitEmpty: Bool {
+            subject == "" && predicate == "" && object == "" && evidenceQuote == ""
+        }
+
         private enum CodingKeys: String, CodingKey {
             case subject, predicate, object
             case evidenceQuote = "evidence"
@@ -129,9 +128,8 @@ enum NuExtractFactCodec {
                 predicate: predicate ?? "",
                 object: object,
                 evidenceQuote: evidence ?? "",
-                // NuExtract is a pure extraction model. The host owns trust
-                // metadata; downstream grounding rejects unsupported output.
-                confidence: 1.0,
+                // Quote grounding is not a calibrated certainty estimate.
+                confidence: 0.8,
                 assertionKind: .asserted,
                 searchAliases: [])
         }
@@ -139,7 +137,7 @@ enum NuExtractFactCodec {
 }
 
 enum CoreAINuExtractWorkerProtocol {
-    static let version: UInt32 = 2
+    static let version: UInt32 = 3
     static let maximumFrameBytes = 16 * 1_024 * 1_024
 
     struct Request: Codable, Equatable, Sendable {
@@ -159,12 +157,14 @@ enum CoreAINuExtractWorkerProtocol {
         let requestID: UInt64
         let result: FactExtractionResponse?
         let error: String?
+        var errorCode: String? = nil
 
         private enum CodingKeys: String, CodingKey {
             case protocolVersion
             case requestID = "requestId"
             case result
             case error
+            case errorCode
         }
 
         static func success(
@@ -177,11 +177,11 @@ enum CoreAINuExtractWorkerProtocol {
                 result: result, error: nil)
         }
 
-        static func failure(requestID: UInt64, error: String) -> Response {
+        static func failure(requestID: UInt64, error: String, errorCode: String? = nil) -> Response {
             Response(
                 protocolVersion: CoreAINuExtractWorkerProtocol.version,
                 requestID: requestID,
-                result: nil, error: error)
+                result: nil, error: error, errorCode: errorCode)
         }
     }
 
@@ -287,7 +287,8 @@ enum CoreAINuExtractWorkerLoop {
                 } catch {
                     response = .failure(
                         requestID: request.requestID,
-                        error: String(describing: error))
+                        error: String(describing: error),
+                        errorCode: (error as? FactExtractionError)?.code)
                 }
             }
             try CoreAINuExtractWorkerProtocol.write(response, to: output)
@@ -340,6 +341,24 @@ public struct CoreAINuExtractWorkerConfiguration: Sendable, Equatable {
 }
 
 #if os(macOS)
+import Darwin
+
+private final class CoreAIExchangeCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    private let continuation: CheckedContinuation<CoreAINuExtractWorkerProtocol.Response, any Error>
+    init(_ continuation: CheckedContinuation<CoreAINuExtractWorkerProtocol.Response, any Error>) {
+        self.continuation = continuation
+    }
+    func finish(_ result: Result<CoreAINuExtractWorkerProtocol.Response, any Error>) -> Bool {
+        lock.lock()
+        guard !completed else { lock.unlock(); return false }
+        completed = true
+        lock.unlock()
+        continuation.resume(with: result)
+        return true
+    }
+}
 /// Native Swift client for the isolated CoreAI NuExtract worker. The parent
 /// owns only pipes and lifecycle state; the child exclusively owns model and
 /// KV-cache memory.
@@ -351,6 +370,7 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
     private let configuration: CoreAINuExtractWorkerConfiguration
     private let idleSeconds: UInt64
     private let maximumRequestsPerProcess: Int
+    private let requestTimeoutSeconds: UInt64
     private var worker: CoreAINuExtractWorkerProcess?
     private var nextRequestID: UInt64 = 1
     private var useGeneration: UInt64 = 0
@@ -367,7 +387,8 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
         maximumFactsPerSource: Int = 16,
         maximumNewTokens: Int = 1_024,
         idleSeconds: UInt64 = 120,
-        maximumRequestsPerProcess: Int = 256
+        maximumRequestsPerProcess: Int = 256,
+        requestTimeoutSeconds: UInt64 = 60
     ) throws {
         let fileManager = FileManager.default
         guard workerExecutableURL.isFileURL,
@@ -390,7 +411,7 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
               !tokenizerIsDirectory.boolValue,
               fileManager.isReadableFile(atPath: tokenizerURL.path),
               idleSeconds > 0,
-              maximumRequestsPerProcess > 0 else {
+              maximumRequestsPerProcess > 0, requestTimeoutSeconds > 0 else {
             throw FactExtractionError.unavailable(
                 "NuExtract tokenizer or worker lifecycle configuration is unavailable")
         }
@@ -406,6 +427,7 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
         self.configuration = configuration
         self.idleSeconds = idleSeconds
         self.maximumRequestsPerProcess = maximumRequestsPerProcess
+        self.requestTimeoutSeconds = requestTimeoutSeconds
         spec = configuration.spec
     }
 
@@ -448,11 +470,13 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
             extraction: request)
         let response: CoreAINuExtractWorkerProtocol.Response
         do {
-            response = try await Self.exchange(envelope, with: worker)
+            response = try await Self.exchange(envelope, with: worker, timeoutSeconds: requestTimeoutSeconds)
             worker.requests += 1
         } catch {
             worker.stop(graceful: false)
             self.worker = nil
+            if let typed = error as? FactExtractionError { throw typed }
+            if error is CancellationError { throw error }
             throw FactExtractionError.inferenceFailed(
                 "NuExtract worker exchange failed: \(error)")
         }
@@ -469,7 +493,7 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
         case (.some(let result), .none):
             return result
         case (.none, .some(let error)):
-            throw FactExtractionError.inferenceFailed(error)
+            throw FactExtractionError.fromWire(code: response.errorCode, message: error)
         default:
             worker.stop(graceful: false)
             self.worker = nil
@@ -516,10 +540,21 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
 
     private static func exchange(
         _ request: CoreAINuExtractWorkerProtocol.Request,
-        with worker: CoreAINuExtractWorkerProcess
+        with worker: CoreAINuExtractWorkerProcess,
+        timeoutSeconds: UInt64
     ) async throws -> CoreAINuExtractWorkerProtocol.Response {
-        try await withCheckedThrowingContinuation { continuation in
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler(operation: {
+          try await withCheckedThrowingContinuation { continuation in
+            let completion = CoreAIExchangeCompletion(continuation)
+            let watchdog = DispatchWorkItem {
+                if completion.finish(.failure(FactExtractionError.timedOut("worker request deadline exceeded"))) {
+                    worker.stop(graceful: false)
+                }
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Double(timeoutSeconds), execute: watchdog)
             DispatchQueue.global(qos: .userInitiated).async {
+                defer { watchdog.cancel() }
                 do {
                     try CoreAINuExtractWorkerProtocol.write(
                         request, to: worker.stdin)
@@ -528,12 +563,13 @@ public actor CoreAINuExtractFactExtractor: FactExtractor {
                         from: worker.stdout) else {
                         throw CoreAINuExtractWorkerProtocol.ProtocolError.unexpectedEOF
                     }
-                    continuation.resume(returning: response)
+                    _ = completion.finish(.success(response))
                 } catch {
-                    continuation.resume(throwing: error)
+                    _ = completion.finish(.failure(error))
                 }
             }
-        }
+          }
+        }, onCancel: { worker.stop(graceful: false) })
     }
 
     private func acquireTransaction() async {
@@ -593,15 +629,18 @@ private final class CoreAINuExtractWorkerProcess: @unchecked Sendable {
         stopped = true
         lock.unlock()
 
-        try? stdin.close()
         if process.isRunning {
             if graceful {
+                try? stdin.close()
                 process.waitUntilExit()
             } else {
-                process.terminate()
+                // SIGTERM can be ignored while the model is wedged. This is
+                // our own isolated worker; force-reap to unblock framed I/O.
+                Darwin.kill(process.processIdentifier, SIGKILL)
                 process.waitUntilExit()
             }
         }
+        try? stdin.close()
         try? stdout.close()
     }
 
@@ -654,7 +693,7 @@ private actor CoreAINuExtractRuntime {
         do {
             let raw = try await engine.generate(
                 NuExtractFactCodec.prompt(for: request))
-            return NuExtractFactCodec.response(
+            return try NuExtractFactCodec.response(
                 from: raw, request: request, spec: spec)
         } catch let error as FactExtractionError {
             throw error
@@ -722,14 +761,9 @@ private final class CoreAINuExtractEngine: @unchecked Sendable {
 
     func generate(_ prompt: String) async throws -> String {
         let promptCapacity = cacheLength - maximumNewTokens - 1
-        let boundedPrompt = String(prompt.prefix(promptCapacity * 4))
-        let encoded = tokenizer.encode(boundedPrompt)
-        // A chunk whose prompt exceeds the model context is that chunk's
-        // deterministic answer under this recipe: no output, decoded by the
-        // codec to zero candidates. An error would leave the source as debt
-        // that every later cycle re-fails identically.
+        let encoded = tokenizer.encode(prompt)
         guard !encoded.isEmpty, encoded.count <= promptCapacity else {
-            return ""
+            throw FactExtractionError.needsSubdivision("prompt exceeds token context including output reserve")
         }
         let bucket = min(((encoded.count + 127) / 128) * 128, cacheLength)
         var inputIDs = [Int32](repeating: 0, count: bucket)
@@ -796,12 +830,7 @@ private final class CoreAINuExtractEngine: @unchecked Sendable {
             cachePosition += 1
             next = try argmax(stepLogits)
         }
-        // The model stopped (stop token, new-token bound, or cache length)
-        // without a complete JSON object. Greedy decoding makes that this
-        // chunk's deterministic answer, so the raw output is returned and
-        // the codec decodes it to zero candidates; an error here would leave
-        // the source as debt that every later cycle re-fails identically.
-        return tokenizer.decode(generated)
+        throw FactExtractionError.needsSubdivision("output ended without a complete JSON object")
     }
 
     private func argmax(_ logits: NDArray) throws -> Int32 {
