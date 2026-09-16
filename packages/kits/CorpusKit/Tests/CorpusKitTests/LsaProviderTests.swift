@@ -67,6 +67,31 @@ struct LsaProviderTests {
         #expect(p.effectiveRank >= 1)
     }
 
+    @Test("bounded retraining refuses an oversized corpus without publishing a basis")
+    func retrainingDocumentCap() {
+        let provider = LsaProvider(rank: 3, svdSweeps: 30)
+        let outcome = provider.trainOnCorpus(
+            texts: lsaCanonicalCorpus,
+            budget: RetrainingBudget(maxDocuments: 4, maxSweeps: 30))
+        #expect(outcome == .skipped(.documentLimit(actual: 5, limit: 4)))
+        #expect(!provider.isFinalized)
+        #expect(provider.documentCount == 0)
+    }
+
+    @Test("bounded retraining observes task cancellation before training")
+    func retrainingCancellation() async {
+        let provider = LsaProvider(rank: 3, svdSweeps: 30)
+        let task = Task { () -> RetrainingOutcome in
+            while !Task.isCancelled { await Task.yield() }
+            return provider.trainOnCorpus(
+                texts: lsaCanonicalCorpus,
+                budget: RetrainingBudget(maxDocuments: 10, maxSweeps: 30))
+        }
+        task.cancel()
+        #expect(await task.value == .skipped(.cancelled))
+        #expect(!provider.isFinalized)
+    }
+
     @Test("embedFloat returns a unit-length vector")
     func embedFloatReturnsUnitVector() async throws {
         let p = trainedProvider()
@@ -223,4 +248,3 @@ struct LsaProviderTests {
                 "LSA and RI projection seeds must differ for bucket isolation")
     }
 }
-

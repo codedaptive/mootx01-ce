@@ -32,7 +32,7 @@ use crate::corpus_ingest_queue::IngestFailureHook;
 use crate::error::{CorpusKitError, CorpusKitResult};
 use crate::hybrid_recall::{recall as hybrid_recall, HybridRecallConfiguration};
 use crate::tokenizer::default_keyword_tokens;
-use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
+use crate::trainable_embedding_basis::{RetrainingBudget, RetrainingOutcome, RetrainingSkipReason, TrainableEmbeddingBasis};
 use engram_lib::Engram;
 use substrate_types::merkle_root::MerkleRoot;
 use std::collections::{BTreeMap, HashMap};
@@ -68,6 +68,12 @@ use persistence_kit::Storage;
 pub mod float_lane;
 pub use float_lane::{FloatDiscriminationSignal, FloatLaneOutcome};
 pub(crate) use float_lane::discrimination_signal_from_outcome;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CorpusRetrainingReport {
+    pub completed_model_ids: Vec<String>,
+    pub skipped_model_ids: BTreeMap<String, RetrainingSkipReason>,
+}
 
 /// Selects the embedding model the `Corpus` struct uses internally.
 ///
@@ -2099,6 +2105,11 @@ impl Corpus {
     /// `now_millis`: Unix epoch in milliseconds for the basis `trained_at` stamp
     /// (converted to seconds) and the re-embedded vectors' filing timestamps.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
+        self.reindex_with_budget(now_millis, &RetrainingBudget::unbounded()).map(|_| ())
+    }
+
+    pub fn reindex_with_budget(&self, now_millis: i64, budget: &RetrainingBudget) -> CorpusKitResult<CorpusRetrainingReport> {
+        let mut report = CorpusRetrainingReport::default();
         // Active chunks only: a source cleared by `remove` must NOT be re-embedded
         // back into recall by a (possibly auto-triggered) reindex.
         let chunks = self.active_chunks()?;
@@ -2337,6 +2348,7 @@ impl Corpus {
                 slot.model_id,
                 chunks.len()
             );
+            report.completed_model_ids.push(slot.model_id.clone());
         }
 
         // Corpus-path slots: fan out to parallel training threads (same as the
@@ -2345,12 +2357,13 @@ impl Corpus {
         let corpus_indices_only: Vec<usize> =
             corpus_path_indices.iter().map(|(i, _)| *i).collect();
         if !corpus_indices_only.is_empty() {
-            std::thread::scope(|scope| -> CorpusKitResult<()> {
+            let attempts = std::thread::scope(|scope| -> CorpusKitResult<Vec<(String, RetrainingOutcome)>> {
                 let chunks_ref = &chunks;
                 let mut handles = Vec::new();
                 for &slot_index in &corpus_indices_only {
                     handles.push(scope.spawn(move || {
-                        self.train_and_persist_basis(slot_index, chunks_ref, filed_at_secs)
+                        let outcome = self.train_and_persist_basis_with_budget(slot_index, chunks_ref, filed_at_secs, budget)?;
+                        Ok((self.slots[slot_index].model_id.clone(), outcome))
                     }));
                 }
                 eprintln!(
@@ -2358,11 +2371,16 @@ impl Corpus {
                     handles.len(),
                     chunks_ref.len()
                 );
-                for h in handles {
-                    h.join().expect("slot train thread panicked")?;
-                }
-                Ok(())
+                let mut outcomes = Vec::new();
+                for h in handles { outcomes.push(h.join().expect("slot train thread panicked")?); }
+                Ok(outcomes)
             })?;
+            for (model_id, outcome) in attempts {
+                match outcome {
+                    RetrainingOutcome::Completed => report.completed_model_ids.push(model_id),
+                    RetrainingOutcome::Skipped(reason) => { report.skipped_model_ids.insert(model_id, reason); }
+                }
+            }
         }
 
         // F-2 heal: for every corpus-path slot, rebuild a FRESH counts
@@ -2376,6 +2394,7 @@ impl Corpus {
         // incorrectly and the restored basis would mismatch the corpus.
         for (slot_index, reason) in &corpus_path_indices {
             let slot = &self.slots[*slot_index];
+            if report.skipped_model_ids.contains_key(&slot.model_id) { continue; }
             let Some(fresh_blob) = slot.fresh_basis_blob.as_ref() else {
                 continue;
             };
@@ -2473,6 +2492,7 @@ impl Corpus {
         }
 
         for slot_index in 0..self.slots.len() {
+            if report.skipped_model_ids.contains_key(&self.slots[slot_index].model_id) { continue; }
             // Skip non-trainable providers: fresh_basis_blob.is_none() means no
             // factory blob → item-local deterministic output → basis-invariant vectors.
             // Re-embedding them on every reindex is wasted work (~20% of per-chunk
@@ -2510,7 +2530,8 @@ impl Corpus {
             chunks.len(),
             self.slots.len()
         );
-        Ok(())
+        report.completed_model_ids.sort();
+        Ok(report)
     }
 
     /// Train a FRESH provider on the given chunks' texts and persist the
@@ -2530,10 +2551,16 @@ impl Corpus {
         chunks: &[Chunk],
         now_secs: i64,
     ) -> CorpusKitResult<()> {
+        self.train_and_persist_basis_with_budget(slot_index, chunks, now_secs, &RetrainingBudget::unbounded()).map(|_| ())
+    }
+
+    fn train_and_persist_basis_with_budget(
+        &self, slot_index: usize, chunks: &[Chunk], now_secs: i64, budget: &RetrainingBudget,
+    ) -> CorpusKitResult<RetrainingOutcome> {
         let Some(fresh_blob) = self.slots[slot_index].fresh_basis_blob.as_ref() else {
             // Defensive: only invoked when this slot's fresh_basis_blob is Some.
             // Nothing to train otherwise.
-            return Ok(());
+            return Ok(RetrainingOutcome::Completed);
         };
         // Reconstruct a fresh trainable provider from the empty-basis blob, train
         // it from scratch, then install it as this slot's live serving provider.
@@ -2557,7 +2584,8 @@ impl Corpus {
             state.accumulator.reconstruct_trainable_basis(fresh_blob)?
         };
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        trained.train_on_corpus(&texts);
+        let outcome = trained.train_on_corpus_with_budget(&texts, budget);
+        if outcome != RetrainingOutcome::Completed { return Ok(outcome); }
         let blob = trained.serialize_basis();
         let model_id = trained.model_id().to_string();
         let model_version = trained.model_version().to_string();
@@ -2575,7 +2603,8 @@ impl Corpus {
             basis: blob,
             trained_at_secs: now_secs,
             trained_chunk_count: chunks.len(),
-        })
+        })?;
+        Ok(RetrainingOutcome::Completed)
     }
 
     /// Re-embed every chunk (binary v0 + float v1) under the GIVEN SLOT's
@@ -3290,4 +3319,3 @@ impl Corpus {
         self.bundle_store.global_corpus_merkle_root()
     }
 }
-
