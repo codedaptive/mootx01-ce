@@ -360,6 +360,22 @@ public enum AriaResident {
         }
     }
 
+    private static func reconcilePreferenceSignal(
+        name: String,
+        enabled: Bool,
+        ids: inout [String: SignalID],
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date,
+        makeSpec: () async -> SignalSpec?
+    ) async throws {
+        if !enabled, let id = ids.removeValue(forKey: name) {
+            _ = try await kit.signalUnregister(id, in: handle)
+        } else if enabled, ids[name] == nil, let spec = await makeSpec() {
+            ids[name] = try await kit.registerStandingSignal(spec, in: handle, now: now)
+        }
+    }
+
     /// Run the resident daemon: install telemetry (if configured), spawn the Brain
     /// pump and the continuous monitoring gate, and serve the HTTP MCP transport
     /// until the process is terminated. Throws on bind failure (the caller decides
@@ -577,10 +593,9 @@ public enum AriaResident {
             contradictionSweepSetting = .on
         }
         // Live consolidation cycle: one bounded sweep per daily fire under
-        // the production distill function. nil when the switch is .off, so
-        // the scheduler never carries the signal.
-        let consolidationCycleClosure: (@Sendable (Date) async throws -> ConsolidationSweepReport)? =
-            consolidationSetting == .off ? nil : { @Sendable now in
+        // the production distill function. Registration follows the live switch.
+        let consolidationCycleClosure: @Sendable (Date) async throws -> ConsolidationSweepReport =
+            { @Sendable now in
                 try await kit.consolidationSweepReport(
                     handle: handle,
                     distillFn: GeniusLocusKit.consolidationDistillFn,
@@ -588,9 +603,9 @@ public enum AriaResident {
             }
         // Live contradiction sweep: the typed rule sweep plus the lexical
         // pass at their default registry/model/probe/top-K parameters.
-        // nil when the switch is .off.
-        let contradictionSweepCycleClosure: (@Sendable (Date) async throws -> ConflictTunnelProposalReport)? =
-            contradictionSweepSetting == .off ? nil : { @Sendable now in
+        // Registration follows the live switch.
+        let contradictionSweepCycleClosure: @Sendable (Date) async throws -> ConflictTunnelProposalReport =
+            { @Sendable now in
                 try await kit.proposeConflictTunnels(in: handle, now: now)
             }
         // Maintenance-family activation: the maintenance-daemon, decay-sweep
@@ -609,18 +624,18 @@ public enum AriaResident {
             maintenanceSetting = .on
         }
         let maintenanceDaemon = await governor.maintenance
-        let maintenanceCycleClosure: (@Sendable (Date) async throws -> Int)? =
-            maintenanceSetting == .off ? nil : { @Sendable now in
+        let maintenanceCycleClosure: @Sendable (Date) async throws -> Int =
+            { @Sendable now in
                 try await maintenanceDaemon.triggerMaintenanceCycle(
                     now: now, categories: [.tombstone]).tombstoneCandidates
             }
-        let decayCycleClosure: (@Sendable (Date) async throws -> Int)? =
-            maintenanceSetting == .off ? nil : { @Sendable now in
+        let decayCycleClosure: @Sendable (Date) async throws -> Int =
+            { @Sendable now in
                 try await maintenanceDaemon.triggerMaintenanceCycle(
                     now: now, categories: [.decay]).decayCandidates
             }
-        let byReferenceCycleClosure: (@Sendable (Date) async throws -> Int)? =
-            maintenanceSetting == .off ? nil : { @Sendable now in
+        let byReferenceCycleClosure: @Sendable (Date) async throws -> Int =
+            { @Sendable now in
                 try await maintenanceDaemon.triggerMaintenanceCycle(
                     now: now, categories: [.byReference]).byReferenceDrifts
             }
@@ -641,22 +656,23 @@ public enum AriaResident {
                 "AriaResident: provisionedPreference(.adaptiveRecall) read failed (\(error)) — defaulting to .on")
             adaptiveRecallSetting = .on
         }
-        let foldCycleClosure: (@Sendable (Date) async throws -> Void)? =
-            adaptiveRecallSetting == .off ? nil : { @Sendable now in
+        let foldCycleClosure: @Sendable (Date) async throws -> Void =
+            { @Sendable now in
                 try await kit.runTemporalCausalityFold(handle, now: now)
             }
-        let trainingCycleClosure: (@Sendable (Date) async throws -> String)? =
-            adaptiveRecallSetting == .off ? nil : { @Sendable now in
+        let trainingCycleClosure: @Sendable (Date) async throws -> String =
+            { @Sendable now in
                 try await kit.runTrainingTick(handle, now: now)
             }
-        let tournamentCycleClosure: (@Sendable (Date) async throws -> TournamentReport)? =
-            adaptiveRecallSetting == .off ? nil : { @Sendable now in
+        let tournamentCycleClosure: @Sendable (Date) async throws -> TournamentReport =
+            { @Sendable now in
                 try await kit.endOfDayTournament(handle, now: now)
             }
 
+        var registeredSignalIDs: [String: SignalID] = [:]
         if let vectorStore = vectorStore {
             do {
-                _ = try await kit.registerDefaultStandingSignals(
+                registeredSignalIDs = try await kit.registerDefaultStandingSignals(
                     in: handle,
                     vectorStore: vectorStore,
                     huntCycle: { now in
@@ -686,14 +702,14 @@ public enum AriaResident {
                     // non-nil when setting=.on AND an extractor is provisioned;
                     // nil (inert default) when setting=.off or no extractor.
                     factExtractionCycle: factExtractionCycleClosure ?? { _ in 0 },
-                    consolidationCycle: consolidationCycleClosure,
-                    contradictionSweepCycle: contradictionSweepCycleClosure,
-                    maintenanceCycle: maintenanceCycleClosure,
-                    decayCycle: decayCycleClosure,
-                    byReferenceCycle: byReferenceCycleClosure,
-                    foldCycle: foldCycleClosure,
-                    trainingCycle: trainingCycleClosure,
-                    tournamentCycle: tournamentCycleClosure,
+                    consolidationCycle: consolidationSetting == .off ? nil : consolidationCycleClosure,
+                    contradictionSweepCycle: contradictionSweepSetting == .off ? nil : contradictionSweepCycleClosure,
+                    maintenanceCycle: maintenanceSetting == .off ? nil : maintenanceCycleClosure,
+                    decayCycle: maintenanceSetting == .off ? nil : decayCycleClosure,
+                    byReferenceCycle: maintenanceSetting == .off ? nil : byReferenceCycleClosure,
+                    foldCycle: adaptiveRecallSetting == .off ? nil : foldCycleClosure,
+                    trainingCycle: adaptiveRecallSetting == .off ? nil : trainingCycleClosure,
+                    tournamentCycle: adaptiveRecallSetting == .off ? nil : tournamentCycleClosure,
                     now: Date()
                 )
                 Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults; consolidation=\(consolidationSetting.rawValue) contradictionSweep=\(contradictionSweepSetting.rawValue) maintenance=\(maintenanceSetting.rawValue))")
@@ -702,6 +718,55 @@ public enum AriaResident {
             }
         } else {
             Logging.stderr.log("AriaResident standing signals NOT registered (no VectorStore for estate; governor signalTick will benign-skip)")
+        }
+
+        let preferenceTask = Task {
+            var ids = registeredSignalIDs
+            let intervalNs = UInt64(config.brainTickMs) * 1_000_000
+            while !Task.isCancelled {
+                let now = Date()
+                do {
+                    let factOn = try await kit.provisionedPreference(.factExtraction, for: handle) != .off
+                    let consolidationOn = try await kit.provisionedPreference(.consolidation, for: handle) != .off
+                    let contradictionOn = try await kit.provisionedPreference(.contradictionSweep, for: handle) != .off
+                    let maintenanceOn = try await kit.provisionedPreference(.maintenance, for: handle) != .off
+                    let adaptiveOn = try await kit.provisionedPreference(.adaptiveRecall, for: handle) != .off
+                    try await reconcilePreferenceSignal(
+                        name: FactExtractionSignal.signalName, enabled: factOn, ids: &ids,
+                        kit: kit, handle: handle, now: now
+                    ) {
+                        guard let cycle = await resolveFactExtractionCycle(
+                            setting: .on, extractor: config.factExtractor, kit: kit, handle: handle
+                        ) else { return nil }
+                        return FactExtractionSignal.spec(factExtractionCycle: cycle)
+                    }
+                    try await reconcilePreferenceSignal(name: ConsolidationSignal.signalName, enabled: consolidationOn, ids: &ids, kit: kit, handle: handle, now: now) {
+                        ConsolidationSignal.spec(consolidationCycle: consolidationCycleClosure)
+                    }
+                    try await reconcilePreferenceSignal(name: ContradictionSweepSignal.signalName, enabled: contradictionOn, ids: &ids, kit: kit, handle: handle, now: now) {
+                        ContradictionSweepSignal.spec(sweepCycle: contradictionSweepCycleClosure)
+                    }
+                    let maintenanceSpecs: [(String, SignalSpec)] = [
+                        (MaintenanceSignal.signalName, MaintenanceSignal.spec(maintenanceCycle: maintenanceCycleClosure)),
+                        (DecaySweepSignal.signalName, DecaySweepSignal.spec(decayCycle: decayCycleClosure)),
+                        (ByReferenceValiditySignal.signalName, ByReferenceValiditySignal.spec(byReferenceCycle: byReferenceCycleClosure)),
+                    ]
+                    for (name, spec) in maintenanceSpecs {
+                        try await reconcilePreferenceSignal(name: name, enabled: maintenanceOn, ids: &ids, kit: kit, handle: handle, now: now) { spec }
+                    }
+                    let adaptiveSpecs: [(String, SignalSpec)] = [
+                        (TemporalCausalitySignal.signalName, TemporalCausalitySignal.spec(foldCycle: foldCycleClosure)),
+                        (TrainingSignal.signalName, TrainingSignal.spec(trainingCycle: trainingCycleClosure)),
+                        (EndOfDayTournamentSignal.signalName, EndOfDayTournamentSignal.spec(tournamentCycle: tournamentCycleClosure)),
+                    ]
+                    for (name, spec) in adaptiveSpecs {
+                        try await reconcilePreferenceSignal(name: name, enabled: adaptiveOn, ids: &ids, kit: kit, handle: handle, now: now) { spec }
+                    }
+                } catch {
+                    Logging.stderr.log("AriaResident preference reconciliation failed closed: \(error)")
+                }
+                do { try await Task.sleep(nanoseconds: intervalNs) } catch { break }
+            }
         }
 
         let pumpTask = Task { await governor.run() }
@@ -812,12 +877,14 @@ public enum AriaResident {
             try await server.run()   // resident: returns only on bind failure
         } catch {
             pumpTask.cancel()
+            preferenceTask.cancel()
             monitoringTask?.cancel()
             serverMetricsTask?.cancel()
             vaultResidentTask?.cancel()
             throw error
         }
         pumpTask.cancel()
+        preferenceTask.cancel()
         monitoringTask?.cancel()
         serverMetricsTask?.cancel()
         vaultResidentTask?.cancel()
