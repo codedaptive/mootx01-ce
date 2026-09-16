@@ -215,8 +215,7 @@ pub use locus_kit::dataset_handle::DatasetColumnSummary;
 pub use matrix::{
     MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
     MatrixCalibrationRegistry, MatrixCoOccurKey, MatrixFieldCell, MatrixNMF,
-    MatrixNMFFactorization, MatrixPersistenceBackend, MatrixPersistenceError,
-    MatrixPersistenceMode, MatrixSnapshot, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
+    MatrixNMFFactorization, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
 };
 pub use training::{
     EnrichmentPassResult, EnrichmentPipeline, TrainingDaemon, TrainingDaemonReport,

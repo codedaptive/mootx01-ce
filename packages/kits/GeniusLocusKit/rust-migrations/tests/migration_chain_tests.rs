@@ -67,6 +67,14 @@ fn read_stamp(storage: &Arc<dyn Storage>) -> Option<EstateFormatVersion> {
         .expect("read estate format")
 }
 
+#[test]
+fn historical_estate_requires_the_offline_owner() {
+    let (mut coord, handle, storage) = make_estate(Some(EstateFormatVersion::V1_9));
+    assert_eq!(coord.run_migration_chain(&handle, NOW, default_ensemble()),
+        Err(MigrationChainError::OfflineUpgradeRequired));
+    assert_eq!(read_stamp(&storage), Some(EstateFormatVersion::V1_9));
+}
+
 // ---------------------------------------------------------------------------
 // §1 A future format is refused before any capsule runs
 // ---------------------------------------------------------------------------
@@ -76,7 +84,7 @@ fn future_format_is_refused_and_left_untouched() {
     let future = EstateFormatVersion { major: 9, minor: 9 };
     let (mut coord, handle, storage) = make_estate(Some(future));
     let error = coord
-        .run_migration_chain(&handle, NOW, default_ensemble())
+        .run_offline_migration_chain(&handle, NOW, default_ensemble())
         .expect_err("a stamp above CURRENT must be refused");
     assert_eq!(
         error,
@@ -100,7 +108,7 @@ fn below_compiled_floor_is_refused_and_left_untouched() {
     );
     let (mut coord, handle, storage) = make_estate(Some(EstateFormatVersion::V1_0));
     let error = coord
-        .run_migration_chain(&handle, NOW, default_ensemble())
+        .run_offline_migration_chain(&handle, NOW, default_ensemble())
         .expect_err("a stamp below the compiled floor must be refused");
     assert_eq!(
         error,
@@ -122,7 +130,7 @@ fn below_compiled_floor_is_refused_and_left_untouched() {
 fn current_estate_is_a_no_op() {
     let (mut coord, handle, storage) = make_estate(Some(EstateFormatVersion::CURRENT));
     coord
-        .run_migration_chain(&handle, NOW, default_ensemble())
+        .run_offline_migration_chain(&handle, NOW, default_ensemble())
         .expect("a current estate needs no capsule");
     assert_eq!(read_stamp(&storage), Some(EstateFormatVersion::CURRENT));
 }
@@ -136,7 +144,7 @@ fn unstamped_estate_is_stamped_current() {
     let (mut coord, handle, storage) = make_estate(None);
     assert_eq!(read_stamp(&storage), None, "precondition: no stamp");
     coord
-        .run_migration_chain(&handle, NOW, default_ensemble())
+        .run_offline_migration_chain(&handle, NOW, default_ensemble())
         .expect("an unstamped estate is a fresh bare open");
     assert_eq!(
         read_stamp(&storage),
@@ -160,7 +168,7 @@ fn a_chain_that_returns_ok_leaves_the_estate_current() {
     for stamp in [None, Some(EstateFormatVersion::CURRENT)] {
         let (mut coord, handle, storage) = make_estate(stamp);
         coord
-            .run_migration_chain(&handle, NOW, default_ensemble())
+            .run_offline_migration_chain(&handle, NOW, default_ensemble())
             .expect("an unstamped or current estate returns Ok");
         assert_eq!(read_stamp(&storage), Some(EstateFormatVersion::CURRENT), "stamp {stamp:?} -> Ok -> CURRENT");
     }
@@ -170,7 +178,7 @@ fn a_chain_that_returns_ok_leaves_the_estate_current() {
     {
         let (mut coord, handle, storage) = make_estate(Some(EstateFormatVersion::V1_6));
         coord
-            .run_migration_chain(&handle, NOW, default_ensemble())
+            .run_offline_migration_chain(&handle, NOW, default_ensemble())
             .expect("the 1.6 -> 1.7 capsule runs on an in-memory estate");
         assert_eq!(read_stamp(&storage), Some(EstateFormatVersion::CURRENT));
     }
@@ -189,7 +197,7 @@ fn a_chain_that_returns_ok_leaves_the_estate_current() {
             .expect("meta");
         assert!(before.is_none(), "precondition: key absent before the chain runs");
         coord
-            .run_migration_chain(&handle, NOW, default_ensemble())
+            .run_offline_migration_chain(&handle, NOW, default_ensemble())
             .expect("the 1.7 -> 1.8 capsule runs on a V1_7 estate");
         assert_eq!(
             read_stamp(&storage),

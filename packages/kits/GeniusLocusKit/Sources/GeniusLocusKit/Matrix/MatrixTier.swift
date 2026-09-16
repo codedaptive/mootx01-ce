@@ -230,6 +230,25 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         self.decayedAsOfMs = 0
     }
 
+    /// Reconstitute a verified record generation without a serialization round trip.
+    package init(fieldPresence: [MatrixFieldCell: Int64],
+                 coOccurrence: [MatrixCoOccurKey: Int64],
+                 temporalCausality: [MatrixTemporalKey: Int64],
+                 liveRowCount: Int64, lastHLC: HLC, temporalWatermarkHLC: HLC,
+                 coOccurrenceDecayed: [MatrixCoOccurKey: Double],
+                 temporalCausalityDecayed: [MatrixTemporalKey: Double],
+                 decayedAsOfMs: Int64) {
+        self.fieldPresence = fieldPresence
+        self.coOccurrence = coOccurrence
+        self.temporalCausality = temporalCausality
+        self.liveRowCount = liveRowCount
+        self.lastHLC = lastHLC
+        self.temporalWatermarkHLC = temporalWatermarkHLC
+        self.coOccurrenceDecayed = coOccurrenceDecayed
+        self.temporalCausalityDecayed = temporalCausalityDecayed
+        self.decayedAsOfMs = decayedAsOfMs
+    }
+
     // MARK: - Codable (backward-compatible)
     //
     // MatrixTier gained `temporalWatermarkHLC` on 2026-06-04. Old

@@ -389,19 +389,16 @@ struct ServeCommand: AsyncParsableCommand {
             // zeros until the load finishes — correct degradation. The dreaming
             // cycle refreshes and re-persists it later.
             //
-            // rebuildDerivedAccelerators LOADS the persisted on-disk matrix snapshot
-            // (MatrixSnapshotStore) and folds only the audit tail past its watermark
-            // forward — it does NOT recompute the whole matrix from the audit log on
-            // every launch. The first launch on a fresh estate full-rebuilds once and
-            // persists; every launch after that is a cheap load + tail fold.
+            // The isolated GLK worker loads normalized records, folds counts
+            // forward, recomputes time-dependent decay, and publishes a complete
+            // generation. No whole-matrix BLOB is decoded or rewritten.
             //
             // RESIDENT ONLY: the matrix tier is a long-lived brain-layer structure
             // that only the resident daemon's recall scoring + dreaming consume. A
             // one-shot stdio `query` subprocess does NOT need it, so skip it in stdio
             // mode — stdio recall runs with degraded (zero) matrix scoring, which is
             // correct one-shot behaviour, and a one-shot must not pay even the load
-            // cost or write a snapshot it will never reuse. In-memory estates have
-            // no on-disk matrix snapshot to load or persist.
+            // cost or write records it will never reuse.
             if residentPort != nil, onDisk {
                 Task {
                     do {

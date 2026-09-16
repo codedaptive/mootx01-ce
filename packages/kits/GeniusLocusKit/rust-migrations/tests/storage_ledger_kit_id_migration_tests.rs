@@ -250,7 +250,7 @@ fn v1_0_estate_with_old_rows_runs_full_chain_to_current() {
     let (mut coord, handle, storage) = make_estate(EstateFormatVersion::V1_0, true);
     assert_eq!(compiled_floor(), Some(EstateFormatVersion::V1_0));
     coord
-        .run_migration_chain(&handle, NOW, default_ensemble())
+        .run_offline_migration_chain(&handle, NOW, default_ensemble())
         .expect("full chain must succeed on an empty v1_0 estate");
     assert_eq!(
         read_stamp(&storage),
