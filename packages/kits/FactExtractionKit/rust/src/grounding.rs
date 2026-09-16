@@ -63,7 +63,9 @@ impl FactGroundingValidator {
             };
         }
 
-        let source: Vec<char> = original_source.chars().collect();
+        // Rust `char` and Swift `Unicode.Scalar` are the shared offset unit.
+        // UTF-8 byte positions are carried separately on `FactSourceSpan`.
+        let source_scalars: Vec<char> = original_source.chars().collect();
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
         let mut seen = HashSet::new();
@@ -94,7 +96,7 @@ impl FactGroundingValidator {
                 continue;
             }
             let needle: Vec<char> = evidence.chars().collect();
-            let occurrences = occurrences(&needle, &source);
+            let occurrences = occurrences(&needle, &source_scalars);
             if occurrences.is_empty() {
                 rejected.push(FactGroundingRejection::EvidenceNotFound);
                 continue;
@@ -136,8 +138,8 @@ impl FactGroundingValidator {
             }
 
             let (start, end) = eligible[0];
-            let start_utf8_byte = source[..start].iter().collect::<String>().len();
-            let end_utf8_byte = source[..end].iter().collect::<String>().len();
+            let start_utf8_byte = source_scalars[..start].iter().collect::<String>().len();
+            let end_utf8_byte = source_scalars[..end].iter().collect::<String>().len();
             let aliases = normalized_aliases(&candidate.search_aliases);
             let projection = FactSearchProjection::build(&subject, &predicate, &object, &aliases);
             accepted.push(GroundedFactCandidate {
