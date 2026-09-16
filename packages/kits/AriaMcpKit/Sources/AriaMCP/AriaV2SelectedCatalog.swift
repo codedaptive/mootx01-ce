@@ -807,9 +807,6 @@ enum AriaV2SelectedCatalog {
                 "tunnel_id": uuidSchema(),
                 "decision": enumSchema(["accept", "endorse", "reject"]),
                 "note": stringSchema(),
-                // Defaults to "user". Edge activation is user-only, so a model
-                // reviewer passes its own id here and uses endorse or reject.
-                "reviewed_by": stringSchema(),
                 "estate_id": uuidSchema(),
             ],
             required: ["tunnel_id", "decision"], dataSchema: reviewTunnelDataSchema()
@@ -1292,10 +1289,9 @@ enum AriaV2SelectedCatalog {
                 "subject": stringSchema(), "predicate": stringSchema(), "objects": stringArray,
             ], required: ["subject", "predicate", "objects"])
             let tally = JSONValue.object(["type": .string("integer"), "minimum": .integer(0)])
-            // The totals count EVERY contradiction, including those whose rows
-            // are withheld; the withheld counts say how much of that total the
-            // caller cannot see. Without them a redacted contradiction is
-            // indistinguishable from no contradiction at all.
+            // Totals count only caller-admissible contradictions. The withheld
+            // compatibility counters remain zero on this public path so they do
+            // not disclose the existence or population of protected rows.
             return orderedExactObjectSchema([
                 "contradictsTunnels": .object(["type": .string("array"), "items": tunnel]),
                 "conflictingFacts": .object(["type": .string("array"), "items": fact]),
