@@ -1753,6 +1753,61 @@ impl DrawerStore for DrawerStoreCore {
         rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()
     }
 
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let content_kind_mask = 0xFC0i64;
+        let dataset_kind = (crate::drawer_operational::ContentKind::Dataset as i64) << 6;
+        let predicate = StoragePredicate::all(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            StoragePredicate::Not(Box::new(StoragePredicate::BitwiseEq {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                expected: dataset_kind,
+                mask: content_kind_mask,
+            })),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "embeddingModelID"),
+                TypedValue::Text(
+                    crate::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID.to_string(),
+                ),
+            ),
+        ]);
+        let rows = self
+            .storage
+            .row_store()
+            .query_projected(
+                T_DRAWERS,
+                &["id"],
+                Some(&predicate),
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
+                Some(limit),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        rows.into_iter()
+            .map(|row| match row.get("id") {
+                Some(TypedValue::Text(id)) => Ok(id.clone()),
+                _ => Err(LocusKitError::CorruptStoredValue {
+                    table: T_DRAWERS.to_string(),
+                    column: "id".to_string(),
+                    stored_text: String::new(),
+                }),
+            })
+            .collect()
+    }
+
     fn all_drawers_bounded_projected(
         &self,
         limit: Option<usize>,
@@ -6204,6 +6259,12 @@ impl DrawerStore for InMemoryDrawerStore {
         limit: usize,
     ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.active_drawers_after(after_id, limit)
+    }
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.inner.active_corpus_content_ids_limited(limit)
     }
 
     // Forwarding overrides for the DESC bounded scan methods. Without these,
