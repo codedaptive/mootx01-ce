@@ -3,6 +3,7 @@
 use crate::digest::source_digest;
 #[path = "complete_content_json.rs"]
 mod json;
+use moot_product_identity::{settings, storage};
 use std::collections::HashMap;
 
 pub const VERSION: &str = "complete-form-visible-v6";
@@ -23,6 +24,27 @@ pub struct CompleteContentResult {
     pub output_tokens: u64,
     pub quality_qualified: bool,
     pub model_assistance: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_expansion_error: Option<ReferenceExpansionError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReferenceExpansionError {
+    pub code: String,
+    pub message: String,
+    pub attempted_bytes: usize,
+    pub max_bytes: usize,
+    pub max_ratio: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ExpansionLimits {
+    max_bytes: usize,
+    max_ratio: usize,
+}
+struct ExpansionResult {
+    text: String,
+    error: Option<ReferenceExpansionError>,
 }
 
 pub struct CompleteContentReducer;
@@ -31,29 +53,48 @@ impl CompleteContentReducer {
         source: &str,
         count: impl Fn(&str) -> u64,
     ) -> Result<CompleteContentResult, String> {
+        let settings = settings::load(&storage::configuration_directory());
+        let limits = ExpansionLimits {
+            max_bytes: settings.context_distill_reference_expansion_max_bytes,
+            max_ratio: settings.context_distill_reference_expansion_max_ratio,
+        };
         let mut visible = false;
         let mut text = source.to_owned();
+        let mut expansion_error = None;
         if source.starts_with(&format!("{VISIBLE_NOTICE}{REPEAT_LEGEND}")) {
-            expand_visible(source)?;
-            visible = true;
+            let expanded = expand_visible(source, limits)?;
+            expansion_error = expanded.error;
+            visible = expansion_error.is_none();
         } else if !source.starts_with(TIME_INTRO) {
             text = clocks(&text, &count);
             text = json::tables(&text, &count);
             if !lines(source).iter().any(|l| *l == json::TABLE_LEGEND) {
-                text = repeat(&text, &count)?;
+                let referenced = repeat(&text, &count, limits)?;
+                text = referenced.text;
+                expansion_error = referenced.error;
             }
             text = json::blocks(&text, &count);
             text = json::declarations(&text, &count);
             text = timestamps(&text, &count);
             if text.starts_with(REPEAT_LEGEND) {
-                let intermediate = expand_refs(&text)?;
-                let candidate = visible_repeat(&intermediate, &count)?;
-                if candidate != intermediate && count(&candidate) < count(source) {
-                    if expand_visible(&candidate)? != intermediate {
-                        return Err("Visible-reference reconstruction failed".into());
+                let expanded = expand_refs(&text, limits, None)?;
+                if expanded.error.is_some() {
+                    text = source.to_owned();
+                    expansion_error = expanded.error;
+                } else {
+                    let intermediate = expanded.text;
+                    let rendered = visible_repeat(&intermediate, &count, limits)?;
+                    if rendered.error.is_some() {
+                        text = source.to_owned();
+                        expansion_error = rendered.error;
+                    } else if rendered.text != intermediate && count(&rendered.text) < count(source)
+                    {
+                        if expand_visible(&rendered.text, limits)?.text != intermediate {
+                            return Err("Visible-reference reconstruction failed".into());
+                        }
+                        text = rendered.text;
+                        visible = true;
                     }
-                    text = candidate;
-                    visible = true;
                 }
             }
         }
@@ -67,6 +108,7 @@ impl CompleteContentReducer {
             visible_refs: visible,
             quality_qualified: false,
             model_assistance: false,
+            reference_expansion_error: expansion_error,
         })
     }
 }
@@ -278,29 +320,71 @@ fn ref_tag<'a>(line: &'a str, kind: &str) -> Option<(&'a str, &'a str)> {
     let rest = tail[n..].strip_prefix(kind)?;
     Some((&tail[..n], rest))
 }
-fn expand_refs(text: &str) -> Result<String, String> {
+fn expand_refs(
+    text: &str,
+    limits: ExpansionLimits,
+    ratio_base_bytes: Option<usize>,
+) -> Result<ExpansionResult, String> {
     let Some(body) = text.strip_prefix(REPEAT_LEGEND) else {
-        return Ok(text.into());
+        return Ok(ExpansionResult {
+            text: text.into(),
+            error: None,
+        });
     };
     let mut defs = HashMap::new();
     let mut out = String::new();
+    let ratio_limit = ratio_base_bytes
+        .unwrap_or(text.len())
+        .checked_mul(limits.max_ratio);
     for line in lines(body) {
-        if let Some((id, value)) = ref_tag(line, " DEFINE]] ") {
-            if defs.insert(id, value).is_some() {
+        let value;
+        if let Some((id, defined)) = ref_tag(line, " DEFINE]] ") {
+            if defs.insert(id, defined).is_some() {
                 return Err("Duplicate definition".into());
             }
-            out.push_str(value);
+            value = defined;
         } else if let Some((id, "\n")) = ref_tag(line, " REPEAT]]") {
-            out.push_str(defs.get(id).ok_or("Forward or unknown reference")?);
+            value = defs
+                .get(id)
+                .copied()
+                .ok_or("Forward or unknown reference")?;
         } else {
-            out.push_str(line);
+            value = line;
         }
+        let attempted = out.len().checked_add(value.len());
+        let exceeds = match attempted {
+            None => true,
+            Some(n) => n > limits.max_bytes || ratio_limit.map_or(false, |limit| n > limit),
+        };
+        if exceeds {
+            return Ok(ExpansionResult {
+                text: text.into(),
+                error: Some(ReferenceExpansionError {
+                    code: "reference_expansion_limit_exceeded".into(),
+                    message: "Reference expansion limit exceeded".into(),
+                    attempted_bytes: attempted.unwrap_or(usize::MAX),
+                    max_bytes: limits.max_bytes,
+                    max_ratio: limits.max_ratio,
+                }),
+            });
+        }
+        out.push_str(value);
     }
-    Ok(out)
+    Ok(ExpansionResult {
+        text: out,
+        error: None,
+    })
 }
-fn repeat(source: &str, count: &Counter<'_>) -> Result<String, String> {
+fn repeat(
+    source: &str,
+    count: &Counter<'_>,
+    limits: ExpansionLimits,
+) -> Result<ExpansionResult, String> {
     if source.contains("[[TSREF:") {
-        return Ok(source.into());
+        return Ok(ExpansionResult {
+            text: source.into(),
+            error: None,
+        });
     }
     let ls = lines(source);
     let mut fence = None;
@@ -350,17 +434,32 @@ fn repeat(source: &str, count: &Counter<'_>) -> Result<String, String> {
         }
     }
     if n == 0 {
-        return Ok(source.into());
+        return Ok(ExpansionResult {
+            text: source.into(),
+            error: None,
+        });
     }
     let mut candidate = REPEAT_LEGEND.to_owned();
     for (i, line) in ls.iter().enumerate() {
         candidate.push_str(replacement.get(&i).map(String::as_str).unwrap_or(line));
     }
     let candidate = gated(source, candidate, count);
-    if candidate != source && expand_refs(&candidate)? != source {
-        return Err("Repeated-text reconstruction failed".into());
+    if candidate != source {
+        let expanded = expand_refs(&candidate, limits, None)?;
+        if let Some(error) = expanded.error {
+            return Ok(ExpansionResult {
+                text: source.into(),
+                error: Some(error),
+            });
+        }
+        if expanded.text != source {
+            return Err("Repeated-text reconstruction failed".into());
+        }
     }
-    Ok(candidate)
+    Ok(ExpansionResult {
+        text: candidate,
+        error: None,
+    })
 }
 fn linked_id(value: &str) -> Option<&str> {
     let rest = value.strip_prefix("- [[")?;
@@ -375,9 +474,12 @@ fn linked_id(value: &str) -> Option<&str> {
     }
     Some(&rest[..n])
 }
-fn expand_visible(source: &str) -> Result<String, String> {
+fn expand_visible(source: &str, limits: ExpansionLimits) -> Result<ExpansionResult, String> {
     let Some(body) = source.strip_prefix(&format!("{VISIBLE_NOTICE}{REPEAT_LEGEND}")) else {
-        return Ok(source.into());
+        return Ok(ExpansionResult {
+            text: source.into(),
+            error: None,
+        });
     };
     let mut defs = HashMap::new();
     let mut output = REPEAT_LEGEND.to_owned();
@@ -402,21 +504,43 @@ fn expand_visible(source: &str) -> Result<String, String> {
         }
         output.push_str(line);
     }
-    expand_refs(&output)
-}
-fn visible_repeat(source: &str, count: &Counter<'_>) -> Result<String, String> {
-    if source.contains(VISIBLE_NOTICE) {
-        return Ok(source.into());
+    let expanded = expand_refs(&output, limits, Some(source.len()))?;
+    if expanded.error.is_some() {
+        Ok(ExpansionResult {
+            text: source.into(),
+            error: expanded.error,
+        })
+    } else {
+        Ok(expanded)
     }
-    let prior = repeat(source, count)?;
-    if prior == source {
-        return Ok(source.into());
+}
+fn visible_repeat(
+    source: &str,
+    count: &Counter<'_>,
+    limits: ExpansionLimits,
+) -> Result<ExpansionResult, String> {
+    if source.contains(VISIBLE_NOTICE) {
+        return Ok(ExpansionResult {
+            text: source.into(),
+            error: None,
+        });
+    }
+    let prior = repeat(source, count, limits)?;
+    if prior.error.is_some() {
+        return Ok(prior);
+    }
+    if prior.text == source {
+        return Ok(ExpansionResult {
+            text: source.into(),
+            error: None,
+        });
     }
     let mut defs = HashMap::new();
     let mut out = format!("{VISIBLE_NOTICE}{REPEAT_LEGEND}");
     let mut cues = 0;
     for line in lines(
         prior
+            .text
             .strip_prefix(REPEAT_LEGEND)
             .ok_or("Missing repeat legend")?,
     ) {
@@ -434,9 +558,15 @@ fn visible_repeat(source: &str, count: &Counter<'_>) -> Result<String, String> {
         out.push_str(line);
     }
     if cues == 0 {
-        return Ok(source.into());
+        return Ok(ExpansionResult {
+            text: source.into(),
+            error: None,
+        });
     }
-    Ok(gated(source, out, count))
+    Ok(ExpansionResult {
+        text: gated(source, out, count),
+        error: None,
+    })
 }
 
 fn timestamp_prefix(line: &str) -> Option<(String, &str, usize)> {
