@@ -2,6 +2,8 @@ import CryptoKit
 import FactExtractionKit
 import Foundation
 import LocusKit
+import MootProductIdentity
+import OSLog
 import SubstrateKernel
 
 /// Outcome of one bounded source-grounded fact duty invocation.
@@ -124,14 +126,13 @@ public extension GeniusLocusKit {
                         expectedSpec: extractor.spec)
                     sourceRejected += grounding.rejected.count
 
-                    // A genuinely empty response is a valid zero-fact result.
-                    // A non-empty response whose every candidate failed
-                    // grounding is provider failure and remains debt.
-                    guard response.candidates.isEmpty || !grounding.accepted.isEmpty else {
-                        rejected += sourceRejected
-                        throw FactExtractionError.malformedResponse(
-                            "all non-empty model candidates failed grounding")
-                    }
+                    // Whatever the validator rejects is counted and the
+                    // source settles on what it accepted, which may be
+                    // nothing: the model's output for this content and
+                    // recipe is deterministic, so a source whose every
+                    // candidate failed grounding is a zero-fact source, not
+                    // debt to retry. Only extractor errors (worker or model
+                    // runtime failures) leave the source as debt.
                     groundedCandidates.append(contentsOf: grounding.accepted)
                 }
                 rejected += sourceRejected
@@ -224,7 +225,11 @@ public extension GeniusLocusKit {
                 completed += 1
             } catch {
                 // Fail-open for the product path: the debt bit remains clear
-                // and the next standing cycle may retry.
+                // and the next standing cycle may retry. The failure is logged
+                // at error level so a source that never settles is visible in
+                // the estate log rather than only as a debt that never falls.
+                Self.factExtractionLog.error(
+                    "fact extraction source \(drawer.id, privacy: .public) failed (estate \(handle.estateUUID, privacy: .public)): \(String(describing: error), privacy: .public)")
                 failed += 1
             }
         }
@@ -232,6 +237,10 @@ public extension GeniusLocusKit {
             completedSources: completed, factsFiled: filed,
             candidatesRejected: rejected, skippedSources: skipped,
             failedSources: failed)
+    }
+
+    private static var factExtractionLog: Logger {
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     static func distilledFactID(
