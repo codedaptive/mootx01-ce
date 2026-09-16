@@ -147,7 +147,8 @@ impl EstateCoordinator {
     }
 
     /// Queue one job for `kind` on this estate. Returns `true` when a job was
-    /// sent, `false` when this process already has one queued or, for the
+    /// sent, `false` when one is already queued (in this process's set, or
+    /// pending on the stream from an earlier process) or, for the
     /// debt-driven duties, the estate owes nothing.
     pub fn enqueue_duty(&self, handle: &EstateHandle, kind: DutyKind, now_millis: i64) -> Result<bool, GeniusLocusKitError> {
         if self.duty_queued.borrow().get(handle).is_some_and(|set| set.contains(&kind)) {
@@ -157,6 +158,21 @@ impl EstateCoordinator {
             return Ok(false);
         }
         self.ensure_dreaming_queue(handle);
+        // Single occupancy is durable: a job left pending by an earlier
+        // process is this process's job, not a reason to queue another.
+        let pending = {
+            let map = self.dreaming_queues.borrow();
+            let Some((queue, _)) = map.get(handle) else {
+                return Err(Self::duty_failure(kind, "queue entry missing after ensure_dreaming_queue".to_string()));
+            };
+            queue
+                .pending_count_for_stream(&kind.stream_id())
+                .map_err(|e| Self::duty_failure(kind, format!("pending count: {e:?}")))?
+        };
+        if pending > 0 {
+            self.duty_queued.borrow_mut().entry(handle.clone()).or_default().insert(kind);
+            return Ok(false);
+        }
         let payload = serde_json::json!({
             "estateUUID": uuid::Uuid::from_bytes(handle.estate_uuid).hyphenated().to_string().to_uppercase(),
             "duty": kind.wire_name(),
@@ -210,17 +226,24 @@ impl EstateCoordinator {
         if let Some(set) = self.duty_queued.borrow_mut().get_mut(handle) {
             set.remove(&kind);
         }
+        // Every job on a duty stream names the same debt, so several claimed
+        // at once (queued across restarts, before the single-occupancy set
+        // existed in this process) are paid by ONE batch, not one batch each.
         let mut jobs_run = 0usize;
         let mut units_paid = 0usize;
-        for (job, _session) in batch {
+        if !batch.is_empty() {
             match self.run_duty_batch(handle, kind, now_millis) {
                 Ok(paid) => {
-                    units_paid += paid;
-                    self.reply_duty(handle, &job.id, queuekit::ObservationStatus::Done);
-                    jobs_run += 1;
+                    units_paid = paid;
+                    for (job, _session) in &batch {
+                        self.reply_duty(handle, &job.id, queuekit::ObservationStatus::Done);
+                        jobs_run += 1;
+                    }
                 }
                 Err(error) => {
-                    self.reply_duty(handle, &job.id, queuekit::ObservationStatus::DoneWithConcerns);
+                    for (job, _session) in &batch {
+                        self.reply_duty(handle, &job.id, queuekit::ObservationStatus::DoneWithConcerns);
+                    }
                     eprintln!(
                         "mootx01 duty {}: batch failed (estate {:?}): {error:?}",
                         kind.wire_name(),

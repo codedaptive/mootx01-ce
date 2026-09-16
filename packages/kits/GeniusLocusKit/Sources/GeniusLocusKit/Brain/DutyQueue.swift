@@ -115,7 +115,8 @@ public extension GeniusLocusKit {
     // MARK: - Producer
 
     /// Queue one job for `kind` on this estate. Returns `true` when a job was
-    /// sent, `false` when this process already has one queued or, for the
+    /// sent, `false` when one is already queued (in this process's set, or
+    /// pending on the stream from an earlier process) or, for the
     /// debt-driven duties, the estate owes nothing.
     @discardableResult
     func enqueueDuty(_ kind: DutyKind, in handle: EstateHandle, now: Date) async throws -> Bool {
@@ -124,6 +125,12 @@ public extension GeniusLocusKit {
             guard try await dutyDebt(kind, in: handle) > 0 else { return false }
         }
         let (queue, hlcValue) = try await ensureDreamingQueue(for: handle)
+        // Single occupancy is durable: a job left pending by an earlier
+        // process is this process's job, not a reason to queue another.
+        if try await queue.pendingCount(stream: kind.streamID) > 0 {
+            dutyQueued[handle, default: []].insert(kind)
+            return false
+        }
         var hlc = hlcValue
         let payload = try JSONEncoder().encode(DutyJobPayload(estateUUID: handle.estateUUID, duty: kind))
         let physMillis = Int64(now.timeIntervalSince1970 * 1000)
@@ -152,23 +159,30 @@ public extension GeniusLocusKit {
 
     // MARK: - Drainer
 
-    /// Claim the jobs on `kind`'s stream, run one batch per job, reply done,
-    /// and re-enqueue while debt remains. A batch error completes the job
-    /// with concerns and is rethrown after the reply so the queue never holds
-    /// a job the process has given up on.
+    /// Claim the jobs on `kind`'s stream, run ONE batch, reply done to every
+    /// claimed job, and re-enqueue while debt remains. Every job on a duty
+    /// stream names the same debt, so several claimed at once (queued across
+    /// restarts, before the single-occupancy set existed in this process)
+    /// are paid by one batch rather than one batch each. A batch error
+    /// completes the claimed jobs with concerns and is rethrown after the
+    /// reply so the queue never holds a job the process has given up on.
     func drainDuty(_ kind: DutyKind, in handle: EstateHandle, now: Date) async throws -> DutyDrainReport {
         let (queue, _) = try await ensureDreamingQueue(for: handle)
         let batch = try await queue.drain(stream: kind.streamID)
         dutyQueued[handle]?.remove(kind)
         var jobsRun = 0
         var unitsPaid = 0
-        for entry in batch {
+        if !batch.isEmpty {
             do {
-                unitsPaid += try await runDutyBatch(kind, in: handle, now: now)
-                try await queue.reply(to: entry.job.id, status: .done, artifacts: [])
-                jobsRun += 1
+                unitsPaid = try await runDutyBatch(kind, in: handle, now: now)
+                for entry in batch {
+                    try await queue.reply(to: entry.job.id, status: .done, artifacts: [])
+                    jobsRun += 1
+                }
             } catch {
-                try? await queue.reply(to: entry.job.id, status: .doneWithConcerns, artifacts: [])
+                for entry in batch {
+                    try? await queue.reply(to: entry.job.id, status: .doneWithConcerns, artifacts: [])
+                }
                 Self.dutyLog.error(
                     "duty \(kind.rawValue, privacy: .public) batch failed (estate \(handle.estateUUID, privacy: .public)): \(String(describing: error), privacy: .public)")
                 throw error
