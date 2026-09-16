@@ -8609,6 +8609,33 @@ mod tests {
     }
 
     #[test]
+    fn active_corpus_ids_filter_before_deterministic_limit() {
+        let store = open_store();
+        let mut empty = sample_drawer("empty", "w", "r", "");
+        empty.filed_at = 1;
+        let mut dataset = sample_drawer("dataset", "w", "r", "dataset");
+        dataset.filed_at = 2;
+        dataset.operational_bitmap = (crate::drawer_operational::ContentKind::Dataset as i64) << 6;
+        let mut tombstoned = sample_drawer("tombstoned", "w", "r", "removed");
+        tombstoned.filed_at = 3;
+        tombstoned.tombstoned_at = Some(4);
+        let mut beta = sample_drawer("beta", "w", "r", "beta");
+        beta.filed_at = 10;
+        let mut alpha = sample_drawer("alpha", "w", "r", "alpha");
+        alpha.filed_at = 10;
+        let mut gamma = sample_drawer("gamma", "w", "r", "gamma");
+        gamma.filed_at = 10;
+        for drawer in [&empty, &dataset, &tombstoned, &beta, &alpha, &gamma] {
+            store.add_drawer(drawer, NOW).unwrap();
+        }
+
+        assert_eq!(
+            store.active_corpus_content_ids_limited(2).unwrap(),
+            vec![tid("alpha"), tid("beta")]
+        );
+    }
+
+    #[test]
     fn first_open_audit_estate_uuid_matches_manifest() {
         // Regression: on a fresh estate the uuid stamped into audit
         // events must equal the manifest estate_uuid. (The Swift port
