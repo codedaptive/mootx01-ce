@@ -3,6 +3,19 @@ import Foundation
 import Testing
 @testable import FactExtractionKitProviders
 
+@Test("continuation preserves Unicode scalar and UTF-8 offsets")
+func factContinuationUnicodeOffsets() throws {
+    let source = "é😀\nJack's birthday"
+    let first = try #require(FactSourceChunker.next(originalSource: source,
+        start: 0, startUTF8Byte: 0, maximumCharacters: 6))
+    #expect(first.text == "é😀\n" && first.span.end == 3 && first.span.endUTF8Byte == 7)
+    let next = try #require(FactSourceChunker.next(originalSource: source,
+        start: 3, startUTF8Byte: 7, maximumCharacters: 50))
+    #expect(next.text == "Jack's birthday" && next.span.endUTF8Byte == source.utf8.count)
+    #expect(FactSourceChunker.next(originalSource: source, start: 1,
+        startUTF8Byte: 1, maximumCharacters: 6) == nil)
+}
+
 @Test("NuExtract codec preserves source input and passes partial facts through empty for the validator")
 func nuExtractCodecContract() throws {
     let source = "Jack's birthday is June 20th."
@@ -20,20 +33,20 @@ func nuExtractCodecContract() throws {
         maximumFacts: 4)
 
     #expect(NuExtractFactCodec.prompt(for: request).contains(source))
-    let response = NuExtractFactCodec.response(
+    let response = try NuExtractFactCodec.response(
         from: "prefix {\"facts\":[{\"subject\":\"Jack\",\"predicate\":\"birthday\",\"object\":\"June 20th\",\"evidence\":\"jack's birthday is june 20th.\"}]} trailing",
         request: request, spec: spec)
     #expect(response.providerID == spec.providerID)
     #expect(response.candidates.count == 1)
     #expect(response.candidates[0].object == "June 20th")
     #expect(response.candidates[0].evidenceQuote == source)
-    #expect(response.candidates[0].confidence == 1.0)
+    #expect(response.candidates[0].confidence == 0.8)
     #expect(response.candidates[0].assertionKind == .asserted)
 
     // A partial fact is not an error: it passes through with empty fields so
     // the grounding validator rejects it (emptyField) and counts it, and the
     // other candidates in the same response survive.
-    let partial = NuExtractFactCodec.response(
+    let partial = try NuExtractFactCodec.response(
         from: "{\"facts\":[{\"subject\":\"Jack\"}]}",
         request: request, spec: spec)
     #expect(partial.candidates.count == 1)
@@ -42,11 +55,13 @@ func nuExtractCodecContract() throws {
         response: partial, request: request, originalSource: source,
         expectedSpec: spec).accepted.isEmpty)
 
-    // Output with no complete JSON object is the chunk's answer: zero
-    // candidates, never an error to retry.
-    #expect(NuExtractFactCodec.response(
-        from: "{\"facts\":[{\"subject\":\"Ja", request: request, spec: spec)
-        .candidates.isEmpty)
+    // Unusable output is not evidence that the source contains no facts.
+    #expect(throws: FactExtractionError.self) {
+        try NuExtractFactCodec.response(
+            from: "{\"facts\":[{\"subject\":\"Ja", request: request, spec: spec)
+    }
+    #expect(try NuExtractFactCodec.response(
+        from: "{\"facts\":[]}", request: request, spec: spec).candidates.isEmpty)
 }
 
 @Test("NuExtract worker uses Rust-compatible frames and exits on EOF")
@@ -100,3 +115,27 @@ func nuExtractWorkerProtocolContract() async throws {
     #expect(response.result?.providerID == "test-worker")
     #expect(response.error == nil)
 }
+
+#if os(macOS)
+@Test("unresponsive NuExtract child times out and is reaped")
+func nuExtractWorkerDeadline() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let asset = root.appendingPathComponent("test.aimodel")
+    try FileManager.default.createDirectory(at: asset, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let tokenizer = root.appendingPathComponent("tokenizer.json")
+    try Data("{}".utf8).write(to: tokenizer)
+    let extractor = try CoreAINuExtractFactExtractor(
+        workerExecutableURL: URL(fileURLWithPath: "/bin/sh"),
+        workerArgumentsPrefix: ["-c", "exec /bin/sleep 30", "worker"],
+        assetURL: asset, tokenizerURL: tokenizer, modelVersion: "test", requestTimeoutSeconds: 1)
+    let start = ContinuousClock.now
+    do {
+        _ = try await extractor.extract(FactExtractionRequest(
+            sourceID: "source", sourceDigest: "digest", sourceText: "hello",
+            eligibleSourceSpans: [], maximumFacts: 4))
+        Issue.record("unresponsive worker returned success")
+    } catch FactExtractionError.timedOut { }
+    #expect(start.duration(to: .now) < .seconds(5))
+}
+#endif
