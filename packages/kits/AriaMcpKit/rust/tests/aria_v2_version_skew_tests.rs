@@ -33,6 +33,7 @@ fn snapshot() -> EstateDiagnosticsSnapshot {
         }],
         drains: vec![],
         rebuild: EstateRebuildState::Idle,
+        matrix: None,
         timing: EstateTiming { watermark_ms: 0, truncated: false },
         recall_trace_count: None,
         sync_state: "local-only".to_owned(),

@@ -165,7 +165,7 @@ func chainFromV1_7EstateReachesCurrentFormat() async throws {
     let (kit, handle, storage) = try await makeEstate(stampedAt: .v1_7)
     let rawBefore = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
     #expect(rawBefore == nil, "key must be absent before the chain runs")
-    let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+    let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
     #expect(prep.format == .current)
     #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
     let rawAfter = try? await kit.estate(for: handle).meta(key: EstatePreferenceKey.factExtraction.rawValue)
