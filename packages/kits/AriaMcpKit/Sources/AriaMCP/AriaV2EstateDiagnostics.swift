@@ -232,6 +232,10 @@ public struct AriaV2DrainStatusData: Sendable, Equatable {
 
 public struct AriaV2RebuildStatusData: Sendable, Equatable {
     public let state: String
+    public let matrix: MatrixRefreshStatus?
+    public init(state: String, matrix: MatrixRefreshStatus? = nil) {
+        self.state = state; self.matrix = matrix
+    }
 }
 
 public struct AriaV2TimingReportData: Sendable, Equatable {
@@ -393,7 +397,9 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
 
     public func rebuild(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2RebuildStatusData {
         try validate(context)
-        return AriaV2RebuildStatusData(state: await kit.derivedRebuildActive(for: handle) ? "running" : "idle")
+        let matrix = try await kit.matrixRefreshStatus(handle)
+        let active = await kit.derivedRebuildActive(for: handle)
+        return AriaV2RebuildStatusData(state: active || matrix.phase == .running || matrix.phase == .queued ? "running" : "idle", matrix: matrix)
     }
 
     public func timing(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2TimingReportData {
@@ -632,9 +638,19 @@ private extension AriaV2DrainStatusData {
 
 private extension AriaV2RebuildStatusData {
     var json: JSONValue {
-        .object([
-            "state": .string(state),
-        ])
+        var values: [String: JSONValue] = ["state": .string(state)]
+        if let matrix {
+            let h = matrix.watermark
+            values["matrix"] = .object([
+                "phase": .string(matrix.phase.rawValue),
+                "generation": matrix.generation.map(JSONValue.string) ?? .null,
+                "watermark": .string("\(h.physicalTime).\(h.logicalCount).\(h.nodeID)"),
+                "reason": matrix.reason.map(JSONValue.string) ?? .null,
+                "migration_phase": .string(matrix.migrationPhase),
+                "reclaimed_bytes": .integer(matrix.reclaimedBytes)
+            ])
+        }
+        return .object(values)
     }
 }
 

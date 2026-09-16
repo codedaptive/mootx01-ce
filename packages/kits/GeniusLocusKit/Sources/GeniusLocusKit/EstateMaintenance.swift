@@ -164,8 +164,13 @@ extension GeniusLocusKit {
         guard let storage = storages[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
-        let snapshotStore = MatrixSnapshotStore(storage: storage)
-        try await snapshotStore.deleteAll()
+        if let worker = matrixRefreshWorkers[handle] {
+            await worker.close()
+            matrixRefreshWorkers[handle] = nil
+        }
+        let snapshotStore = MatrixRecordStore(storage: storage)
+        try await snapshotStore.prepare()
+        try await snapshotStore.invalidate(estateID: handle.estateUUID)
         // Direct DrawerStore access for live-drawer enumeration — offline
         // maintenance context, same justification as recordPhysicalRemovalEvents.
         let drawerStore = try await DrawerStore(storage: storage)
@@ -194,7 +199,7 @@ extension GeniusLocusKit {
             from: try await auditLog(for: handle)).liveRowCount
         guard let matrixTier = matrixTiers[handle],
               let persisted = try await snapshotStore.load(estateID: handle.estateUUID),
-              persisted.tier == matrixTier,
+              persisted == matrixTier,
               matrixTier.liveRowCount == replayedLiveRows else {
             throw GeniusLocusKitError.underlyingEstateFailure(
                 reason: "estate maintenance: rebuilt Matrix did not match audit replay")

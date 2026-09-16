@@ -42,6 +42,7 @@ fn snapshot(mounted: bool) -> EstateDiagnosticsSnapshot {
         ],
         drains: vec![EstateDrain { name: "corpus_encode".to_owned(), state: EstateDrainState::Draining, pending: 4 }],
         rebuild: EstateRebuildState::Running,
+        matrix: None,
         timing: EstateTiming { watermark_ms: 1_700_000_123_456, truncated: true },
         recall_trace_count: Some(7),
         sync_state: "local-only".to_owned(),
