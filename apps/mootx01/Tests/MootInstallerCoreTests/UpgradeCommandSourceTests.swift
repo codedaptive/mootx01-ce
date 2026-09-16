@@ -12,6 +12,37 @@ struct UpgradeCommandSourceTests {
             .appendingPathComponent("Sources/mootx01/Commands/UpgradeCommand.swift")
     }
 
+    private static var packageRootURL: URL {
+        commandSourceURL
+            .deletingLastPathComponent()   // Commands
+            .deletingLastPathComponent()   // mootx01 target
+            .deletingLastPathComponent()   // Sources
+    }
+
+    @Test("both product manifests compile the legacy flat-layout migration call sites")
+    func productManifestsEnableFlatLayoutMigration() throws {
+        for manifest in ["Package.swift", "Package.community.swift"] {
+            let source = try String(
+                contentsOf: Self.packageRootURL.appendingPathComponent(manifest),
+                encoding: .utf8)
+            #expect(source.contains(".define(\"GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG\")"),
+                    "\(manifest) must compile the 1.0.x flat-layout migration call sites")
+        }
+    }
+
+    @Test("fact-extraction workers use the kernel-resolved current executable")
+    func factExtractionWorkersDoNotTrustArgvZero() throws {
+        let commands = Self.commandSourceURL.deletingLastPathComponent()
+        for name in ["DreamCommand.swift", "ServeCommand.swift"] {
+            let source = try String(
+                contentsOf: commands.appendingPathComponent(name), encoding: .utf8)
+            #expect(!source.contains("URL(fileURLWithPath: CommandLine.arguments[0])"),
+                    "\(name) must not derive a worker executable from argv[0]")
+            #expect(source.contains("resolvedCurrentExecutableURL()"),
+                    "\(name) must use the kernel/bundle-derived executable resolver")
+        }
+    }
+
     @Test("VACUUM failure after inventory trim reports the failure truthfully, not 'estate is unaffected'")
     func vacuumFailureMessageIsAccurate() throws {
         let source = try String(contentsOf: Self.commandSourceURL, encoding: .utf8)
