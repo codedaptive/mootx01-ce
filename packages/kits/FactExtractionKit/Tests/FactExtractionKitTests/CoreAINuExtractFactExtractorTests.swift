@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import FactExtractionKitProviders
 
-@Test("NuExtract codec preserves source input and fails closed on partial facts")
+@Test("NuExtract codec preserves source input and passes partial facts through empty for the validator")
 func nuExtractCodecContract() throws {
     let source = "Jack's birthday is June 20th."
     let spec = FactExtractorModelSpec(
@@ -20,7 +20,7 @@ func nuExtractCodecContract() throws {
         maximumFacts: 4)
 
     #expect(NuExtractFactCodec.prompt(for: request).contains(source))
-    let response = try NuExtractFactCodec.response(
+    let response = NuExtractFactCodec.response(
         from: "prefix {\"facts\":[{\"subject\":\"Jack\",\"predicate\":\"birthday\",\"object\":\"June 20th\",\"evidence\":\"jack's birthday is june 20th.\"}]} trailing",
         request: request, spec: spec)
     #expect(response.providerID == spec.providerID)
@@ -30,11 +30,23 @@ func nuExtractCodecContract() throws {
     #expect(response.candidates[0].confidence == 1.0)
     #expect(response.candidates[0].assertionKind == .asserted)
 
-    #expect(throws: FactExtractionError.self) {
-        _ = try NuExtractFactCodec.response(
-            from: "{\"facts\":[{\"subject\":\"Jack\"}]}",
-            request: request, spec: spec)
-    }
+    // A partial fact is not an error: it passes through with empty fields so
+    // the grounding validator rejects it (emptyField) and counts it, and the
+    // other candidates in the same response survive.
+    let partial = NuExtractFactCodec.response(
+        from: "{\"facts\":[{\"subject\":\"Jack\"}]}",
+        request: request, spec: spec)
+    #expect(partial.candidates.count == 1)
+    #expect(partial.candidates[0].predicate.isEmpty)
+    #expect(FactGroundingValidator.validate(
+        response: partial, request: request, originalSource: source,
+        expectedSpec: spec).accepted.isEmpty)
+
+    // Output with no complete JSON object is the chunk's answer: zero
+    // candidates, never an error to retry.
+    #expect(NuExtractFactCodec.response(
+        from: "{\"facts\":[{\"subject\":\"Ja", request: request, spec: spec)
+        .candidates.isEmpty)
 }
 
 @Test("NuExtract worker uses Rust-compatible frames and exits on EOF")

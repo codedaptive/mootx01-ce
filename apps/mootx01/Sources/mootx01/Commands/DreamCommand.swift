@@ -195,7 +195,10 @@ struct DreamCommand: AsyncParsableCommand {
                     handle, limit: 16, now: Date())
                 Logging.stderr.log(
                     "mootx01 dream: fact extraction cycle complete — " +
-                    "\(result.factsFiled) fact(s) filed")
+                    "\(result.completedSources) source(s) settled, " +
+                    "\(result.factsFiled) fact(s) filed, " +
+                    "\(result.candidatesRejected) candidate(s) rejected, " +
+                    "\(result.skippedSources) skipped, \(result.failedSources) failed")
             } catch {
                 Logging.stderr.log(
                     "mootx01 dream warning: fact extraction cycle failed: \(error)")

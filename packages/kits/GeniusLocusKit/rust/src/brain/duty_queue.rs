@@ -93,7 +93,7 @@ pub struct DutyDrainReport {
     /// Jobs claimed and completed on the duty's stream.
     pub jobs_run: usize,
     /// Units the batches paid: drawers encoded, subjects written, facts rows
-    /// written, facts filed, or 1 per completed retrain.
+    /// written, sources settled by extraction, or 1 per completed retrain.
     pub units_paid: usize,
     /// Debt still owed after the drain (0 for the retrain).
     pub remaining_debt: usize,
@@ -321,7 +321,7 @@ impl EstateCoordinator {
                 .map_err(|e| Self::duty_failure(kind, format!("{e:?}"))),
             DutyKind::FactExtraction => self
                 .run_fact_extraction_batch(handle, DUTY_FACT_EXTRACTION_BATCH, now_millis)
-                .map(|r| r.facts_filed),
+                .map(|r| r.completed_sources),
             DutyKind::RetrainBasis => self
                 .reindex_corpus(handle, now_millis)
                 .map(|_| 1)
