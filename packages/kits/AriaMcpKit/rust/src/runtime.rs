@@ -984,6 +984,15 @@ pub fn activate_and_build_extraction_cycle(
     coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
     handle: genius_locus_kit::EstateHandle,
 ) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
+    extraction_cycle(extractor, coord, handle, false)
+}
+
+fn extraction_cycle(
+    extractor: Arc<dyn fact_extraction_kit::contract::FactExtractor>,
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: genius_locus_kit::EstateHandle,
+    impatient: bool,
+) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
     // Derive the recipe ID from the extractor's spec. Format is the cross-port
     // contract: "<provider_id>:<model_id>:<model_version>", identical to the
     // Swift twin. A recipe change clears bit 28 on all drawers estate-wide so
@@ -1005,12 +1014,14 @@ pub fn activate_and_build_extraction_cycle(
     let fact_coord = Arc::clone(coord);
     let fact_handle = handle;
     let cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(move || {
+      let mut settled = 0;
+      loop {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        match fact_coord.lock() {
-            Ok(mut coord) => {
+        let (work, jobs) = {
+                let mut coord = fact_coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
                 let setting = coord
                     .provisioned_preference(
                         &fact_handle,
@@ -1018,7 +1029,7 @@ pub fn activate_and_build_extraction_cycle(
                     )
                     .map_err(|e| format!("{e:?}"))?;
                 if setting == genius_locus_kit::EstatePreferenceValue::Off {
-                    return Ok(0);
+                    return Ok(settled);
                 }
                 coord
                     .activate_fact_extractor(Arc::clone(&extractor), &recipe_id, &fact_handle)
@@ -1028,13 +1039,33 @@ pub fn activate_and_build_extraction_cycle(
                 coord
                     .enqueue_duty(&fact_handle, genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
                     .map_err(|e| format!("{e:?}"))?;
-                coord
-                    .drain_duty(&fact_handle, genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
-                    .map(|r| r.units_paid as i64)
-                    .map_err(|e| format!("{e:?}"))
+                let work = coord.prepare_fact_extraction_batch(&fact_handle, 16, now_ms)
+                    .map_err(|e| format!("{e:?}"))?;
+                if work.is_none() { return Ok(settled); }
+                let jobs = coord.claim_duty_jobs(&fact_handle,
+                    genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
+                    .map_err(|e| format!("{e:?}"))?;
+                if jobs.is_empty() { return Ok(settled); }
+                (work, jobs)
+        };
+        // No coordinator mutex is held during model inference or framed I/O.
+        let result = work.map(|work| work.run()).transpose();
+        let coord = fact_coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+        for job in jobs { coord.complete_duty_job(&fact_handle, &job, result.is_ok()); }
+        if let Ok(Some(report)) = &result {
+            if report.made_progress {
+                coord.enqueue_duty(&fact_handle,
+                    genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
+                    .map_err(|e| format!("{e:?}"))?;
             }
-            Err(e) => Err(format!("coordinator lock poisoned: {e}")),
         }
+        let report = result.map_err(|e| format!("{e:?}"))?;
+        let made_progress = report.as_ref().is_some_and(|report| report.made_progress);
+        settled += report.map_or(0, |report| report.completed_sources as i64);
+        if !impatient || !made_progress { return Ok(settled); }
+        // Drop the coordinator guard before the next batch. Deferred failures
+        // never keep the impatient dream spinning; enqueue requires ready work.
+      }
     });
     Some(cycle)
 }
@@ -1140,6 +1171,25 @@ pub fn build_fact_extraction_cycle(
     handle: genius_locus_kit::EstateHandle,
     config_dir: Option<&std::path::Path>,
 ) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
+    configured_extraction_cycle(coord, handle, config_dir, false)
+}
+
+/// Dream uses the same claimed jobs as the resident, continuing while runnable
+/// source chunks make progress. The resident still runs one bounded batch.
+pub fn build_fact_extraction_dream_cycle(
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: genius_locus_kit::EstateHandle,
+    config_dir: Option<&std::path::Path>,
+) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
+    configured_extraction_cycle(coord, handle, config_dir, true)
+}
+
+fn configured_extraction_cycle(
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: genius_locus_kit::EstateHandle,
+    config_dir: Option<&std::path::Path>,
+    impatient: bool,
+) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
     // The second preference selects the provider. Apple Foundation Models is
     // an Apple-only runtime; the Rust product fails quiet when it is selected.
     let extractor_setting = {
@@ -1240,7 +1290,7 @@ pub fn build_fact_extraction_cycle(
     // The returned closure re-reads the authoritative estate setting before
     // each activation and extraction batch.
     let client: Arc<dyn fact_extraction_kit::contract::FactExtractor> = Arc::new(client);
-    activate_and_build_extraction_cycle(client, coord, handle)
+    extraction_cycle(client, coord, handle, impatient)
 }
 
 // -------------------------------------------------------------------------------

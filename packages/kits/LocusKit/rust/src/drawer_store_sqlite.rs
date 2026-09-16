@@ -404,6 +404,10 @@ impl DrawerStore for SqliteDrawerStore {
     ) -> Result<usize, LocusKitError> {
         self.0.set_facts_extracted_if_content_matches(drawer_id, expected_content)
     }
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.0.publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
+    }
     fn fact_extraction_debt_batch(
         &self,
         limit: usize,
