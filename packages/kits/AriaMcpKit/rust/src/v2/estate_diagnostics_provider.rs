@@ -65,6 +65,7 @@ impl<'a> SelectedEstateDiagnosticsAuthority<'a> {
             // None trace count means "not read", never "no traces".
             recall_trace_count: None,
             sync_state: "local-only".to_owned(),
+            drawer_rows: None,
             subjects_bearing: 0,
             subjects_eligible: 0,
             shared_content_migration: None,
@@ -191,9 +192,12 @@ impl EstateDiagnosticsAuthority for SelectedEstateDiagnosticsAuthority<'_> {
         );
         let mut snapshot = self.base_snapshot(mounted);
         match operation {
-            // Liveness must stay lightweight; do not add any inventory, fact,
-            // drain, rebuild, or audit read to this arm.
-            EstateDiagnosticsOperation::Ping => {}
+            // Liveness stays lightweight: one COUNT over drawers, read for the
+            // LSA retrain backstop declaration; no inventory, fact, drain,
+            // rebuild, or audit read in this arm.
+            EstateDiagnosticsOperation::Ping => {
+                snapshot.drawer_rows = coord.count_drawer_rows(handle).ok().map(|n| n as u64);
+            }
             EstateDiagnosticsOperation::Status => {
                 let status_drawers = coord
                     .all_drawers(handle)
