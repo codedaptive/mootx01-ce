@@ -1010,6 +1010,11 @@ impl AutonomicGovernor {
         self.ensure_scheduler().register(spec, now_nanos)
     }
 
+    /// Remove a standing signal without creating a scheduler when none exists.
+    pub fn unregister_standing_signal(&mut self, id: &SchedulerSignalID) -> bool {
+        self.scheduler.as_mut().is_some_and(|scheduler| scheduler.unregister(id))
+    }
+
     /// Register the standing signals (architecture spec §11.2 + SPEC_ADORNMENT §4)
     /// against this estate's scheduler: the seven always-on signals plus the
     /// seven preference-gated ones for which a live cycle is passed. Mirrors Swift
@@ -1257,13 +1262,26 @@ impl AutonomicGovernor {
     ///
     /// Logs start/stop to stderr, consistent with the Swift governor.
     pub fn run_loop(&mut self) {
+        self.run_loop_with_before_tick(|_, _| Ok(()));
+    }
+
+    /// Run with a host-owned preference reconciliation step before each tick.
+    /// The hook shares the injected tick time and may register/unregister signals.
+    /// A failed reconciliation skips the tick, so stale authorization cannot fire.
+    pub fn run_loop_with_before_tick(
+        &mut self,
+        mut before_tick: impl FnMut(&mut Self, SystemTime) -> Result<(), String>,
+    ) {
         eprintln!("AutonomicGovernor started (base tick {}ms)", self.base_tick_ms);
         while !self.stop_flag.load(Ordering::Relaxed) {
             // Read the clock once per iteration and inject into all daemons.
             // This is the ONLY place SystemTime::now() is called in the governor
             // path — all daemons in a single tick share the same `now`.
             let now = SystemTime::now();
-            self.tick(now);
+            match before_tick(self, now) {
+                Ok(()) => { self.tick(now); }
+                Err(error) => eprintln!("AutonomicGovernor: preference reconciliation failed: {error}"),
+            }
             std::thread::sleep(Duration::from_millis(self.base_tick_ms));
         }
         eprintln!("AutonomicGovernor stopped");

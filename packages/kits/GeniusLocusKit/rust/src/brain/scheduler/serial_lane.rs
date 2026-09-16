@@ -585,6 +585,11 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
         id
     }
 
+    /// Remove a standing signal and its subscriptions. Unknown IDs are a no-op.
+    pub fn unregister(&mut self, id: &SignalID) -> bool {
+        self.signals.remove(id).is_some()
+    }
+
     /// Architecture spec §7.8.5 `signal_status() -> [SignalReport]`.
     /// Sorted lexically by SignalID to match the Swift reference's ordering
     /// convention.
