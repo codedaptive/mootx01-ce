@@ -1108,7 +1108,7 @@ fn memory_mutation_input_schema(name: &str) -> Value {
             json!(["from_id", "to_id", "relationship"]),
         ),
         "moot_review_tunnel" => (
-            json!({"tunnel_id":uuid(),"decision":{"type":"string","enum":["accept","endorse","reject"]},"note":string(),"reviewed_by":string(),"estate_id":uuid()}),
+            json!({"tunnel_id":uuid(),"decision":{"type":"string","enum":["accept","endorse","reject"]},"note":string(),"estate_id":uuid()}),
             json!(["tunnel_id", "decision"]),
         ),
         _ => unreachable!("only selected memory mutation names use this schema"),
