@@ -80,9 +80,6 @@ public extension GeniusLocusKit {
         // Resolve the estate up front. A stale handle surfaces here as
         // estateNotOpen before any plan work.
         let estate = try estate(for: handle)
-        let withheldBySensitivity = await sensitivityWithheldCount(
-            for: request.frame, handle: handle)
-
         // Compute the execution plan. frontierK bounds candidate retrieval:
         // min(max(limit * 4, 64), 256) ensures we pull enough candidates
         // for scoring without retrieving unbounded rows.
@@ -111,6 +108,11 @@ public extension GeniusLocusKit {
             effectiveMode: request.mode,
             frontierK: frontierK,
             weights: .uniform
+        )
+        let withheldBySensitivity = await scoredRecallSensitivityWithheldCount(
+            for: request.frame,
+            handle: handle,
+            candidateLimit: frontierK
         )
 
         Self.recallLog.debug(
@@ -310,9 +312,33 @@ public extension GeniusLocusKit {
         return finalResult
     }
 
+    /// Counts sensitivity-default exclusions over a bounded, body-free candidate
+    /// window. The cached per-estate store avoids constructing a new schema-
+    /// applying `DrawerStore` for every recall.
+    private func scoredRecallSensitivityWithheldCount(
+        for frame: RecallFrame,
+        handle: EstateHandle,
+        candidateLimit: Int
+    ) async -> Int {
+        do {
+            let store = try await ensureKGStore(for: handle)
+            let drawers = try await store.allDrawers(
+                hydrationLevel: .structured,
+                limit: max(0, candidateLimit)
+            )
+            let nodeNames = try await store.resolveNodeNames(
+                parentNodeIds: Array(Set(drawers.map(\.parentNodeId))))
+            let evaluation = try await BitmapEvaluator.evaluateResult(
+                frame: frame, drawers: drawers, store: store, nodeNames: nodeNames
+            )
+            return evaluation.withheldBySensitivity
+        } catch {
+            return 0
+        }
+    }
+
     /// Counts sensitivity-default exclusions over LocusKit's persisted candidate
-    /// set. Recall continues to use its established stream for rows, scoring, and
-    /// ordering; this companion evaluation only carries the count upward.
+    /// set for callers that supply an already-bounded candidate collection.
     func sensitivityWithheldCount(
         for frame: RecallFrame,
         handle: EstateHandle,
