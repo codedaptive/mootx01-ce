@@ -189,7 +189,10 @@ fn empty_response_is_a_valid_zero_fact_completion() {
 }
 
 #[test]
-fn wholly_ungrounded_output_stays_debt() {
+fn wholly_ungrounded_output_settles_with_zero_facts() {
+    // Wholly ungrounded output is the model's deterministic answer for this
+    // content: the source settles with zero facts and the rejection is
+    // counted; it is not debt to retry.
     let (mut coordinator, handle, store) = open();
     let drawer_id = capture(&coordinator, &handle, SOURCE);
     coordinator
@@ -206,9 +209,11 @@ fn wholly_ungrounded_output_stays_debt() {
     let result = coordinator
         .run_fact_extraction_batch(&handle, 16, NOW)
         .unwrap();
-    assert_eq!(result.failed_sources, 1);
+    assert_eq!(result.completed_sources, 1);
+    assert_eq!(result.failed_sources, 0);
     assert_eq!(result.facts_filed, 0);
-    assert!(!store
+    assert_eq!(result.candidates_rejected, 1);
+    assert!(store
         .get_drawer(&drawer_id)
         .unwrap()
         .unwrap()

@@ -85,7 +85,7 @@ struct FactExtractionDutyTests {
         #expect(replay.completedSources == 0 && replay.factsFiled == 0)
     }
 
-    @Test("empty model result is settled, wholly ungrounded output stays debt")
+    @Test("empty model result and wholly ungrounded output both settle")
     func zeroAndUngroundedOutcomes() async throws {
         let (zeroKit, zeroHandle) = try await openEstate(owner: "fact-zero")
         let zeroDrawer = try await capture(zeroKit, zeroHandle, content: "A friendly hello.")
@@ -119,10 +119,15 @@ struct FactExtractionDutyTests {
         }
         _ = try await badKit.activateFactExtractor(
             bad, recipeID: "apple-system-v1", for: badHandle)
+        // Wholly ungrounded output is the model's deterministic answer for
+        // this content: the source settles with zero facts and the rejection
+        // is counted; it is not debt to retry.
         let rejected = try await badKit.runFactExtractionBatch(badHandle, now: now)
-        #expect(rejected.failedSources == 1 && rejected.candidatesRejected == 1)
+        #expect(rejected.completedSources == 1 && rejected.failedSources == 0
+                    && rejected.factsFiled == 0 && rejected.candidatesRejected == 1)
         let badEstate = try await badKit.estate(for: badHandle)
-        #expect(try await badEstate.getDrawers(ids: [badDrawer.id]).first?.areFactsExtracted == false)
+        #expect(try await badEstate.getDrawers(ids: [badDrawer.id]).first?.areFactsExtracted == true)
+        #expect(try await badEstate.allKGFacts().isEmpty)
         #expect(try await badEstate.allKGFacts().isEmpty)
     }
 
