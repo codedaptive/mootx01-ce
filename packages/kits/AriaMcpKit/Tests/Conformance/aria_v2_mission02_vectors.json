@@ -2515,6 +2515,9 @@
                 "estate_name": {
                   "type": "string"
                 },
+                "lsa_retraining_degraded": {
+                  "type": "string"
+                },
                 "state": {
                   "const": "mounted"
                 },

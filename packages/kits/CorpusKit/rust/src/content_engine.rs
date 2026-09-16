@@ -3641,18 +3641,22 @@ impl CorpusContentEngine {
         now_millis: i64,
         budget: &RetrainingBudget,
     ) -> CorpusKitResult<crate::CorpusRetrainingReport> {
-        // The document cap bounds the TRAINING sample, never the estate: a
-        // basis is trained on at most `max_documents` documents (the source's
-        // deterministic order, so the sample is stable across attempts) and
-        // every active document is then embedded with it. Refusing to retrain
-        // an estate larger than the cap left every real estate's dense basis
-        // frozen and made the facts-backfill rebuild fail (2026-09-16); the
-        // bound on work is the sample size plus the deadline and cancellation
-        // checks inside training. Twin of Swift `reindex(now:budget:laneScope:)`.
-        let training_ids = self.source.active_content_ids_limited(budget.max_documents)?;
+        let ids = self.source.active_content_ids_limited(budget.max_documents.saturating_add(1))?;
         let trainable_ids: Vec<String> = self.slots.iter()
             .filter(|slot| slot.fresh_basis_blob.is_some())
             .map(|slot| slot.model_id.clone()).collect();
+        if ids.len() > budget.max_documents {
+            let reason = crate::RetrainingSkipReason::DocumentLimit {
+                actual: ids.len(), limit: budget.max_documents,
+            };
+            if trainable_ids.is_empty() {
+                return Err(CorpusKitError::RetrainingSkipped(reason));
+            }
+            return Ok(crate::CorpusRetrainingReport {
+                completed_model_ids: Vec::new(),
+                skipped_model_ids: trainable_ids.into_iter().map(|id| (id, reason.clone())).collect(),
+            });
+        }
         if let Some(reason) = budget.cancellation_reason() {
             if trainable_ids.is_empty() {
                 return Err(CorpusKitError::RetrainingSkipped(reason));
@@ -3662,7 +3666,7 @@ impl CorpusContentEngine {
                 skipped_model_ids: trainable_ids.into_iter().map(|id| (id, reason.clone())).collect(),
             });
         }
-        self.reindex_impl(now_millis, Some(budget), Some(training_ids))
+        self.reindex_impl(now_millis, Some(budget), Some(ids))
     }
 
     fn reindex_impl(
@@ -3730,10 +3734,10 @@ impl CorpusContentEngine {
             self.vector_store
                 .begin_deferred_index()
                 .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
-            // Every active document is re-embedded, whatever the training
-            // sample was: a bounded training set must never leave part of the
-            // estate without vectors in the published generation.
-            let ids = self.source.active_content_ids()?;
+            let ids = match &bounded_ids {
+                Some(ids) => ids.clone(),
+                None => self.source.active_content_ids()?,
+            };
             if matches!(
                 self.configuration.index_unit(),
                 CorpusIndexUnitPolicy::WholeContent

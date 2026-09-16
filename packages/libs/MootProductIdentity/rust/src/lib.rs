@@ -253,12 +253,6 @@ pub mod settings {
         /// switching models automatically clears extraction debt estate-wide
         /// (`fact_extraction.model_version` in config.json).
         pub fact_extraction_model_version: Option<String>,
-        /// Maximum documents admitted to LSA retraining.
-        pub corpus_lsa_retraining_max_documents: usize,
-        /// Maximum Jacobi sweeps per retraining attempt.
-        pub corpus_lsa_retraining_max_sweeps: usize,
-        /// Cooperative retraining wall-clock budget in milliseconds.
-        pub corpus_lsa_retraining_timeout_milliseconds: u64,
         /// Maximum expanded reference output bytes.
         pub context_distill_reference_expansion_max_bytes: usize,
         /// Maximum reference output/input UTF-8 byte ratio.
@@ -279,9 +273,6 @@ pub mod settings {
                 fact_extraction_gguf: None,
                 fact_extraction_tokenizer: None,
                 fact_extraction_model_version: None,
-                corpus_lsa_retraining_max_documents: 2048,
-                corpus_lsa_retraining_max_sweeps: 30,
-                corpus_lsa_retraining_timeout_milliseconds: 30000,
                 context_distill_reference_expansion_max_bytes: 8_388_608,
                 context_distill_reference_expansion_max_ratio: 64,
                 recall_distillation_max_source_bytes: 32768,
@@ -350,17 +341,9 @@ pub mod settings {
             distill.and_then(|v| v.get(key)).and_then(|v| v.as_i64())
                 .filter(|v| *v > 0).map(|v| v as usize).unwrap_or(fallback)
         };
-        let lsa = root.get("corpus").and_then(|c| c.get("lsa_retraining"));
-        let positive = |key: &str, fallback: i64| -> i64 {
-            lsa.and_then(|v| v.get(key)).and_then(|v| v.as_i64())
-                .map(|v| v.max(1)).unwrap_or(fallback)
-        };
         ProductSettings {
             context_distill_reference_expansion_max_bytes: distill_positive("reference_expansion_max_bytes", 8_388_608),
             context_distill_reference_expansion_max_ratio: distill_positive("reference_expansion_max_ratio", 64),
-            corpus_lsa_retraining_max_documents: positive("max_documents", 2048) as usize,
-            corpus_lsa_retraining_max_sweeps: positive("max_sweeps", 30) as usize,
-            corpus_lsa_retraining_timeout_milliseconds: positive("timeout_milliseconds", 30000) as u64,
             recall_distillation_max_source_bytes: root.get("recall_distillation")
                 .and_then(|v| v.get("max_source_bytes")).and_then(|v| v.as_i64())
                 .map(|v| v.clamp(1, 32768) as usize).unwrap_or(32768),
@@ -443,19 +426,6 @@ pub mod settings {
     mod tests {
         use super::*;
 
-        #[test]
-        fn lsa_settings_defaults_bounds_and_invalid_types() {
-            let defaults = parse_settings("{}");
-            assert_eq!(defaults.corpus_lsa_retraining_max_documents, 2048);
-            assert_eq!(defaults.corpus_lsa_retraining_max_sweeps, 30);
-            assert_eq!(defaults.corpus_lsa_retraining_timeout_milliseconds, 30000);
-            let bounded = parse_settings(r#"{"corpus":{"lsa_retraining":{"max_documents":-2,"max_sweeps":0,"timeout_milliseconds":125}}}"#);
-            assert_eq!(bounded.corpus_lsa_retraining_max_documents, 1);
-            assert_eq!(bounded.corpus_lsa_retraining_max_sweeps, 1);
-            assert_eq!(bounded.corpus_lsa_retraining_timeout_milliseconds, 125);
-            let invalid = parse_settings(r#"{"corpus":{"lsa_retraining":{"max_documents":true,"max_sweeps":1.5,"timeout_milliseconds":"100"}}}"#);
-            assert_eq!(invalid, defaults);
-        }
 
         // Unit tests for pub(crate) helpers — these are the only callers that can
         // reach them, since the integration tests in tests/ are a separate crate.
