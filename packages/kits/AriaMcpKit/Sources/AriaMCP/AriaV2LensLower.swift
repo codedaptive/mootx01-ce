@@ -209,20 +209,16 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
             // The v2 projection preserves the existing contradiction lens's two
             // typed signals.  It reads the persisted output of the atomic hunt
             // directly; it never parses a rendered text response.
-            // COUNT FIRST, THEN WITHHOLD. Filtering by sensitivity before
-            // counting makes a restricted contradiction vanish from the total,
-            // so an estate with three contradictions reports one and the
-            // caller is told the estate is more consistent than it is. For a
-            // contradiction lens the count IS the product. Restricted tunnel
-            // rows are omitted from the emitted set; only the tally is complete.
+            // Restrict the population before deriving rows or aggregates. Counts
+            // are part of the product, so counting protected rows would disclose
+            // their existence even when their contents remain redacted.
             // Endpoint ids within kept (Normal/Elevated) tunnel rows are always
             // emitted — an id is not body-derived content (WITHHELD-ID-ONLY = a).
-            let allContradictions = (try await kit.allTunnels(in: handle)).filter {
+            let tunnels = (try await kit.allTunnels(in: handle)).filter {
                 $0.kind == .contradicts && $0.tombstonedAt == nil
                     && ($0.lifecycle == .active || $0.lifecycle == .proposed)
+                    && $0.adjectiveSensitivity.isBulkExportable
             }
-            let tunnels = allContradictions.filter { $0.adjectiveSensitivity.isBulkExportable }
-            let withheldTunnelCount = allContradictions.count - tunnels.count
             let emittedTunnels = Array(tunnels.prefix(50))
             let tunnelRows = emittedTunnels.map { tunnel -> JSONValue in
                 var row: [String: JSONValue] = [
@@ -238,22 +234,11 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                 return .object(row)
             }
 
-            // Same rule for fact groups: a group is conflicting or it is not,
-            // and that is decided over every fact. Filtering first can hide a
-            // whole group, or — worse — leave a group looking consistent
-            // because the fact that disagreed was restricted.
-            let allFacts = try await kit.recallKGFacts(handle)
-            var allFactsByKey: [ContradictionFactKey: [KGFact]] = [:]
-            for fact in allFacts {
-                let key = ContradictionFactKey(
-                    subject: fact.subject.lowercased(), predicate: fact.predicate.lowercased())
-                allFactsByKey[key, default: []].append(fact)
+            // Fact conflicts are likewise derived only from caller-admissible
+            // facts, preventing chosen-input probes against protected values.
+            let facts = (try await kit.recallKGFacts(handle)).filter {
+                $0.adjectiveSensitivity.isBulkExportable
             }
-            let allConflictingKeys = Set(
-                allFactsByKey
-                    .filter { Set($0.value.map { $0.object.lowercased() }).count > 1 }
-                    .keys)
-            let facts = allFacts.filter { $0.adjectiveSensitivity.isBulkExportable }
             var factsByKey: [ContradictionFactKey: [KGFact]] = [:]
             for fact in facts {
                 let key = ContradictionFactKey(
@@ -327,28 +312,21 @@ public struct AriaV2GeniusLocusLensLowerAuthority: AriaV2LensLowerAuthority {
                     "objects": .array(objects),
                 ]))
             }
-            let visibleConflictingKeys = Set(
-                factsByKey
-                    .filter { Set($0.value.map { $0.object.lowercased() }).count > 1 }
-                    .keys)
-            let withheldFactGroupCount = allConflictingKeys.subtracting(visibleConflictingKeys).count
-            let totalContradictions = allContradictions.count
-            let totalFactGroups = allConflictingKeys.count
+            let totalContradictions = tunnels.count
+            let totalFactGroups = factsByKey
+                .filter { Set($0.value.map { $0.object.lowercased() }).count > 1 }
+                .count
             var summary = "Found \(totalContradictions) contradiction tunnels "
                 + "and \(totalFactGroups) conflicting fact groups."
-            if withheldTunnelCount > 0 || withheldFactGroupCount > 0 {
-                summary += " \(withheldTunnelCount + withheldFactGroupCount) withheld by sensitivity."
-            }
             return .init(data: .object([
                 "contradictsTunnels": .array(tunnelRows),
                 "conflictingFacts": .array(factRows),
-                // Totals over EVERYTHING, so the caller learns the estate has
-                // a contradiction even where the rows are not theirs to read.
                 "totalContradictionCount": .integer(Int64(totalContradictions)),
                 "totalConflictingFactGroupCount": .integer(Int64(totalFactGroups)),
-                // How much of the above is redacted out of the rows above.
-                "withheldContradictionCount": .integer(Int64(withheldTunnelCount)),
-                "withheldConflictingFactGroupCount": .integer(Int64(withheldFactGroupCount)),
+                // The public posture has no visibility into protected rows, so
+                // these compatibility fields cannot encode hidden population.
+                "withheldContradictionCount": .integer(0),
+                "withheldConflictingFactGroupCount": .integer(0),
             ]), compactText: summary)
 
         case .lensThemeWeather:

@@ -292,17 +292,25 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
     public let handle: EstateHandle
     public let selectedEstateID: UUID
     public let now: Date
+    /// Caller-admitted adjective ceiling. Reclassification never reports or
+    /// rewrites a drawer above this tier.
+    public let maximumSensitivity: AdjectiveSensitivity
     /// Server identity threaded from the dispatcher; stamped in the audit trail
     /// of every `reanchorAnchor` write so automated FDC repairs are attributed
     /// to the MCP server, not to the estate owner.
     public let serverIdentity: String
 
-    public init(kit: GeniusLocusKit, handle: EstateHandle, selectedEstateID: UUID, now: Date, serverIdentity: String) {
+    public init(
+        kit: GeniusLocusKit, handle: EstateHandle, selectedEstateID: UUID,
+        now: Date, serverIdentity: String,
+        maximumSensitivity: AdjectiveSensitivity = .elevated
+    ) {
         self.kit = kit
         self.handle = handle
         self.selectedEstateID = selectedEstateID
         self.now = now
         self.serverIdentity = serverIdentity
+        self.maximumSensitivity = maximumSensitivity
     }
 
     public func execute(_ request: AriaV2DataMobilityRequest) async throws -> AriaV2DataMobilityOutcome {
@@ -459,6 +467,7 @@ public struct AriaV2GeniusLocusDataMobilityAuthority: AriaV2DataMobilityAuthorit
             // MX-TAB-4 locked decision: FDC classifier boundary.
             $0.tombstonedAt == nil && !$0.isKnewPast && !$0.isTerminal
                 && $0.contentKind != .dataset
+                && $0.adjectiveSensitivity.rawValue <= maximumSensitivity.rawValue
         }
         let scannedDrawers = limit.map { Array(active.prefix($0)) } ?? active
 
