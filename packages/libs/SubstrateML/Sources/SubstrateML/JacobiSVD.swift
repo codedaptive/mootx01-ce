@@ -90,6 +90,11 @@ public struct SVDResult: Sendable {
     }
 }
 
+/// Cooperative cancellation before a decomposition can publish a result.
+public struct JacobiSVDCancelled: Error, Sendable {
+    public init() {}
+}
+
 // MARK: - JacobiSVD
 
 /// Deterministic one-sided Jacobi SVD for real matrices.
@@ -131,6 +136,17 @@ public enum JacobiSVD {
         rank: Int,
         sweeps: Int = 30
     ) -> SVDResult {
+        // The constant predicate cannot cancel, so this overload is infallible.
+        try! decompose(A: A, rank: rank, sweeps: sweeps, shouldCancel: { false })
+    }
+
+    /// Decompose with cooperative cancellation before allocation and between
+    /// tournament rounds. Cancellation discards partial factors.
+    public static func decompose(
+        A: [[Float]], rank: Int, sweeps: Int = 30,
+        shouldCancel: () -> Bool
+    ) throws -> SVDResult {
+        if shouldCancel() { throw JacobiSVDCancelled() }
         let m = A.count
         precondition(m > 0, "JacobiSVD: A must have at least one row")
         let n = A[0].count
@@ -194,11 +210,13 @@ public enum JacobiSVD {
         // disjointness, unit-asserted in JacobiSVDTests.
         let rounds = tournamentRounds(n)
         let workers = ProcessInfo.processInfo.activeProcessorCount
-        W.withUnsafeMutableBufferPointer { wBuf in
-            V.withUnsafeMutableBufferPointer { vBuf in
+        try W.withUnsafeMutableBufferPointer { wBuf in
+            try V.withUnsafeMutableBufferPointer { vBuf in
                 let mats = MatPtr(w: wBuf.baseAddress!, v: vBuf.baseAddress!)
                 for _ in 0..<sweeps {
+                    if shouldCancel() { throw JacobiSVDCancelled() }
                     for round in rounds {
+                        if shouldCancel() { throw JacobiSVDCancelled() }
                         if workers <= 1 || round.count < 2 {
                             for pair in round {
                                 rotatePair(mats, m: m, n: n, p: pair.p, q: pair.q, eps: eps)
@@ -226,6 +244,8 @@ public enum JacobiSVD {
                 }
             }
         }
+
+        if shouldCancel() { throw JacobiSVDCancelled() }
 
         // After sweeps, the columns of W are approximately orthogonal.
         // Compute singular values σ_j = ||W[:,j]||.
