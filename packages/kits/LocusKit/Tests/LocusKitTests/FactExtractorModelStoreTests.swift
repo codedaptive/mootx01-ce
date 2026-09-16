@@ -69,6 +69,29 @@ struct FactExtractorModelStoreTests {
         #expect(try await store.countFactExtractionDebt() == 2)
 
         _ = try await store.setFactsExtracted(drawerId: ids[0])
+        try await registry.upsert(FactExtractorModelRow(
+            recipeID: "nuextract-b1-q8-v1", providerID: "replacement-provider",
+            modelID: "replacement-model", modelVersion: "r2",
+            schemaVersion: "kgfact-extraction-v2", extractorKind: "closure",
+            maximumInputCharacters: 32_768, maximumFactsPerSource: 24,
+            isActive: true))
+        #expect(try await store.countFactExtractionDebt() == 2,
+                "changing an active recipe identity clears bit 28")
+        #expect(try await registry.all().filter(\.isActive).map(\.recipeID)
+                == ["nuextract-b1-q8-v1"], "active upsert preserves a single active recipe")
+
+        _ = try await store.setFactsExtracted(drawerId: ids[0])
+        let inactive = FactExtractorModelRow(
+            recipeID: "nuextract-b1-q8-v1", providerID: "replacement-provider",
+            modelID: "replacement-model", modelVersion: "r2",
+            schemaVersion: "kgfact-extraction-v2", extractorKind: "closure",
+            maximumInputCharacters: 32_768, maximumFactsPerSource: 24,
+            isActive: false)
+        try await registry.upsert(inactive)
+        #expect(try await store.countFactExtractionDebt() == 2,
+                "changing recipe activation clears bit 28")
+
+        _ = try await store.setFactsExtracted(drawerId: ids[0])
         _ = try await store.expungeGated(
             drawerId: ids[0], changedBy: "bilby", reason: "derived fact erasure",
             now: Date(timeIntervalSince1970: 1_700_000_001))
