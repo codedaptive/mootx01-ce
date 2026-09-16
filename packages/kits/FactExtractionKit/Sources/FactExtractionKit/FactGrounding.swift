@@ -50,6 +50,8 @@ public enum FactGroundingValidator {
             return FactGroundingReport(accepted: [], rejected: [.tooManyCandidates])
         }
 
+        // Unicode scalars are the shared Swift/Rust offset unit. UTF-8 byte
+        // positions are carried separately on `FactSourceSpan`.
         let sourceScalars = Array(originalSource.unicodeScalars)
         var accepted: [GroundedFactCandidate] = []
         var rejected: [FactGroundingRejection] = []
