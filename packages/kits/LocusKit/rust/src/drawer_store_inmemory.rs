@@ -2785,9 +2785,9 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
-        Ok(self.storage.row_store().query_projected(
-            T_DRAWERS, &["id"], Some(&fact_extraction_debt_predicate()), &[], None, None)
-            .map_err(map_storage_err)?.len())
+        self.storage.row_store().count(
+            T_DRAWERS, Some(&fact_extraction_debt_predicate()))
+            .map_err(map_storage_err)
     }
 
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
