@@ -125,7 +125,7 @@ struct IndexCompositionColumnDropMigrationTests {
         #expect(try await storage.currentSchemaVersion(for: checkpointKitID) == 3)
         #expect(try await checkpointRow(storage)["composition_policy"] == .text("lex=original;dense=original"))
 
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
@@ -165,9 +165,9 @@ struct IndexCompositionColumnDropMigrationTests {
     func prepareTwiceIsNoOpAndDirectRerunLeavesTheLadderAlone() async throws {
         let storage = inMemory()
         let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_5)
-        let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let first = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(first.format == .current)
-        let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let second = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(second.format == .current)
         #expect(second.migrated == false)
 
@@ -189,7 +189,7 @@ struct IndexCompositionColumnDropMigrationTests {
         let kit = GeniusLocusKit()
         let handle = try await kit.open(
             storage: storage, owner: testOwner, identityKeyStore: InMemoryEstateIdentityKeyStore())
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(prep.migrated == false)
         #expect(prep.migrationState == nil)
@@ -227,7 +227,7 @@ struct IndexCompositionColumnDropMigrationTests {
         let handle = try await kit.open(
             storage: storage, owner: testOwner, identityKeyStore: InMemoryEstateIdentityKeyStore())
 
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         let row = try await checkpointRow(storage)
         #expect(row["composition_policy"] == nil)
@@ -252,7 +252,7 @@ struct IndexCompositionColumnDropMigrationTests {
     func v1_4EstateRunsBothCapsulesToCurrent() async throws {
         let storage = inMemory()
         let (kit, handle) = try await makeEstate(storage: storage, stampedAt: .v1_4)
-        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow)
+        let prep = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: testNow, offlineUpgrade: true)
         #expect(prep.format == .current)
         #expect(try await EstateFormatStore(storage: storage).readIfPresent() == .current)
         #expect(try await checkpointRow(storage)["composition_policy"] == nil)

@@ -211,10 +211,13 @@ impl V2DreamLower for V2GeniusLocusDreamLower {
         if request.estate_id.is_some_and(|id| id != admission.estate_id) {
             return Err(());
         }
-        let mut coordinator = self.coordinator.lock().map_err(|_| ())?;
-        coordinator
-            .rebuild_derived_accelerators(&admission.estate_handle, admission.now_millis)
-            .map_err(|_| ())?;
+        let ticket = {
+            let mut coordinator = self.coordinator.lock().map_err(|_| ())?;
+            coordinator.request_matrix_refresh(&admission.estate_handle, admission.now_millis,
+                Default::default(), false).map_err(|_| ())?.1
+        };
+        ticket.wait().map_err(|_| ())?;
+        let coordinator = self.coordinator.lock().map_err(|_| ())?;
 
         let now_seconds = admission.now_millis / 1_000;
         let now_iso = neuron_kit::topology_analysis::epoch_to_iso8601(admission.now_millis);

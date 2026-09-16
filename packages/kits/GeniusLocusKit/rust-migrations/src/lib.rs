@@ -98,6 +98,11 @@ mod preference_seed_migration;
 #[cfg(feature = "migration-v1-8-to-v1-9")]
 pub use preference_seed_migration::*;
 
+#[cfg(feature = "migration-v1-9-to-v1-10")]
+mod matrix_record_migration;
+#[cfg(feature = "migration-v1-9-to-v1-10")]
+pub use matrix_record_migration::*;
+
 use genius_locus_kit::estate_format::{EstateFormatError, EstateFormatStore, EstateFormatVersion};
 use std::sync::Arc;
 
@@ -126,6 +131,7 @@ pub enum MigrationChainError {
     },
     /// The estate-format read or stamp failed.
     Storage(String),
+    OfflineUpgradeRequired,
     /// A compiled capsule failed; the text names the capsule and its error.
     Capsule(String),
 }
@@ -144,6 +150,7 @@ impl std::fmt::Display for MigrationChainError {
                 f,
                 "this GLK {current} build contains no historical migration capsules for estate format {found}"
             ),
+            Self::OfflineUpgradeRequired => write!(f, "matrix storage upgrade required; run mootx01 upgrade with the estate stopped"),
             Self::Storage(reason) => write!(f, "estate-format store: {reason}"),
             Self::Capsule(reason) => write!(f, "{reason}"),
         }
@@ -195,10 +202,29 @@ pub trait MigrationChainExt {
         now_millis: i64,
         models: Vec<corpus_kit::EmbeddingModelConfig>,
     ) -> Result<(), MigrationChainError>;
+    fn run_offline_migration_chain(
+        &mut self,
+        handle: &genius_locus_kit::handle::EstateHandle,
+        now_millis: i64,
+        models: Vec<corpus_kit::EmbeddingModelConfig>,
+    ) -> Result<(), MigrationChainError>;
 }
 
 impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
     fn run_migration_chain(
+        &mut self,
+        handle: &genius_locus_kit::handle::EstateHandle,
+        now_millis: i64,
+        models: Vec<corpus_kit::EmbeddingModelConfig>,
+    ) -> Result<(), MigrationChainError> {
+        let storage = self.migration_storage(handle).ok_or_else(|| MigrationChainError::Storage("no storage registered".into()))?;
+        if EstateFormatStore::new(storage).read_if_present()?.is_some_and(|f| f < EstateFormatVersion::CURRENT) {
+            return Err(MigrationChainError::OfflineUpgradeRequired);
+        }
+        self.run_offline_migration_chain(handle, now_millis, models)
+    }
+
+    fn run_offline_migration_chain(
         &mut self,
         handle: &genius_locus_kit::handle::EstateHandle,
         now_millis: i64,
@@ -246,7 +272,7 @@ impl MigrationChainExt for genius_locus_kit::coordinator::EstateCoordinator {
 /// historical stamp between the compiled floor and the current format. The
 /// gate is the last capsule in the chain: a build without it cannot reach
 /// the current format, whatever older capsules it compiled.
-#[cfg(feature = "migration-v1-8-to-v1-9")]
+#[cfg(feature = "migration-v1-9-to-v1-10")]
 fn run_compiled_chain(
     coordinator: &mut genius_locus_kit::coordinator::EstateCoordinator,
     handle: &genius_locus_kit::handle::EstateHandle,
@@ -330,19 +356,31 @@ fn run_compiled_chain(
     // absent, create recall_ratings and write the V1_9 stamp, the last write
     // of the chain (I-28). `found` is below CURRENT here, so the capsule
     // always applies.
-    coordinator.run_preference_seed_migration(handle, now_millis)
+    #[cfg(feature = "migration-v1-8-to-v1-9")]
+    if found < EstateFormatVersion::V1_9 { coordinator.run_preference_seed_migration(handle, now_millis)
         .map_err(|error| {
             MigrationChainError::Capsule(format!(
                 "preference-seed migration: {error:?}"
             ))
         })?;
+    }
+    let storage = coordinator.migration_storage(handle).ok_or_else(|| MigrationChainError::Storage("no storage registered".into()))?;
+    migrate_matrix_records(storage, &uuid_string(handle), now_millis, Default::default())
+        .map_err(|e| MigrationChainError::Capsule(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(feature = "migration-v1-9-to-v1-10")]
+fn uuid_string(handle: &genius_locus_kit::handle::EstateHandle) -> String {
+    let b = handle.estate_uuid;
+    format!("{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15])
 }
 
 /// No compiled chain reaches the current format, so a historical estate
 /// cannot be served by this build (the Swift catalog's
 /// `noHistoricalMigrationsCompiled` branch).
-#[cfg(not(feature = "migration-v1-8-to-v1-9"))]
+#[cfg(not(feature = "migration-v1-9-to-v1-10"))]
 fn run_compiled_chain(
     _coordinator: &mut genius_locus_kit::coordinator::EstateCoordinator,
     _handle: &genius_locus_kit::handle::EstateHandle,
@@ -425,6 +463,6 @@ pub fn compiled_floor() -> Option<EstateFormatVersion> {
         not(feature = "migration-v1-8-to-v1-9")
     ))]
     {
-        None
+        if cfg!(feature = "migration-v1-9-to-v1-10") { Some(EstateFormatVersion::V1_9) } else { None }
     }
 }

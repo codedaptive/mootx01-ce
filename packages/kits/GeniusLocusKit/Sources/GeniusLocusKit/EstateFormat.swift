@@ -57,7 +57,9 @@ public struct EstateFormatVersion: Sendable, Codable, Hashable, Comparable,
     /// seeded "on" on every populated estate, and the recall_ratings table
     /// exists.
     public static let v1_9 = EstateFormatVersion(major: 1, minor: 9)
-    public static let current = v1_9
+    /// Format 1.10: keyed matrix records; legacy snapshot retired during offline upgrade.
+    public static let v1_10 = EstateFormatVersion(major: 1, minor: 10)
+    public static let current = v1_10
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         (lhs.major, lhs.minor) < (rhs.major, rhs.minor)
