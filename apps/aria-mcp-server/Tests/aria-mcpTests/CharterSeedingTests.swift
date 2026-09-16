@@ -52,7 +52,8 @@ struct CharterSeedingTests {
     /// the seeding call inside that function makes this test red.
     @Test func registeredOpeningSeedsSevenCharterDrawers() async throws {
         let (kit, handle) = try await freshEstate()
-        await AriaMCPMain.seedChartersIfRegistered(kit: kit, handle: handle, registered: true, now: Self.testNow)
+        await AriaMCPMain.seedChartersIfRegistered(
+            kit: kit, handle: handle, registered: true, frozen: false, now: Self.testNow)
         let count = try await charterDrawerCount(kit: kit, handle: handle)
         #expect(count == 7,
                 "registered opening must seed exactly 7 charter drawers, got \(count)")
@@ -64,9 +65,20 @@ struct CharterSeedingTests {
     /// guard is what keeps a transient opening clean.
     @Test func transientOpeningSeedsNoCharterDrawers() async throws {
         let (kit, handle) = try await freshEstate()
-        await AriaMCPMain.seedChartersIfRegistered(kit: kit, handle: handle, registered: false, now: Self.testNow)
+        await AriaMCPMain.seedChartersIfRegistered(
+            kit: kit, handle: handle, registered: false, frozen: false, now: Self.testNow)
         let count = try await charterDrawerCount(kit: kit, handle: handle)
         #expect(count == 0,
                 "transient opening must seed zero charter drawers, got \(count)")
+    }
+
+    /// A frozen registered opening must remain side-effect free.
+    @Test func frozenRegisteredOpeningSeedsNoCharterDrawers() async throws {
+        let (kit, handle) = try await freshEstate()
+        await AriaMCPMain.seedChartersIfRegistered(
+            kit: kit, handle: handle, registered: true, frozen: true, now: Self.testNow)
+        let count = try await charterDrawerCount(kit: kit, handle: handle)
+        #expect(count == 0,
+                "frozen registered opening must seed zero charter drawers, got \(count)")
     }
 }
