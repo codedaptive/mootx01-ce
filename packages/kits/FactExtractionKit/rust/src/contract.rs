@@ -138,6 +138,14 @@ pub enum FactExtractionError {
     InferenceFailed(String),
     #[error("malformed response: {0}")]
     MalformedResponse(String),
+    #[error("needs subdivision: {0}")]
+    NeedsSubdivision(String),
+    #[error("extractor timed out: {0}")]
+    TimedOut(String),
+}
+
+impl From<String> for FactExtractionError {
+    fn from(message: String) -> Self { Self::InferenceFailed(message) }
 }
 
 pub trait FactExtractor: Send + Sync {
