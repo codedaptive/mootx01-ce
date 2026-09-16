@@ -692,6 +692,9 @@ public struct ToolDispatcher: Sendable {
             )
         }
 
+        let modeDeclaration = ariaV2GlobalModeDeclaration(
+            toolName: name, arguments: args, environment: environment)
+
         // Transform phase: run before decode so a hook can remove or inject a key
         // before the strict argument decoder sees the arguments. In production,
         // preDecodeRegistrations holds the mode concern's transform hook (strips the
@@ -708,7 +711,8 @@ public struct ToolDispatcher: Sendable {
         let transformedArgs = transformOutcome.arguments.objectValue ?? args
 
         let request = try AriaSurfaceDecoder.decode(name: name, arguments: transformedArgs)
-        return await dispatchV2(request, rawArguments: transformedArgs)
+        return await dispatchV2(
+            request, rawArguments: transformedArgs, modeDeclaration: modeDeclaration)
     }
 }
 
@@ -730,7 +734,8 @@ private extension ToolDispatcher {
     /// the decoder accepted.
     private func dispatchV2(
         _ request: AriaSurfaceRequest,
-        rawArguments: [String: JSONValue]
+        rawArguments: [String: JSONValue],
+        modeDeclaration: ModeDeclaration?
     ) async -> JSONValue {
         // Load estate-provisioned modes preferences on the first v2 call of
         // this session. The outer guard prevents the async estate read from
@@ -778,7 +783,8 @@ private extension ToolDispatcher {
         let chain = try! AriaV2CallChain(
             registrations: ariaV2ProductionRegistrations(
                 request: request,
-                modeSessionState: modeSessionState
+                modeSessionState: modeSessionState,
+                modeDeclaration: modeDeclaration
             )
         )
         // Record phase: the coaching hook calls recordCall on admitted, decoded
@@ -850,7 +856,8 @@ private extension ToolDispatcher {
             estateID: handle.estateUUID,
             callableToolNames: Set(effectiveRegistry.operations.map(\.publicName)),
             buildID: buildSerial,
-            capabilityDigest: capabilityDigest)
+            capabilityDigest: capabilityDigest,
+            projectedTools: ToolProjection.tools())
         let memoryMutations = AriaV2MemoryMutations(
             kit: kit, handle: handle, context: memoryOperations.context)
         let recallLens = AriaV2RecallLensService(
@@ -885,7 +892,8 @@ private extension ToolDispatcher {
                     selectedEstateID: handle.estateUUID),
                 direct: AriaV2GeniusLocusDataMobilityAuthority(
                     kit: kit, handle: handle, selectedEstateID: handle.estateUUID,
-                    now: now, serverIdentity: serverIdentity)))
+                    now: now, serverIdentity: serverIdentity,
+                    maximumSensitivity: maximumSensitivity)))
 
         do {
             switch request {

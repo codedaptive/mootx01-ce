@@ -27,17 +27,20 @@ public struct AriaV2CognitionCatalogService: Sendable {
     public let callableToolNames: Set<String>
     public let buildID: String
     public let capabilityDigest: String
+    public let projectedTools: [ProjectedTool]
 
     public init(
         estateID: UUID,
         callableToolNames: Set<String>,
         buildID: String,
-        capabilityDigest: String
+        capabilityDigest: String,
+        projectedTools: [ProjectedTool]
     ) {
         self.estateID = estateID
         self.callableToolNames = callableToolNames
         self.buildID = buildID
         self.capabilityDigest = capabilityDigest
+        self.projectedTools = projectedTools
     }
 
     public func lenses(_ request: AriaV2CognitionCatalogRequest) throws -> JSONValue {
@@ -49,7 +52,7 @@ public struct AriaV2CognitionCatalogService: Sendable {
             // the ordinal it carries decides nothing here. Sort by publicName
             // so the contract holds regardless of registry container order.
             .sorted { $0.publicName < $1.publicName }
-        let catalogByName = Self.buildCatalogLookup()
+        let catalogByName = buildCatalogLookup()
         if request.verbose {
             // Verbose: include input_schema and output_schema for each tool.
             // All three of description, input_schema, and output_schema come from
@@ -147,13 +150,11 @@ public struct AriaV2CognitionCatalogService: Sendable {
         }
     }
 
-    /// Build a name→ProjectedTool lookup from the v2 catalog projection.
-    /// `ToolProjection.tools()` returns projectedTools from the selected catalog,
-    /// which carry the authoritative description, inputSchema, and outputSchema
-    /// per operation. This keeps the lens lane in sync with the tools/list surface.
-    private static func buildCatalogLookup() -> [String: ProjectedTool] {
+    /// Build a name→ProjectedTool lookup from the caller's own contract. Public
+    /// and authenticated first-party lanes have distinct argument schemas.
+    private func buildCatalogLookup() -> [String: ProjectedTool] {
         Dictionary(
-            ToolProjection.tools().map { ($0.name, $0) },
+            projectedTools.map { ($0.name, $0) },
             uniquingKeysWith: { first, _ in first })
     }
 
