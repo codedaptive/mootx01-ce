@@ -1,4 +1,6 @@
 import Foundation
+import CorpusKit
+import MootProductIdentity
 import LocusKit
 import QueueKit
 
@@ -255,6 +257,14 @@ public extension GeniusLocusKit {
         // moot_rebuild_status span: the basis retrain + re-embed window.
         derivedRebuildSpan(handle, open: true)
         defer { derivedRebuildSpan(handle, open: false) }
-        try await corpus.reindex(now: now)
+        let settings = MootProductIdentity.Settings.load()
+        let budget = RetrainingBudget(
+            maxDocuments: settings.corpusLSARetrainingMaxDocuments,
+            maxSweeps: settings.corpusLSARetrainingMaxSweeps,
+            deadline: ContinuousClock.now.advanced(by: .milliseconds(settings.corpusLSARetrainingTimeoutMilliseconds)))
+        let report = try await corpus.reindex(now: now, budget: budget)
+        guard report.skippedModelIDs.isEmpty else {
+            throw CorpusKitError.invalidConfiguration("Retraining budget exhausted: \(report.skippedModelIDs)")
+        }
     }
 }

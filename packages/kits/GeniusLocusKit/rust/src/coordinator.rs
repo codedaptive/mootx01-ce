@@ -5137,7 +5137,7 @@ impl EstateCoordinator {
         let Some(corpus) = self.corpus_kits.get(handle) else {
             return Ok(());
         };
-        corpus.reindex(now).map_err(|e| {
+        crate::brain::bounded_retraining::reindex_with_settings(corpus, now).map_err(|e| {
             VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
                 verb: "reindex_corpus".to_string(),
                 reason: format!("{e:?}"),

@@ -32,3 +32,5 @@ pub mod event_lag_pairs;
 pub mod scheduler;
 pub mod signals;
 pub mod end_of_day_tournament;
+
+pub mod bounded_retraining;
