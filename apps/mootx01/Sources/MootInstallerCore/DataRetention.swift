@@ -209,13 +209,66 @@ public enum DataRetention {
         #endif
     }
 
-    /// Uninstall removal: the WHOLE configuration directory moves as one
-    /// recoverable item (the catalog, the default database location with
-    /// every estate under it, the moot-mgr store, config).
+    /// Uninstall removal: every registered estate directory that exists
+    /// outside the configuration directory moves to the Trash, followed by
+    /// the whole configuration directory (catalog, in-tree estates, manager
+    /// store, and config). Overlapping paths are collapsed so no descendant
+    /// is moved after an ancestor.
     public static func trashDataDirectory(
-        _ configurationDirectory: URL, using move: Mover = systemTrash
+        _ configurationDirectory: URL,
+        registeredDatabaseURLs: [URL],
+        using move: Mover = systemTrash
     ) throws {
-        try move(configurationDirectory)
+        for url in uninstallTrashTargets(
+            configurationDirectory: configurationDirectory,
+            registeredDatabaseURLs: registeredDatabaseURLs
+        ) {
+            try move(url)
+        }
+    }
+
+    /// Existing registered estates expressed as the smallest set of
+    /// directories that covers them and the configuration directory.
+    /// Database files that do not exist are omitted, matching the inventory.
+    static func uninstallTrashTargets(
+        configurationDirectory: URL,
+        registeredDatabaseURLs: [URL]
+    ) -> [URL] {
+        let fm = FileManager.default
+        var candidates = registeredDatabaseURLs
+            .filter { fm.fileExists(atPath: $0.path) }
+            .map { $0.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath() }
+        if fm.fileExists(atPath: configurationDirectory.path) {
+            candidates.append(configurationDirectory.standardizedFileURL.resolvingSymlinksInPath())
+        }
+
+        let configuration = configurationDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let ordered = Dictionary(grouping: candidates, by: \.path)
+            .compactMap(\.value.first)
+            .sorted {
+                let lhsDepth = $0.pathComponents.count
+                let rhsDepth = $1.pathComponents.count
+                return lhsDepth == rhsDepth ? $0.path < $1.path : lhsDepth < rhsDepth
+            }
+        var targets: [URL] = []
+        for candidate in ordered
+        where candidate != configuration
+            && !contains(candidate, in: configuration)
+            && !targets.contains(where: { contains(candidate, in: $0) }) {
+            targets.append(candidate)
+        }
+        if fm.fileExists(atPath: configuration.path)
+            && !targets.contains(where: { contains(configuration, in: $0) }) {
+            targets.append(configuration)
+        }
+        return targets
+    }
+
+    private static func contains(_ child: URL, in ancestor: URL) -> Bool {
+        let childParts = child.pathComponents
+        let ancestorParts = ancestor.pathComponents
+        return childParts.count >= ancestorParts.count
+            && Array(childParts.prefix(ancestorParts.count)) == ancestorParts
     }
 
     /// Reinstall 'reuse': the existing estate stays where it is; the
