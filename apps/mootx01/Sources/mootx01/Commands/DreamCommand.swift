@@ -284,16 +284,15 @@ struct DreamCommand: AsyncParsableCommand {
             // cycle error above.
             if await kit.subjectProducerPipeline(for: handle) != nil {
                 do {
-                    let debt = try await kit.countSubjectDebt(in: handle)
-                    if debt > 0 {
-                        // 256 items per cycle: the miniLLM writes subjects subsecond per item;
-                        // 32 was far below practical throughput and caused post-upgrade debt
-                        // to converge over days rather than hours on large estates.
-                        let sweep = try await kit.subjectBackfillSweep(
-                            handle, batchLimit: 256, now: cycleNow)
+                    // One 256-item batch per pass, run as a claimed QueueKit job
+                    // (DutyQueue): the miniLLM writes subjects subsecond per item;
+                    // post-upgrade debt converges over hours on large estates.
+                    _ = try await kit.enqueueDuty(.subjectBackfill, in: handle, now: cycleNow)
+                    let sweep = try await kit.drainDuty(.subjectBackfill, in: handle, now: cycleNow)
+                    if sweep.jobsRun > 0 {
                         Logging.stderr.log(
-                            "mootx01 dream: subject backfill — \(sweep.written) written, "
-                            + "\(sweep.skippedInadmissible) skipped, \(sweep.remainingDebt) remaining")
+                            "mootx01 dream: subject backfill — \(sweep.unitsPaid) written, "
+                            + "\(sweep.remainingDebt) remaining")
                     }
                 } catch {
                     Logging.stderr.log("mootx01 dream warning: subject backfill error: \(error) — continuing")
@@ -313,7 +312,8 @@ struct DreamCommand: AsyncParsableCommand {
         // activation itself when none is registered; with no model it is a
         // clean 0. An error is non-fatal like the cycle error above.
         do {
-            let encoded = try await kit.runSpanEncodeBatch(handle: handle, now: cycleNow)
+            _ = try await kit.enqueueDuty(.spanEncode, in: handle, now: cycleNow)
+            let encoded = try await kit.drainDuty(.spanEncode, in: handle, now: cycleNow).unitsPaid
             if encoded > 0 {
                 Logging.stderr.log("mootx01 dream: span encode — \(encoded) drawer(s) encoded")
             }

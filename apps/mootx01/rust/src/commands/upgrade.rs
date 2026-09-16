@@ -1096,10 +1096,16 @@ fn run_ssc_facts_backfill(record: &EstateRecord) -> bool {
                     &estate.display().to_string(),
                     "aria-mcp-default",
                 )?;
-                let guard = reg.coord.lock().map_err(|e| e.to_string())?;
-                let written = guard.backfill_ssc_facts(&reg.default.handle).map_err(|e| format!("{e:?}"))?;
+                let mut guard = reg.coord.lock().map_err(|e| e.to_string())?;
+                // Both run as claimed QueueKit jobs (duty_queue): the facts pass
+                // and the lane rebuild are resumable if the upgrade dies here.
+                let written = guard
+                    .pay_duty_until_settled(&reg.default.handle, genius_locus_kit::brain::duty_queue::DutyKind::FactsBackfill, now)
+                    .map_err(|e| format!("{e:?}"))?;
                 if written > 0 {
-                    guard.reindex_corpus(&reg.default.handle, now).map_err(|e| format!("{e:?}"))?;
+                    guard
+                        .pay_duty_until_settled(&reg.default.handle, genius_locus_kit::brain::duty_queue::DutyKind::RetrainBasis, now)
+                        .map_err(|e| format!("{e:?}"))?;
                 }
                 Ok(written)
             })();
