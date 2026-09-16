@@ -999,7 +999,7 @@ pub fn activate_and_build_extraction_cycle(
     // registration failure logs and degrades gracefully — the daemon continues
     // serving without signal 14.
     // Build the cycle closure that `register_default_standing_signals` schedules
-    // as signal 14. Returns `facts_filed as i64` per the standing-signal
+    // as signal 14. Returns the sources settled as i64 per the standing-signal
     // contract. The coordinator Arc is cloned into the closure; the Mutex
     // serializes access so dreaming ticks are safe.
     let fact_coord = Arc::clone(coord);
