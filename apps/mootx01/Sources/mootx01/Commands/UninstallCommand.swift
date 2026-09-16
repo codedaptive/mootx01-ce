@@ -162,11 +162,26 @@ struct UninstallCommand: AsyncParsableCommand {
         let dataDir = EstateCatalog.configurationDirectory
         let records = (try? EstateCatalog.load())?.records ?? []
         let defaultRecord = records.first { $0.name == EstateCatalog.defaultName }
+        let registeredEstateFiles = records.flatMap {
+            $0.ownedFileURLs + [$0.legacyEncryptionOptOutURL]
+        }
+        let externalEstateFiles = DataRetention.externalEstateFiles(
+            configurationDirectory: dataDir,
+            registeredEstateFiles: registeredEstateFiles
+        )
         guard let inventory = DataRetention.dataInventory(
             defaultDatabaseURL: defaultRecord?.databaseURL,
             namedDatabaseURLs: records.filter { $0.name != EstateCatalog.defaultName }.map(\.databaseURL),
             configurationDirectory: dataDir)
         else { return }
+
+        func printExternalEstateFiles() {
+            guard !externalEstateFiles.isEmpty else { return }
+            print("  External registered estate files:")
+            for file in externalEstateFiles {
+                print("    \(file.path)")
+            }
+        }
 
         let decision = DataRetention.decideDataRemoval(
             purge: purge,
@@ -175,12 +190,14 @@ struct UninstallCommand: AsyncParsableCommand {
             offer: {
                 print("\nYour data is still in place at \(dataDir.path):")
                 print("  \(inventory)")
+                printExternalEstateFiles()
                 print("Remove it too? [y/N]: ", terminator: "")
                 let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
                 return answer == "y" || answer == "yes"
             },
             confirm: {
                 print("WARNING: this DESTROYS all MOOTx01 memory data (\(inventory)).")
+                printExternalEstateFiles()
                 print("It will be moved to \(DataRetention.trashName) (recoverable until you empty it).")
                 print("Type 'yes' to confirm: ", terminator: "")
                 return readLine()?.trimmingCharacters(in: .whitespaces) == "yes"
@@ -197,7 +214,7 @@ struct UninstallCommand: AsyncParsableCommand {
             do {
                 try DataRetention.trashDataDirectory(
                     dataDir,
-                    registeredDatabaseURLs: records.map(\.databaseURL)
+                    registeredEstateFiles: registeredEstateFiles
                 )
                 print("  ✓ All registered estate data moved to \(DataRetention.trashName).")
             } catch {
