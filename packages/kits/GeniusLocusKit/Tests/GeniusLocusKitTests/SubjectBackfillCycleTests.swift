@@ -99,7 +99,7 @@ struct SubjectBackfillCycleTests {
         #expect(lane.inFlight == 0)
         #expect(lane.isDraining)
         #expect(lane.detail
-            == "drawers awaiting fact extraction for the active recipe; no extractor registered")
+            == "no extractor registered; ready: 0, running: 0, partial: 0, retrying: 0, blocked: 2, rejected: 0, not applicable: 0, empty: 0")
         #expect(DrainStatus.encodeSettled(drains),
                 "fact row debt must not extend the corpus-only detached finisher")
     }
