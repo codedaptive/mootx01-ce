@@ -365,6 +365,8 @@ fn run_compiled_chain(
         })?;
     }
     let storage = coordinator.migration_storage(handle).ok_or_else(|| MigrationChainError::Storage("no storage registered".into()))?;
+    // The bool return (true = legacy blob found) is not used by the Rust chain,
+    // which does not carry a GLKMigrationPreparation.migrated equivalent.
     migrate_matrix_records(storage, &uuid_string(handle), now_millis, Default::default())
         .map_err(|e| MigrationChainError::Capsule(e.to_string()))?;
     Ok(())
