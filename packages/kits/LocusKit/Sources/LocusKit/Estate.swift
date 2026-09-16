@@ -631,9 +631,9 @@ public actor Estate {
     }
 
     public func subjectDebtBatch(
-        limit: Int, includingPipelines pipelines: [String]
+        limit: Int, includingPipelines pipelines: [String], offset: Int = 0
     ) async throws -> [Drawer] {
-        try await store.subjectDebtBatch(limit: limit, includingPipelines: pipelines)
+        try await store.subjectDebtBatch(limit: limit, includingPipelines: pipelines, offset: offset)
     }
 
     // MARK: - Drawer enumeration

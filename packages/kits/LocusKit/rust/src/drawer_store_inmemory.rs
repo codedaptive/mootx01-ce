@@ -3302,6 +3302,15 @@ impl DrawerStore for DrawerStoreCore {
         limit: usize,
         pipelines: &[String],
     ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.subject_debt_batch_including_from(limit, pipelines, 0)
+    }
+
+    fn subject_debt_batch_including_from(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+        offset: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
         let predicate = subject_debt_predicate(pipelines);
         let (rows, _skipped) = self
             .storage
@@ -3314,7 +3323,7 @@ impl DrawerStore for DrawerStoreCore {
                     OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
                 ],
                 Some(limit),
-                None,
+                if offset > 0 { Some(offset) } else { None },
             )
             .map_err(map_storage_err)?;
         decode_rows_skip_corrupt(&rows, "subject_debt_batch")
@@ -6455,6 +6464,14 @@ impl DrawerStore for InMemoryDrawerStore {
         pipelines: &[String],
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.inner.subject_debt_batch_including(limit, pipelines)
+    }
+    fn subject_debt_batch_including_from(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+        offset: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.subject_debt_batch_including_from(limit, pipelines, offset)
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_missing_subject(pipeline_version)
