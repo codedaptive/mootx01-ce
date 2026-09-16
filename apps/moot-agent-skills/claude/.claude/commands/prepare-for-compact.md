@@ -11,6 +11,12 @@ Give them context, not commands. No "you must", no "always", no checklist
 to obey. They get their own judgment once oriented; your job is to orient
 them.
 
+Do not copy credentials, keys, tokens, or unnecessary raw private data into
+the handoff. If this session recalled restricted or secret memories under a
+grant, file the handoff at the highest sensitivity of any material it recalled:
+name that sensitivity explicitly (`restricted` or `secret`) in the
+`moot_file_memory` call, even if the grant has since expired or been locked.
+
 ## What to cover
 
 In your own words and your own order:
