@@ -27,6 +27,7 @@ pub enum CorpusKitError {
     /// canonical record — the job is stale and is rejected WITHOUT
     /// advancing the index checkpoint (GLK shared-content 1.1).
     StaleRevision(String),
+    RetrainingSkipped(crate::RetrainingSkipReason),
 }
 
 impl std::fmt::Display for CorpusKitError {
@@ -46,6 +47,7 @@ impl std::fmt::Display for CorpusKitError {
                 write!(f, "invalid configuration: {}", s)
             }
             CorpusKitError::StaleRevision(s) => write!(f, "stale revision: {}", s),
+            CorpusKitError::RetrainingSkipped(reason) => write!(f, "retraining skipped: {:?}", reason),
         }
     }
 }

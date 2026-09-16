@@ -449,6 +449,30 @@ impl BundleStore {
         Ok(rows.iter().filter_map(decode_chunk).collect())
     }
 
+    pub fn active_chunks_limited(
+        &self,
+        limit: usize,
+        removed_source_ids: &std::collections::HashSet<String>,
+    ) -> CorpusKitResult<Vec<Chunk>> {
+        let predicate = if removed_source_ids.is_empty() {
+            None
+        } else {
+            let mut removed: Vec<String> = removed_source_ids.iter().cloned().collect();
+            removed.sort();
+            Some(StoragePredicate::Not(Box::new(StoragePredicate::In(
+                Column::new("chunks", "source_id"),
+                removed.into_iter().map(TypedValue::Text).collect(),
+            ))))
+        };
+        let order = vec![OrderClause::new(
+            Column::new("chunks", "hlc"), OrderDirection::Ascending,
+        )];
+        let rows = self.storage.row_store()
+            .query_as_of("chunks", predicate.as_ref(), &order, Some(limit), None, None)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        Ok(rows.iter().filter_map(decode_chunk).collect())
+    }
+
     // ── Hard-delete erasure (secfix/ws2-coredelete) ──
 
     /// Zero the verbatim text of every chunk belonging to `source_id`.
