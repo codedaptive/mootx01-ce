@@ -35,3 +35,7 @@ pub use drain_lease::{DrainLease, DRAIN_LEASE_TTL_SECS, DRAIN_LEASE_HEARTBEAT_SE
 pub use persistencekit::{
     PersistenceKitBackend, QueueKitSchema, QUEUE_KIT_TABLE_NAME,
 };
+#[cfg(feature = "persistencekit")]
+pub mod checkpoint;
+#[cfg(feature = "persistencekit")]
+pub use checkpoint::{QueueCheckpointStore, QueueCheckpointLease};

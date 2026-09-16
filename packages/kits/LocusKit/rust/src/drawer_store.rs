@@ -899,6 +899,13 @@ pub trait DrawerStore: Send + Sync {
             "set_facts_extracted_if_content_matches not implemented for this DrawerStore impl".to_string()))
     }
 
+    /// Atomically publish a fully processed source generation and its completion
+    /// bit. None refuses a changed source/recipe; zero is an idempotent replay.
+    fn publish_extracted_facts(&self, _source_id: &str, _expected_content: &str,
+        _recipe_id: &str, _facts: &[KGFact], _now: i64) -> Result<Option<usize>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable("atomic fact publication unavailable".into()))
+    }
+
     /// Active, non-empty drawers whose bit 28 is clear.
     fn fact_extraction_debt_batch(
         &self, _limit: usize, _after_drawer_id: Option<&str>
@@ -2567,6 +2574,10 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         &self, drawer_id: &str, expected_content: &str
     ) -> Result<usize, LocusKitError> {
         self.as_ref().set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.as_ref().publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
     }
     fn fact_extraction_debt_batch(
         &self, limit: usize, after_drawer_id: Option<&str>

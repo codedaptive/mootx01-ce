@@ -2824,6 +2824,86 @@ impl DrawerStore for DrawerStoreCore {
         store.update(T_DRAWERS, values, &predicate).map_err(map_storage_err)
     }
 
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        for fact in facts {
+            validate_non_empty(&fact.subject, "subject")?;
+            validate_non_empty(&fact.predicate, "predicate")?;
+            validate_non_empty(&fact.object, "object")?;
+            if fact.source_drawer_id != source_id || fact.extraction_schema_version.is_empty() {
+                return Err(LocusKitError::InvalidContent("extraction publication source mismatch".into()));
+            }
+        }
+        let stamp = self.hlc.lock().unwrap().send(now);
+        let mut result = None;
+        self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let rs = txn.row_store();
+            let source_predicate = StoragePredicate::And(vec![
+                StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(source_id.into())),
+                StoragePredicate::Eq(Column::new(T_DRAWERS, "content"), TypedValue::Text(expected_content.into())),
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+                StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"), TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
+            ]);
+            let sources = rs.query(T_DRAWERS, Some(&source_predicate), &[], Some(1), None)?;
+            let Some(source) = sources.first() else { return Ok(()) };
+            let registry = rs.query("fact_extractor_models", Some(&StoragePredicate::And(vec![
+                StoragePredicate::Eq(Column::new("fact_extractor_models", "recipe_id"), TypedValue::Text(recipe_id.into())),
+                StoragePredicate::Eq(Column::new("fact_extractor_models", "is_active"), TypedValue::Int(1)),
+            ])), &[], Some(1), None)?;
+            if registry.is_empty() { return Ok(()); }
+            let op = i64_value_of(source.get("operationalBitmap"));
+            if op & DrawerFeatureFlags::FACTS_EXTRACTED != 0 { result = Some(0); return Ok(()); }
+            let history = rs.query(T_KG_FACTS, Some(&StoragePredicate::Eq(
+                Column::new(T_KG_FACTS, "sourceDrawerID"), TypedValue::Text(source_id.into()))), &[], None, None)?;
+            let mut filed = 0;
+            let mut ids: std::collections::HashSet<_> = history.iter().map(|row| string_value_of(row.get("id"))).collect();
+            let inactive_ids: std::collections::HashSet<_> = history.iter()
+                .filter(|row| i64_value_of(row.get("adjectiveBitmap")) & 63 >= RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)
+                .map(|row| string_value_of(row.get("id"))).collect();
+            for fact in facts {
+                if !ids.insert(fact.id.clone()) { continue; }
+                let mut values = kg_fact_values(fact);
+                values.insert("adjectiveBitmap".into(), TypedValue::Bitmap(i64_value_of(source.get("adjectiveBitmap"))));
+                values.insert("provenanceBitmap".into(), TypedValue::Bitmap(i64_value_of(source.get("provenance"))));
+                rs.insert(T_KG_FACTS, values)?;
+                filed += 1;
+            }
+            let anchor = substrate_lib::verbs::LatticeAnchor::udc_qid(
+                &string_value_of(source.get("udcCode")), &string_value_of(source.get("wikidataQID")));
+            for row in &history {
+                let id = string_value_of(row.get("id"));
+                if facts.is_empty() || facts.iter().any(|fact| fact.id == id)
+                    || string_value_of(row.get("extractionSchemaVersion")).is_empty()
+                    || i64_value_of(row.get("adjectiveBitmap")) & 63 >= RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64
+                    || !facts.iter().any(|fact| !inactive_ids.contains(&fact.id)
+                        && fact.subject == string_value_of(row.get("subject"))
+                        && fact.predicate == string_value_of(row.get("predicate"))
+                        && fact.object == string_value_of(row.get("object"))
+                        && fact.evidence_quote == string_value_of(row.get("evidenceQuote"))) { continue; }
+                let event = audit_gate::admit(self.estate_uuid.as_u128(),
+                    substrate_lib::verbs::RowId(persistence_kit::row_key_derivation::deterministic_row_key(&id).as_u128()),
+                    substrate_lib::verbs::NounType::KGFact, RowVerb::Retract,
+                    Some(BitmapFields { adjective: i64_value_of(row.get("adjectiveBitmap")) as u64,
+                        operational: i64_value_of(row.get("operationalBitmap")) as u64,
+                        provenance: i64_value_of(row.get("provenanceBitmap")) as u64 }), Some(anchor),
+                    &[audit_gate::FieldWrite { slot: audit_gate::FieldSlot::with_values(
+                        audit_gate::Column::Adjective, 0, 6, "state", &[0,1,2,3,16,17,18,19,32,33]), value: 18 }],
+                    anchor, &self.vocabulary, stamp, "fact-extraction-duty")
+                    .map_err(|error| persistence_kit::StorageError::TransactionConflict { detail: format!("fact replacement rejected: {error}") })?;
+                let event = substrate_lib::verbs::AuditEvent {
+                    reason: Some("replaced by grounded extraction generation".into()), ..event };
+                rs.update(T_KG_FACTS, BTreeMap::from([("adjectiveBitmap".into(), TypedValue::Bitmap(event.after_bitmaps.0))]),
+                    &StoragePredicate::Eq(Column::new(T_KG_FACTS, "id"), TypedValue::Text(id)))?;
+                txn.audit_log().append(pk_audit_event_from(&event))?;
+            }
+            rs.update(T_DRAWERS, BTreeMap::from([("operationalBitmap".into(),
+                TypedValue::Bitmap(op | DrawerFeatureFlags::FACTS_EXTRACTED))]), &source_predicate)?;
+            result = Some(filed);
+            Ok(())
+        }).map_err(map_storage_err)?;
+        Ok(result)
+    }
+
     fn fact_extraction_debt_batch(
         &self, limit: usize, after_drawer_id: Option<&str>
     ) -> Result<Vec<Drawer>, LocusKitError> {
@@ -6383,6 +6463,10 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<usize, LocusKitError> {
         self.inner.set_facts_extracted_if_content_matches(drawer_id, expected_content)
     }
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.inner.publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
+    }
     fn fact_extraction_debt_batch(
         &self,
         limit: usize,
@@ -6948,6 +7032,8 @@ fn span_index_debt_predicate() -> StoragePredicate {
 fn fact_extraction_debt_predicate() -> StoragePredicate {
     StoragePredicate::And(vec![
         StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"),
+            TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
         StoragePredicate::Neq(
             Column::new(T_DRAWERS, "content"),
             TypedValue::Text(String::new()),
