@@ -1744,6 +1744,16 @@ impl Estate {
         self.store.subject_debt_batch_including(limit, pipelines)
     }
 
+    /// `subject_debt_batch_including` read from `offset` (the sweep's cursor).
+    pub fn subject_debt_batch_including_from(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+        offset: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.subject_debt_batch_including_from(limit, pipelines, offset)
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is
