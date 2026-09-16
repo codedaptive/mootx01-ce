@@ -259,6 +259,10 @@ pub mod settings {
         pub corpus_lsa_retraining_max_sweeps: usize,
         /// Cooperative retraining wall-clock budget in milliseconds.
         pub corpus_lsa_retraining_timeout_milliseconds: u64,
+        /// Maximum expanded reference output bytes.
+        pub context_distill_reference_expansion_max_bytes: usize,
+        /// Maximum reference output/input UTF-8 byte ratio.
+        pub context_distill_reference_expansion_max_ratio: usize,
         /// `recall_distillation.max_source_bytes`: UTF-8 admission budget,
         /// default/ceiling 32768. Config may lower it; oversized bodies stay intact.
         pub recall_distillation_max_source_bytes: usize,
@@ -278,6 +282,8 @@ pub mod settings {
                 corpus_lsa_retraining_max_documents: 2048,
                 corpus_lsa_retraining_max_sweeps: 30,
                 corpus_lsa_retraining_timeout_milliseconds: 30000,
+                context_distill_reference_expansion_max_bytes: 8_388_608,
+                context_distill_reference_expansion_max_ratio: 64,
                 recall_distillation_max_source_bytes: 32768,
             }
         }
@@ -339,12 +345,19 @@ pub mod settings {
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
 
+        let distill = root.get("context_distill");
+        let distill_positive = |key: &str, fallback: usize| -> usize {
+            distill.and_then(|v| v.get(key)).and_then(|v| v.as_i64())
+                .filter(|v| *v > 0).map(|v| v as usize).unwrap_or(fallback)
+        };
         let lsa = root.get("corpus").and_then(|c| c.get("lsa_retraining"));
         let positive = |key: &str, fallback: i64| -> i64 {
             lsa.and_then(|v| v.get(key)).and_then(|v| v.as_i64())
                 .map(|v| v.max(1)).unwrap_or(fallback)
         };
         ProductSettings {
+            context_distill_reference_expansion_max_bytes: distill_positive("reference_expansion_max_bytes", 8_388_608),
+            context_distill_reference_expansion_max_ratio: distill_positive("reference_expansion_max_ratio", 64),
             corpus_lsa_retraining_max_documents: positive("max_documents", 2048) as usize,
             corpus_lsa_retraining_max_sweeps: positive("max_sweeps", 30) as usize,
             corpus_lsa_retraining_timeout_milliseconds: positive("timeout_milliseconds", 30000) as u64,
