@@ -14,6 +14,7 @@ use locus_kit::{
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
     frames::CaptureFrame,
     provenance::Channel,
+    tunnel::Tunnel,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -77,10 +78,8 @@ impl<'a> EstateV2MemoryService<'a> {
         })
     }
 
-    /// Load active linked tunnels for a drawer, sensitivity-filtered and capped
-    /// at 50. Uses `all_active_tunnels()` which filters `lifecycle == Active &&
-    /// !is_retired()`, then filters in-memory by drawer id — the Rust coordinator
-    /// has no per-drawer active-tunnel query, so we filter after loading.
+    /// Project active linked tunnels for one drawer from the request-scoped
+    /// snapshot, sensitivity-filtered and capped at 50.
     ///
     /// Sensitivity gate: tunnel sensitivity <= ceiling. Far-endpoint drawers
     /// (when the far id is non-nil) are fetched and any that exceed the ceiling
@@ -89,18 +88,11 @@ impl<'a> EstateV2MemoryService<'a> {
     fn load_tunnels(
         &self,
         estate: &OpenEstate,
+        all_active: &[Tunnel],
         drawer_id: &str,
         ceiling: AdjectiveSensitivity,
     ) -> Result<Vec<V2TunnelRow>, V2MemoryFailure> {
         use locus_kit::tunnel_operational::TunnelLifecycle;
-
-        // All active (lifecycle == Active, not retired) tunnels in the estate.
-        // This mirrors the LocusKit SQL-layer filter in the Swift port
-        // (activeTunnelsFrom/To → LocusKit.Estate L947/L955).
-        let all_active = estate.coord.lock()
-            .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
-            .all_active_tunnels(&estate.handle)
-            .map_err(|e| failure("operation_failed", &format!("tunnel fetch failed: {e:?}")))?;
 
         // Filter to tunnels linked to this drawer.
         let linked: Vec<_> = all_active.iter().filter(|t| {
@@ -375,6 +367,13 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             result.hits.retain(|h| h.id != *anchor);
         }
 
+        // Apply the public provenance boundary before any downstream consumer.
+        // The packager derives citations, confidence signals, cutoff, rows, and
+        // counts from this same authorized set.
+        result.hits.retain(|hit| {
+            hit.drawer.as_ref().is_some_and(|drawer| provenance_visible(drawer.provenance))
+        });
+
         // record a sensitivity_read_under_grant audit entry for each hit
         // admitted PAST the substrate's default ceiling specifically because a
         // grant is live. Only rows whose OWN adjective sensitivity is
@@ -549,6 +548,18 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             }
         }
 
+        // depth:full may request up to 50 memories. Snapshot active tunnels once
+        // for the batch, then select each drawer's rows in memory; do not rescan
+        // the entire estate for every requested id.
+        let all_active_tunnels = if request.depth == V2MemoryDepth::Full && !selected.is_empty() {
+            Some(estate.coord.lock()
+                .map_err(|_| failure("estate_unavailable", "The estate coordinator is unavailable."))?
+                .all_active_tunnels(&estate.handle)
+                .map_err(|e| failure("operation_failed", &format!("tunnel fetch failed: {e:?}")))?)
+        } else {
+            None
+        };
+
         requested_order.iter().filter_map(|memory_id| {
             (!ambiguous.contains(memory_id)).then(|| selected.get(memory_id))
                 .flatten().map(|drawer| {
@@ -556,7 +567,12 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
                     // depth:distilled carry no tunnels, matching v1 which only queried
                     // tunnels on the full-record path (ToolDispatch.swift:2568-2579).
                     let tunnels = if request.depth == V2MemoryDepth::Full {
-                        self.load_tunnels(estate, &drawer.id, sensitivity_ceiling(context))
+                        self.load_tunnels(
+                            estate,
+                            all_active_tunnels.as_deref().unwrap_or_default(),
+                            &drawer.id,
+                            sensitivity_ceiling(context),
+                        )
                             .unwrap_or_default()
                     } else {
                         Vec::new()
