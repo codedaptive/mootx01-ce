@@ -17,12 +17,17 @@ public enum MatrixRecordMigration {
 
     /// Caller owns exclusive estate access for this entire operation. Normal
     /// serving remains disabled until the format stamp advances on success.
+    /// Returns `true` when a legacy snapshot blob was found and retired — i.e.
+    /// actual data migration occurred. Returns `false` for a no-op pass (no
+    /// blob row, nothing to rebuild), which stamps the format without moving data.
+    @discardableResult
     public static func run(storage: any Storage, estateID: UUID, now: Date,
-                           limits: MatrixRefreshLimits = .init()) async throws {
+                           limits: MatrixRefreshLimits = .init()) async throws -> Bool {
         let format = EstateFormatStore(storage: storage)
         let found = try await format.readIfPresent()
         if let found, found > .v1_10 { throw MatrixRecordError.corrupt("newer estate format") }
-        if found == .v1_10 { return }
+        if found == .v1_10 { return false }
+        var didMigrate = false
         let store = MatrixRecordStore(storage: storage)
         try await store.prepare()
         var phase = try await store.state(estateID: estateID).map { MatrixRecordStore.text($0.values, "migration_phase") }
@@ -52,6 +57,9 @@ public enum MatrixRecordMigration {
                           calibration.updateTimestamps.allSatisfy({ model, time in
                               restored.updateTimestamps[model].map { abs($0 - time) <= 0.000001 } == true
                           }) else { throw MatrixRecordError.corrupt("calibration verification failed; legacy snapshot retained") }
+                    // A legacy blob was found and its calibration extracted; this
+                    // pass migrated real data.
+                    didMigrate = true
                 }
                 // This phase is durable BEFORE the destructive step. A crash
                 // after DROP resumes a rebuild from source, never from the BLOB.
@@ -85,13 +93,18 @@ public enum MatrixRecordMigration {
             try await store.setMigration(estateID: estateID, phase: "complete", reclaimedBytes: report.reclaimedBytes)
         }
         try await format.stamp(.v1_10, now: now)
+        return didMigrate
     }
 }
 
 public extension GeniusLocusKit {
-    func runMatrixRecordMigration(handle: EstateHandle, now: Date) async throws {
+    /// Runs the 1.9 → 1.10 matrix-records upgrade capsule. Returns `true` when
+    /// a legacy snapshot blob was found and retired (actual data migration);
+    /// returns `false` for a no-op pass that only stamps the new format.
+    @discardableResult
+    func runMatrixRecordMigration(handle: EstateHandle, now: Date) async throws -> Bool {
         let storage = try migrationStorage(for: handle)
-        try await MatrixRecordMigration.run(storage: storage, estateID: handle.estateUUID, now: now)
+        return try await MatrixRecordMigration.run(storage: storage, estateID: handle.estateUUID, now: now)
     }
 }
 
