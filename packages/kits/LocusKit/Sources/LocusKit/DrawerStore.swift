@@ -5790,6 +5790,93 @@ public actor DrawerStore {
         }
     }
 
+    /// Publish one completely processed source generation atomically. Nil means
+    /// the source/recipe changed. A replay returns zero. Empty success never
+    /// retires facts; absence from new model output is not a retraction.
+    public func publishExtractedFacts(
+        sourceID: String, expectedContent: String, recipeID: String,
+        facts: [KGFact], now: Date
+    ) async throws -> Int? {
+        for fact in facts {
+            try Self.validateNonEmpty(fact.subject, label: "subject")
+            try Self.validateNonEmpty(fact.predicate, label: "predicate")
+            try Self.validateNonEmpty(fact.object, label: "object")
+            guard fact.sourceDrawerID == sourceID, !fact.extractionSchemaVersion.isEmpty else {
+                throw LocusKitError.invalidContent("extraction publication source mismatch")
+            }
+        }
+        let stamp = hlc.send(now: Int64(now.timeIntervalSince1970 * 1000))
+        let estateID = estateUuid
+        let vocab = vocabulary
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let sourcePredicate: StoragePredicate = .and([
+                .eq(Column(table: "drawers", name: "id"), .text(sourceID)),
+                .eq(Column(table: "drawers", name: "content"), .text(expectedContent)),
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
+            ])
+            guard let source = try await txn.rowStore.query(table: "drawers",
+                where: sourcePredicate, orderBy: [], limit: 1, offset: nil).first else { return nil }
+            let registry = try await txn.rowStore.query(table: "fact_extractor_models", where: .and([
+                .eq(Column(table: "fact_extractor_models", name: "recipe_id"), .text(recipeID)),
+                .eq(Column(table: "fact_extractor_models", name: "is_active"), .int(1)),
+            ]), orderBy: [], limit: 1, offset: nil)
+            guard !registry.isEmpty else { return nil }
+            let op = Self.int64(source["operationalBitmap"])
+            if op & DrawerFeatureFlags.factsExtracted.rawValue != 0 { return 0 }
+            let history = try await txn.rowStore.query(table: "kg_facts", where:
+                .eq(Column(table: "kg_facts", name: "sourceDrawerID"), .text(sourceID)))
+            var ids = Set(history.map { Self.string($0["id"]) })
+            var filed = 0
+            for fact in facts where ids.insert(fact.id).inserted {
+                var values = Self.kgFactValues(fact)
+                // Inherit current source access policy inside the same transaction.
+                values["adjectiveBitmap"] = .bitmap(Self.int64(source["adjectiveBitmap"]))
+                values["provenanceBitmap"] = .bitmap(Self.int64(source["provenance"]))
+                _ = try await txn.rowStore.insert(table: "kg_facts", values: values)
+                filed += 1
+            }
+            let desiredIDs = Set(facts.map(\.id))
+            let inactiveIDs = Set(history.filter {
+                Self.int64($0["adjectiveBitmap"]) & 63 >= Int64(RowState.activeClusterUpperBoundRaw)
+            }.map { Self.string($0["id"]) })
+            let anchor = SubstrateTypes.LatticeAnchor.udcQid(
+                Self.string(source["udcCode"]), qid: Self.string(source["wikidataQID"]))
+            // Only positively replaced duplicates are retired. An omitted fact,
+            // even after a recipe change, remains an independently grounded claim.
+            for row in history where !facts.isEmpty && !desiredIDs.contains(Self.string(row["id"])) {
+                guard !Self.string(row["extractionSchemaVersion"]).isEmpty,
+                      Self.int64(row["adjectiveBitmap"]) & 63 < Int64(RowState.activeClusterUpperBoundRaw),
+                      facts.contains(where: {
+                          !inactiveIDs.contains($0.id)
+                          && $0.subject == Self.string(row["subject"]) && $0.predicate == Self.string(row["predicate"])
+                          && $0.object == Self.string(row["object"]) && $0.evidenceQuote == Self.string(row["evidenceQuote"])
+                      }) else { continue }
+                let result = AuditGate.admit(estateUuid: estateID,
+                    rowId: RowKeyDerivation.deterministicRowKey(from: Self.string(row["id"])),
+                    nounType: .kgFact, verb: .retract,
+                    prior: BitmapFields(adjective: UInt64(bitPattern: Self.int64(row["adjectiveBitmap"])),
+                        operational: UInt64(bitPattern: Self.int64(row["operationalBitmap"])),
+                        provenance: UInt64(bitPattern: Self.int64(row["provenanceBitmap"]))),
+                    priorLatticeAnchor: anchor,
+                    writes: [FieldWrite(slot: FieldSlot(column: .adjective, shift: 0, width: 6,
+                        label: "state", legalValues: [0, 1, 2, 3, 16, 17, 18, 19, 32, 33]), value: 18)],
+                    afterLatticeAnchor: anchor, vocabulary: vocab, hlc: stamp, actor: "fact-extraction-duty")
+                guard case .success(let event) = result else {
+                    throw LocusKitError.invalidContent("fact replacement rejected by audit gate")
+                }
+                _ = try await txn.rowStore.update(table: "kg_facts",
+                    values: ["adjectiveBitmap": .bitmap(event.afterBitmaps.adjective)], where:
+                    .eq(Column(table: "kg_facts", name: "id"), .text(Self.string(row["id"]))))
+                try await txn.auditLog.append(event.withReason("replaced by grounded extraction generation"))
+            }
+            _ = try await txn.rowStore.update(table: "drawers",
+                values: ["operationalBitmap": .bitmap(op | DrawerFeatureFlags.factsExtracted.rawValue)],
+                where: sourcePredicate)
+            return filed
+        }
+    }
+
     /// Active, non-empty drawers whose fact-extraction settlement bit is clear.
     public func factExtractionDebtBatch(
         limit: Int, afterDrawerID: String? = nil
@@ -5813,6 +5900,7 @@ public actor DrawerStore {
     private static var factExtractionDebtPredicate: StoragePredicate {
         .and([
             .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
             .neq(Column(table: "drawers", name: "content"), .text("")),
             .bitmaskNone(Column(table: "drawers", name: "operationalBitmap"),
                          mask: DrawerFeatureFlags.factsExtracted.rawValue),

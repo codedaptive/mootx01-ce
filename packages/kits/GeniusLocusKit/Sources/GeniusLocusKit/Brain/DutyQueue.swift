@@ -67,6 +67,7 @@ public struct DutyDrainReport: Sendable, Equatable {
     public let unitsPaid: Int
     /// Debt still owed after the drain (0 for the retrain).
     public let remainingDebt: Int
+    public var madeProgress: Bool = false
 }
 
 /// The job payload: the estate and the duty, so a job read from the queue
@@ -97,7 +98,7 @@ public extension GeniusLocusKit {
     /// absent, so a duty with nothing to run is never queued. The facts
     /// backfill has no cheap count and is paid on demand; the retrain is
     /// requested, not inferred.
-    func dutyDebt(_ kind: DutyKind, in handle: EstateHandle) async throws -> Int {
+    func dutyDebt(_ kind: DutyKind, in handle: EstateHandle, now: Date = Date()) async throws -> Int {
         let estate = try estate(for: handle)
         switch kind {
         case .spanEncode:
@@ -109,7 +110,8 @@ public extension GeniusLocusKit {
             return try await estate.countSubjectDebt()
         case .factExtraction:
             guard factExtractors[handle] != nil else { return 0 }
-            return try await estate.countFactExtractionDebt()
+            let state = try await factExtractionWorkStatus(handle, now: now)
+            return state.runnable + state.inFlight + state.retrying + state.blocked + state.rejected
         case .factsBackfill, .retrainBasis:
             return 0
         }
@@ -124,8 +126,11 @@ public extension GeniusLocusKit {
     @discardableResult
     func enqueueDuty(_ kind: DutyKind, in handle: EstateHandle, now: Date) async throws -> Bool {
         if dutyQueued[handle]?.contains(kind) == true { return false }
+        if kind == .factExtraction {
+            guard try await factExtractionWorkStatus(handle, now: now).runnable > 0 else { return false }
+        }
         if kind != .factsBackfill && kind != .retrainBasis {
-            guard try await dutyDebt(kind, in: handle) > 0 else { return false }
+            guard try await dutyDebt(kind, in: handle, now: now) > 0 else { return false }
         }
         let (queue, hlcValue) = try await ensureDreamingQueue(for: handle)
         // Single occupancy is durable: a job left pending by an earlier
@@ -171,13 +176,27 @@ public extension GeniusLocusKit {
     /// reply so the queue never holds a job the process has given up on.
     func drainDuty(_ kind: DutyKind, in handle: EstateHandle, now: Date) async throws -> DutyDrainReport {
         let (queue, _) = try await ensureDreamingQueue(for: handle)
+        let extraction = kind == .factExtraction
+            ? try await prepareFactExtractionBatch(handle, limit: Self.dutyFactExtractionBatch, now: now) : nil
+        if kind == .factExtraction && extraction == nil {
+            return DutyDrainReport(kind: kind, jobsRun: 0, unitsPaid: 0,
+                remainingDebt: try await dutyDebt(kind, in: handle, now: now))
+        }
         let batch = try await queue.drain(stream: kind.streamID)
         dutyQueued[handle]?.remove(kind)
         var jobsRun = 0
         var unitsPaid = 0
+        var advanced = false
         if !batch.isEmpty {
             do {
-                unitsPaid = try await runDutyBatch(kind, in: handle, now: now)
+                if kind == .factExtraction {
+                    let result = try await extraction!.run()
+                    unitsPaid = result.completedSources
+                    advanced = result.madeProgress
+                } else {
+                    unitsPaid = try await runDutyBatch(kind, in: handle, now: now)
+                    advanced = unitsPaid > 0
+                }
                 for entry in batch {
                     try await queue.reply(to: entry.job.id, status: .done, artifacts: [])
                     jobsRun += 1
@@ -191,13 +210,15 @@ public extension GeniusLocusKit {
                 throw error
             }
         }
-        let remaining = try await dutyDebt(kind, in: handle)
+        let remaining = try await dutyDebt(kind, in: handle, now: now)
         // Carry the work forward: a job that paid something and left debt
         // queues the next batch; a job that paid nothing does not loop.
-        if jobsRun > 0, unitsPaid > 0, remaining > 0 {
+        if jobsRun > 0, advanced, remaining > 0 {
             _ = try await enqueueDuty(kind, in: handle, now: now)
         }
-        return DutyDrainReport(kind: kind, jobsRun: jobsRun, unitsPaid: unitsPaid, remainingDebt: remaining)
+        var report = DutyDrainReport(kind: kind, jobsRun: jobsRun, unitsPaid: unitsPaid, remainingDebt: remaining)
+        report.madeProgress = advanced
+        return report
     }
 
     /// Drain the duty streams no standing signal owns, once. Called from
@@ -222,7 +243,7 @@ public extension GeniusLocusKit {
             _ = try await enqueueDuty(kind, in: handle, now: now)
             let report = try await drainDuty(kind, in: handle, now: now)
             total += report.unitsPaid
-            if report.jobsRun == 0 || report.unitsPaid == 0 { return total }
+            if report.jobsRun == 0 || !report.madeProgress { return total }
             if kind == .retrainBasis || kind == .factsBackfill { return total }
             if report.remainingDebt == 0 { return total }
         }
