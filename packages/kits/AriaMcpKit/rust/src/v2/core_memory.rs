@@ -664,27 +664,25 @@ pub fn execute_memory_search(request: V2MemorySearchRequest, dependencies: &V2Co
                 found_part
             };
 
-            // NOT gated behind `explain`. The line is emitted for LOW and
-            // MEDIUM only — high, single and not-found stay silent — so it is
-            // not a per-call token cost but a warning that appears exactly
-            // when the ranking is too weak to rely on. v1 emitted it on every
-            // search under the same condition. Order: discrimination precedes
-            // degradation (ResultComposer.controlLines §1 before §3).
-            let scores: Vec<f64> = result.rows.iter().filter_map(|r| r.score).collect();
-            let mut disc = crate::recall_discrimination::classify(&scores);
-            // A lexical-only ranking cannot support a high verdict.
-            if crate::recall_discrimination::dense_lane_dark(result.span_rerank_registered)
-                && matches!(disc, crate::recall_discrimination::DiscriminationLevel::High)
-            {
-                disc = crate::recall_discrimination::DiscriminationLevel::Medium;
-            }
-            match disc {
-                crate::recall_discrimination::DiscriminationLevel::Low
-                | crate::recall_discrimination::DiscriminationLevel::Medium => {
-                    compact.push('\n');
-                    compact.push_str(crate::recall_discrimination::result_line(disc));
+            // Discrimination is opt-in. Low and medium are rendered before any
+            // degradation line; high, single, and not-found remain silent.
+            if request.explain == Some(true) {
+                let scores: Vec<f64> = result.rows.iter().filter_map(|r| r.score).collect();
+                let mut disc = crate::recall_discrimination::classify(&scores);
+                // A lexical-only ranking cannot support a high verdict.
+                if crate::recall_discrimination::dense_lane_dark(result.span_rerank_registered)
+                    && matches!(disc, crate::recall_discrimination::DiscriminationLevel::High)
+                {
+                    disc = crate::recall_discrimination::DiscriminationLevel::Medium;
                 }
-                _ => {}
+                match disc {
+                    crate::recall_discrimination::DiscriminationLevel::Low
+                    | crate::recall_discrimination::DiscriminationLevel::Medium => {
+                        compact.push('\n');
+                        compact.push_str(crate::recall_discrimination::result_line(disc));
+                    }
+                    _ => {}
+                }
             }
 
             // retrieval: degraded — emit AFTER discrimination, matching the v1 S1
