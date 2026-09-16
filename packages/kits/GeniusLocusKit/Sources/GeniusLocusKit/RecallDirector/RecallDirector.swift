@@ -109,12 +109,6 @@ public extension GeniusLocusKit {
             frontierK: frontierK,
             weights: .uniform
         )
-        let withheldBySensitivity = await scoredRecallSensitivityWithheldCount(
-            for: request.frame,
-            handle: handle,
-            candidateLimit: frontierK
-        )
-
         Self.recallLog.debug(
             "RecallDirector: mode=\(request.mode.rawValue, privacy: .public) limit=\(request.limit, privacy: .public) frontierK=\(frontierK, privacy: .public)"
         )
@@ -259,7 +253,7 @@ public extension GeniusLocusKit {
         // `now` is Date() here — the allowed call site per the determinism rule
         // (Date() inside sub-engines is forbidden; the verb boundary is the
         // sanctioned entry point, identical to propose/associate).
-        var finalResult = result.replacing(withheldBySensitivity: withheldBySensitivity)
+        var finalResult = result
         // Inject the fired route key so callers can see which route, if any,
         // transformed this request. nil when no route fired (the common case).
         if let key = firedRouteKey {
@@ -312,51 +306,19 @@ public extension GeniusLocusKit {
         return finalResult
     }
 
-    /// Counts sensitivity-default exclusions over a bounded, body-free candidate
-    /// window. The cached per-estate store avoids constructing a new schema-
-    /// applying `DrawerStore` for every recall.
-    private func scoredRecallSensitivityWithheldCount(
-        for frame: RecallFrame,
-        handle: EstateHandle,
-        candidateLimit: Int
-    ) async -> Int {
-        do {
-            let store = try await ensureKGStore(for: handle)
-            let drawers = try await store.allDrawers(
-                hydrationLevel: .structured,
-                limit: max(0, candidateLimit)
-            )
-            let nodeNames = try await store.resolveNodeNames(
-                parentNodeIds: Array(Set(drawers.map(\.parentNodeId))))
-            let evaluation = try await BitmapEvaluator.evaluateResult(
-                frame: frame, drawers: drawers, store: store, nodeNames: nodeNames
-            )
-            return evaluation.withheldBySensitivity
-        } catch {
-            return 0
-        }
-    }
-
     /// Counts sensitivity-default exclusions over LocusKit's persisted candidate
     /// set for callers that supply an already-bounded candidate collection.
     func sensitivityWithheldCount(
         for frame: RecallFrame,
         handle: EstateHandle,
-        candidates: [Drawer]? = nil
+        candidates: [Drawer]
     ) async -> Int {
         do {
-            guard let storage = storages[handle] else { return 0 }
-            let store = try await DrawerStore(storage: storage)
-            let drawers: [Drawer]
-            if let candidates {
-                drawers = candidates
-            } else {
-                drawers = try await estate(for: handle).allDrawers()
-            }
+            let store = try await ensureKGStore(for: handle)
             let nodeNames = try await store.resolveNodeNames(
-                parentNodeIds: Array(Set(drawers.map(\.parentNodeId))))
+                parentNodeIds: Array(Set(candidates.map(\.parentNodeId))))
             let evaluation = try await BitmapEvaluator.evaluateResult(
-                frame: frame, drawers: drawers, store: store, nodeNames: nodeNames
+                frame: frame, drawers: candidates, store: store, nodeNames: nodeNames
             )
             return evaluation.withheldBySensitivity
         } catch {
@@ -543,6 +505,7 @@ public extension GeniusLocusKit {
             plan: plan,
             unionProfile: nil,
             hits: hits,
+            withheldBySensitivity: stream.withheldBySensitivity,
             degradedStages: degradedStages,
             laneRanks: laneRanks,
             queryLatticeAnchor: nil
@@ -733,11 +696,13 @@ public extension GeniusLocusKit {
         //   pre-existing behaviour.
         let corpusHitIDs = Array(Set(bm25List.map(\.id) + vectorList.map(\.id)))
         var corpusContentByID: [String: String] = [:]
+        var withheldBySensitivity = 0
         if !corpusHitIDs.isEmpty {
             if let filtered = try? await estate.getDrawers(
                 ids: corpusHitIDs, matchingFrame: request.frame,
                 hydrationLevel: .full) {
                 let admissibleIDs = Set(filtered.admissible.map { $0.id })
+                withheldBySensitivity = filtered.withheldBySensitivity
                 for d in filtered.admissible { corpusContentByID[d.id] = d.content }
                 // Pre-filter: remove frame-excluded items so they cannot steal rank slots
                 // before rrfFuseN truncates to limit.
@@ -870,6 +835,7 @@ public extension GeniusLocusKit {
 
         // corpusOnly is BM25 + Hamming only.
         return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: sortedHits,
+                               withheldBySensitivity: withheldBySensitivity,
                                degradedStages: degradedStages,
                                laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
     }
@@ -1260,6 +1226,7 @@ public extension GeniusLocusKit {
 
         // hybrid is locus + BM25 + Hamming only.
         return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits,
+                               withheldBySensitivity: stream.withheldBySensitivity,
                                degradedStages: degradedStages,
                                laneRanks: laneRanks,
                                queryLatticeAnchor: hybridSketch?.latticeAnchor)
@@ -3375,6 +3342,7 @@ public extension GeniusLocusKit {
         )
 
         return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
+                               withheldBySensitivity: stream.withheldBySensitivity,
                                denseLaneStatus: denseLaneExplainerTag, degradedStages: degradedStages,
                                laneRanks: laneRanks, queryLatticeAnchor: sketch.latticeAnchor)
     }
