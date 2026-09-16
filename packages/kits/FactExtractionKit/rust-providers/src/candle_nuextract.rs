@@ -8,7 +8,7 @@ use candle_core::{Device, Tensor};
 use candle_transformers::models::{quantized_phi3, quantized_qwen2};
 use fact_extraction_kit::{
     FactAssertionKind, FactCandidate, FactExtractionRequest, FactExtractionResponse,
-    FactExtractorModelSpec,
+    FactExtractorModelSpec, FactExtractionError,
 };
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -16,12 +16,12 @@ use tokenizers::Tokenizer;
 use crate::protocol::NuExtractArchitecture;
 
 const EXTRACTION_TEMPLATE: &str = r#"{
-  "fact": {
+  "facts": [{
     "subject": "",
     "predicate": "",
     "object": "",
     "evidence": ""
-  }
+  }]
 }"#;
 
 enum QuantizedModel {
@@ -114,35 +114,25 @@ impl CandleNuExtract {
     pub fn extract(
         &mut self,
         request: &FactExtractionRequest,
-    ) -> Result<FactExtractionResponse, String> {
+    ) -> Result<FactExtractionResponse, FactExtractionError> {
         if request.maximum_facts == 0
             || request.maximum_facts > self.spec.maximum_facts_per_source
             || request.source_text.chars().count() > self.spec.maximum_input_characters
         {
-            return Err("request exceeds the configured NuExtract recipe".into());
+            return Err(FactExtractionError::InvalidRequest("request exceeds the configured NuExtract recipe".into()));
         }
         let prompt = format!(
             "<|input|>\n### Template:\n{EXTRACTION_TEMPLATE}\n### Text:\n{}\n\n<|output|>",
             request.source_text
         );
-        // NuExtract decodes greedily, so its output for a chunk is a function
-        // of the chunk and the recipe: output that carries no complete JSON
-        // object, or JSON that does not decode, is that chunk's answer and
-        // yields a zero-candidate response rather than an error. An error
-        // would leave the source as debt and the next cycle would produce
-        // the same output; a recipe change re-clears the estate's debt and
-        // re-extracts. Fields the model omitted pass through empty and every
-        // bound (fact count, field length, evidence grounding) is enforced
-        // by `FactGroundingValidator`, which counts each rejection.
-        let raw_facts = match self.generate(&prompt)? {
-            Some(raw) => parse_first_json_object::<RawBatch>(&raw)
-                .ok()
-                .and_then(|batch| batch.facts.or_else(|| batch.fact.map(|fact| vec![fact])))
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let raw = self.generate(&prompt)?;
+        let batch = parse_first_json_object::<RawBatch>(&raw)
+            .map_err(FactExtractionError::MalformedResponse)?;
+        let raw_facts = batch.facts.or_else(|| batch.fact.map(|fact| vec![fact]))
+            .ok_or_else(|| FactExtractionError::MalformedResponse("missing fact collection".into()))?;
         let candidates = raw_facts
             .into_iter()
+            .filter(|raw| !raw.is_explicit_empty())
             .map(|raw| raw.into_candidate(&request.source_text))
             .collect();
         Ok(FactExtractionResponse {
@@ -155,12 +145,8 @@ impl CandleNuExtract {
         })
     }
 
-    /// Run greedy decoding until the output carries a complete JSON object
-    /// or the new-token bound is reached. `Ok(None)` is the model stopping
-    /// without a complete object (the chunk's deterministic answer, treated
-    /// as zero candidates); `Err` is a runtime failure (tokenizer, forward
-    /// pass) that the caller reports so the source stays as debt.
-    fn generate(&mut self, prompt: &str) -> Result<Option<String>, String> {
+    /// Token context includes the prompt/template and reserved output budget.
+    fn generate(&mut self, prompt: &str) -> Result<String, FactExtractionError> {
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -168,12 +154,8 @@ impl CandleNuExtract {
         let mut ids = encoding.get_ids().to_vec();
         let prompt_length = ids.len();
         let maximum_prompt = self.context_length - self.maximum_new_tokens - 1;
-        // A chunk whose prompt exceeds the model context is that chunk's
-        // deterministic answer under this recipe: no output, decoded to zero
-        // candidates. An error would leave the source as debt that every
-        // later cycle re-fails identically.
         if prompt_length == 0 || prompt_length > maximum_prompt {
-            return Ok(None);
+            return Err(FactExtractionError::NeedsSubdivision("prompt exceeds token context including output reserve".into()));
         }
 
         for step in 0..self.maximum_new_tokens {
@@ -204,16 +186,16 @@ impl CandleNuExtract {
                 .decode(&ids[prompt_length..], true)
                 .map_err(|error| format!("decode NuExtract output: {error}"))?;
             if parse_first_json_object::<serde_json::Value>(&decoded).is_ok() {
-                return Ok(Some(decoded));
+                return Ok(decoded);
             }
         }
         let decoded = self
             .tokenizer
             .decode(&ids[prompt_length..], true)
             .map_err(|error| format!("decode NuExtract output: {error}"))?;
-        Ok(parse_first_json_object::<serde_json::Value>(&decoded)
-            .ok()
-            .map(|_| decoded))
+        parse_first_json_object::<serde_json::Value>(&decoded)
+            .map(|_| decoded)
+            .map_err(|_| FactExtractionError::NeedsSubdivision("output ended without a complete JSON object".into()))
     }
 }
 
@@ -234,6 +216,10 @@ struct RawFact {
 }
 
 impl RawFact {
+    fn is_explicit_empty(&self) -> bool {
+        [&self.subject, &self.predicate, &self.object, &self.evidence_quote]
+            .iter().all(|value| value.as_deref() == Some(""))
+    }
     /// A missing field passes through empty; the grounding validator rejects
     /// the candidate as `EmptyField` and the other candidates in the same
     /// response survive.
@@ -258,9 +244,7 @@ impl RawFact {
             predicate: self.predicate.unwrap_or_default(),
             object,
             evidence_quote,
-            // NuExtract is a pure extraction model. The host owns trust
-            // metadata; downstream grounding rejects unsupported output.
-            confidence: 1.0,
+            confidence: 0.8,
             assertion_kind: FactAssertionKind::Asserted,
             search_aliases: Vec::new(),
         }
@@ -291,14 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn partial_fact_fails_closed_instead_of_becoming_a_zero_fact_result() {
+    fn partial_fact_reaches_grounding_with_missing_fields() {
         let batch: RawBatch = parse_first_json_object(r#"{"facts":[{"subject":"Jack"}]}"#).unwrap();
         assert!(batch
             .facts
             .unwrap()
             .remove(0)
             .into_candidate("Jack's birthday is June 20th.")
-            .is_err());
+            .predicate.is_empty());
     }
 
     #[test]
@@ -311,9 +295,8 @@ mod tests {
             .facts
             .unwrap()
             .remove(0)
-            .into_candidate("Jack's birthday is June 20th.")
-            .unwrap();
-        assert_eq!(candidate.confidence, 1.0);
+            .into_candidate("Jack's birthday is June 20th.");
+        assert_eq!(candidate.confidence, 0.8);
         assert_eq!(candidate.assertion_kind, FactAssertionKind::Asserted);
         assert!(candidate.search_aliases.is_empty());
     }

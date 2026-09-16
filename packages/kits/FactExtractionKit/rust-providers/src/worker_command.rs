@@ -40,7 +40,7 @@ pub fn run_from_args() -> Result<(), String> {
         } else {
             match extractor.extract(&request.extraction) {
                 Ok(result) => WorkerResponse::success(request_id, result),
-                Err(error) => WorkerResponse::failure(request_id, error),
+                Err(error) => WorkerResponse::extraction_failure(request_id, error),
             }
         };
         write_frame(&mut output, &response)?;

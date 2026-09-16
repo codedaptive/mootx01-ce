@@ -191,14 +191,11 @@ struct DreamCommand: AsyncParsableCommand {
             do {
                 _ = try await kit.activateFactExtractor(
                     extractor, recipeID: recipeID, for: handle)
-                let result = try await kit.runFactExtractionBatch(
-                    handle, limit: 16, now: Date())
+                let settled = try await kit.payDutyUntilSettled(.factExtraction, in: handle, now: Date())
+                let state = try await kit.factExtractionWorkStatus(handle, now: Date())
                 Logging.stderr.log(
                     "mootx01 dream: fact extraction cycle complete — " +
-                    "\(result.completedSources) source(s) settled, " +
-                    "\(result.factsFiled) fact(s) filed, " +
-                    "\(result.candidatesRejected) candidate(s) rejected, " +
-                    "\(result.skippedSources) skipped, \(result.failedSources) failed")
+                    "\(settled) source(s) settled; \(state.detail)")
             } catch {
                 Logging.stderr.log(
                     "mootx01 dream warning: fact extraction cycle failed: \(error)")

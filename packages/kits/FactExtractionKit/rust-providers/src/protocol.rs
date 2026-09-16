@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use fact_extraction_kit::FactExtractionRequest;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAXIMUM_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +39,8 @@ pub struct WorkerResponse {
     pub request_id: u64,
     pub result: Option<fact_extraction_kit::FactExtractionResponse>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl WorkerResponse {
@@ -48,6 +50,7 @@ impl WorkerResponse {
             request_id,
             result: Some(result),
             error: None,
+            error_code: None,
         }
     }
 
@@ -57,7 +60,12 @@ impl WorkerResponse {
             request_id,
             result: None,
             error: Some(error.into()),
+            error_code: None,
         }
+    }
+
+    pub fn extraction_failure(request_id: u64, error: fact_extraction_kit::FactExtractionError) -> Self {
+        Self { error_code: Some(error.code().into()), ..Self::failure(request_id, error.to_string()) }
     }
 }
 

@@ -19,6 +19,7 @@
 
 pub mod span_encode_duty;
 pub mod fact_extraction_duty;
+pub mod fact_extraction_workflow;
 pub mod anomaly_flag_sweep;
 pub mod conflict_projection_pass;
 pub mod conflict_projection_sweep;

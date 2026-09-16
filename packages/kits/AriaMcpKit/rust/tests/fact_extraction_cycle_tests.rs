@@ -40,11 +40,13 @@ use genius_locus_kit::{EstateCoordinator, EstatePreferenceKey, EstatePreferenceV
 /// "stub-provider:stub-model:stub-v1".
 struct StubExtractor {
     spec: FactExtractorModelSpec,
+    coordinator_probe: Option<std::sync::Weak<std::sync::Mutex<EstateCoordinator>>>,
 }
 
 impl StubExtractor {
     fn new() -> Self {
         Self {
+            coordinator_probe: None,
             spec: FactExtractorModelSpec {
                 provider_id: "stub-provider".into(),
                 model_id: "stub-model".into(),
@@ -65,10 +67,14 @@ impl FactExtractor for StubExtractor {
 
     fn extract(
         &self,
-        _request: &FactExtractionRequest,
+        request: &FactExtractionRequest,
     ) -> Result<FactExtractionResponse, FactExtractionError> {
+        if let Some(probe) = &self.coordinator_probe {
+            let coordinator = probe.upgrade().expect("coordinator alive");
+            assert!(coordinator.try_lock().is_ok(), "inference must not hold the resident coordinator mutex");
+        }
         Ok(FactExtractionResponse {
-            source_digest: String::new(),
+            source_digest: request.source_digest.clone(),
             provider_id: self.spec.provider_id.clone(),
             model_id: self.spec.model_id.clone(),
             model_version: self.spec.model_version.clone(),
@@ -211,7 +217,9 @@ fn fact_extraction_cycle_tracks_runtime_preference_without_restart() {
             )
             .expect("provision Off");
     }
-    let extractor: Arc<dyn FactExtractor> = Arc::new(StubExtractor::new());
+    let mut stub = StubExtractor::new();
+    stub.coordinator_probe = Some(Arc::downgrade(&coord));
+    let extractor: Arc<dyn FactExtractor> = Arc::new(stub);
     let cycle = activate_and_build_extraction_cycle(extractor, &coord, handle)
         .expect("available extractor retains a lazy cycle while Off");
     assert_eq!(cycle().expect("Off is a no-op"), 0);
@@ -231,9 +239,14 @@ fn fact_extraction_cycle_tracks_runtime_preference_without_restart() {
             )
             .expect("provision On");
     }
-    // The cycle pays in sources settled: every drawer the fresh estate owes
-    // settles against the stub's empty output, so the debt reads zero after.
-    let settled = cycle().expect("On runs after live preference change");
+    // One resident tick pays one bounded chunk per source; seeded memories
+    // may need continuation jobs. Empty success must still bind its digest.
+    let mut settled = 0;
+    for _ in 0..64 {
+        settled += cycle().expect("On runs after live preference change");
+        if coord.lock().unwrap().duty_debt(&handle,
+            genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction).unwrap() == 0 { break; }
+    }
     let remaining = coord
         .lock()
         .unwrap()

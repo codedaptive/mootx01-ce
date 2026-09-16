@@ -155,7 +155,7 @@ impl QueueKitSchema {
 /// coordinator (GLK near-realtime encode drain).
 #[derive(Clone)]
 pub struct PersistenceKitBackend {
-    storage: Arc<dyn Storage>,
+    pub(crate) storage: Arc<dyn Storage>,
 }
 
 impl PersistenceKitBackend {
