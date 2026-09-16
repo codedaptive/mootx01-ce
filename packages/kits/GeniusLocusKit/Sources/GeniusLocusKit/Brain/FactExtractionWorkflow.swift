@@ -38,8 +38,16 @@ public struct FactExtractionWorkStatus: Sendable {
     public var rejected = 0
     public var notApplicable = 0
     public var completedEmpty = 0
+    // False when no extractor is registered for the estate; the detail
+    // prepends the explanation so an operator reading moot_drain_status with
+    // 54,000 pending rows sees "no extractor registered" ahead of the counts.
+    public var extractorRegistered = true
     public var detail: String {
-        "ready: \(runnable), running: \(inFlight), partial: \(partial), retrying: \(retrying), blocked: \(blocked), rejected: \(rejected), not applicable: \(notApplicable), empty: \(completedEmpty)"
+        let counts = "ready: \(runnable), running: \(inFlight), partial: \(partial), retrying: \(retrying), blocked: \(blocked), rejected: \(rejected), not applicable: \(notApplicable), empty: \(completedEmpty)"
+        if !extractorRegistered {
+            return "no extractor registered; \(counts)"
+        }
+        return counts
     }
 }
 
@@ -105,7 +113,9 @@ extension GeniusLocusKit {
         var status = FactExtractionWorkStatus()
         status.runnable = try await estate.countFactExtractionDebt()
         guard let recipeID = factExtractorRecipeIDs[handle] else {
-            status.blocked = status.runnable; status.runnable = 0; return status
+            status.blocked = status.runnable; status.runnable = 0
+            status.extractorRegistered = false
+            return status
         }
         guard let queue = dreamingQueues[handle] else { return status }
         let checkpoints = try QueueCheckpointStore(queue: queue)
