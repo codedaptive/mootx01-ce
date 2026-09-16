@@ -31,6 +31,11 @@ import Foundation
 /// `ReleaseDownloader.latestTag`).
 public actor UpdateAdvisor {
 
+    /// Release identifiers surfaced to the model are deliberately narrower
+    /// than general SemVer: the product publishes stable tags and numbered
+    /// beta tags only. The cap bounds the untrusted feed value before display.
+    static let maximumReleaseTagLength = 32
+
     /// Returns the newer-release tag (e.g. "v1.0.34") or nil when the
     /// installed version is current. Throws on network/decode failure.
     /// Semver gating lives in the check function (`ReleaseDownloader.
@@ -96,9 +101,34 @@ public actor UpdateAdvisor {
         // thrown error and an up-to-date nil tag both land here as nil,
         // and both mean the same thing — nothing to advise this window.
         if let tag = try? await withTimeout(probeTimeout, latestNewerTag) {
-            cached = "\(tag) is available (installed \(installedVersion)) — upgrade with `mootx01 upgrade`"
+            let release = Self.isDisplaySafeReleaseTag(tag) ? tag : "a newer release"
+            cached = "\(release) is available (installed \(installedVersion)) — upgrade with `mootx01 upgrade`"
         }
         return cached
+    }
+
+    /// Accept only the project's published tag grammar:
+    /// `vMAJOR.MINOR.PATCH` or `vMAJOR.MINOR.PATCH-beta-N`.
+    nonisolated static func isDisplaySafeReleaseTag(_ tag: String) -> Bool {
+        guard !tag.isEmpty,
+              tag.utf8.count <= maximumReleaseTagLength,
+              tag.first == "v"
+        else { return false }
+
+        let version = tag.dropFirst()
+        let pieces = version.split(separator: "-", omittingEmptySubsequences: false)
+        guard pieces.count == 1 || pieces.count == 3 else { return false }
+        let core = pieces[0].split(separator: ".", omittingEmptySubsequences: false)
+        guard core.count == 3,
+              core.allSatisfy(Self.isASCIIDigits)
+        else { return false }
+        if pieces.count == 1 { return true }
+        return pieces[1] == "beta"
+            && Self.isASCIIDigits(pieces[2])
+    }
+
+    private nonisolated static func isASCIIDigits(_ value: Substring) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy { (48...57).contains($0) }
     }
 
     /// Race `operation` against a deadline; the loser is cancelled.

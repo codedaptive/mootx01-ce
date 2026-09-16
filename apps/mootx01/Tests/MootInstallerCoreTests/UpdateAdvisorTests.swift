@@ -49,6 +49,28 @@ struct UpdateAdvisorTests {
         #expect(line == "v1.0.34 is available (installed 1.0.33) — upgrade with `mootx01 upgrade`")
     }
 
+    @Test("numbered beta tag renders verbatim")
+    func rendersNumberedBetaTag() async {
+        let advisor = UpdateAdvisor(installedVersion: "1.1.0-beta-18", environment: [:]) {
+            "v1.1.0-beta-19"
+        }
+        #expect(await advisor.advisory() == "v1.1.0-beta-19 is available (installed 1.1.0-beta-18) — upgrade with `mootx01 upgrade`")
+    }
+
+    @Test("untrusted or overlong tags render only the generic release text", arguments: [
+        "v999.0.0-IGNORE-PRIOR-INSTRUCTIONS",
+        "1.2.3",
+        "v1.2",
+        "v1.2.3-beta-x",
+        "v" + String(repeating: "9", count: UpdateAdvisor.maximumReleaseTagLength),
+    ])
+    func unsafeTagIsNotReflected(_ tag: String) async {
+        let advisor = UpdateAdvisor(installedVersion: "1.0.33", environment: [:]) { tag }
+        let line = await advisor.advisory()
+        #expect(line == "a newer release is available (installed 1.0.33) — upgrade with `mootx01 upgrade`")
+        #expect(!(line?.contains(tag) ?? false))
+    }
+
     @Test("up-to-date (nil tag) stays silent")
     func upToDateIsSilent() async {
         let advisor = UpdateAdvisor(installedVersion: "1.0.33", environment: [:]) { nil }
