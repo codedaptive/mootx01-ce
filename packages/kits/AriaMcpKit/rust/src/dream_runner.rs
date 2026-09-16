@@ -178,13 +178,13 @@ pub fn run_one_dreaming_cycle(
 
     // The one-shot finisher owns Signal 14 while it has the estate open. Build
     // and activate through the same production function as the resident, then
-    // run one bounded batch even when the REM-ALPHA queue is empty.
+    // drain runnable fact chunks even when the REM-ALPHA queue is empty.
     let fact_settings_directory = if opening.federate {
         None
     } else {
         Path::new(estate_path).parent()
     };
-    if let Some(fact_cycle) = crate::runtime::build_fact_extraction_cycle(
+    if let Some(fact_cycle) = crate::runtime::build_fact_extraction_dream_cycle(
         &reg.coord,
         handle,
         fact_settings_directory,
@@ -196,6 +196,13 @@ pub fn run_one_dreaming_cycle(
             Err(error) => eprintln!(
                 "mootx01 dream: fact extraction cycle failed: {error}"
             ),
+        }
+        if let Ok(coord) = reg.coord.lock() {
+            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis() as i64;
+            if let Ok(status) = coord.fact_extraction_work_status(&handle, now_ms) {
+                eprintln!("mootx01 dream: fact extraction — {}", status.detail());
+            }
         }
     }
     // Span debt: one bounded batch per dreaming pass, the same call the

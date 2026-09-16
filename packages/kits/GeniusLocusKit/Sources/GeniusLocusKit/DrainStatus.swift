@@ -227,22 +227,12 @@ extension GeniusLocusKit {
             ))
         }
 
-        // Drain 5 of N: fact extraction. Row debt — drawers whose bit 28 is
-        // clear for the active recipe — paid down only by the bounded batch
-        // inside a dreaming cycle, so `inFlight` is 0. ALWAYS rendered: this
-        // lane exists so a caller can settle an estate on product state
-        // rather than by running blind dreaming cycles, and an absent lane
-        // would read as "nothing owed". Without a registered extractor the
-        // debt cannot move; the detail says so.
-        let factDebt = try await estate.countFactExtractionDebt()
-        let factDetail = registeredFactExtractor(for: handle) == nil
-            ? "drawers awaiting fact extraction for the active recipe; no extractor registered"
-            : "drawers awaiting fact extraction for the active recipe"
+        let facts = try await factExtractionWorkStatus(handle, now: Date())
         statuses.append(DrainStatus(
             name: DrainStatus.factExtractionName,
-            pending: factDebt,
-            inFlight: 0,
-            detail: factDetail
+            pending: facts.runnable + facts.retrying + facts.blocked + facts.rejected,
+            inFlight: facts.inFlight,
+            detail: facts.detail
         ))
 
         return statuses
