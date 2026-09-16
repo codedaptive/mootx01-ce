@@ -35,12 +35,16 @@ pub fn legacy_matrix_schema() -> SchemaDeclaration {
 
 /// Caller owns exclusive access. Interrupted rebuilds restart from authoritative
 /// audit rows; completed rebuilds resume at physical reclamation.
+/// Run the 1.9 → 1.10 matrix-records upgrade. Returns `true` when a legacy
+/// snapshot blob was found and retired (actual data migration occurred);
+/// returns `false` for a no-op pass that only stamps the new format. The
+/// caller may discard the bool when it does not track migration state.
 pub fn migrate_matrix_records(
     storage: Arc<dyn Storage>,
     id: &str,
     now_millis: i64,
     limits: MatrixRefreshLimits,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     let format = EstateFormatStore::new(storage.clone());
     let found = format
         .read_if_present()
@@ -49,8 +53,9 @@ pub fn migrate_matrix_records(
         return Err(failure("newer estate format"));
     }
     if found == Some(EstateFormatVersion::V1_10) {
-        return Ok(());
+        return Ok(false);
     }
+    let mut did_migrate = false;
     let store = MatrixRecordStore::new(storage.clone());
     store.prepare()?;
     let mut phase = store
@@ -86,6 +91,9 @@ pub fn migrate_matrix_records(
                 if store.load_calibration(id)? != calibration {
                     return Err(failure("calibration verification failed; legacy retained"));
                 }
+                // A legacy blob was found and its calibration extracted; this
+                // pass migrated real data.
+                did_migrate = true;
             }
             store.set_migration(id, "rebuilding", 0)?;
             let mut retired = SchemaDeclaration::new("GeniusLocusKitMatrix", 2, vec![]);
@@ -127,7 +135,8 @@ pub fn migrate_matrix_records(
     }
     format
         .stamp(EstateFormatVersion::V1_10, now_millis)
-        .map_err(|e| failure(format!("{e:?}")))
+        .map_err(|e| failure(format!("{e:?}")))?;
+    Ok(did_migrate)
 }
 
 /// Skip disposable count sections without constructing another matrix. This

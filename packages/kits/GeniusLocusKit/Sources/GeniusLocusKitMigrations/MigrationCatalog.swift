@@ -232,9 +232,14 @@ public enum GLKMigrationCatalog {
         // last write of the chain (I-28).
         if found < .v1_9 { try await kit.runPreferenceSeedMigration(handle: handle, now: now) }
         #endif
-        try await kit.runMatrixRecordMigration(handle: handle, now: now)
-        migrated = true
-        migrationState = "complete"
+        // A no-op pass (no legacy snapshot blob, no serving generation to
+        // rebuild) stamps the new format without migrating data; migrated stays
+        // false so callers can distinguish a format bump from a real conversion.
+        let matrixMigrated = try await kit.runMatrixRecordMigration(handle: handle, now: now)
+        if matrixMigrated {
+            migrated = true
+            migrationState = "complete"
+        }
         return GLKMigrationPreparation(
             format: .current,
             migrated: migrated,
