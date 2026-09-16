@@ -11543,9 +11543,6 @@ impl EstateCoordinator {
             frontier_k,
             weights: RecallWeights::UNIFORM,
         };
-        let withheld_by_sensitivity =
-            self.sensitivity_withheld_count(handle, &request.frame, frontier_k);
-
         // Extract test seam values before the multi-lane dispatch.
         // Each seam is single-use (consumed here, cleared in the RefCell) so the
         // next call after injection fires the seam exactly once, then resumes
@@ -11745,7 +11742,6 @@ impl EstateCoordinator {
         // so `enqueue_dreaming_item` stamps the HLC with it directly.
         // No SystemTime::now() inside this engine — determinism rule.
         let mut result = result;
-        result.withheld_by_sensitivity = withheld_by_sensitivity;
         // Inject the fired route key so callers can see which route, if any,
         // transformed this request. None when no route fired (the common case).
         result.route = fired_route_key;
@@ -11819,8 +11815,9 @@ impl EstateCoordinator {
         // failures (P0-5 sites 1-5): a failed liveRows / room-fingerprints /
         // room-drawer / bitmap-eval read names a locus.* stage so a FAILED
         // locus recall is distinguishable from a GENUINE-EMPTY estate.
-        let (all_rows, locus_degraded) =
-            estate.recall(traced_frame, now).collect_all_with_degraded();
+        let stream = estate.recall(traced_frame, now);
+        let withheld_by_sensitivity = stream.withheld_by_sensitivity();
+        let (all_rows, locus_degraded) = stream.collect_all_with_degraded();
         let rows: Vec<Drawer> = all_rows.into_iter().take(plan.frontier_k).collect();
 
         let limited: Vec<Drawer> = rows.into_iter().take(request.limit).collect();
@@ -11889,7 +11886,7 @@ impl EstateCoordinator {
             dense_lane_status: None,
             degraded_stages,
             hits,
-            withheld_by_sensitivity: 0,
+            withheld_by_sensitivity,
             lane_ranks,
             // locusOnly compiles no sketch — the anchor derivation never runs.
             // Mirrors Swift RecallDirector.locusOnly path (GLKRecallResult.swift §M4).
@@ -12475,13 +12472,15 @@ impl EstateCoordinator {
             GLKRecallMode::Hybrid | GLKRecallMode::UnionBest
         );
 
+        let mut withheld_by_sensitivity;
         if include_locus {
             // collect_all_with_degraded surfaces LocusKit recall internal-read
             // failures (P0-5 sites 1-5) for the Hybrid/UnionBest locus lane: a
             // failed locus read names a locus.* stage so a FAILED locus lane is
             // distinguishable from a GENUINE-EMPTY one. Genuine-empty: none.
-            let (all_locus, locus_degraded) =
-                estate.recall(traced_frame, now).collect_all_with_degraded();
+            let stream = estate.recall(traced_frame, now);
+            withheld_by_sensitivity = stream.withheld_by_sensitivity();
+            let (all_locus, locus_degraded) = stream.collect_all_with_degraded();
             degraded_stages.extend(locus_degraded);
             // Sort before rank assignment — full set, capped inside stable_locus_rank_rows.
             // Without a stable tiebreak, equal-filed_at drawers arrive in whatever order
@@ -12506,8 +12505,12 @@ impl EstateCoordinator {
             // for drawer hydration. Trace rows (if external-origin) are written
             // by recall_scored's central writer from the fused result — the
             // hydration scan itself never traces.
-            let all_rows: Vec<Drawer> = estate
-                .recall(request.frame.clone(), now)
+            let stream = estate.recall(request.frame.clone(), now);
+            // CorpusOnly's primary candidates are the query-derived corpus/vector
+            // IDs below, not this hydration supply. Their frame-filter result
+            // replaces this zero once those IDs are evaluated.
+            withheld_by_sensitivity = 0;
+            let all_rows: Vec<Drawer> = stream
                 .collect_all()
                 .into_iter()
                 .take(plan.frontier_k)
@@ -13115,6 +13118,9 @@ impl EstateCoordinator {
         if !extra_ids.is_empty() {
             match estate.get_drawers_matching_frame(&extra_ids, &request.frame) {
                 Ok(filtered) => {
+                    if request.mode == GLKRecallMode::CorpusOnly {
+                        withheld_by_sensitivity = filtered.withheld_by_sensitivity;
+                    }
                     for d in filtered.admissible {
                         drawer_index.insert(d.id.clone(), d);
                     }
@@ -14413,7 +14419,7 @@ impl EstateCoordinator {
             // DISTINGUISHABLE from "absent evidence" (empty Vec, no matching docs).
             degraded_stages,
             hits,
-            withheld_by_sensitivity: 0,
+            withheld_by_sensitivity,
             lane_ranks,
             // M4: pre-computed anchor from the sketch compilation block above.
             // Callers must read from here; single-derivation doctrine enforced.
@@ -14452,8 +14458,9 @@ impl EstateCoordinator {
         // since this no-corpus path's RESULT is the locus lane, a failed locus
         // read names a locus.* stage so a FAILED recall is distinguishable from
         // a GENUINE-EMPTY estate. Seeded into degraded_stages below.
-        let (all_locus, locus_degraded) =
-            estate.recall(traced_frame, now).collect_all_with_degraded();
+        let stream = estate.recall(traced_frame, now);
+        let withheld_by_sensitivity = stream.withheld_by_sensitivity();
+        let (all_locus, locus_degraded) = stream.collect_all_with_degraded();
         // Sort before scoring using the same stable comparator as the hybrid path.
         // Cap happens inside stable_locus_rank_rows after sort — same pattern.
         let locus_rows: Vec<Drawer> = stable_locus_rank_rows(all_locus, plan.frontier_k);
@@ -14665,30 +14672,13 @@ impl EstateCoordinator {
             // there is no throwing stage on the locus-ranked path.
             degraded_stages,
             hits,
-            withheld_by_sensitivity: 0,
+            withheld_by_sensitivity,
             lane_ranks,
             // M4: pre-computed anchor — single derivation for this recall path.
             query_lattice_anchor,
             cross_encoder: None,
             route: None,
         })
-    }
-
-    /// Evaluates a bounded, body-free candidate window solely to carry the
-    /// default-ceiling exclusion count. A failed companion evaluation leaves
-    /// recall rows and scoring untouched and reports the source-compatible zero
-    /// default.
-    fn sensitivity_withheld_count(
-        &self,
-        handle: &EstateHandle,
-        frame: &RecallFrame,
-        candidate_limit: usize,
-    ) -> usize {
-        let Some(store) = self.recall_stores.get(handle) else { return 0; };
-        let Ok(drawers) = store.all_drawers_bounded_projected(Some(candidate_limit)) else {
-            return 0;
-        };
-        self.sensitivity_withheld_count_for_drawers(handle, frame, &drawers)
     }
 
     fn sensitivity_withheld_count_for_drawers(
