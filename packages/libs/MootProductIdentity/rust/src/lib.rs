@@ -227,7 +227,7 @@ pub mod settings {
 
     /// Parsed product settings. `None` fields mean the key was absent in the
     /// file — the consumer falls back to its computed default.
-    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ProductSettings {
         /// Override path for the daemon stats store (`daemon.stats_store`).
         /// `None` means absent in the file; the consumer should use
@@ -253,6 +253,25 @@ pub mod settings {
         /// switching models automatically clears extraction debt estate-wide
         /// (`fact_extraction.model_version` in config.json).
         pub fact_extraction_model_version: Option<String>,
+        /// `recall_distillation.max_source_bytes`: UTF-8 admission budget,
+        /// default/ceiling 32768. Config may lower it; oversized bodies stay intact.
+        pub recall_distillation_max_source_bytes: usize,
+    }
+
+    /// A missing or unreadable config file yields the same values as `{}`:
+    /// absent optional keys and the 32768-byte recall admission ceiling. A
+    /// derived `Default` would set the ceiling to zero and disable distillation.
+    impl Default for ProductSettings {
+        fn default() -> Self {
+            Self {
+                daemon_stats_store: None,
+                fact_extraction_worker_executable: None,
+                fact_extraction_gguf: None,
+                fact_extraction_tokenizer: None,
+                fact_extraction_model_version: None,
+                recall_distillation_max_source_bytes: 32768,
+            }
+        }
     }
 
     /// Load settings from `<config_dir>/config.json`.
@@ -312,11 +331,29 @@ pub mod settings {
             .map(str::to_owned);
 
         ProductSettings {
+            recall_distillation_max_source_bytes: root.get("recall_distillation")
+                .and_then(|v| v.get("max_source_bytes")).and_then(|v| v.as_i64())
+                .map(|v| v.clamp(1, 32768) as usize).unwrap_or(32768),
             daemon_stats_store,
             fact_extraction_worker_executable,
             fact_extraction_gguf,
             fact_extraction_tokenizer,
             fact_extraction_model_version,
+        }
+    }
+
+    #[test]
+    fn missing_config_file_keeps_recall_ceiling() {
+        let dir = std::env::temp_dir().join(format!("mpi-missing-{}", std::process::id()));
+        assert_eq!(load_from_file(&dir, FILE_NAME).recall_distillation_max_source_bytes, 32768);
+    }
+
+    #[test]
+    fn recall_budget_cannot_disable_safety_ceiling() {
+        assert_eq!(parse_settings("{}").recall_distillation_max_source_bytes, 32768);
+        for (value, expected) in [("1024", 1024), ("0", 1), ("-1", 1), ("999999", 32768), ("true", 32768), ("1.5", 32768), ("\"64\"", 32768)] {
+            let json = format!("{{\"recall_distillation\":{{\"max_source_bytes\":{value}}}}}");
+            assert_eq!(parse_settings(&json).recall_distillation_max_source_bytes, expected);
         }
     }
 

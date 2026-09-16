@@ -346,6 +346,11 @@ public enum MootProductIdentity {
         /// transaction that resets the debt).
         public let factExtractionModelVersion: String?
 
+        /// `recall_distillation.max_source_bytes`: UTF-8 admission limit (default
+        /// 32768). Larger bodies are returned intact. Config can lower, not raise,
+        /// the safety ceiling; nonpositive integers clamp to 1, invalid values default.
+        public let recallDistillationMaxSourceBytes: Int
+
         // MARK: Loading
 
         /// Load settings from `config.json` in the given configuration directory.
@@ -391,7 +396,9 @@ public enum MootProductIdentity {
                 daemonStatsStore: storeOrNil,
                 factExtractionCoreAIAsset: coreaiAsset,
                 factExtractionCoreAITokenizer: coreaiTokenizer,
-                factExtractionModelVersion: modelVersion)
+                factExtractionModelVersion: modelVersion,
+                recallDistillationMaxSourceBytes: min(32768, positiveInteger(
+                    (root["recall_distillation"] as? [String: Any])?["max_source_bytes"], fallback: 32768)))
         }
 
         // MARK: Writing
@@ -448,18 +455,29 @@ public enum MootProductIdentity {
             return fm.createFile(atPath: url.path, contents: written)
         }
 
+        // Reject JSON booleans, fractional values, and out-of-range integers in
+        // both ports. Nonpositive integer settings clamp to one.
+        private static func positiveInteger(_ value: Any?, fallback: Int) -> Int {
+            guard let number = value as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let integer = Int(number.stringValue) else { return fallback }
+            return max(1, integer)
+        }
+
         // MARK: Private init
 
         private init(
             daemonStatsStore: String?,
             factExtractionCoreAIAsset: String?,
             factExtractionCoreAITokenizer: String?,
-            factExtractionModelVersion: String?
+            factExtractionModelVersion: String?,
+            recallDistillationMaxSourceBytes: Int = 32768
         ) {
             self.daemonStatsStore = daemonStatsStore
             self.factExtractionCoreAIAsset = factExtractionCoreAIAsset
             self.factExtractionCoreAITokenizer = factExtractionCoreAITokenizer
             self.factExtractionModelVersion = factExtractionModelVersion
+            self.recallDistillationMaxSourceBytes = recallDistillationMaxSourceBytes
         }
     }
 }

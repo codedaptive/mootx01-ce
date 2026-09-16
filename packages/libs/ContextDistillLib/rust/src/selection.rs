@@ -444,6 +444,23 @@ pub struct IntentSpanResult {
 // §8 — intent_span_selection
 // ---------------------------------------------------------------------------
 
+// Work ceilings mirror SelectionLayer.swift. Exhaustion preserves all source
+// evidence rather than returning a misleading truncated distillate.
+fn selection_budget_fallback(source: &str, reason: &str) -> IntentSpanResult {
+    IntentSpanResult {
+        compact_core: source.to_owned(),
+        selected_source_spans: vec![json!({
+            "start": 0, "end": source.chars().count(),
+            "start_utf8_byte": 0, "end_utf8_byte": source.len(),
+            "kind": "complete-source-budget-fallback",
+        })],
+        selection_details: json!({
+            "mode": "resource-budget", "exact_source_spans": true,
+            "unsupported_shapes": [reason], "compression_skipped": true,
+        }).as_object().unwrap().clone(),
+    }
+}
+
 /// Select atoms and build the intent-span core and span list.
 ///
 /// This is the Rust port of the body of Python `intent_span(source, trailer)`
@@ -471,12 +488,27 @@ pub fn intent_span_selection_with_peer_dialogue(
     applied_trailer_bytes: usize,
     peer_dialogue: bool,
 ) -> IntentSpanResult {
+    intent_span_selection_with_budget(source, applied_trailer_bytes, peer_dialogue, false)
+}
+
+pub fn intent_span_selection_with_budget(
+    source: &str,
+    applied_trailer_bytes: usize,
+    peer_dialogue: bool,
+    bounded: bool,
+) -> IntentSpanResult {
+    if bounded && source.len() > 32768 {
+        return selection_budget_fallback(source, "source-byte-budget");
+    }
     let source_chars: Vec<char> = source.chars().collect();
     let source_bytes = source.len(); // UTF-8 byte count
 
     // §8.1 — Build atoms.
     let result = intent_atoms_with_peer_dialogue(source, peer_dialogue);
     let atoms = result.atoms;
+    if bounded && atoms.len() > 256 {
+        return selection_budget_fallback(source, "atom-budget");
+    }
     let hard = result.hard;
     let coverage = result.coverage;
     let mut unsupported = result.unsupported;
@@ -567,7 +599,14 @@ pub fn intent_span_selection_with_peer_dialogue(
         .collect();
     let mut budget_rejected: Vec<Value> = Vec::new();
 
+    let mut work_remaining = 100_000usize;
     while !remaining.is_empty() {
+        // Charge before scanning; deterministic across hash iteration orders.
+        let cost = remaining.len() * (selected.len() + 1) + atoms.len() * 2;
+        if bounded && cost > work_remaining {
+            return selection_budget_fallback(source, "selector-work-budget");
+        }
+        if bounded { work_remaining -= cost; }
         // Compute term set of currently selected atoms.
         let selected_terms: HashSet<String> = if selected.is_empty() {
             HashSet::new()
