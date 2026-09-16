@@ -12068,7 +12068,6 @@
           "decision",
           "estate_id",
           "note",
-          "reviewed_by",
           "tunnel_id"
         ],
         "availability": {
@@ -12106,9 +12105,6 @@
               "type": "string"
             },
             "note": {
-              "type": "string"
-            },
-            "reviewed_by": {
               "type": "string"
             },
             "tunnel_id": {
