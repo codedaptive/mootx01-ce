@@ -1839,7 +1839,7 @@ enum AriaV2SelectedCatalog {
         // `version_skew` and `update_available` are optional — emitted only
         // when the host detects a mismatch or a newer release is available.
         // `orderedExactObjectSchema` with an explicit `required` list keeps the
-        // four required fields marked as such while allowing both optional
+        // four required fields marked as such while allowing the optional
         // properties to appear or be absent without schema violation.  The
         // required array is sorted to match what `exactObjectSchema` would emit
         // and to stay byte-identical to the Rust port's array.
@@ -1848,6 +1848,7 @@ enum AriaV2SelectedCatalog {
             "estate_name": stringSchema(),
             "state": .object(["const": .string("mounted")]),
             "build_serial": stringSchema(),
+            "lsa_retraining_degraded": stringSchema(),
             "update_available": stringSchema(),
             "version_skew": stringSchema(),
         ], required: ["build_serial", "estate_id", "estate_name", "state"])
