@@ -107,6 +107,10 @@ private func withOpenEstate<T: Sendable>(
                     created: ISO8601DateFormatter().string(from: now))
                 try EstateCatalog.writeManifest(manifest, to: estate)
             }
+            if case .plaintext = encryption.mode {
+                FileHandle.standardError.write(Data(
+                    "mootx01 preference: created estate '\(estate.name)' UNENCRYPTED at \(estate.directory.path). Run `mootx01 upgrade` at any time to encrypt it.\n".utf8))
+            }
         }
         let result = try await body(kit, handle)
         try await kit.close(handle)
