@@ -1259,6 +1259,7 @@ fn estate_diagnostics_data_schema(name: &str) -> Option<Value> {
                 "build_serial": string(),
                 "estate_id": uuid(),
                 "estate_name": string(),
+                "lsa_retraining_degraded": string(),
                 "state": {"const": "mounted"},
                 "update_available": string(),
                 "version_skew": string(),
