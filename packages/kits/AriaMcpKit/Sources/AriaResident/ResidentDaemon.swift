@@ -369,8 +369,9 @@ public enum AriaResident {
         now: Date,
         makeSpec: () async -> SignalSpec?
     ) async throws {
-        if !enabled, let id = ids.removeValue(forKey: name) {
+        if !enabled, let id = ids[name] {
             _ = try await kit.signalUnregister(id, in: handle)
+            ids.removeValue(forKey: name)
         } else if enabled, ids[name] == nil, let spec = await makeSpec() {
             ids[name] = try await kit.registerStandingSignal(spec, in: handle, now: now)
         }
@@ -763,7 +764,29 @@ public enum AriaResident {
                         try await reconcilePreferenceSignal(name: name, enabled: adaptiveOn, ids: &ids, kit: kit, handle: handle, now: now) { spec }
                     }
                 } catch {
-                    Logging.stderr.log("AriaResident preference reconciliation failed closed: \(error)")
+                    Logging.stderr.log("AriaResident preference reconciliation failed; unregistering managed signals: \(error)")
+                    let managedNames = [
+                        FactExtractionSignal.signalName,
+                        ConsolidationSignal.signalName,
+                        ContradictionSweepSignal.signalName,
+                        MaintenanceSignal.signalName,
+                        DecaySweepSignal.signalName,
+                        ByReferenceValiditySignal.signalName,
+                        TemporalCausalitySignal.signalName,
+                        TrainingSignal.signalName,
+                        EndOfDayTournamentSignal.signalName,
+                    ]
+                    for name in managedNames {
+                        do {
+                            try await reconcilePreferenceSignal(
+                                name: name, enabled: false, ids: &ids,
+                                kit: kit, handle: handle, now: now
+                            ) { nil }
+                        } catch {
+                            Logging.stderr.log(
+                                "AriaResident failed to unregister managed signal \(name); will retry: \(error)")
+                        }
+                    }
                 }
                 do { try await Task.sleep(nanoseconds: intervalNs) } catch { break }
             }
