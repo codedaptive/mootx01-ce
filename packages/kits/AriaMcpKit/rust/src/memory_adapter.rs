@@ -68,15 +68,18 @@ fn validate_path(args: &BTreeMap<String, JsonValue>, key: &str) -> Result<String
     if path.contains("..") {
         return Err(JSONRPCError::new(JSONRPCErrorCode::INVALID_PARAMS, format!("Path traversal: {path}")));
     }
-    if !path.starts_with(MEMORIES_ROOT) {
+    if path != MEMORIES_ROOT && !path.starts_with(&format!("{MEMORIES_ROOT}/")) {
         return Err(JSONRPCError::new(JSONRPCErrorCode::INVALID_PARAMS, format!("Must start with {MEMORIES_ROOT}: {path}")));
     }
     Ok(path.to_string())
 }
 
 fn path_to_room(path: &str) -> String {
-    if path.len() <= MEMORIES_ROOT.len() + 1 { return "root".to_string(); }
-    path[MEMORIES_ROOT.len() + 1..].to_string()
+    path.strip_prefix(MEMORIES_ROOT)
+        .and_then(|tail| tail.strip_prefix('/'))
+        .filter(|room| !room.is_empty())
+        .unwrap_or("root")
+        .to_string()
 }
 
 fn vpath(room: &str) -> String { format!("{MEMORIES_ROOT}/{room}") }
