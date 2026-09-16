@@ -62,6 +62,11 @@ struct PluginPackageShapeTests {
         // the loop body into a per-file helper would let the count-guard
         // drift away from the assertions it certifies, which is the precise
         // failure this suite exists to prevent.
+        //
+        // Key split (2026-09-16): the Claude Code plugin registers its server
+        // under MCPClients.pluginServerName ("memory"), giving tools the
+        // mcp__plugin_mootx01_memory__ prefix. Every other manifestBundle host
+        // is a direct install and keeps MCPClients.serverName ("mootx01").
         let pluginHosts = InstallBundle.embedded.hosts.values
             .filter(\.supportsPlugin)
             .sorted { $0.id < $1.id }
@@ -76,17 +81,23 @@ struct PluginPackageShapeTests {
             #expect(!maps.isEmpty,
                     "\(host.id) is plugin-capable but its package declares no MCP server map")
 
+            // claude-code's plugin package registers under pluginServerName ("memory");
+            // every other manifestBundle host is a direct install and uses serverName ("mootx01").
+            let expectedKey = host.id == "claude-code"
+                ? MCPClients.pluginServerName
+                : MCPClients.serverName
+
             for (rel, mapKey, servers) in maps {
                 let where_ = "\(host.id)/\(rel) [\(mapKey)]"
 
-                #expect(Array(servers.keys) == [MCPClients.pluginServerName],
+                #expect(Array(servers.keys) == [expectedKey],
                         """
-                        \(where_): must declare exactly the plugin server key \
-                        '\(MCPClients.pluginServerName)'; got \(servers.keys.sorted())
+                        \(where_): must declare exactly the expected server key \
+                        '\(expectedKey)'; got \(servers.keys.sorted())
                         """)
 
-                guard let entry = servers[MCPClients.pluginServerName] as? [String: Any] else {
-                    Issue.record("\(where_): no entry under '\(MCPClients.pluginServerName)'")
+                guard let entry = servers[expectedKey] as? [String: Any] else {
+                    Issue.record("\(where_): no entry under '\(expectedKey)'")
                     continue
                 }
 
@@ -119,35 +130,37 @@ struct PluginPackageShapeTests {
                 """)
     }
 
-    /// The constant the installer reads must be the key the packager writes.
-    /// `MCPClients.pluginServerName` is a mirror of generated data; this is
-    /// the test that keeps the mirror faithful. It is the direct tripwire for
-    /// a repeat of 7f64973aa, where the generated key moved and the
-    /// installer's copy did not.
+    /// The constant the installer reads must be the key the packager writes for
+    /// the Claude Code plugin package specifically. `MCPClients.pluginServerName`
+    /// is a mirror of generated data; this is the test that keeps the mirror
+    /// faithful. It is the direct tripwire for a repeat of 7f64973aa, where the
+    /// generated key moved and the installer's copy did not.
+    ///
+    /// Only the claude-code package is checked here because claude-code is the
+    /// only host whose plugin package uses `pluginServerName` ("memory"). Direct-
+    /// install packages for other hosts use `serverName` ("mootx01") and are
+    /// covered by `pluginPackageEntriesAreHTTPShaped`.
     @Test("MCPClients.pluginServerName matches the key the packager actually emits")
     func pluginServerNameMatchesGeneratedPackages() throws {
         let emitted = Set(
-            InstallBundle.embedded.hosts.values
-                .filter(\.supportsPlugin)
-                .flatMap { Self.serverMaps(forHostID: $0.id) }
-                .flatMap(\.servers.keys)
+            Self.serverMaps(forHostID: "claude-code").flatMap(\.servers.keys)
         )
         #expect(emitted == [MCPClients.pluginServerName],
                 """
-                the generated packages are the authority for the plugin server key; \
+                the generated claude-code package is the authority for the plugin server key; \
                 MCPClients.pluginServerName is '\(MCPClients.pluginServerName)' but the \
-                packages emit \(emitted.sorted())
+                claude-code package emits \(emitted.sorted())
                 """)
     }
 
-    /// The two keys are intentionally the same: both the plugin and the direct
-    /// install entry use `"mootx01"` so MOOT tools surface under a single
-    /// `mcp__mootx01__*` prefix regardless of install path. The upgrade-time
-    /// Codex config.toml cleanup step (UpgradeCommand) replaces the role that
-    /// deliberate-distinctness previously served for ownership detection.
-    @Test("the plugin server key and the direct-entry server key are now identical")
-    func pluginAndDirectServerKeysAreIdentical() {
-        #expect(MCPClients.pluginServerName == MCPClients.serverName)
+    /// The plugin and direct server keys are intentionally distinct: the plugin
+    /// registers under `"memory"` (prefix `mcp__plugin_mootx01_memory__`) while
+    /// direct installs continue to use `"mootx01"` (prefix `mcp__mootx01__`).
+    @Test("the plugin server key and the direct-entry server key are distinct")
+    func pluginAndDirectServerKeysAreDistinct() {
+        #expect(MCPClients.pluginServerName != MCPClients.serverName)
+        #expect(MCPClients.pluginServerName == "memory")
+        #expect(MCPClients.serverName == "mootx01")
     }
 
     /// Recursively collects every `type: "command"` hook's `command` string

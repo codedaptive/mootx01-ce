@@ -4,13 +4,12 @@
 //! settings key is `permissions.allow` (nested under a `permissions`
 //! object), NOT top-level `allowedTools`. Entries take the MCP-prefixed
 //! form `mcp__mootx01__<tool_name>` for the direct connection, and
-//! `mcp__plugin_mootx01_mootx01__<tool_name>` for calls routed through the
-//! installed plugin (plugin-owned MCP connections, v1.0.15) — empirically confirmed against a
-//! live `~/.claude/settings.json` carrying both prefixes side by side (this
-//! installer's marketplace and plugin are both named `mootx01`, giving the
-//! concrete plugin prefix `mcp__plugin_mootx01_mootx01__`). A rule written
-//! for only one namespace matches zero calls made through the other
-//! connection — every tier write in this file covers BOTH.
+//! `mcp__plugin_mootx01_memory__<tool_name>` for calls routed through the
+//! installed plugin (Claude Code plugin mode, v1.1.0+: the plugin registers
+//! its server under the key `"memory"`, giving the concrete prefix
+//! `mcp__plugin_mootx01_memory__`). A rule written for only one namespace
+//! matches zero calls made through the other connection — every tier write
+//! in this file covers BOTH.
 //!
 //! Tool names are derived at runtime from the linked aria-mcp library
 //! (`tool_list::build_tool_list()`), so the allow list can never drift from
@@ -33,9 +32,15 @@ use crate::core::merge::MergeError;
 const PREFIX: &str = "mcp__mootx01__";
 
 /// The MCP tool prefix Claude Code uses for calls routed through the
-/// installed plugin. See the module doc comment for the empirical
-/// confirmation and shape rationale.
-const PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_mootx01__";
+/// installed plugin (v1.1.0+: the plugin registers its server under the key
+/// `"memory"`, so the prefix is `mcp__plugin_mootx01_memory__`).
+const PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_memory__";
+
+/// Pre-v1.1.0 plugin prefix. The plugin registered its server under `"mootx01"`
+/// before this release, giving `mcp__plugin_mootx01_mootx01__`. Kept ONLY in
+/// the revoke list so `revoke` migrates away existing allow/deny entries on
+/// upgrade; never written by grant paths.
+const LEGACY_PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_mootx01__";
 
 /// Every namespace prefix a tool name must be written under.
 const ALL_PREFIXES: [&str; 2] = [PREFIX, PLUGIN_PREFIX];
@@ -304,7 +309,7 @@ pub fn classify(tool: &str) -> Tier {
 ///
 /// Backfilling at the classifier default instead would bypass a user's
 /// `deny`: someone who denies `mcp__mootx01__moot_memory_get` would get
-/// `mcp__plugin_mootx01_mootx01__moot_memory_get` added to `allow` on the
+/// `mcp__plugin_mootx01_memory__moot_memory_get` added to `allow` on the
 /// next install or upgrade, because that exact string is "genuinely
 /// absent". A user cannot place an entry for a namespace they have never
 /// seen.
@@ -541,18 +546,22 @@ pub fn has_any_moot_entries(settings_path: &Path) -> bool {
     false
 }
 
-/// Remove every `mcp__mootx01__` AND `mcp__plugin_mootx01_mootx01__` entry
-/// from `permissions.allow` / `.ask` / `.deny`. Prefix-based, so tools
-/// renamed or removed since being granted are cleaned too, and both
-/// namespaces so an uninstall does not strand the plugin-prefixed twin
-/// entries `grant`/`grant_tiered` now write. Absent file is a no-op.
-/// Returns the number removed.
+/// Remove every `mcp__mootx01__`, `mcp__plugin_mootx01_memory__`, and
+/// `mcp__plugin_mootx01_mootx01__` (pre-v1.1.0 plugin prefix) entry from
+/// `permissions.allow` / `.ask` / `.deny`. Prefix-based, so tools renamed or
+/// removed since being granted are cleaned too. The legacy prefix is stripped
+/// here so an upgrade on a machine installed before v1.1.0 migrates away
+/// existing allow/deny entries rather than stranding them. Absent file is a
+/// no-op. Returns the number removed.
 pub fn revoke(settings_path: &Path) -> Result<usize, MergeError> {
     if !settings_path.exists() {
         return Ok(0);
     }
     let mut root = read_settings(settings_path)?;
     let mut removed = 0;
+    // All prefixes to strip: current direct, current plugin, and the pre-v1.1.0
+    // plugin prefix for migration (LEGACY_PLUGIN_PREFIX).
+    let revoke_prefixes = [PREFIX, PLUGIN_PREFIX, LEGACY_PLUGIN_PREFIX];
     for key in ["allow", "ask", "deny"] {
         if let Some(arr) = root
             .get_mut("permissions")
@@ -562,7 +571,7 @@ pub fn revoke(settings_path: &Path) -> Result<usize, MergeError> {
             let before = arr.len();
             arr.retain(|v| {
                 v.as_str()
-                    .map(|s| !ALL_PREFIXES.iter().any(|p| s.starts_with(p)))
+                    .map(|s| !revoke_prefixes.iter().any(|p| s.starts_with(p)))
                     .unwrap_or(true)
             });
             removed += before - arr.len();
@@ -968,9 +977,9 @@ mod tests {
             .map(|e| e.as_str().unwrap())
             .collect();
         assert!(allow.contains(&"mcp__mootx01__moot_memory_search"));
-        assert!(allow.contains(&"mcp__plugin_mootx01_mootx01__moot_memory_search"));
+        assert!(allow.contains(&"mcp__plugin_mootx01_memory__moot_memory_search"));
         assert!(deny.contains(&"mcp__mootx01__moot_erase_memory"));
-        assert!(deny.contains(&"mcp__plugin_mootx01_mootx01__moot_erase_memory"));
+        assert!(deny.contains(&"mcp__plugin_mootx01_memory__moot_erase_memory"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -988,7 +997,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     const DIRECT_SEARCH: &str = "mcp__mootx01__moot_memory_search";
-    const PLUGIN_SEARCH: &str = "mcp__plugin_mootx01_mootx01__moot_memory_search";
+    const PLUGIN_SEARCH: &str = "mcp__plugin_mootx01_memory__moot_memory_search";
 
     /// Seed a settings.json with `seed`, run `grant_tiered`, and return the
     /// three resulting tier lists. Every inheritance test has the same
@@ -1121,7 +1130,7 @@ mod tests {
             );
         }
         // The unrelated tool's own inheritance still applies to ITS twin.
-        assert!(deny.iter().any(|e| e == "mcp__plugin_mootx01_mootx01__moot_estate_ping"));
+        assert!(deny.iter().any(|e| e == "mcp__plugin_mootx01_memory__moot_estate_ping"));
     }
 
     #[test]
@@ -1159,12 +1168,12 @@ mod tests {
             &p,
             serde_json::to_string_pretty(&serde_json::json!({
                 "permissions": {
-                    "allow": ["mcp__mootx01__moot_estate_ping", "mcp__plugin_mootx01_mootx01__moot_estate_ping"],
+                    "allow": ["mcp__mootx01__moot_estate_ping", "mcp__plugin_mootx01_memory__moot_estate_ping"],
                     "ask": [
-                        "mcp__mootx01__moot_memory_search", "mcp__plugin_mootx01_mootx01__moot_memory_search",
-                        "mcp__mootx01__moot_withdraw_memory", "mcp__plugin_mootx01_mootx01__moot_withdraw_memory",
+                        "mcp__mootx01__moot_memory_search", "mcp__plugin_mootx01_memory__moot_memory_search",
+                        "mcp__mootx01__moot_withdraw_memory", "mcp__plugin_mootx01_memory__moot_withdraw_memory",
                     ],
-                    "deny": ["mcp__mootx01__moot_erase_memory", "mcp__plugin_mootx01_mootx01__moot_erase_memory"],
+                    "deny": ["mcp__mootx01__moot_erase_memory", "mcp__plugin_mootx01_memory__moot_erase_memory"],
                 }
             }))
             .unwrap(),
@@ -1181,7 +1190,7 @@ mod tests {
         let ask: Vec<String> = v["permissions"]["ask"]
             .as_array().unwrap().iter().map(|e| e.as_str().unwrap().to_string()).collect();
         assert!(allow.contains(&"mcp__mootx01__moot_memory_search".to_string()));
-        assert!(allow.contains(&"mcp__plugin_mootx01_mootx01__moot_memory_search".to_string()));
+        assert!(allow.contains(&"mcp__plugin_mootx01_memory__moot_memory_search".to_string()));
         assert!(!ask.contains(&"mcp__mootx01__moot_memory_search".to_string()));
         assert!(ask.contains(&"mcp__mootx01__moot_withdraw_memory".to_string()), "a genuine mutation must stay in ask");
 
@@ -1255,7 +1264,7 @@ mod tests {
         std::fs::write(&p, br#"{"permissions":{"allow":["Bash(ls:*)"]}}"#).unwrap();
         assert!(!has_any_moot_entries(&p), "foreign-only file");
 
-        std::fs::write(&p, br#"{"permissions":{"deny":["mcp__plugin_mootx01_mootx01__moot_erase_memory"]}}"#).unwrap();
+        std::fs::write(&p, br#"{"permissions":{"deny":["mcp__plugin_mootx01_memory__moot_erase_memory"]}}"#).unwrap();
         assert!(has_any_moot_entries(&p), "plugin-namespace entry must count");
         let _ = std::fs::remove_dir_all(&dir);
     }
