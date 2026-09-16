@@ -1773,6 +1773,16 @@ impl Estate {
         self.store.active_drawers_after(after_id, limit)
     }
 
+    /// Active non-dataset IDs in deterministic training order. The production
+    /// stores apply the filter, ID-only projection, ordering, and limit before
+    /// document bodies are materialized.
+    pub fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.store.active_corpus_content_ids_limited(limit)
+    }
+
     /// Fingerprints of every non-tombstoned drawer captured in the closed
     /// epoch-milliseconds window `[start_epoch, end_epoch]`, in
     /// HLC-ascending order within the window. Estate-level pass-through over
