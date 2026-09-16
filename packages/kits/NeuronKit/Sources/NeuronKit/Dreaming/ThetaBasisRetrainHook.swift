@@ -103,7 +103,10 @@ public struct EstateThetaBasisRetrainHook: ThetaBasisRetrainHook {
     /// A nil corpus (LocusOnly estate) is handled gracefully by GLK — the
     /// method returns without error when no Corpus is registered.
     public func retrain(now: Date) async throws {
-        try await kit.reindexCorpus(handle: handle, now: now)
+        // The retrain runs as a claimed QueueKit job (DutyQueue `retrainBasis`)
+        // so a dreamer that dies mid-retrain leaves a reclaimable job, not a
+        // silently skipped day.
+        try await kit.payDutyUntilSettled(.retrainBasis, in: handle, now: now)
         Self.log.info(
             "theta-retrain: corpus basis retrained for estate \(handle.estateUUID, privacy: .public)"
         )
