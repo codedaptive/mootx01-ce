@@ -100,8 +100,50 @@ fn activation_and_content_writes_maintain_bit_28_debt() {
     assert_eq!(store.count_fact_extraction_debt().unwrap(), 2);
 
     store.set_facts_extracted(ids[0]).unwrap();
+    let mut replacement = row("nuextract-b1-q8-v1");
+    replacement.provider_id = "replacement-provider".into();
+    replacement.model_id = "replacement-model".into();
+    replacement.model_version = "r2".into();
+    replacement.schema_version = "kgfact-extraction-v2".into();
+    replacement.is_active = true;
+    registry.upsert(&replacement).unwrap();
+    assert_eq!(
+        store.count_fact_extraction_debt().unwrap(),
+        2,
+        "changing an active recipe identity clears bit 28"
+    );
+    let active: Vec<String> = registry
+        .all()
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.is_active)
+        .map(|row| row.recipe_id)
+        .collect();
+    assert_eq!(
+        active,
+        vec!["nuextract-b1-q8-v1"],
+        "active upsert preserves a single active recipe"
+    );
+
+    store.set_facts_extracted(ids[0]).unwrap();
+    replacement.is_active = false;
+    registry.upsert(&replacement).unwrap();
+    assert_eq!(
+        store.count_fact_extraction_debt().unwrap(),
+        2,
+        "changing recipe activation clears bit 28"
+    );
+
+    store.set_facts_extracted(ids[0]).unwrap();
     store
-        .expunge_gated(ids[0], "bilby", Some("derived fact erasure"), NOW + 1, true, AdjectiveSensitivity::Secret)
+        .expunge_gated(
+            ids[0],
+            "bilby",
+            Some("derived fact erasure"),
+            NOW + 1,
+            true,
+            AdjectiveSensitivity::Secret,
+        )
         .unwrap();
     assert!(
         !store
