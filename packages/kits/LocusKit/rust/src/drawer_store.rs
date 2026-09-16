@@ -1043,6 +1043,23 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// `subject_debt_batch_including` read from `offset` into the
+    /// (filedAt, id)-ordered debt: rows the producer could not settle stay
+    /// in the predicate, so a sweep that always read from the head would
+    /// re-enumerate the same inadmissible rows forever; the caller advances
+    /// past what it skipped. Mirrors Swift
+    /// `subjectDebtBatch(limit:includingPipelines:offset:)`.
+    fn subject_debt_batch_including_from(
+        &self,
+        _limit: usize,
+        _pipelines: &[String],
+        _offset: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "subject_debt_batch_including_from not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // ── Wave-2 vague tier methods (SPEC_CONSOLIDATION_VAGUE_RECALL §3.2, §4.4, §5.1) ──
 
     /// Atomically consolidate N constituents into a pre-built vague drawer.
@@ -2623,6 +2640,14 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         pipelines: &[String],
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().subject_debt_batch_including(limit, pipelines)
+    }
+    fn subject_debt_batch_including_from(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+        offset: usize,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().subject_debt_batch_including_from(limit, pipelines, offset)
     }
     fn seal_expunge_audit(
         &self,
