@@ -1,0 +1,8 @@
+{
+  "definition_bytes": 32768,
+  "repeat_count": 1500,
+  "error_code": "reference_expansion_limit_exceeded",
+  "error_message": "Reference expansion limit exceeded",
+  "max_bytes": 8388608,
+  "max_ratio": 64
+}
