@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer_operational::ContentKind;
 
 use crate::estate_registry::{EstateRegistry, OpenEstate};
@@ -33,11 +34,19 @@ use super::data_mobility::{
 /// this type only uses the estate admitted for the current request.
 pub struct DirectDataMobilityLower<'a> {
     registry: &'a EstateRegistry,
+    maximum_sensitivity: AdjectiveSensitivity,
 }
 
 impl<'a> DirectDataMobilityLower<'a> {
     pub const fn new(registry: &'a EstateRegistry) -> Self {
-        Self { registry }
+        Self { registry, maximum_sensitivity: AdjectiveSensitivity::Elevated }
+    }
+
+    pub const fn with_maximum_sensitivity(
+        registry: &'a EstateRegistry,
+        maximum_sensitivity: AdjectiveSensitivity,
+    ) -> Self {
+        Self { registry, maximum_sensitivity }
     }
 
     fn selected_open(&self, admission: &V2DataMobilityAdmission) -> Result<&OpenEstate, ()> {
@@ -97,6 +106,8 @@ impl V2DataMobilityLower for DirectDataMobilityLower<'_> {
                 d.tombstoned_at.is_none()
                     && d.is_currently_believed()
                     && d.content_kind() != ContentKind::Dataset
+                    && d.adjective_sensitivity().raw_value()
+                        <= self.maximum_sensitivity.raw_value()
             })
             .collect();
         // Apply the limit cap before classification so the parallel pass

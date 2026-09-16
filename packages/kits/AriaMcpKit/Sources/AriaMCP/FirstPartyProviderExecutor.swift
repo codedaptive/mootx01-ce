@@ -226,7 +226,8 @@ public actor FirstPartyProviderExecutor: FirstPartyProvider, FirstPartyProviderE
                 return try AriaV2CognitionCatalogService(estateID: call.estateIdentifier,
                     callableToolNames: Set(FirstPartyProviderCatalog.registry.operations.map(\.publicName)),
                     buildID: FirstPartyProviderCatalog.contractVersion,
-                    capabilityDigest: FirstPartyProviderCatalog.capabilityDigest).lenses(request)
+                    capabilityDigest: FirstPartyProviderCatalog.capabilityDigest,
+                    projectedTools: FirstPartyProviderCatalog.projectedTools).lenses(request)
             case "moot_estate_status": return try await diagnostics.status(arguments: .object(arguments))
             case "moot_drain_status": return try await diagnostics.drainStatus(arguments: .object(arguments))
             case "moot_rebuild_status": return try await diagnostics.rebuildStatus(arguments: .object(arguments))
