@@ -9,8 +9,9 @@ use crate::v2::estate_diagnostics::{
     DiagnosticsFact, DiagnosticsLifecycle, DiagnosticsMemory, EstateDiagnosticsAuthority,
     EstateDiagnosticsContext, EstateDiagnosticsFailure, EstateDiagnosticsGrant,
     EstateDiagnosticsOperation, EstateDiagnosticsSnapshot, EstateDrain, EstateDrainState,
-    EstateRebuildState, EstateTiming,
+    EstateRebuildState, EstateTiming, SharedContentMigration,
 };
+use genius_locus_kit_migrations::{SharedContentMigrationExt, SharedContentReclaimStatus};
 use uuid::Uuid;
 
 const SESSION_ID: &str = "selected-v2-public";
@@ -97,6 +98,21 @@ impl<'a> SelectedEstateDiagnosticsAuthority<'a> {
 
     fn lifecycle(active: bool) -> DiagnosticsLifecycle {
         if active { DiagnosticsLifecycle::CurrentClusterA } else { DiagnosticsLifecycle::Other }
+    }
+
+    fn shared_content_migration(
+        status: SharedContentReclaimStatus,
+    ) -> Option<SharedContentMigration> {
+        let state = serde_json::to_value(status.state?).ok()?.as_str()?.to_owned();
+        Some(SharedContentMigration {
+            state,
+            estimated_reclaimable_bytes: status
+                .estimated_reclaimable_bytes
+                .and_then(|value| value.try_into().ok()),
+            reclaimed_bytes: status
+                .reclaimed_bytes
+                .and_then(|value| value.try_into().ok()),
+        })
     }
 
     fn timing(
@@ -206,6 +222,9 @@ impl EstateDiagnosticsAuthority for SelectedEstateDiagnosticsAuthority<'_> {
                     .sync_state_token(handle)
                     .ok()
                     .unwrap_or_else(|| "local-only".to_owned());
+                snapshot.shared_content_migration = Self::shared_content_migration(
+                    coord.shared_content_reclaim_status(handle),
+                );
                 snapshot.memories = status_drawers
                     .into_iter()
                     .filter(|drawer| drawer.tombstoned_at.is_none())
@@ -282,5 +301,42 @@ impl EstateDiagnosticsAuthority for SelectedEstateDiagnosticsAuthority<'_> {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sec07_tests {
+    use super::*;
+    use genius_locus_kit_migrations::SharedContentMigrationState;
+
+    #[test]
+    fn reclaim_status_maps_to_public_diagnostics_shape() {
+        let mapped = SelectedEstateDiagnosticsAuthority::shared_content_migration(
+            SharedContentReclaimStatus {
+                state: Some(SharedContentMigrationState::ReclaimPending),
+                estimated_reclaimable_bytes: Some(4096),
+                reclaimed_bytes: None,
+                live_reclaimable_bytes: Some(2048),
+            },
+        )
+        .expect("persisted migration state must be reported");
+        assert_eq!(mapped.state, "reclaimPending");
+        assert_eq!(mapped.estimated_reclaimable_bytes, Some(4096));
+        assert_eq!(mapped.reclaimed_bytes, None);
+    }
+
+    #[test]
+    fn absent_migration_record_stays_omitted() {
+        assert_eq!(
+            SelectedEstateDiagnosticsAuthority::shared_content_migration(
+                SharedContentReclaimStatus {
+                    state: None,
+                    estimated_reclaimable_bytes: None,
+                    reclaimed_bytes: None,
+                    live_reclaimable_bytes: Some(2048),
+                },
+            ),
+            None
+        );
     }
 }

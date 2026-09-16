@@ -60,6 +60,32 @@ enum AriaV2ChainPositions {
 
 // MARK: - Pre-decode registration factory
 
+/// Return the call-local global mode declaration, excluding operations whose
+/// input schema owns the `mode` argument for its own business semantics.
+func ariaV2GlobalModeDeclaration(
+    toolName: String,
+    arguments: [String: JSONValue],
+    environment: [String: String]
+) -> ModeDeclaration? {
+    guard case .string(let rawMode) = arguments["mode"],
+          !ariaV2OperationOwnsMode(toolName: toolName, environment: environment)
+    else { return nil }
+    return ModeDeclaration.parse(rawMode)
+}
+
+private func ariaV2OperationOwnsMode(
+    toolName: String,
+    environment: [String: String]
+) -> Bool {
+    let registry = AriaV2SelectedCatalog.registry(environment: environment)
+    guard let operation = registry.operation(named: toolName),
+          case .object(let schema) = operation.inputSchema,
+          let propsValue = schema["properties"],
+          case .object(let props) = propsValue
+    else { return false }
+    return props["mode"] != nil
+}
+
 /// Build the pre-decode (transform-phase) chain registration for one v2 call.
 ///
 /// Called per call from `ToolDispatcher.dispatch` before `AriaSurfaceDecoder.decode`.
@@ -74,8 +100,9 @@ enum AriaV2ChainPositions {
 ///      is absent.
 ///   2. **Mode arg stripping:** strips the `mode` global modifier from arguments so
 ///      the strict decoder never sees it, unless the operation owns `mode` in its
-///      `inputSchema` (collision). Parses the declaration and stashes it in
-///      `modeSessionState.pendingDeclaration` for the post-decode ingress/egress hooks.
+///      `inputSchema` (collision). The dispatcher parses the declaration from the
+///      original arguments and carries it directly into this call's post-decode
+///      registrations.
 ///
 /// - Parameters:
 ///   - environment: The process-environment dictionary used to select the v2 catalog.
@@ -107,31 +134,13 @@ func ariaV2PreDecodeRegistrations(
         // `mode` in their v2 inputSchema: moot_reclassify_fdc, moot_palace_import,
         // moot_vault_import. An operation added later that declares `mode` is excluded here
         // automatically, without a code change. When an operation owns `mode`, the key is
-        // left untouched and the stash is set to nil — the decoder will see and handle it normally.
-        var pendingDecl: ModeDeclaration? = nil
-        if let modeValue = args["mode"] {
-            let registry = AriaV2SelectedCatalog.registry(environment: environment)
-            var operationOwnsMode = false
-            if let op = registry.operation(named: toolName),
-               case .object(let schema) = op.inputSchema,
-               let propsValue = schema["properties"],
-               case .object(let props) = propsValue {
-                operationOwnsMode = props["mode"] != nil
-            }
-
-            if !operationOwnsMode {
+        // left untouched — the decoder will see and handle it normally.
+        if args["mode"] != nil {
+            if !ariaV2OperationOwnsMode(toolName: toolName, environment: environment) {
                 // Strip the global modifier so the strict decoder never sees it.
                 args["mode"] = nil
-                // Parse the declaration; stash for the post-decode ingress hooks.
-                if case .string(let modeStr) = modeValue {
-                    pendingDecl = ModeDeclaration.parse(modeStr)
-                }
             }
         }
-
-        // Write the stash whether or not `mode` was present. A nil stash means
-        // "no mode declared this call" — the ingress hooks treat nil as no-op.
-        await modeSessionState.setPendingDeclaration(pendingDecl)
         return .object(args)
     }
 
@@ -177,23 +186,21 @@ func ariaV2PreDecodeRegistrations(
 /// - Returns: Two registrations, concern names `"mode"` and `"coaching"`.
 func ariaV2ProductionRegistrations(
     request: AriaSurfaceRequest,
-    modeSessionState: ModeSessionState
+    modeSessionState: ModeSessionState,
+    modeDeclaration: ModeDeclaration? = nil
 ) -> [AriaV2ChainRegistration] {
 
     // MARK: Mode ingress hook (position 5)
     //
-    // Reads `pendingDeclaration` set by the transform hook and returns the
-    // declaration's `unknownHint` text as per-concern ingress state. The mode
+    // Reads the call-local declaration supplied by the dispatcher and returns
+    // its `unknownHint` text as per-concern ingress state. The mode
     // egress hook at position 20 receives this state and calls `applyHint`.
     //
-    // Does NOT clear `pendingDeclaration` — the coaching ingress at position 10
-    // clears it after reading it for `recordCall`.
     let modeIngress: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?) = {
         _, arguments in
-        let decl = await modeSessionState.pendingDeclaration
         // Per-concern state: bare unknownHint text as a string JSONValue, or nil.
         // AriaV2Envelope.applyHint adds the "hint: " prefix — pass the bare text here.
-        let state: JSONValue? = decl?.unknownHint.map { .string($0) } ?? nil
+        let state: JSONValue? = modeDeclaration?.unknownHint.map { .string($0) } ?? nil
         return (arguments, state)
     }
 
@@ -209,18 +216,15 @@ func ariaV2ProductionRegistrations(
 
     // MARK: Coaching ingress (record) hook (position 10)
     //
-    // Reads `pendingDeclaration` (already consumed by the mode ingress at position 5),
-    // then clears it and calls `recordCall` with the declaration so the sticky state
-    // and call counters are updated for this call.
+    // Records the call-local declaration so sticky state and call counters are
+    // updated for this call only.
     //
     // The ingress (record) phase runs after decode and after the frozen-mutation
     // guard. Counting runs here because a refused or decode-failed call is not a
     // call. The transform phase runs before decode and must not advance the counter.
     let coachingIngress: @Sendable (String, JSONValue) async throws -> (JSONValue, JSONValue?) = {
         toolName, arguments in
-        let decl = await modeSessionState.pendingDeclaration
-        await modeSessionState.clearPendingDeclaration()
-        await modeSessionState.recordCall(toolName: toolName, mode: decl)
+        await modeSessionState.recordCall(toolName: toolName, mode: modeDeclaration)
         return (arguments, nil)
     }
 
