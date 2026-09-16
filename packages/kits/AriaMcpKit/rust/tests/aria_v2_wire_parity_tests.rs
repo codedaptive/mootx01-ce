@@ -1125,7 +1125,7 @@ fn review_tunnel_model_reject_routes_to_object_to_tunnel() {
     );
 
     // The tunnel is still proposed (not active, not withdrawn) — invisible to search.
-    let after = call(&dispatcher, "moot_connection_search", json!({
+    let after = call(&model_2, "moot_connection_search", json!({
         "memory_id": from, "direction": "outgoing",
     }));
     assert!(is_success(&after));
