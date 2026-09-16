@@ -40,7 +40,7 @@ struct FirstPartyProviderCatalogTests {
         let publicEnabled = AriaV2SelectedCatalog.capabilityDigest(environment: [:])
         let publicWithoutVault = AriaV2SelectedCatalog.capabilityDigest(environment: ["MOOTX01_VAULT": "0"])
         #expect(publicTools.count == 81)
-        #expect(publicEnabled == "dbcb07d723e2beb8002403c30c62ad652df8ce3e97d46191eb820af74861ff59")
+        #expect(publicEnabled == "f629a80a55c0b3fc7b0783d6e86ed751cca749adeb0ba1fd27bc381df4fb9139")
         #expect(stableNames.count == 26)
         #expect(stableDigest == "3cb6f168d86fc2c1dc0f5384f1ac5972c8c16d49ff08b32a862abaaab2d3a77e")
         #expect(publicEnabled != stableDigest)

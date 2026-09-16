@@ -18,7 +18,7 @@
 //                   fresh estates and retired by the shared-content
 //                   migration on existing ones.
 //   GLK grants    — grants
-//   GLK matrix    — matrix_snapshot
+//   GLK matrix    — matrix record tables
 //
 // The authoritative table list is the LIVE component declarations composed
 // below — never a count or version copied into prose (stale-literal rule,
@@ -35,7 +35,7 @@
 // declaration the caller would have to assemble it ad-hoc; providing
 // it here avoids drift between what is opened and what is replicated.
 //
-// IMPORTANT: matrix_snapshot MUST be in this composite so StorageReplicator.hydrate
+// IMPORTANT: matrix record tables MUST be in this composite so StorageReplicator.hydrate
 // copies it from the durable SQLite backend into the in-memory backend before
 // rebuildDerivedAccelerators runs. Without it, hydrated estates always cold-rebuild
 // the matrix tier, discarding persisted calibration state.
@@ -81,7 +81,7 @@ public enum GeniusLocusKitSchema {
         + CorpusSchemaProfile.attachedDeclaration.version
         + EstateFormatStore.schemaDeclaration.version
         + grantsSchemaVersion
-        + matrixSnapshotSchemaVersion
+        + matrixRecordsSchemaVersion
 
     /// The complete composite schema declaration for a GeniusLocus estate.
     ///
@@ -94,7 +94,7 @@ public enum GeniusLocusKitSchema {
     ///   - `StorageReplicator.hydrate(into:from:schema:)` —     ///     every declared table plus audit events from the durable backend into a fresh
     ///     in-memory backend before `Estate.open` runs against it.
     ///
-    /// The matrix_snapshot table is included here so hydration copies
+    /// The matrix record tables table is included here so hydration copies
     /// persisted matrix calibration state into the in-memory backend.
     /// Without it, rebuildDerivedAccelerators always cold-rebuilds the
     /// matrix tier, discarding saved calibration curves and timestamps.
@@ -102,8 +102,8 @@ public enum GeniusLocusKitSchema {
         SchemaDeclaration(
             kitID: kitID,
             version: version,
-            tables: locusKitTables + vectorKitTables + claimsTables + corpusKitTables + EstateFormatStore.schemaDeclaration.tables + grantsTables + matrixSnapshotTables,
-            indices: locusKitIndices + vectorKitIndices + claimsIndices + corpusKitIndices
+            tables: locusKitTables + vectorKitTables + claimsTables + corpusKitTables + EstateFormatStore.schemaDeclaration.tables + grantsTables + matrixRecordsTables,
+            indices: locusKitIndices + vectorKitIndices + claimsIndices + corpusKitIndices + MatrixRecordStore.schemaDeclaration.indices
         )
     }
 
@@ -166,21 +166,21 @@ public enum GeniusLocusKitSchema {
     /// Composite addend for GLK-owned grant authorization state.
     private static let grantsSchemaVersion = 1
 
-    /// The matrix_snapshot table from MatrixSnapshotStore.
+    /// The matrix record tables table from MatrixRecordStore.
     ///
     /// Including this table in the composite schema ensures StorageReplicator.hydrate
     /// copies persisted matrix calibration snapshots from the durable SQLite backend
     /// into the in-memory backend. Without it, hydrated estates silently cold-rebuild
     /// their matrix tier, discarding calibration curves and decay timestamps.
     ///
-    /// The table is created by MatrixSnapshotStore in rebuildDerivedAccelerators —
+    /// The table is created by MatrixRecordStore in rebuildDerivedAccelerators —
     /// this composite reference does NOT transfer schema ownership; it only ensures
     /// the replication path includes the table.
-    private static var matrixSnapshotTables: [TableDeclaration] {
-        MatrixSnapshotStore.schemaDeclaration.tables
+    private static var matrixRecordsTables: [TableDeclaration] {
+        MatrixRecordStore.schemaDeclaration.tables
     }
 
     /// Composite addend for the GLK matrix snapshot table.
-    private static let matrixSnapshotSchemaVersion = MatrixSnapshotStore.schemaDeclaration.version
+    private static let matrixRecordsSchemaVersion = MatrixRecordStore.schemaDeclaration.version
 
 }

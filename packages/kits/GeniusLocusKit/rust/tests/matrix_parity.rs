@@ -25,7 +25,7 @@ use genius_locus_kit::audit::{
 };
 use genius_locus_kit::matrix::{
     MatrixCalibrationOutcome, MatrixCalibrationRegistry, MatrixCoOccurKey, MatrixFieldCell,
-    MatrixNMF, MatrixPersistenceBackend, MatrixPersistenceMode, MatrixTemporalKey, MatrixTier,
+    MatrixNMF, MatrixTemporalKey, MatrixTier,
     MatrixValueCoord,
 };
 
@@ -148,108 +148,6 @@ fn rebuild_from_audit_log_equals_incremental() {
     assert_eq!(rebuilt.live_row_count, incremental.live_row_count);
     assert_eq!(rebuilt.field_presence, incremental.field_presence);
     assert_eq!(rebuilt.co_occurrence, incremental.co_occurrence);
-}
-
-#[test]
-fn in_memory_mode_rebuilds_but_does_not_persist() {
-    let mut log = UnifiedAuditLog::new();
-    log.add(capture(
-        EntryUUID([7; 16]),
-        "bm.x",
-        UnifiedAuditValue::Bitmap(0b11),
-        hlc(1),
-    ));
-    let backend = MatrixPersistenceBackend::new(MatrixPersistenceMode::InMemory);
-    let snap = backend
-        .rebuild(&log, MatrixCalibrationRegistry::new())
-        .unwrap();
-    assert_eq!(snap.tier.live_row_count, 1);
-    assert!(backend.load().unwrap().is_none());
-}
-
-#[test]
-fn snapshotted_mode_round_trips_exactly() {
-    let tmp = std::env::temp_dir().join(format!(
-        "matrix-snap-{}.bin",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _cleanup = scopeguard_remove(tmp.clone());
-
-    let mut log = UnifiedAuditLog::new();
-    log.add(capture(
-        EntryUUID([1; 16]),
-        "bm.a",
-        UnifiedAuditValue::Bitmap(0b1011),
-        hlc(10),
-    ));
-    log.add(capture(
-        EntryUUID([2; 16]),
-        "bm.a",
-        UnifiedAuditValue::Bitmap(0b0011),
-        hlc(20),
-    ));
-    log.add(capture(
-        EntryUUID([2; 16]),
-        "bm.b",
-        UnifiedAuditValue::Bitmap(0b1100),
-        hlc(20),
-    ));
-
-    let backend =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    let snap1 = backend
-        .rebuild(&log, MatrixCalibrationRegistry::new())
-        .unwrap();
-    let backend2 =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    let loaded = backend2.load().unwrap().expect("snapshot present");
-    assert_eq!(loaded.tier, snap1.tier);
-    assert_eq!(loaded.calibration, snap1.calibration);
-    assert_eq!(loaded.hlc_watermark, snap1.hlc_watermark);
-}
-
-#[test]
-fn persistence_modes_agree_on_tier() {
-    let tmp = std::env::temp_dir().join(format!(
-        "matrix-eq-{}.bin",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _cleanup = scopeguard_remove(tmp.clone());
-
-    let mut log = UnifiedAuditLog::new();
-    log.add(capture(
-        EntryUUID([1; 16]),
-        "bm.x",
-        UnifiedAuditValue::Bitmap(0b1),
-        hlc(1),
-    ));
-    log.add(capture(
-        EntryUUID([2; 16]),
-        "bm.x",
-        UnifiedAuditValue::Bitmap(0b1),
-        hlc(2),
-    ));
-    log.add(capture(
-        EntryUUID([2; 16]),
-        "bm.y",
-        UnifiedAuditValue::Bitmap(0b10),
-        hlc(2),
-    ));
-
-    let mem = MatrixPersistenceBackend::new(MatrixPersistenceMode::InMemory);
-    let snap =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    let mem_out = mem.rebuild(&log, MatrixCalibrationRegistry::new()).unwrap();
-    let snap_out = snap
-        .rebuild(&log, MatrixCalibrationRegistry::new())
-        .unwrap();
-    assert_eq!(mem_out.tier, snap_out.tier);
 }
 
 #[test]
@@ -517,179 +415,9 @@ fn wikidata_qid_excluded_from_temporal_but_kept_in_cooccurrence() {
     );
 }
 
-// MARK: - temporal_watermark_hlc snapshot persistence (t3-temporal-watermark)
-//
-// These two tests enforce the conformance fix: the Rust MatrixSnapshot now
-// saves and restores temporal_watermark_hlc, mirroring Swift's Codable path
-// which uses `decodeIfPresent ?? .zero`.
+// MARK: - Temporal incremental boundary regressions
 
-/// Round-trip: a MatrixTier with a known non-zero temporal_watermark_hlc
-/// must survive a snapshot save→load cycle with the watermark intact.
-///
-/// This test FAILS before the fix (temporal_watermark_hlc resets to ZERO
-/// after load) and PASSES after (encode_snapshot writes the trailer;
-/// decode_snapshot reads it back).
-#[test]
-fn snapshot_persists_temporal_watermark_hlc_round_trip() {
-    let tmp = std::env::temp_dir().join(format!(
-        "matrix-twm-rt-{}.bin",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _cleanup = scopeguard_remove(tmp.clone());
-
-    // Build a log and run rebuild_temporal so temporal_watermark_hlc
-    // is set to a known non-zero value (the HLC of the later entry).
-    let h0 = HLC::new(0, 0, 1);
-    let h1 = HLC::new(300_000, 0, 1); // 5 minutes = 300_000 ms
-    let row_a = EntryUUID([0xA1; 16]);
-    let row_b = EntryUUID([0xB1; 16]);
-
-    let mut log = UnifiedAuditLog::new();
-    log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), h0));
-    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(2), h1));
-
-    // Use rebuild_temporal to populate temporal_watermark_hlc on the tier.
-    let t_tier = MatrixTier::rebuild_temporal(&log);
-    assert!(
-        t_tier.temporal_watermark_hlc > HLC::ZERO,
-        "precondition: rebuild_temporal must set a non-zero watermark"
-    );
-    let known_watermark = t_tier.temporal_watermark_hlc;
-
-    // Build a full MatrixSnapshot carrying this tier.
-    let backend =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    // Construct the snapshot via a custom save so we control the tier directly.
-    use genius_locus_kit::matrix::{MatrixSnapshot};
-    let snap_to_save = MatrixSnapshot::new(t_tier, MatrixCalibrationRegistry::new(), h1);
-    backend.save(&snap_to_save).expect("save must succeed");
-
-    // Load it back and verify temporal_watermark_hlc is preserved.
-    let backend2 =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    let loaded = backend2.load().expect("load must succeed").expect("snapshot must be present");
-
-    assert_eq!(
-        loaded.tier.temporal_watermark_hlc, known_watermark,
-        "temporal_watermark_hlc must survive snapshot round-trip; \
-         got {:?}, want {:?}",
-        loaded.tier.temporal_watermark_hlc, known_watermark
-    );
-}
-
-/// The Snapshotted file backend rejects schema_version=1 (old format) via a
-/// SchemaVersionMismatch error, not by silently accepting it. This documents
-/// the correct gate: the file backend requires CURRENT_SCHEMA_VERSION (2).
-/// Legacy v1 decode behavior (HLC::ZERO fallback) is tested at the unit level
-/// in matrix/persistence.rs::v2_truncation_tests::v1_blob_decodes_ok_with_zero_watermark_and_empty_timestamps.
-#[test]
-fn snapshot_file_backend_rejects_v1_schema_version() {
-    let tmp = std::env::temp_dir().join(format!(
-        "matrix-twm-bc-{}.bin",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _cleanup = scopeguard_remove(tmp.clone());
-
-    let h1 = HLC::new(300_000, 0, 1);
-    use genius_locus_kit::matrix::MatrixSnapshot;
-    let snap = MatrixSnapshot::new(MatrixTier::new(), MatrixCalibrationRegistry::new(), h1);
-    let backend =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    backend.save(&snap).expect("save must succeed");
-
-    // Patch schema_version byte (first 4 LE bytes) to 1 to simulate an old-format file.
-    let mut bytes = std::fs::read(&tmp).expect("read back saved bytes");
-    bytes[0] = 1; bytes[1] = 0; bytes[2] = 0; bytes[3] = 0;
-    // Strip the 20-byte tail so the blob is also well-formed as schema_version=1 content.
-    let tail_len = 20;
-    if bytes.len() >= tail_len {
-        bytes.truncate(bytes.len() - tail_len);
-    }
-    std::fs::write(&tmp, &bytes).expect("write patched bytes");
-
-    // The file backend's schema version gate rejects v1 blobs via SchemaVersionMismatch.
-    // MatrixSnapshotStore.load() (the SQLite path) converts this to Ok(None) → full rebuild.
-    let backend2 =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    let result = backend2.load();
-    assert!(
-        result.is_err(),
-        "file backend must reject schema_version=1 blob, got Ok"
-    );
-}
-
-/// Corruption gate (v2 format): a schema_version=2 snapshot truncated before
-/// the temporal_watermark_hlc section must be REJECTED (not silently accepted
-/// with HLC::ZERO). MatrixSnapshotStore.load() treats a decode error as None,
-/// so the caller falls back to a full rebuild — the safe behavior.
-///
-/// Without this guard, a truncated v2 blob with a reset watermark could cause
-/// incremental_update to replay temporal deltas over already-loaded state.
-#[test]
-fn snapshot_truncated_v2_before_watermark_is_rejected() {
-    let tmp = std::env::temp_dir().join(format!(
-        "matrix-twm-trunc-{}.bin",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _cleanup = scopeguard_remove(tmp.clone());
-
-    let h1 = HLC::new(300_000, 0, 1);
-    use genius_locus_kit::matrix::MatrixSnapshot;
-    let snap = MatrixSnapshot::new(MatrixTier::new(), MatrixCalibrationRegistry::new(), h1);
-    // schema_version must be 2 (the current version) for this test to be meaningful.
-    assert_eq!(snap.schema_version, 2, "test requires a v2 snapshot");
-    let backend =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    backend.save(&snap).expect("save must succeed");
-
-    let mut bytes = std::fs::read(&tmp).expect("read back saved bytes");
-    let original_len = bytes.len();
-    // Strip the 20-byte v2 tail (watermark + ts count) — leaves schema_version=2
-    // in the header but no temporal_watermark tail. This is the corrupt truncated-v2 case.
-    let tail_len = 20;
-    assert!(original_len >= tail_len, "saved snapshot must be at least {tail_len} bytes");
-    bytes.truncate(original_len - tail_len);
-    std::fs::write(&tmp, &bytes).expect("write truncated bytes");
-
-    // Load the truncated v2 snapshot. The Snapshotted backend propagates
-    // SnapshotDecodeFailed for a truncated blob — callers (MatrixSnapshotStore.load)
-    // then treat the error as None → full rebuild (the safe behavior contract).
-    // Here we verify the error IS returned rather than silently accepting
-    // the truncated blob as Ok(Some(snapshot_with_reset_watermark)).
-    let backend2 =
-        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
-    let result = backend2.load();
-    assert!(
-        result.is_err(),
-        "truncated v2 snapshot must return Err (decode failure), got Ok"
-    );
-}
-
-// MARK: - Conformance: boundary prune (Finding #4) + backdated eventTime (Finding #3)
-
-/// Finding #4 conformance (codex 98a790c2): incremental T rebuild must keep
-/// sources that are exactly at the boundary of the corrected prune cutoff.
-/// Mirrors Swift MatrixTierTests.temporalBoundarySourceNotPrunedIncrementalEqualsFullRebuild.
-///
-/// Setup (raw HLC, no event_times map):
-///   A at   600_000 ms — source in the vulnerable 59_999-ms zone.
-///   B at 16_000_000 ms — establishes the snapshot watermark.
-///   C at 16_000_001 ms — new entry that should pair with A.
-///
-/// With window = 256 minutes, watermark = 16_000_000:
-///   old cutoff: 16_000_000 − 15_360_000 = 640_000  → A(600_000) DROPPED
-///   new cutoff: 16_000_000 − 15_419_999 = 580_001  → A(600_000) KEPT ✓
-///
-/// delta (C − A) = 15_400_001 ms → deltaMin = 256 → bucket 128.
+/// Folding past a temporal watermark must retain sources needed by new targets.
 #[test]
 fn temporal_boundary_source_not_pruned_incremental_equals_full_rebuild() {
     let h_a = hlc(600_000);       // source in vulnerable zone
@@ -813,18 +541,6 @@ fn backdated_event_time_triggers_full_temporal_rebuild_incremental_equals_full_r
         Some(&1),
         "incremental_update must contain B→A at bucket 1 after backdated fallback"
     );
-}
-
-// Small RAII helper — pulls a path out at drop time without bringing
-// in the `scopeguard` crate.
-struct ScopeguardRemove(std::path::PathBuf);
-impl Drop for ScopeguardRemove {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-fn scopeguard_remove(p: std::path::PathBuf) -> ScopeguardRemove {
-    ScopeguardRemove(p)
 }
 
 // MARK: - Incremental hydration conformance (persist + load-forward)

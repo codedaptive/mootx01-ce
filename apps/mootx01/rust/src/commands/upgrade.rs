@@ -62,8 +62,7 @@ pub fn run(
     // --converge-only: we ARE the freshly installed binary, re-executed by the
     // upgrade that placed us. Run the convergence steps and nothing else.
     if converge_only {
-        run_convergence(&record, !estate_only);
-        return ExitCode::from(exit::OK);
+        return ExitCode::from(if run_convergence(&record, !estate_only) { exit::OK } else { exit::FAILURE });
     }
 
     // --backfill-only, or a transient estate: estate-only convergence for
@@ -92,6 +91,7 @@ pub fn run(
         if !run_schema_upgrade(&record) {
             return ExitCode::from(exit::FAILURE);
         }
+        if !run_matrix_records_upgrade(&record) { return ExitCode::from(exit::FAILURE); }
         retire_legacy_encryption_opt_out(&record);
         refresh_manifest(&record);
         let ok_kg    = run_kg_fact_identity_backfill(&record);
@@ -118,7 +118,7 @@ pub fn run(
         }
         let code = place_and_report(&src, &home, no_restart);
         if code == ExitCode::from(exit::OK) {
-            converge_after_install(&record, db.as_deref(), &home, no_restart);
+            if !converge_after_install(&record, db.as_deref(), &home, no_restart) { return ExitCode::from(exit::FAILURE); }
             offer_estate_encryption_if_needed(&record);
         }
         return code;
@@ -151,6 +151,7 @@ pub fn run(
             // and it converges whether or not a new version is available — so
             // the up-to-date early return still runs all migration steps and offers.
             if run_schema_upgrade(&record) {
+                if !run_matrix_records_upgrade(&record) { return ExitCode::from(exit::FAILURE); }
                 retire_legacy_encryption_opt_out(&record);
                 refresh_manifest(&record);
                 run_kg_fact_identity_backfill(&record);
@@ -200,7 +201,7 @@ pub fn run(
         // converged install and an accept owns its own stop/start sequence.
         // The backfill runs first: unattended correctness migration before
         // the TTY-gated opt-in offer.
-        converge_after_install(&record, db.as_deref(), &home, no_restart);
+        if !converge_after_install(&record, db.as_deref(), &home, no_restart) { return ExitCode::from(exit::FAILURE); }
         offer_estate_encryption_if_needed(&record);
     }
     code
@@ -221,17 +222,17 @@ pub fn run(
 /// NOTE ON REACH: this only helps when the ALREADY-INSTALLED binary carries it.
 /// Upgrading FROM a version without this logic still converges with that old
 /// version's code — the installer cannot be fixed from the release it installs.
-fn converge_after_install(record: &EstateRecord, db: Option<&str>, home: &std::path::Path, no_restart: bool) {
+fn converge_after_install(record: &EstateRecord, db: Option<&str>, home: &std::path::Path, no_restart: bool) -> bool {
     // Same destination `release::place_binary` writes to.
     #[cfg(not(target_os = "windows"))]
     let installed = home.join(".mootx01/bin/mootx01");
     #[cfg(target_os = "windows")]
     let installed = home.join(".mootx01/bin/mootx01.exe");
     if reexec_convergence(&installed, db, no_restart) {
-        return;
+        return true;
     }
     println!("Note: converging with the previous binary — the installed one could not run.");
-    run_convergence(record, false);
+    run_convergence(record, false)
 }
 
 /// Re-execute `binary` with `--converge-only`. Returns false when it could not
@@ -272,12 +273,13 @@ fn reexec_convergence(binary: &std::path::Path, db: Option<&str>, no_restart: bo
 /// The convergence sequence itself, in order. The migration steps and the reclaim
 /// both need a quiesced estate; the reclaim additionally repairs foreign SQLite
 /// geometry before its VACUUM.
-fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
+fn run_convergence(record: &EstateRecord, refresh_plugins: bool) -> bool {
     // Return values are intentionally ignored in the full convergence path —
     // each step is independent and retryable; the next `mootx01 upgrade` catches failures.
     // A refused schema version skips every data step: each of them would
     // open the LocusKit schema and stamp the estate current.
     if run_schema_upgrade(record) {
+        if !run_matrix_records_upgrade(record) { return false; }
         retire_legacy_encryption_opt_out(record);
         refresh_manifest(record);
         let _ = run_kg_fact_identity_backfill(record);
@@ -293,6 +295,27 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
     if refresh_plugins && record.kind != EstateRecordKind::Transient {
         refresh_installed_codex_plugin(&super::install::home_dir());
     }
+    true
+}
+
+/// Offline matrix upgrade under the existing exclusive maintenance owner.
+fn run_matrix_records_upgrade(record: &EstateRecord) -> bool {
+    let estate = record.database_path();
+    if !estate.exists() { return true; }
+    with_resident_daemon_quiesced(&record.pid_path(), "matrix storage upgrade", &PlatformDaemon, || {
+        match aria_mcp::estate_registry::EstateRegistry::new_sqlite_for_maintenance(
+            &estate.display().to_string(), "aria-mcp-default") {
+            Ok(registry) => {
+                drop(registry);
+                println!("  ✓ matrix records prepared; required retirement and reclamation complete");
+                true
+            },
+            Err(error) => {
+                println!("  ✗ matrix storage upgrade failed: {error}; serving remains gated until upgrade succeeds");
+                false
+            }
+        }
+    }).unwrap_or(false)
 }
 
 /// Schema upgrade: the one product schema migration. Reads the LocusKit ledger
@@ -314,6 +337,7 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) {
 ///
 /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
 /// Returns `true` when the estate is at 20 afterwards (or absent).
+
 fn run_schema_upgrade(record: &EstateRecord) -> bool {
     use std::sync::Arc;
     use corpus_kit::BasisStore;

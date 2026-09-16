@@ -1322,10 +1322,20 @@ fn estate_diagnostics_data_schema(name: &str) -> Option<Value> {
             "drains".to_owned(),
             json!({"type":"array","items":drain_entry_schema()}),
         )]))),
-        "moot_rebuild_status" => Some(exact_object(serde_json::Map::from_iter([(
-            "state".to_owned(),
-            json!({"type":"string","enum":["running","idle"]}),
-        )]))),
+        "moot_rebuild_status" => Some(json!({
+            "type":"object", "required":["state"], "additionalProperties":false,
+            "properties":{
+                "state":{"type":"string","enum":["running","idle"]},
+                "matrix":exact_object(serde_json::Map::from_iter([
+                    ("phase".into(),json!({"type":"string","enum":["idle","queued","running","deferred","failed"]})),
+                    ("generation".into(),json!({"type":["string","null"]})),
+                    ("watermark".into(),json!({"type":"string"})),
+                    ("reason".into(),json!({"type":["string","null"]})),
+                    ("migration_phase".into(),json!({"type":"string"})),
+                    ("reclaimed_bytes".into(),json!({"type":"integer","minimum":0}))
+                ]))
+            }
+        })),
         "moot_timing_report" => Some(exact_object(serde_json::Map::from_iter([
             ("since_ms".to_owned(), json!({"const":0})),
             ("watermark_ms".to_owned(), json!({"type":"integer"})),

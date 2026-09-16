@@ -364,14 +364,14 @@ impl EstateRegistry {
     /// if the semantic-recall wiring (Corpus/VectorStore construction) fails.
     /// The caller should print this to stderr and exit with a nonzero code.
     pub fn new_sqlite(path: &str, owner: &str) -> Result<Self, String> {
-        Self::open_sqlite(path, owner, EstateOpening::REGISTERED)
+        Self::open_sqlite(path, owner, EstateOpening::REGISTERED, false)
     }
 
     /// Open a SQLite estate with the opening its catalog record decides
     /// (`EstateOpening::for_record`): federation and charter seeding for a
     /// registered estate, neither for a transient one.
     pub fn new_sqlite_with(path: &str, owner: &str, opening: EstateOpening) -> Result<Self, String> {
-        Self::open_sqlite(path, owner, opening)
+        Self::open_sqlite(path, owner, opening, false)
     }
 
     /// Open a SQLite estate for maintenance callers (e.g. `mootx01 upgrade`).
@@ -391,7 +391,7 @@ impl EstateRegistry {
     ///
     /// Same error conditions as `new_sqlite`.
     pub fn new_sqlite_for_maintenance(path: &str, owner: &str) -> Result<Self, String> {
-        Self::open_sqlite(path, owner, EstateOpening::MAINTENANCE)
+        Self::open_sqlite(path, owner, EstateOpening::MAINTENANCE, true)
     }
 
     /// Shared SQLite open path behind `new_sqlite` and `new_sqlite_for_maintenance`.
@@ -399,7 +399,7 @@ impl EstateRegistry {
     /// (geometry normalization, store open, estate-id read-back, coordinator
     /// admission, semantic-recall wiring) is one implementation so the ports
     /// cannot drift between the serve and upgrade opens.
-    fn open_sqlite(path: &str, owner: &str, opening: EstateOpening) -> Result<Self, String> {
+    fn open_sqlite(path: &str, owner: &str, opening: EstateOpening, offline_upgrade: bool) -> Result<Self, String> {
         // First run = no estate file before this open. Read before anything
         // below can create the file; it gates the create-time defaults.
         let first_run = !std::path::Path::new(path).exists();
@@ -501,7 +501,7 @@ impl EstateRegistry {
                 .provision_default_encoder_if_absent(&handle)
                 .map_err(|e| format!("aria-mcp: default encoder provisioning failed for {path:?}: {e:?}"))?;
         }
-        wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord, preserve_v2_frozen_configuration)
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord, preserve_v2_frozen_configuration, offline_upgrade)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         if opening.seed_charters && !frozen {
             // Idempotently seed the seven default wings. Non-fatal: seeding
@@ -603,7 +603,7 @@ impl EstateRegistry {
         })?;
         let preserve_v2_frozen_configuration =
             crate::estate_posture::EstatePosture::from_process_environment().is_frozen();
-        wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord, preserve_v2_frozen_configuration)
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord, preserve_v2_frozen_configuration, false)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
@@ -1031,6 +1031,7 @@ fn wire_sqlite_semantic_recall(
     handle: &EstateHandle,
     coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
     preserve_v2_frozen_configuration: bool,
+    offline_upgrade: bool,
 ) -> Result<(), String> {
     let now = wall_now_millis();
     if preserve_v2_frozen_configuration {
@@ -1043,9 +1044,10 @@ fn wire_sqlite_semantic_recall(
         // This binary declares a 1.0 floor, so prepare the estate through the
         // separately compiled migration capsules before current-runtime wiring.
         let mut guard = coord.lock().unwrap();
-        guard
-            .run_migration_chain(handle, now, default_ensemble())
-            .map_err(|error| format!("estate migration chain for {path:?}: {error}"))?;
+        let result = if offline_upgrade {
+            guard.run_offline_migration_chain(handle, now, default_ensemble())
+        } else { guard.run_migration_chain(handle, now, default_ensemble()) };
+        result.map_err(|error| format!("estate migration chain for {path:?}: {error}"))?;
     }
     wire_glk(handle, coord, shared_storage, now, preserve_v2_frozen_configuration)
 }

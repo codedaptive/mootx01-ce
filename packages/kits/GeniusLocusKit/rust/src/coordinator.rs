@@ -1333,7 +1333,9 @@ pub struct EstateCoordinator {
     /// the hydration path), read by the `matrixAware` recall lane. Absent ⇒
     /// all matrix score columns read 0.0, correct for a fresh estate. Mirrors
     /// the Swift actor's `matrixTiers: [EstateHandle: MatrixTier]`.
-    matrix_tiers: HashMap<EstateHandle, crate::matrix::MatrixTier>,
+    matrix_tiers: HashMap<EstateHandle, Arc<crate::matrix::MatrixTier>>,
+    matrix_refresh_workers: HashMap<EstateHandle, Arc<crate::matrix::MatrixRefreshWorker>>,
+    matrix_frozen_handles: HashSet<EstateHandle>,
     /// Per-estate graph-centrality caches. Registered by `register_graph_cache`
     /// (called by the dreaming cycle once it has computed per-drawer graph
     /// centrality), read by the `matrixAware` recall lane to populate the `graph`
@@ -1629,6 +1631,8 @@ impl EstateCoordinator {
             mount_states: HashMap::new(),
             audit_logs: HashMap::new(),
             matrix_tiers: HashMap::new(),
+            matrix_refresh_workers: HashMap::new(),
+            matrix_frozen_handles: HashSet::new(),
             graph_caches: HashMap::new(),
             preference_stores: HashMap::new(),
             node_topology_providers: HashMap::new(),
@@ -2048,6 +2052,7 @@ impl EstateCoordinator {
             return Err(GeniusLocusKitError::DuplicateEstate { estate_uuid });
         }
         self.registry.insert(handle, estate);
+        if frozen { self.matrix_frozen_handles.insert(handle); }
         self.recall_stores.insert(handle, recall_store);
         // Initialise durable grant store backed by an in-memory storage (the
         // default for `open`; callers that want SQLite-backed grant persistence
@@ -2122,6 +2127,10 @@ impl EstateCoordinator {
     /// `tests/estate_close_completeness.rs` enforces that this stays complete
     /// as registries are added.
     pub fn close(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
+        // Worker never takes the coordinator lock. Join before releasing storage.
+        if let Some(worker) = self.matrix_refresh_workers.remove(handle) {
+            worker.close();
+        }
         if self.registry.remove(handle).is_none() {
             return Err(GeniusLocusKitError::EstateNotOpen {
                 estate_uuid: handle.estate_uuid,
@@ -2163,6 +2172,7 @@ impl EstateCoordinator {
         // must not resolve to a live log or a stale recall tier (GLK-03 parity).
         self.audit_logs.remove(handle);
         self.matrix_tiers.remove(handle);
+        self.matrix_frozen_handles.remove(handle);
         // Drop the graph cache and preference store with the estate — a closed
         // handle must not resolve to a stale recall accelerator. Both are pure
         // score lookups registered by the caller (`register_graph_cache` /
@@ -9127,14 +9137,15 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         tier: crate::matrix::MatrixTier,
     ) {
-        self.matrix_tiers.insert(*handle, tier);
+        self.matrix_tiers.insert(*handle, Arc::new(tier));
     }
 
     /// The `MatrixTier` registered for `handle`, if any. The `matrixAware`
     /// recall path reads this to populate co-occurrence / field-fit / temporal
     /// score columns. Mirrors the Swift actor's `matrixTiers[handle]` lookup.
-    pub fn matrix_tier(&self, handle: &EstateHandle) -> Option<&crate::matrix::MatrixTier> {
-        self.matrix_tiers.get(handle)
+    pub fn matrix_tier(&self, handle: &EstateHandle) -> Option<Arc<crate::matrix::MatrixTier>> {
+        self.matrix_refresh_workers.get(handle).and_then(|worker| worker.current())
+            .or_else(|| self.matrix_tiers.get(handle).cloned())
     }
 
     // MARK: - graph cache + preference store (recall-scoring accelerators)
@@ -9194,220 +9205,76 @@ impl EstateCoordinator {
         self.preference_stores.get(handle)
     }
 
-    /// Feed the unified audit log, rebuild the recall-scoring `MatrixTier`
-    /// from it (both passes: F/O/C + T), and register the tier for `handle`.
-    ///
-    /// The on-demand counterpart to the hydration path's matrix rebuild —
-    /// the Rust parity of the Swift `GeniusLocusKit.rebuildDerivedAccelerators(for:)`.
-    /// `moot_dream` calls this so the `matrixAware` recall lane is live after a
-    /// dreaming cycle rather than reading a stale (or absent) tier.
-    ///
-    /// Idempotent: feeding the same events is a G-Set no-op, and the
-    /// loaded-then-folded tier equals a from-scratch rebuild (conformance-tested).
-    ///
-    /// PERSISTENCE: the matrix tier is read from its on-disk SQLite snapshot
-    /// (`MatrixSnapshotStore`) and folded FORWARD over only the audit tail past
-    /// the snapshot watermark — it is NOT recomputed from the whole audit log on
-    /// every launch. A full rebuild runs only on cold start (no snapshot) or a
-    /// stale format. After computing, the fresh tier is persisted so the next
-    /// launch loads it. In-memory estates (where `storages` holds no backing
-    /// storage) cannot persist, so they full-rebuild every time — the parity of
-    /// Swift's `.inMemory` no-op mode. Mirrors Swift
-    /// `GeniusLocusKit.rebuildDerivedAccelerators(for:now:)`.
-    pub fn rebuild_derived_accelerators(
-        &mut self,
-        handle: &EstateHandle,
-        now: i64,
-    ) -> Result<(), VerbDispatchError> {
-        // Step 1 — build a transient audit log snapshot (MatrixTier consumes
-        // the bridged log, not raw storage events). Bug 4 fix: no longer
-        // accumulates into the persistent audit_logs HashMap.
-        let log = self.current_audit_log(handle)?;
+    /// Enqueue work and return a ticket. A serving host must release its
+    /// coordinator mutex before waiting. The clock is epoch milliseconds.
+    pub fn request_matrix_refresh(
+        &mut self, handle: &EstateHandle, now_millis: i64,
+        limits: crate::matrix::MatrixRefreshLimits, training_only: bool,
+    ) -> Result<(crate::matrix::MatrixRefreshDisposition, crate::matrix::MatrixRefreshTicket), VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        let storage = self.storages.get(handle).cloned().ok_or_else(|| VerbError::UnderlyingEstateFailure {
+            verb: "request_matrix_refresh".into(), reason: "estate has no registered storage".into()
+        })?;
+        let initial = self.matrix_tiers.get(handle).cloned();
+        let frozen = self.matrix_frozen_handles.contains(handle);
+        let worker = self.matrix_refresh_workers.entry(*handle).or_insert_with(||
+            crate::matrix::MatrixRefreshWorker::new(storage, uuid_to_str(&handle.estate_uuid), initial, frozen));
+        worker.request(now_millis, limits, training_only).map_err(|e|
+            VerbError::UnderlyingEstateFailure { verb: "request_matrix_refresh".into(), reason: e.to_string() }.into())
+    }
 
-        // Build the event_time map (audit row_id → authored-in-world epoch ms) so
-        // the temporal (T) matrix pass keys off event_time, not the capture HLC —
-        // all temporal-cognition primitives key off eventTime. A bulk
-        // historical import stamps every capture with one HLC, so hlc-based lags
-        // are all 0 and no causality pairs form; the real ordering lives in each
-        // drawer's event_time. event_time and the fold's physical_time are both
-        // epoch-ms, so it flows through directly. The row_id key mirrors
-        // bridge_audit_event's `EntryUUID(row_uuid.to_be_bytes())`.
-        let event_times: std::collections::HashMap<crate::audit::EntryUUID, i64> = {
-            let estate = self.estate_for_verb(handle)?;
-            let drawers = estate.all_drawers().map_err(|e| {
-                VerbDispatchError::from(remap(
-                    "rebuild_derived_accelerators",
-                    &uuid_to_str(&handle.estate_uuid),
-                    e,
-                ))
-            })?;
-            drawers
-                .iter()
-                .filter_map(|d| {
-                    uuid::Uuid::parse_str(&d.id).ok().map(|u| {
-                        (
-                            crate::audit::EntryUUID(u.as_u128().to_be_bytes()),
-                            d.event_time,
-                        )
-                    })
-                })
-                .collect()
-        };
-
-        // The matrix snapshot store needs a durable backing storage. In-memory
-        // estates don't retain one (storages holds only DrawerStore-backed
-        // storages); they full-rebuild without persistence, as in Swift's
-        // .inMemory mode.
-        // S4-C (§8.13, Bob's Option C ruling): the decayed O/T projections
-        // are recomputed IN FULL at every maintenance pass (fp
-        // non-associativity of exp-factor composition rules out an exact
-        // incremental merge). `now` at this surface is epoch SECONDS
-        // (the documented i64-unit seam); the decay clock is ms.
-        let decay_now_ms = now * 1000;
-        let apply_decayed_projections =
-            |tier: &mut crate::matrix::MatrixTier,
-             log: &crate::audit::UnifiedAuditLog,
-             event_times: &std::collections::HashMap<crate::audit::EntryUUID, i64>| {
-                tier.co_occurrence_decayed =
-                    crate::matrix::MatrixTier::decayed_co_occurrence(log, decay_now_ms);
-                tier.temporal_causality_decayed =
-                    crate::matrix::MatrixTier::rebuild_temporal_from_with_decay(
-                        log,
-                        substrate_types::hlc::HLC::ZERO,
-                        event_times,
-                        Some(decay_now_ms),
-                    )
-                    .temporal_causality_decayed;
-                tier.decayed_as_of_ms = decay_now_ms;
-            };
-
-        let Some(storage) = self.storages.get(handle).cloned() else {
-            let mut tier = crate::matrix::MatrixTier::full_rebuild(&log, &event_times);
-            apply_decayed_projections(&mut tier, &log, &event_times);
-            self.register_matrix_tier(handle, tier);
-            return Ok(());
-        };
-
-        let map_err = |e: persistence_kit::StorageError| -> VerbDispatchError {
-            VerbError::UnderlyingEstateFailure {
-                verb: "rebuild_derived_accelerators".to_string(),
-                reason: e.to_string(),
-            }
-            .into()
-        };
-
-        // Ensure the table exists (idempotent CREATE TABLE IF NOT EXISTS under the
-        // store's own kitID) and build the store.
-        storage
-            .migrate(&crate::matrix::MatrixSnapshotStore::schema_declaration())
-            .map_err(map_err)?;
-        let store = crate::matrix::MatrixSnapshotStore::new(Arc::clone(&storage));
-        let estate_id = uuid_to_str(&handle.estate_uuid);
-
-        // Step 2 — LOAD from disk + fold the tail forward, else cold-start rebuild.
-        // load() is fail-soft (decode/version mismatch → None → full rebuild).
-        let tier = match store.load(&estate_id).map_err(map_err)? {
-            Some(snapshot) => {
-                // incremental_update is conformance-proven equal to full_rebuild,
-                // including cross-cursor expunge/withdraw and temporal
-                // window-boundary pairs — exact, not an approximation.
-                let mut loaded = snapshot.tier;
-                loaded.incremental_update(&log, &event_times);
-                loaded
-            }
-            None => crate::matrix::MatrixTier::full_rebuild(&log, &event_times),
-        };
-
-        // Step 3 — install so the matrixAware recall lane is live.
-        let mut tier = tier;
-        apply_decayed_projections(&mut tier, &log, &event_times);
-        self.register_matrix_tier(handle, tier.clone());
-
-        // Step 4 — persist the fresh tier so the NEXT launch loads it. Watermark
-        // is the F/O/C cursor. Calibration is not tracked per-estate on the
-        // coordinator (Rust does not mirror Swift's calibrationRegistries map), so
-        // an empty registry is persisted alongside the tier; the matrix F/O/C/T
-        // state is what the launch path loads and folds forward.
-        let watermark = tier.last_hlc;
-        let snapshot = crate::matrix::MatrixSnapshot::new(
-            tier,
-            crate::matrix::MatrixCalibrationRegistry::default(),
-            watermark,
-        );
-        store.upsert(&estate_id, &snapshot, now).map_err(map_err)?;
-
-        // Flush the dense vector store's resident-array sidecar alongside the
-        // matrix snapshot — both are derived accelerators that must live on disk so
-        // a cold restart loads them instead of rebuilding from a full table scan.
-        // The sidecar is write-behind; this is the periodic flush point (runs on
-        // launch and on every dreaming cycle). Best-effort: the `vectors` table
-        // remains the source of truth, and a no-op when no sidecar is configured.
-        if let Some(vs) = self.vector_stores.get(handle) {
-            let _ = vs.flush();
+    pub fn matrix_refresh_status(&self, handle: &EstateHandle) -> Result<crate::matrix::MatrixRefreshStatus, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        let mut status = if let Some(storage)=self.storages.get(handle) {
+            crate::matrix::MatrixRecordStore::new(storage.clone()).status_metadata(&uuid_to_str(&handle.estate_uuid))
+                .map_err(|e| VerbError::UnderlyingEstateFailure {verb:"matrix_refresh_status".into(),reason:e.to_string()})?
+        } else { Default::default() };
+        if let Some(worker)=self.matrix_refresh_workers.get(handle) {
+            let execution=worker.status();status.phase=execution.phase;status.reason=execution.reason;
         }
+        Ok(status)
+    }
+
+    /// Synchronous convenience for exclusively owned/offline coordinators.
+    /// Serving hosts use request_matrix_refresh and wait outside their mutex.
+    pub fn rebuild_derived_accelerators(
+        &mut self, handle: &EstateHandle, now_millis: i64,
+    ) -> Result<(), VerbDispatchError> {
+        if self.storages.contains_key(handle) {
+            let (_, ticket) = self.request_matrix_refresh(handle, now_millis, Default::default(), false)?;
+            ticket.wait().map_err(|reason| VerbError::UnderlyingEstateFailure {
+                verb: "rebuild_derived_accelerators".into(), reason
+            })?;
+        } else {
+            // Bare in-memory estates have no persistence owner.
+            let log = self.current_audit_log(handle)?;
+            let drawers = self.estate_for_verb(handle)?.all_drawers().map_err(|e|
+                VerbDispatchError::from(remap("rebuild_derived_accelerators", &uuid_to_str(&handle.estate_uuid), e)))?;
+            let times = drawers.iter().filter_map(|d| uuid::Uuid::parse_str(&d.id).ok().map(|id|
+                (crate::audit::EntryUUID(id.as_u128().to_be_bytes()), d.event_time))).collect();
+            let mut tier = crate::matrix::MatrixTier::full_rebuild(&log, &times);
+            tier.co_occurrence_decayed = crate::matrix::MatrixTier::decayed_co_occurrence(&log, now_millis);
+            tier.temporal_causality_decayed = crate::matrix::MatrixTier::rebuild_temporal_from_with_decay(
+                &log, substrate_types::hlc::HLC::ZERO, &times, Some(now_millis)).temporal_causality_decayed;
+            tier.decayed_as_of_ms = now_millis;
+            self.register_matrix_tier(handle, tier);
+        }
+        if let Some(vs) = self.vector_stores.get(handle) { let _ = vs.flush(); }
         Ok(())
     }
 
-    // MARK: - adaptive-recall standing-signal cycles
-
-    /// Hourly fold of the new audit-log tail into the temporal causality
-    /// matrix — the `temporal-causality-fold` standing signal's cycle.
-    /// Rebuilds the derived accelerators from the log the same way estate
-    /// open does: the persisted snapshot is loaded, folded forward over the
-    /// audit tail past its watermark and re-persisted, so the `matrixAware`
-    /// recall lane reads a tier that includes every capture since the
-    /// previous fire. Mirrors Swift
-    /// `GeniusLocusKit.runTemporalCausalityFold(_:now:)`.
+    /// Standing signals enqueue/coalesce; they never wait for the full fold.
     pub fn run_temporal_causality_fold(
-        &mut self,
-        handle: &EstateHandle,
-        now_millis: i64,
+        &mut self, handle: &EstateHandle, now_millis: i64,
     ) -> Result<(), VerbDispatchError> {
-        self.rebuild_derived_accelerators(handle, now_millis)
+        self.request_matrix_refresh(handle, now_millis, Default::default(), false).map(|_| ())
     }
 
-    /// One training-daemon tick over this coordinator's matrix tier for
-    /// `handle` — the `training-daemon` standing signal's cycle.
-    ///
-    /// Runs `TrainingDaemon::run_once` against the estate's audit log. The
-    /// daemon is minted per tick with the default threshold gate, so its
-    /// watermark starts at zero and an active tick folds the full log; the
-    /// gate keeps the tick dormant (no matrix work) until the estate has
-    /// crossed the transition threshold. The tier is taken from
-    /// `matrix_tiers` (a fresh tier is installed when none is registered
-    /// yet). Calibration is not tracked per-estate on the coordinator, the
-    /// same posture as `rebuild_derived_accelerators`, so each tick records
-    /// its observations into a fresh registry. Returns a one-line summary
-    /// of the tick for the signal's diagnostic. Mirrors Swift
-    /// `GeniusLocusKit.runTrainingTick(_:now:)`.
     pub fn run_training_tick(
-        &mut self,
-        handle: &EstateHandle,
-        now_millis: i64,
+        &mut self, handle: &EstateHandle, now_millis: i64,
     ) -> Result<String, VerbDispatchError> {
-        let log = self.audit_log(handle)?;
-        let tier = self
-            .matrix_tiers
-            .entry(*handle)
-            .or_insert_with(crate::matrix::MatrixTier::new);
-        let mut calibration = crate::matrix::MatrixCalibrationRegistry::default();
-        let mut daemon = crate::training::TrainingDaemon::new(
-            crate::training::TrainingThresholdGate::default(),
-        );
-        let tick = daemon.run_once(&log, tier, &mut calibration);
-        let state = if tick.decision.is_active() { "active" } else { "dormant" };
-        Ok(format!(
-            "training tick {}: transitions {}/{}, considered {}, F cells {}, O keys {}, T keys {}, calibration observations {} at {}ms",
-            state,
-            tick.decision.transition_count(),
-            tick.decision.threshold(),
-            tick.pass_result.transitions_considered,
-            tick.pass_result.f_cells_touched,
-            tick.pass_result.o_keys_touched,
-            tick.pass_result.t_keys_touched,
-            tick.pass_result.calibration_observations_recorded,
-            now_millis
-        ))
+        let (disposition, _) = self.request_matrix_refresh(handle, now_millis, Default::default(), true)?;
+        Ok(format!("training refresh {disposition:?}; threshold evaluated by background owner"))
     }
 
     // MARK: - all_tunnels
@@ -11627,7 +11494,7 @@ impl EstateCoordinator {
                 // so the clone cost is proportional to the tier's live row count —
                 // acceptable for the scored-recall call path which already does multiple
                 // HashMap lookups per candidate).
-                let matrix_tier = self.matrix_tiers.get(handle).cloned();
+                let matrix_tier = self.matrix_tier(handle);
                 // Pass the registered GraphCache / PreferenceStore (if any) for the
                 // `matrixAware` graph / preference score columns. `Arc::clone` is a
                 // reference-count bump only — the trait object lives behind the Arc, so
@@ -12373,7 +12240,7 @@ impl EstateCoordinator {
         // run rebuild_derived_accelerators at least once. None on a fresh estate
         // with no matrix data (matrix signals are 0.0, same as Swift's fallback when
         // matrixTiers[handle] == nil).
-        matrix_tier: Option<crate::matrix::MatrixTier>,
+        matrix_tier: Option<Arc<crate::matrix::MatrixTier>>,
         // GraphCache / PreferenceStore registered for this estate — Some when the
         // dreaming cycle / training daemon has registered one. None on a fresh estate
         // with no graph/preference priors (the graph/preference columns read 0.0, same

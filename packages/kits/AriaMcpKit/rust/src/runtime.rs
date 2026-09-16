@@ -721,14 +721,9 @@ pub fn run(
         // starts accepting calls immediately; matrix recall degrades to zeros
         // until the load finishes — correct degradation, not a stall.
         //
-        // `rebuild_derived_accelerators` LOADS the persisted on-disk matrix
-        // snapshot (MatrixSnapshotStore) and folds only the audit tail past its
-        // watermark forward — it does NOT recompute the whole matrix from the
-        // audit log on every launch. The first launch on a fresh estate
-        // full-rebuilds once and persists; every launch after that is a cheap
-        // load + tail fold. Without this the tier stays nil until the first
-        // dreaming cycle, so a freshly-launched daemon scores every matrix
-        // column 0.0 and the persisted snapshot is never read back.
+        // The GLK worker loads normalized records, folds count matrices forward,
+        // recomputes decay, and publishes a complete generation in bounded row
+        // batches. Existing counts can serve while refresh proceeds.
         //
         // RESIDENT ONLY: the matrix tier is a long-lived brain-layer structure
         // only the resident daemon's recall scoring + dreaming consume. This
@@ -737,22 +732,22 @@ pub fn run(
         // one-shot query must not pay the load cost or persist a snapshot it
         // will never reuse.
         //
-        // The coordinator is shared with the governor behind a Mutex, so a
-        // concurrent dream rebuild is serialized, not a race.
+        // Hold the coordinator mutex only to obtain a ticket; never while waiting.
+        // Concurrent dream/temporal requests coalesce inside the worker.
         let accel_coord = Arc::clone(&config.registry.coord);
         let accel_handle = config.registry.default.handle;
         std::thread::spawn(move || {
             let now = crate::dispatch::wall_now();
-            match accel_coord
-                .lock()
-                .unwrap()
-                .rebuild_derived_accelerators(&accel_handle, now)
-            {
-                Ok(()) => eprintln!("derived accelerators rebuilt (background)"),
-                Err(e) => eprintln!(
-                    "warning: derived accelerator rebuild failed: {}",
-                    crate::interface_tools::describe_verb_dispatch_error(&e)
-                ),
+            let requested = {
+                accel_coord.lock().unwrap()
+                    .request_matrix_refresh(&accel_handle, now, Default::default(), false)
+            };
+            match requested {
+                Ok((_, ticket)) => match ticket.wait() {
+                    Ok(_) => eprintln!("derived accelerators rebuilt (background)"),
+                    Err(e) => eprintln!("warning: matrix refresh failed: {e}"),
+                },
+                Err(e) => eprintln!("warning: matrix refresh request failed: {e:?}"),
             }
         });
 

@@ -300,12 +300,56 @@ table=manifest
   col=value type=text null=0 default=- role=-
   pk=key
   appendOnly=0 hashable=0
-table=matrix_snapshot
+table=matrix_calibration
   col=estate_id type=text null=0 default=- role=-
-  col=schema_version type=int null=0 default=- role=-
-  col=snapshot type=blob null=0 default=- role=-
-  col=last_hlc type=text null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=bucket type=int null=0 default=- role=-
+  col=count type=int null=0 default=- role=-
+  col=success_rate type=float null=0 default=- role=-
+  col=updated_seconds type=float null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=estate_id,model_id,bucket
+  appendOnly=0 hashable=0
+table=matrix_cells
+  col=estate_id type=text null=0 default=- role=-
+  col=generation type=text null=0 default=- role=-
+  col=cell_id type=text null=0 default=- role=-
+  col=family type=text null=0 default=- role=-
+  col=a_field type=text null=0 default=- role=-
+  col=a_kind type=text null=0 default=- role=-
+  col=a_value type=text null=0 default=- role=-
+  col=b_field type=text null=0 default=- role=-
+  col=b_kind type=text null=0 default=- role=-
+  col=b_value type=text null=0 default=- role=-
+  col=lag type=int null=0 default=- role=-
+  col=count type=int null=1 default=- role=-
+  col=decayed type=float null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=estate_id,generation,cell_id
+  appendOnly=0 hashable=0
+table=matrix_generations
+  col=estate_id type=text null=0 default=- role=-
+  col=generation type=text null=0 default=- role=-
+  col=phase type=text null=0 default=- role=-
+  col=cell_count type=int null=0 default=- role=-
+  col=live_row_count type=int null=0 default=- role=-
+  col=last_physical_ms type=int null=0 default=- role=-
+  col=last_logical type=int null=0 default=- role=-
+  col=last_node type=int null=0 default=- role=-
+  col=temporal_physical_ms type=int null=0 default=- role=-
+  col=temporal_logical type=int null=0 default=- role=-
+  col=temporal_node type=int null=0 default=- role=-
+  col=decayed_as_of_ms type=int null=0 default=- role=-
   col=updated_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=estate_id,generation
+  appendOnly=0 hashable=0
+table=matrix_state
+  col=estate_id type=text null=0 default=- role=-
+  col=active_generation type=text null=1 default=- role=-
+  col=migration_phase type=text null=0 default=- role=-
+  col=reclaimed_bytes type=int null=0 default=- role=-
+  col=reason type=text null=1 default=- role=-
   col=ext type=json null=1 default=- role=-
   pk=estate_id
   appendOnly=0 hashable=0

@@ -185,6 +185,7 @@ pub struct EstateDiagnosticsSnapshot {
     pub facts: Vec<DiagnosticsFact>,
     pub drains: Vec<EstateDrain>,
     pub rebuild: EstateRebuildState,
+    pub matrix: Option<serde_json::Value>,
     pub timing: EstateTiming,
     /// Stored value of `aria.fdc.recalced_data_version` from the estate meta
     /// table. `None` means the key has never been written (no floor set yet).
@@ -319,6 +320,8 @@ pub struct EstateDrainData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EstateRebuildData {
     pub state: EstateRebuildState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matrix: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -436,7 +439,7 @@ impl<P: EstateDiagnosticsAuthority> EstateDiagnosticsService<P> {
         context: &EstateDiagnosticsContext,
     ) -> Result<EstateRebuildData, EstateDiagnosticsFailure> {
         let (_, snapshot) = self.current(EstateDiagnosticsOperation::Rebuild, request, context)?;
-        Ok(EstateRebuildData { state: snapshot.rebuild })
+        Ok(EstateRebuildData { state: snapshot.rebuild, matrix: snapshot.matrix })
     }
 
     pub fn timing(

@@ -864,7 +864,10 @@ struct AriaSurfaceV2Tests {
 
         let rebuild = try await dispatcher.dispatch(name: "moot_rebuild_status", arguments: .object([:]))
         let rebuildData = rebuild.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
-        #expect(rebuildData == ["state": .string("idle")])
+        #expect(rebuildData == ["state": .string("idle"), "matrix": .object([
+            "phase": .string("idle"), "generation": .null, "watermark": .string("0.0.0"),
+            "reason": .null, "migration_phase": .string("complete"), "reclaimed_bytes": .integer(0)
+        ])])
         #expect(rebuild.objectValue?["structuredContent"]?.objectValue?["meta"]?.objectValue?["effect"] == .string("read"))
     }
 
