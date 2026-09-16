@@ -29,7 +29,7 @@
 use corpus_kit::{
     CorpusContentConfiguration, CorpusContentEngine, CorpusContentId,
     CorpusContentRecord, CorpusContentSource, CorpusContentChangeBatch, CorpusKitError,
-    CorpusOperatingMode, CorpusIndexUnitPolicy, EmbeddingModelConfig,
+    CorpusOperatingMode, CorpusIndexUnitPolicy, EmbeddingModelConfig, RetrainingBudget,
 };
 use corpus_kit::content_digest;
 use corpus_kit_providers::RandomIndexingProvider;
@@ -92,6 +92,7 @@ struct FaultSource {
     records: Mutex<BTreeMap<String, CorpusContentRecord>>,
     /// When true, the next `record()` call returns `Err` and resets the flag.
     fail_on_next_record: AtomicBool,
+    last_requested_limit: Mutex<Option<usize>>,
 }
 
 impl FaultSource {
@@ -99,6 +100,7 @@ impl FaultSource {
         Arc::new(Self {
             records: Mutex::new(BTreeMap::new()),
             fail_on_next_record: AtomicBool::new(false),
+            last_requested_limit: Mutex::new(None),
         })
     }
 
@@ -152,6 +154,29 @@ impl CorpusContentSource for FaultSource {
         ids.sort();
         Ok(ids)
     }
+
+    fn active_content_ids_limited(&self, limit: usize) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        *self.last_requested_limit.lock().unwrap() = Some(limit);
+        let mut ids = self.active_content_ids()?;
+        ids.truncate(limit);
+        Ok(ids)
+    }
+}
+
+#[test]
+fn bounded_reindex_refuses_cap_plus_one_and_retains_serving_generation() {
+    let (storage, _guard) = make_scratch_storage();
+    let source = FaultSource::new();
+    for index in 1..=3 { source.put(&format!("bounded-{index}"), &format!("bounded corpus row {index}")); }
+    let engine = make_ri_engine(storage.clone(), source.clone());
+    engine.reindex(NOW_MILLIS).expect("initial reindex");
+    let before = serving_generation(storage.as_ref(), RI_MODEL_ID);
+    let report = engine.reindex_with_budget(
+        NOW_MILLIS, &RetrainingBudget::new(2, 30, None)).expect("bounded report");
+    assert!(report.completed_model_ids.is_empty());
+    assert_eq!(*source.last_requested_limit.lock().unwrap(), Some(3));
+    assert_eq!(serving_generation(storage.as_ref(), RI_MODEL_ID), before);
+    assert_eq!(vector_row_count(storage.as_ref(), RI_MODEL_ID), 3 * LANES_PER_ITEM);
 }
 
 // ── Storage inspection helpers ──────────────────────────────────────────────
