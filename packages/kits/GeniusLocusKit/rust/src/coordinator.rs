@@ -2799,28 +2799,12 @@ impl EstateCoordinator {
             });
         }
 
-        // Drain 5 of N: fact extraction. Row debt — drawers whose bit 28 is
-        // clear for the active recipe — paid down only by the bounded batch
-        // inside a dreaming cycle, so `in_flight` is 0. ALWAYS rendered: this
-        // lane exists so a caller can settle an estate on product state
-        // rather than by running blind dreaming cycles, and an absent lane
-        // would read as "nothing owed". Without a registered extractor the
-        // debt cannot move; the detail says so. Mirrors the Swift entry.
-        let fact_debt = estate.count_fact_extraction_debt().map_err(|e| {
-            GeniusLocusKitError::UnderlyingEstateFailure {
-                reason: format!("count_fact_extraction_debt: {e:?}"),
-            }
-        })?;
-        let fact_detail = if self.registered_fact_extractor(handle).is_none() {
-            "drawers awaiting fact extraction for the active recipe; no extractor registered"
-        } else {
-            "drawers awaiting fact extraction for the active recipe"
-        };
+        let facts = self.fact_extraction_work_status(handle, (queuekit::wall_now_secs() * 1000.0) as i64)?;
         statuses.push(DrainStatus {
             name: DrainStatus::FACT_EXTRACTION_NAME.to_string(),
-            pending: fact_debt,
-            in_flight: 0,
-            detail: Some(fact_detail.to_string()),
+            pending: facts.runnable + facts.retrying + facts.blocked + facts.rejected,
+            in_flight: facts.in_flight,
+            detail: Some(facts.detail()),
         });
 
         Ok(statuses)
