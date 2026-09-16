@@ -8611,7 +8611,7 @@ mod tests {
     #[test]
     fn active_corpus_ids_filter_before_deterministic_limit() {
         let store = open_store();
-        let mut empty = sample_drawer("empty", "w", "r", "");
+        let mut empty = sample_drawer("empty", "w", "r", "placeholder");
         empty.filed_at = 1;
         let mut dataset = sample_drawer("dataset", "w", "r", "dataset");
         dataset.filed_at = 2;
@@ -8628,6 +8628,20 @@ mod tests {
         for drawer in [&empty, &dataset, &tombstoned, &beta, &alpha, &gamma] {
             store.add_drawer(drawer, NOW).unwrap();
         }
+        let mut empty_content = BTreeMap::new();
+        empty_content.insert("content".to_string(), TypedValue::Text(String::new()));
+        store
+            .storage()
+            .row_store()
+            .update(
+                T_DRAWERS,
+                empty_content,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(tid("empty")),
+                ),
+            )
+            .unwrap();
 
         assert_eq!(
             store.active_corpus_content_ids_limited(2).unwrap(),
