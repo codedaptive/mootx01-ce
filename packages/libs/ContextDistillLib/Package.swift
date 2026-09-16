@@ -7,7 +7,7 @@
 // PC/Linux (Rust). Complete-form reducers and passage views are deterministic;
 // Foundation regex and local scanners implement the narrow supported grammars.
 //
-// Depends on nothing. Sits alongside AriaLexiconLib as a pure-vocabulary library.
+// Depends only on product settings. Sits alongside AriaLexiconLib as a pure-vocabulary library.
 
 import PackageDescription
 
@@ -23,9 +23,15 @@ let package = Package(
             targets: ["ContextDistillLib"]
         ),
     ],
+    dependencies: [
+        .package(name: "MootProductIdentity", path: "../MootProductIdentity"),
+    ],
     targets: [
         .target(
-            name: "ContextDistillLib"
+            name: "ContextDistillLib",
+            dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+            ]
         ),
         .testTarget(
             name: "ContextDistillLibTests",
