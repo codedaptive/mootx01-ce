@@ -174,6 +174,14 @@ pub trait CorpusContentSource: Send + Sync {
     /// Every live content ID, in deterministic ascending ID order — the
     /// streaming order rebuilds use.
     fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError>;
+
+    /// At most `limit` live IDs in deterministic order. Storage-backed
+    /// production sources must override and push the limit into their query.
+    fn active_content_ids_limited(&self, limit: usize) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        let mut ids = self.active_content_ids()?;
+        ids.truncate(limit);
+        Ok(ids)
+    }
 }
 
 /// The full canonical-content authority — the standalone-mode surface.
