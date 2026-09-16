@@ -73,43 +73,94 @@ impl FactExtractorModelStore {
 
     pub fn upsert(&self, row: &FactExtractorModelRow) -> Result<(), LocusKitError> {
         validate(row)?;
-        let mut values = BTreeMap::new();
-        values.insert("recipe_id".into(), TypedValue::Text(row.recipe_id.clone()));
-        values.insert(
-            "provider_id".into(),
-            TypedValue::Text(row.provider_id.clone()),
-        );
-        values.insert("model_id".into(), TypedValue::Text(row.model_id.clone()));
-        values.insert(
-            "model_version".into(),
-            TypedValue::Text(row.model_version.clone()),
-        );
-        values.insert(
-            "schema_version".into(),
-            TypedValue::Text(row.schema_version.clone()),
-        );
-        values.insert(
-            "extractor_kind".into(),
-            TypedValue::Text(row.extractor_kind.clone()),
-        );
-        values.insert(
-            "maximum_input_characters".into(),
-            TypedValue::Int(row.maximum_input_characters),
-        );
-        values.insert(
-            "maximum_facts_per_source".into(),
-            TypedValue::Int(row.maximum_facts_per_source),
-        );
-        values.insert(
-            "is_active".into(),
-            TypedValue::Int(if row.is_active { 1 } else { 0 }),
-        );
-        values.insert("ext".into(), TypedValue::Null);
-        self.storage
-            .row_store()
-            .upsert(T_MODELS, values, &["recipe_id".into()])
-            .map_err(map_err)?;
-        Ok(())
+        let store = self.storage.row_store();
+        store.begin_transaction().map_err(map_err)?;
+        let result = (|| {
+            let existing = store
+                .query(
+                    T_MODELS,
+                    Some(&StoragePredicate::Eq(
+                        Column::new(T_MODELS, "recipe_id"),
+                        TypedValue::Text(row.recipe_id.clone()),
+                    )),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(map_err)?
+                .first()
+                .map(row_from)
+                .transpose()?;
+            let invalidates_debt = existing.as_ref().map_or(row.is_active, |previous| {
+                previous.provider_id != row.provider_id
+                    || previous.model_id != row.model_id
+                    || previous.model_version != row.model_version
+                    || previous.schema_version != row.schema_version
+                    || previous.is_active != row.is_active
+            });
+
+            if row.is_active {
+                let mut off = BTreeMap::new();
+                off.insert("is_active".into(), TypedValue::Int(0));
+                store
+                    .update(
+                        T_MODELS,
+                        off,
+                        &StoragePredicate::Eq(
+                            Column::new(T_MODELS, "is_active"),
+                            TypedValue::Int(1),
+                        ),
+                    )
+                    .map_err(map_err)?;
+            }
+
+            let mut values = BTreeMap::new();
+            values.insert("recipe_id".into(), TypedValue::Text(row.recipe_id.clone()));
+            values.insert(
+                "provider_id".into(),
+                TypedValue::Text(row.provider_id.clone()),
+            );
+            values.insert("model_id".into(), TypedValue::Text(row.model_id.clone()));
+            values.insert(
+                "model_version".into(),
+                TypedValue::Text(row.model_version.clone()),
+            );
+            values.insert(
+                "schema_version".into(),
+                TypedValue::Text(row.schema_version.clone()),
+            );
+            values.insert(
+                "extractor_kind".into(),
+                TypedValue::Text(row.extractor_kind.clone()),
+            );
+            values.insert(
+                "maximum_input_characters".into(),
+                TypedValue::Int(row.maximum_input_characters),
+            );
+            values.insert(
+                "maximum_facts_per_source".into(),
+                TypedValue::Int(row.maximum_facts_per_source),
+            );
+            values.insert(
+                "is_active".into(),
+                TypedValue::Int(if row.is_active { 1 } else { 0 }),
+            );
+            values.insert("ext".into(), TypedValue::Null);
+            store
+                .upsert(T_MODELS, values, &["recipe_id".into()])
+                .map_err(map_err)?;
+            if invalidates_debt {
+                clear_extraction_debt(store.as_ref())?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => store.commit_transaction().map_err(map_err),
+            Err(error) => {
+                let _ = store.rollback_transaction();
+                Err(error)
+            }
+        }
     }
 
     pub fn activate(&self, recipe_id: &str) -> Result<usize, LocusKitError> {
@@ -149,45 +200,7 @@ impl FactExtractorModelStore {
             on.insert("is_active".into(), TypedValue::Int(1));
             store.update(T_MODELS, on, &target_pred).map_err(map_err)?;
 
-            let carriers = store
-                .query_projected(
-                    T_DRAWERS,
-                    &["id", "operationalBitmap"],
-                    Some(&StoragePredicate::BitmaskAll {
-                        column: Column::new(T_DRAWERS, "operationalBitmap"),
-                        mask: DrawerFeatureFlags::FACTS_EXTRACTED,
-                    }),
-                    &[],
-                    None,
-                    None,
-                )
-                .map_err(map_err)?;
-            let mut cleared = 0;
-            for carrier in carriers {
-                let Some(TypedValue::Text(id)) = carrier.get("id") else {
-                    continue;
-                };
-                let current = match carrier.get("operationalBitmap") {
-                    Some(TypedValue::Bitmap(value)) | Some(TypedValue::Int(value)) => *value,
-                    _ => 0,
-                };
-                let mut values = BTreeMap::new();
-                values.insert(
-                    "operationalBitmap".into(),
-                    TypedValue::Bitmap(current & !DrawerFeatureFlags::FACTS_EXTRACTED),
-                );
-                cleared += store
-                    .update(
-                        T_DRAWERS,
-                        values,
-                        &StoragePredicate::Eq(
-                            Column::new(T_DRAWERS, "id"),
-                            TypedValue::Text(id.clone()),
-                        ),
-                    )
-                    .map_err(map_err)?;
-            }
-            Ok(cleared)
+            clear_extraction_debt(store.as_ref())
         })();
         match result {
             Ok(count) => {
@@ -200,6 +213,45 @@ impl FactExtractorModelStore {
             }
         }
     }
+}
+
+fn clear_extraction_debt(store: &dyn persistence_kit::RowStore) -> Result<usize, LocusKitError> {
+    let carriers = store
+        .query_projected(
+            T_DRAWERS,
+            &["id", "operationalBitmap"],
+            Some(&StoragePredicate::BitmaskAll {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                mask: DrawerFeatureFlags::FACTS_EXTRACTED,
+            }),
+            &[],
+            None,
+            None,
+        )
+        .map_err(map_err)?;
+    let mut cleared = 0;
+    for carrier in carriers {
+        let Some(TypedValue::Text(id)) = carrier.get("id") else {
+            continue;
+        };
+        let current = match carrier.get("operationalBitmap") {
+            Some(TypedValue::Bitmap(value)) | Some(TypedValue::Int(value)) => *value,
+            _ => 0,
+        };
+        let mut values = BTreeMap::new();
+        values.insert(
+            "operationalBitmap".into(),
+            TypedValue::Bitmap(current & !DrawerFeatureFlags::FACTS_EXTRACTED),
+        );
+        cleared += store
+            .update(
+                T_DRAWERS,
+                values,
+                &StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(id.clone())),
+            )
+            .map_err(map_err)?;
+    }
+    Ok(cleared)
 }
 
 fn validate(row: &FactExtractorModelRow) -> Result<(), LocusKitError> {
