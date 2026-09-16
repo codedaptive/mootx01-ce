@@ -599,12 +599,12 @@ fn is_leap(y: u64) -> bool {
 /// Proposed / Endorsed / Accepted):
 ///
 /// - `accept` (user-only): activates via the existing
-///   `respond_to_tunnel` path, recording `reviewed_by` in the review
+///   `respond_to_tunnel` path, recording the authenticated reviewer in the review
 ///   ledger. Edge activation is human-authoritative — a model reviewer
 ///   can NEVER activate, no matter how many endorsements accumulate.
-/// - `reject` with `reviewed_by` "user": withdraws permanently
+/// - `reject` by the authenticated user: withdraws permanently
 ///   (durable dedup — never re-proposed).
-/// - `reject` with a model `reviewed_by`: the AI-objection path
+/// - `reject` by an authenticated model: the AI-objection path
 ///   (`object_to_tunnel`) — withdraws only when no model endorsement
 ///   exists (reopenable); otherwise the tunnel stays proposed and is
 ///   marked contested for user attention.
