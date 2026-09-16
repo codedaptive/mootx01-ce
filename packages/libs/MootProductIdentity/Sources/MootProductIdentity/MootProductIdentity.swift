@@ -35,6 +35,7 @@
 // either port's parity test fails until all three agree.
 
 import Foundation
+import CoreFoundation
 #if canImport(Security)
 import Security
 #endif
@@ -346,6 +347,12 @@ public enum MootProductIdentity {
         /// transaction that resets the debt).
         public let factExtractionModelVersion: String?
 
+        /// Maximum documents admitted to LSA retraining (`corpus.lsa_retraining.max_documents`).
+        public let corpusLSARetrainingMaxDocuments: Int
+        /// Maximum Jacobi sweeps (`corpus.lsa_retraining.max_sweeps`).
+        public let corpusLSARetrainingMaxSweeps: Int
+        /// Cooperative wall-clock budget (`corpus.lsa_retraining.timeout_milliseconds`).
+        public let corpusLSARetrainingTimeoutMilliseconds: Int
         /// `recall_distillation.max_source_bytes`: UTF-8 admission limit (default
         /// 32768). Larger bodies are returned intact. Config can lower, not raise,
         /// the safety ceiling; nonpositive integers clamp to 1, invalid values default.
@@ -392,11 +399,15 @@ public enum MootProductIdentity {
                 .flatMap { $0.isEmpty ? nil : $0 }
             let modelVersion = (factExtraction?["model_version"] as? String)
                 .flatMap { $0.isEmpty ? nil : $0 }
+            let lsa = (root["corpus"] as? [String: Any])?["lsa_retraining"] as? [String: Any]
             return Settings(
                 daemonStatsStore: storeOrNil,
                 factExtractionCoreAIAsset: coreaiAsset,
                 factExtractionCoreAITokenizer: coreaiTokenizer,
                 factExtractionModelVersion: modelVersion,
+                corpusLSARetrainingMaxDocuments: positiveInteger(lsa?["max_documents"], fallback: 2048),
+                corpusLSARetrainingMaxSweeps: positiveInteger(lsa?["max_sweeps"], fallback: 30),
+                corpusLSARetrainingTimeoutMilliseconds: positiveInteger(lsa?["timeout_milliseconds"], fallback: 30000),
                 recallDistillationMaxSourceBytes: min(32768, positiveInteger(
                     (root["recall_distillation"] as? [String: Any])?["max_source_bytes"], fallback: 32768)))
         }
@@ -471,12 +482,18 @@ public enum MootProductIdentity {
             factExtractionCoreAIAsset: String?,
             factExtractionCoreAITokenizer: String?,
             factExtractionModelVersion: String?,
+            corpusLSARetrainingMaxDocuments: Int = 2048,
+            corpusLSARetrainingMaxSweeps: Int = 30,
+            corpusLSARetrainingTimeoutMilliseconds: Int = 30000,
             recallDistillationMaxSourceBytes: Int = 32768
         ) {
             self.daemonStatsStore = daemonStatsStore
             self.factExtractionCoreAIAsset = factExtractionCoreAIAsset
             self.factExtractionCoreAITokenizer = factExtractionCoreAITokenizer
             self.factExtractionModelVersion = factExtractionModelVersion
+            self.corpusLSARetrainingMaxDocuments = corpusLSARetrainingMaxDocuments
+            self.corpusLSARetrainingMaxSweeps = corpusLSARetrainingMaxSweeps
+            self.corpusLSARetrainingTimeoutMilliseconds = corpusLSARetrainingTimeoutMilliseconds
             self.recallDistillationMaxSourceBytes = recallDistillationMaxSourceBytes
         }
     }

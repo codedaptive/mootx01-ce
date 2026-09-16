@@ -41,6 +41,10 @@ pub struct SvdResult {
     pub rank: usize,
 }
 
+/// Cooperative cancellation discards partial decomposition factors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JacobiSvdCancelled;
+
 pub struct JacobiSvd;
 
 impl JacobiSvd {
@@ -55,6 +59,16 @@ impl JacobiSvd {
     /// # Panics
     /// Panics if A is empty, non-rectangular, m < n, or rank < 1.
     pub fn decompose(a: &[Vec<f32>], rank: usize, sweeps: usize) -> SvdResult {
+        Self::decompose_cancellable(a, rank, sweeps, || false)
+            .expect("constant cancellation predicate cannot cancel")
+    }
+
+    /// Decompose with cancellation before allocation and between tournament rounds.
+    pub fn decompose_cancellable(
+        a: &[Vec<f32>], rank: usize, sweeps: usize,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<SvdResult, JacobiSvdCancelled> {
+        if should_cancel() { return Err(JacobiSvdCancelled); }
         let m = a.len();
         assert!(m > 0, "JacobiSvd: A must have at least one row");
         let n = a[0].len();
@@ -109,10 +123,14 @@ impl JacobiSvd {
             .map(|x| x.get())
             .unwrap_or(1);
         for _ in 0..sweeps {
+            if should_cancel() { return Err(JacobiSvdCancelled); }
             for round in &rounds {
+                if should_cancel() { return Err(JacobiSvdCancelled); }
                 Self::process_round(&mut w, &mut v, m, n, round, workers, eps);
             }
         }
+
+        if should_cancel() { return Err(JacobiSvdCancelled); }
 
         // Compute singular values σ_j = ||W[:,j]||.
         let mut sigma_all = vec![0.0_f32; n];
@@ -184,12 +202,12 @@ impl JacobiSvd {
             }
         }
 
-        SvdResult {
+        Ok(SvdResult {
             u: u_out,
             singular_values: sigma_k,
             vt: vt_out,
             rank: k,
-        }
+        })
     }
 
     /// Round-robin tournament schedule for `n` columns (the classic circle
@@ -742,5 +760,26 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sec03_cancellation_tests {
+    use super::*;
+    #[test]
+    fn cancellation_discards_partial_factors() {
+        let a = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        assert!(JacobiSvd::decompose_cancellable(&a, 2, 30, || true).is_err());
+        let mut checks = 0;
+        assert!(JacobiSvd::decompose_cancellable(&a, 2, 30, || {
+            checks += 1;
+            checks == 3
+        }).is_err());
+        assert_eq!(checks, 3);
+        let regular = JacobiSvd::decompose(&a, 2, 30);
+        let cancellable = JacobiSvd::decompose_cancellable(&a, 2, 30, || false).unwrap();
+        assert_eq!(regular.singular_values, cancellable.singular_values);
+        assert_eq!(regular.u, cancellable.u);
+        assert_eq!(regular.vt, cancellable.vt);
     }
 }
