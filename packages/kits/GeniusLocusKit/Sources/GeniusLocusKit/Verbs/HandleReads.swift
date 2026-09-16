@@ -43,6 +43,15 @@ public extension GeniusLocusKit {
         return try await estate.allDrawers(hydrationLevel: hydrationLevel, limit: limit)
     }
 
+    /// The single drawer with this storage row id, or nil when the estate has
+    /// no such row. Tombstoned rows are returned like any other; a caller that
+    /// wants believed rows only filters on the result. Delegates to
+    /// `Estate.drawerById(rowID:)`.
+    func drawerById(in handle: EstateHandle, rowID: String) async throws -> Drawer? {
+        let estate = try estate(for: handle)
+        return try await estate.drawerById(rowID: rowID)
+    }
+
     /// The drawers whose storage ids are in `ids`, at the given hydration
     /// level, with no frame applied. Callers that need the sensitivity gate
     /// use `getDrawers(in:ids:matchingFrame:hydrationLevel:)` instead.
