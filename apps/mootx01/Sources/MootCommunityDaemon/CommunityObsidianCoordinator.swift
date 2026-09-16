@@ -67,7 +67,7 @@
 //
 // SIDECAR: obsidian-authorization.json
 // ───────────────────────────────────────────────────────────────────────────
-// { "vaultURL": "file:///...", "displayName": "...", "bookmarkData": "<base64>",
+// { "estateID": "<uuid>", "vaultURL": "file:///...", "displayName": "...", "bookmarkData": "<base64>",
 //   "needsRenewal": false, "renewalReason": null }
 //
 // SIDECAR: obsidian-state.json
@@ -92,6 +92,8 @@ private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, categ
 
 /// Persisted Obsidian authorization state (obsidian-authorization.json).
 private struct PersistedAuthorization: Codable, Sendable {
+    /// Estate that granted this authorization. Authorization never crosses estates.
+    var estateID: UUID
     /// Resolved file URL as a string ("file:///path/to/vault").
     var vaultURL: String
     /// Human-readable vault display name.
@@ -234,7 +236,8 @@ public actor CommunityObsidianCoordinator: Sendable {
         let state = readState()
         guard state.enabled else { return }
         // Guard: authorization must be present and valid.
-        guard let auth = readAuthorization(), !auth.needsRenewal else { return }
+        guard let auth = readAuthorization(), auth.estateID == handle.estateUUID,
+              !auth.needsRenewal else { return }
         guard let vaultURL = URL(string: auth.vaultURL) else { return }
         do {
             try await startService(vaultURL: vaultURL)
@@ -260,7 +263,7 @@ public actor CommunityObsidianCoordinator: Sendable {
     ///   6. Runtime running       → idle (with checkpoint if available).
     public func status() async -> JSONValue {
         let state = readState()
-        let auth = readAuthorization()
+        let auth = readAuthorization().flatMap { $0.estateID == handle.estateUUID ? $0 : nil }
 
         // Rule 1: no vault selected → blocked.
         guard let auth else {
@@ -333,7 +336,7 @@ public actor CommunityObsidianCoordinator: Sendable {
     /// - valid:        Vault selected and authorization is current.
     /// - needsRenewal: Vault was authorized but access was revoked/expired.
     public func authorization() async -> JSONValue {
-        guard let auth = readAuthorization() else {
+        guard let auth = readAuthorization(), auth.estateID == handle.estateUUID else {
             return ObsidianAuthorization.missing.toJSONValue()
         }
         if auth.needsRenewal, let reason = auth.renewalReason {
@@ -386,6 +389,7 @@ public actor CommunityObsidianCoordinator: Sendable {
 
         // Persist the authorization.
         let auth = PersistedAuthorization(
+            estateID: handle.estateUUID,
             vaultURL: vaultURL.absoluteString,
             displayName: displayName,
             bookmarkData: bookmark.base64EncodedString(),
@@ -414,7 +418,7 @@ public actor CommunityObsidianCoordinator: Sendable {
     ///   - Returns enabled.
     public func enable() async -> JSONValue {
         // Check authorization.
-        guard let auth = readAuthorization() else {
+        guard let auth = readAuthorization(), auth.estateID == handle.estateUUID else {
             return ObsidianEnableOutcome.refused(reason: "vault-authorization-missing").toJSONValue()
         }
         guard !auth.needsRenewal else {
@@ -528,7 +532,7 @@ public actor CommunityObsidianCoordinator: Sendable {
         }
 
         // Check authorization.
-        guard let auth = readAuthorization(), !auth.needsRenewal,
+        guard let auth = readAuthorization(), auth.estateID == handle.estateUUID, !auth.needsRenewal,
               let vaultURL = URL(string: auth.vaultURL) else {
             return ObsidianRetryOutcome.refused(reason: "sync-not-retryable").toJSONValue()
         }
