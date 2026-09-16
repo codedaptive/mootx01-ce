@@ -5772,9 +5772,8 @@ public actor DrawerStore {
     }
 
     public func countFactExtractionDebt() async throws -> Int {
-        try await storage.rowStore.query(
-            table: "drawers", where: Self.factExtractionDebtPredicate,
-            orderBy: [], limit: nil, offset: nil, columns: ["id"]).count
+        try await storage.rowStore.count(
+            table: "drawers", where: Self.factExtractionDebtPredicate)
     }
 
     private static var factExtractionDebtPredicate: StoragePredicate {
