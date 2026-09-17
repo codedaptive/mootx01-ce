@@ -165,7 +165,7 @@ pub fn installed_version(plugin_id: &str, home: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn installed_entry(plugin_id: &str, home: &Path) -> Option<Value> {
+pub(crate) fn installed_entry(plugin_id: &str, home: &Path) -> Option<Value> {
     let path = home
         .join(".claude")
         .join("plugins")
