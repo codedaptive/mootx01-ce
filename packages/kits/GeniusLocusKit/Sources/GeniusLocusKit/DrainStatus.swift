@@ -234,14 +234,23 @@ extension GeniusLocusKit {
             ))
         }
 
-        let facts = try await factExtractionWorkStatus(handle, now: Date())
-        statuses.append(DrainStatus(
-            name: DrainStatus.factExtractionName,
-            pending: facts.runnable + facts.retrying + facts.blocked,
-            inFlight: facts.inFlight,
-            detail: facts.detail,
-            rejected: facts.rejected
-        ))
+        // With the master preference off nothing is owed: the lane reads
+        // idle and says why, so a settle loop on an estate that turned
+        // extraction off (the Rust artifact build) finishes.
+        if (try? await provisionedPreference(.factExtraction, for: handle)) == .off {
+            statuses.append(DrainStatus(
+                name: DrainStatus.factExtractionName, pending: 0, inFlight: 0,
+                detail: "fact_extraction off"))
+        } else {
+            let facts = try await factExtractionWorkStatus(handle, now: Date())
+            statuses.append(DrainStatus(
+                name: DrainStatus.factExtractionName,
+                pending: facts.runnable + facts.retrying + facts.blocked,
+                inFlight: facts.inFlight,
+                detail: facts.detail,
+                rejected: facts.rejected
+            ))
+        }
 
         return statuses
     }
