@@ -1647,12 +1647,22 @@ impl AutonomicGovernor {
                     coord.complete_duty_job(&self.handle, id, outcome.is_ok());
                 }
             }
-            if let Err(e) = outcome {
-                eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e);
-            } else {
-                // Advance the shared baseline so ALPHA's delta window starts
-                // from this retrain point. Persisted by save_daemon_state below.
-                self.dreaming.advance_reindex_vocab(live_vocab);
+            // F11: `Ok(false)` is a DEGRADED retrain (a backstop was reached,
+            // the serving basis was kept) — must not advance the shared
+            // baseline, or the vocabulary drift that hit the backstop is
+            // never revisited by a later THETA/ALPHA cycle. Before this fix
+            // `Ok(())` covered both outcomes, so a degraded retrain advanced
+            // the baseline exactly like a full one.
+            match outcome {
+                Err(e) => eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e),
+                Ok(false) => eprintln!(
+                    "AutonomicGovernor: REM-THETA basis-retrain DEGRADED (backstop reached); baseline not advanced"
+                ),
+                Ok(true) => {
+                    // Advance the shared baseline so ALPHA's delta window starts
+                    // from this retrain point. Persisted by save_daemon_state below.
+                    self.dreaming.advance_reindex_vocab(live_vocab);
+                }
             }
         }
 
@@ -1693,8 +1703,14 @@ impl AutonomicGovernor {
                                 coord.complete_duty_job(&duty_handle, id, outcome.is_ok());
                             }
                         }
+                        // F11: `Ok(false)` is a DEGRADED retrain (a backstop was
+                        // reached, the serving basis was kept) — treated the same
+                        // as an error for the vocabulary-baseline gate above
+                        // (`check_corpus_growth` only advances on `true`), so a
+                        // degraded retrain re-fires next cycle instead of the
+                        // drift it hit the backstop under being silently accepted.
                         match outcome {
-                            Ok(()) => true,
+                            Ok(completed) => completed,
                             Err(error) => {
                                 eprintln!(
                                     "AutonomicGovernor: corpus growth retrain failed: {error:?}"

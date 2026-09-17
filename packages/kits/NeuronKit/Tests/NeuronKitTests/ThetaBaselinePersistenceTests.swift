@@ -35,9 +35,21 @@ import GeniusLocusKit
 private actor BPHook: ThetaBasisRetrainHook {
     private(set) var callCount: Int = 0
 
-    func retrain(now: Date) async throws {
-        callCount += 1
+    /// F11: when true, `retrain(now:)` reports a DEGRADED retrain (a
+    /// backstop reached, serving basis kept) instead of a full one.
+    var shouldDegrade: Bool
+
+    init(shouldDegrade: Bool = false) {
+        self.shouldDegrade = shouldDegrade
     }
+
+    @discardableResult
+    func retrain(now: Date) async throws -> Bool {
+        callCount += 1
+        return !shouldDegrade
+    }
+
+    func setShouldDegrade(_ v: Bool) { shouldDegrade = v }
 }
 
 /// Minimal sink — THETA needs propose and recordCycleDiary.
@@ -53,7 +65,8 @@ private actor BPGrowthProbe: CorpusGrowthProbe {
     private(set) var vocab: Int
     init(vocab: Int) { self.vocab = vocab }
     func vocabAnchor() async throws -> Int { vocab }
-    func reindex(now: Date) async throws {}
+    @discardableResult
+    func reindex(now: Date) async throws -> Bool { true }
     func setVocab(_ v: Int) { vocab = v }
 }
 
@@ -270,5 +283,43 @@ struct ThetaBaselinePersistenceTests {
         let callsAfterRestart = await hook2.callCount
         #expect(callsAfterRestart == 0,
                 "restarted daemon must NOT fire retrain when vocab is unchanged since last retrain")
+    }
+
+    // BP-5 (F11): a DEGRADED THETA retrain (a document/time backstop reached,
+    // serving basis kept) must not advance lastReindexVocab. Before the fix
+    // `ThetaBasisRetrainHook.retrain(now:)` returned Void, so a degraded
+    // retrain was indistinguishable from a full one and the baseline
+    // advanced regardless — the vocabulary drift that hit the backstop was
+    // never revisited by a later cycle.
+    @Test("BP-5 (F11): a degraded THETA retrain does not advance lastReindexVocab")
+    func bp5_degradedRetrainDoesNotAdvanceBaseline() async throws {
+        let store = InMemoryDreamingPolicyStore(.default)
+        let probe = BPGrowthProbe(vocab: 700)
+        let hook = BPHook(shouldDegrade: true)
+
+        // First-ever cycle: sentinel (-1) fires the retrain, but it comes
+        // back DEGRADED, so the baseline must stay at the sentinel.
+        let daemon1 = makeConsolidationDaemon(store: store, probe: probe, hook: hook)
+        let now = Date(timeIntervalSinceReferenceDate: 500_000_000)
+        _ = try await daemon1.runThetaCycle(now: now)
+
+        let callsAfterFirst = await hook.callCount
+        #expect(callsAfterFirst == 1, "precondition: retrain fired on sentinel path")
+
+        let state = await daemon1.currentDaemonState_testOnly()
+        #expect(state.lastReindexVocab == -1,
+                "a DEGRADED retrain must leave lastReindexVocab at the sentinel, not advance to the live vocab")
+
+        // The next cycle must retry — the sentinel never cleared — rather
+        // than silently accepting the degraded basis as caught up.
+        await hook.setShouldDegrade(false)
+        let t2 = Date(timeIntervalSinceReferenceDate: 500_000_001)
+        _ = try await daemon1.runThetaCycle(now: t2)
+        let callsAfterSecond = await hook.callCount
+        #expect(callsAfterSecond == 2, "the next cycle must retry the retrain since the baseline never advanced")
+
+        let stateAfterSecond = await daemon1.currentDaemonState_testOnly()
+        #expect(stateAfterSecond.lastReindexVocab == 700,
+                "a full retrain on the retry must advance the baseline normally")
     }
 }
