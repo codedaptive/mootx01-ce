@@ -115,6 +115,41 @@ struct CKRecordMappingTests {
         #expect(metadataKeys.allSatisfy { $0.first?.isLetter == true })
     }
 
+    @Test("a live save clears the tombstone marker, so a changed-keys merge onto an earlier delete decodes live in both HLC representations")
+    func liveSaveClearsTheTombstoneMarker() throws {
+        let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
+        for representation in [HLCWireRepresentation.legacyPacked, .fullWidthV2] {
+            let rowKey = UUID()
+            let deleteHLC = HLC(physicalTime: 1000, logicalCount: 1, nodeID: 3)
+            let liveHLC = HLC(physicalTime: 2000, logicalCount: 0, nodeID: 3)
+
+            // The stored server record after a pushed delete.
+            let stored = CKRecordMapping.tombstoneRecord(
+                rowKey: rowKey, table: "items", kitID: "MyKit",
+                deleteHLC: deleteHLC, schemaVersion: 2, zone: zoneID, representation: representation)
+            #expect((stored[SyncTombstone.deletedFieldKey] as? NSNumber)?.intValue == 1)
+
+            // A later admitted live save for the same record ID.
+            let live = try CKRecordMapping.record(
+                from: ["note": .text("back")], table: "items", rowKey: rowKey,
+                hlc: liveHLC, schemaVersion: 2, kitID: "MyKit", zone: zoneID, representation: representation)
+            #expect((live[SyncTombstone.deletedFieldKey] as? NSNumber)?.intValue == 0,
+                    "a live record writes the marker as 0 so the key is in its changed set")
+            #expect(live.changedKeys().contains(SyncTombstone.deletedFieldKey))
+
+            // Model the `.changedKeys` server merge: every changed key of the
+            // live record overwrites the stored one.
+            for key in live.changedKeys() {
+                stored[key] = live[key]
+            }
+            let decoded = try CKRecordMapping.decode(stored, representation: representation)
+            #expect(!decoded.isTombstone, "the merged record must decode live, not as a tombstone with the live HLC")
+            #expect(decoded.hlc.physicalTime == 2000)
+            #expect(decoded.values["note"] == .text("back"))
+            #expect(decoded.values[SyncTombstone.deletedFieldKey] == nil, "sync metadata never reaches application values")
+        }
+    }
+
     @Test("future wire metadata namespace keys do not leak into application values")
     func futureMetadataKeyIsFiltered() throws {
         let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
