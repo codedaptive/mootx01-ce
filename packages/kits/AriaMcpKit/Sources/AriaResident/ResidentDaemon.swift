@@ -723,7 +723,11 @@ public enum AriaResident {
                     // estate. Threshold stays the sweep default; the signal's
                     // scheduler clock is the deterministic `now` it passes.
                     anomalyCycle: { now in
-                        try await kit.anomalyFlagSweep(handle: handle, now: now)
+                        // Enqueue only (§ DUTY_LIFECYCLE): the anomaly duty
+                        // worker scores owed rooms off the tick, and only the
+                        // rooms touched since their last scoring.
+                        _ = try await kit.enqueueDuty(.anomalySweep, in: handle, now: now)
+                        return 0
                     },
                     // Live span-encode cycle (Encoder Rerank contract sheet
                     // §10): encodes drawers whose bit 27 is clear under the
@@ -835,6 +839,7 @@ public enum AriaResident {
             (DutyKind.spanEncode, SpanEncodeSignal.defaultCadenceSeconds, true),
             (DutyKind.subjectBackfill, dutyCadence, true),
             (DutyKind.factExtraction, dutyCadence, true),
+            (DutyKind.anomalySweep, dutyCadence, true),
             (DutyKind.factsBackfill, SpanEncodeSignal.defaultCadenceSeconds, false),
             (DutyKind.retrainBasis, SpanEncodeSignal.defaultCadenceSeconds, false),
         ].map { kind, cadence, enqueues in

@@ -14,10 +14,9 @@
 //   B-3  anomalous_filter: Some(false) returns all hits when no drawers have
 //        bit 26 set (all drawers satisfy is_anomalous() == false).
 //
-// Note on the maintenance sweep: the anomaly-flag sweep is authored in Swift
-// and sets bit 26 via a serializable-transaction write. Rust tests verify the
-// gate semantics and builder API; full end-to-end sweep behaviour is covered
-// by AnomalyFlagSweepTests.swift in the GeniusLocusKit Swift test suite.
+// The sweep itself (whole-estate `anomaly_flag_sweep` and the incremental
+// duty) is covered by anomaly_sweep_duty_parity.rs; these tests verify the
+// gate semantics and builder API only.
 
 use std::sync::Arc;
 
