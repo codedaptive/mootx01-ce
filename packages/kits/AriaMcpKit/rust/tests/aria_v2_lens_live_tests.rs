@@ -195,6 +195,23 @@ fn selected_lens_rejects_invalid_ranges_and_limits() {
     }
 }
 
+/// `moot_lens_overlap` and `moot_lens_divergence` compare the selected estate
+/// with a second estate the caller can read; the selected estate's own id is
+/// refused exactly like an unregistered one (Swift twin:
+/// AriaV2GeniusLocusLensLowerAuthority.comparisonHandle).
+#[test]
+fn selected_comparison_lenses_refuse_the_estate_itself() {
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
+    let own_id = session.default.estate_id.hyphenated().to_string();
+    for tool in ["moot_lens_overlap", "moot_lens_divergence"] {
+        let result = session
+            .call(tool, &args!["comparison_estate_id" => own_id.as_str()])
+            .expect("a self comparison is an operational refusal, not a transport fault");
+        assert_eq!(result["isError"], serde_json::json!(true), "{tool}: {result:?}");
+        assert_eq!(result["structuredContent"]["error"]["code"], "lens_unavailable", "{tool}: {result:?}");
+    }
+}
+
 #[test]
 fn selected_lens_unknown_estate_is_an_estate_unavailable_refusal() {
     let session = SelectedV2Session::new(EstateRegistry::new_inmemory_bare());
