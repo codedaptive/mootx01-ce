@@ -49,13 +49,16 @@ public enum DutyKind: String, CaseIterable, Sendable, Codable {
     case factsBackfill = "facts-backfill"
     case factExtraction = "fact-extraction"
     case retrainBasis = "retrain-basis"
+    /// Room-cohesion anomaly scoring for rooms touched since their last
+    /// scoring (AnomalyFlagSweep.swift); debt is the owed-room count.
+    case anomalySweep = "anomaly-sweep"
 
     /// The QueueKit stream this duty's jobs ride.
     public var streamID: StreamID { StreamID(rawValue: "duty-" + rawValue) }
 
     /// Duties whose debt the resident pays on its own cadence. The retrain is
     /// requested by the dreaming theta hook and the upgrade, never inferred.
-    public static let residentDuties: [DutyKind] = [.spanEncode, .subjectBackfill, .factExtraction]
+    public static let residentDuties: [DutyKind] = [.spanEncode, .subjectBackfill, .factExtraction, .anomalySweep]
 }
 
 /// What one `drainDuty` call did.
@@ -69,6 +72,11 @@ public struct DutyDrainReport: Sendable, Equatable {
     /// Debt still owed after the drain (0 for the retrain).
     public let remainingDebt: Int
     public var madeProgress: Bool = false
+    /// Fact extraction only: no batch could be prepared because another
+    /// process holds the stream's drain lease (a dead process leaves a fresh
+    /// lease for one TTL). Debt is owed and the drainer stood down; a settle
+    /// loop waits out the TTL instead of reading this as settled.
+    public var leaseHeld: Bool = false
 }
 
 /// The job payload: the estate and the duty, so a job read from the queue
@@ -109,6 +117,8 @@ public extension GeniusLocusKit {
             let state = try await factExtractionWorkStatus(handle, now: now)
             // Rejected is settled (bits 28 and 29): reported, never owed.
             return state.runnable + state.inFlight + state.retrying + state.blocked
+        case .anomalySweep:
+            return try await anomalySweepOwedRooms(handle, now: now).count
         case .factsBackfill, .retrainBasis:
             return 0
         }
@@ -176,8 +186,12 @@ public extension GeniusLocusKit {
         let extraction = kind == .factExtraction
             ? try await prepareFactExtractionBatch(handle, limit: dutyLimits(for: handle).factExtractionBatch, now: now) : nil
         if kind == .factExtraction && extraction == nil {
-            return DutyDrainReport(kind: kind, jobsRun: 0, unitsPaid: 0,
+            var report = DutyDrainReport(kind: kind, jobsRun: 0, unitsPaid: 0,
                 remainingDebt: try await dutyDebt(kind, in: handle, now: now))
+            // An extractor is registered and debt is owed, so the only reason
+            // no batch was prepared is the stream lease held elsewhere.
+            report.leaseHeld = factExtractors[handle] != nil && report.remainingDebt > 0
+            return report
         }
         let batch = try await queue.drain(stream: kind.streamID)
         dutyQueued[handle]?.remove(kind)
@@ -244,11 +258,21 @@ public extension GeniusLocusKit {
         // came due during the sleep is due on the next pass. `now` itself is
         // never re-read from the system clock inside the loop.
         var now = now
+        // A stream lease left fresh by a dead process expires after one TTL;
+        // wait it out a few times before reading "held" as settled.
+        var leaseWaits = 0
         while true {
             _ = try await enqueueDuty(kind, in: handle, now: now)
             let report = try await drainDuty(kind, in: handle, now: now)
             total += report.unitsPaid
             if report.jobsRun > 0 { progress?(report) }
+            if report.leaseHeld && leaseWaits < Self.maxLeaseWaits {
+                leaseWaits += 1
+                let wait = DrainLease.defaultTTL + 1
+                try await Task.sleep(for: .seconds(wait))
+                now = now.addingTimeInterval(wait)
+                continue
+            }
             if report.jobsRun == 0 || !report.madeProgress {
                 // Fact extraction schedules a short retry after a malformed
                 // response. No progress plus something retrying is a wait,
@@ -272,6 +296,9 @@ public extension GeniusLocusKit {
     /// response retries at 30 s; longer backoffs mean provider trouble and
     /// the finisher exits instead). Zero when the retry is already due.
     private static let maxRetryWaitSeconds: TimeInterval = 120
+    /// How many lease TTLs a settle loop waits for another drainer's lease to
+    /// clear (a dead holder's lease clears after one).
+    private static let maxLeaseWaits = 4
     private func waitForFactRetry(_ handle: EstateHandle, now: Date) async throws -> TimeInterval? {
         let status = try await factExtractionWorkStatus(handle, now: now)
         guard status.retrying > 0, let at = status.nextRetryAt else { return nil }
@@ -300,6 +327,8 @@ public extension GeniusLocusKit {
         case .retrainBasis:
             try await reindexCorpus(handle: handle, now: now)
             return 1
+        case .anomalySweep:
+            return try await runAnomalySweepBatch(handle, limit: dutyLimits(for: handle).anomalySweepRooms, now: now)
         }
     }
 }

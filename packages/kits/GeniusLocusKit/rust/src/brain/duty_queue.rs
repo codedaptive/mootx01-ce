@@ -46,21 +46,25 @@ pub enum DutyKind {
     FactsBackfill,
     FactExtraction,
     RetrainBasis,
+    /// Room-cohesion anomaly scoring for rooms touched since their last
+    /// scoring (anomaly_flag_sweep.rs); debt is the owed-room count.
+    AnomalySweep,
 }
 
 impl DutyKind {
-    pub const ALL: [DutyKind; 5] = [
+    pub const ALL: [DutyKind; 6] = [
         DutyKind::SpanEncode,
         DutyKind::SubjectBackfill,
         DutyKind::FactsBackfill,
         DutyKind::FactExtraction,
         DutyKind::RetrainBasis,
+        DutyKind::AnomalySweep,
     ];
 
     /// Duties whose debt the resident pays on its own cadence. The retrain is
     /// requested by the dreaming theta hook and the upgrade, never inferred.
-    pub const RESIDENT: [DutyKind; 3] =
-        [DutyKind::SpanEncode, DutyKind::SubjectBackfill, DutyKind::FactExtraction];
+    pub const RESIDENT: [DutyKind; 4] =
+        [DutyKind::SpanEncode, DutyKind::SubjectBackfill, DutyKind::FactExtraction, DutyKind::AnomalySweep];
 
     /// Duties no standing signal owns; the tick drains these after the
     /// scheduler so each tick pays exactly one batch per duty.
@@ -74,6 +78,7 @@ impl DutyKind {
             DutyKind::FactsBackfill => "facts-backfill",
             DutyKind::FactExtraction => "fact-extraction",
             DutyKind::RetrainBasis => "retrain-basis",
+            DutyKind::AnomalySweep => "anomaly-sweep",
         }
     }
 
@@ -99,6 +104,11 @@ pub struct DutyDrainReport {
     /// Debt still owed after the drain (0 for the retrain).
     pub remaining_debt: usize,
     pub made_progress: bool,
+    /// Fact extraction only: no batch could be prepared because another
+    /// process holds the stream's drain lease (a dead process leaves a fresh
+    /// lease for one TTL). Debt is owed and the drainer stood down; a settle
+    /// loop waits out the TTL instead of reading this as settled.
+    pub lease_held: bool,
 }
 
 /// Batch limits and the fact source lease for the row-debt duties
@@ -116,11 +126,13 @@ pub struct DutyLimits {
     /// Per-source in-flight fence while a model call runs, in seconds. It
     /// must exceed the extractor's request timeout.
     pub fact_source_lease_seconds: u64,
+    /// Rooms scored per anomaly-sweep batch (each room is O(n²) in its size).
+    pub anomaly_sweep_rooms: usize,
 }
 
 impl Default for DutyLimits {
     fn default() -> Self {
-        Self { fact_extraction_batch: 16, subject_backfill_batch: 32, fact_source_lease_seconds: 120 }
+        Self { fact_extraction_batch: 16, subject_backfill_batch: 32, fact_source_lease_seconds: 120, anomaly_sweep_rooms: 8 }
     }
 }
 
@@ -131,6 +143,7 @@ impl DutyLimits {
             fact_extraction_batch: settings.duty_fact_extraction_batch.max(1),
             subject_backfill_batch: settings.duty_subject_backfill_batch.max(1),
             fact_source_lease_seconds: settings.duty_fact_source_lease_seconds.max(1),
+            anomaly_sweep_rooms: settings.duty_anomaly_sweep_rooms.max(1),
         }
     }
 }
@@ -190,6 +203,7 @@ impl EstateCoordinator {
                 let state = self.fact_extraction_work_status(handle, now)?;
                 return Ok(state.runnable + state.in_flight + state.retrying + state.blocked);
             }
+            DutyKind::AnomalySweep => return Ok(self.anomaly_sweep_owed_rooms(handle, now)?.len()),
             DutyKind::FactsBackfill | DutyKind::RetrainBasis => return Ok(0),
         };
         count.map_err(|e| Self::duty_failure(kind, format!("debt count: {e:?}")))
@@ -269,8 +283,12 @@ impl EstateCoordinator {
             self.prepare_fact_extraction_batch(handle, self.duty_limits(handle).fact_extraction_batch, now_millis)?
         } else { None };
         if kind == DutyKind::FactExtraction && extraction.is_none() {
+            let remaining_debt = self.duty_debt_at(handle, kind, now_millis)?;
+            // An extractor is registered and debt is owed, so the only reason
+            // no batch was prepared is the stream lease held elsewhere.
+            let lease_held = self.fact_extractors.contains_key(handle) && remaining_debt > 0;
             return Ok(DutyDrainReport { kind, jobs_run: 0, units_paid: 0,
-                remaining_debt: self.duty_debt_at(handle, kind, now_millis)?, made_progress: false });
+                remaining_debt, made_progress: false, lease_held });
         }
         self.ensure_dreaming_queue(handle);
         let batch = {
@@ -323,7 +341,7 @@ impl EstateCoordinator {
         if jobs_run > 0 && advanced && remaining > 0 {
             self.enqueue_duty(handle, kind, now_millis)?;
         }
-        Ok(DutyDrainReport { kind, jobs_run, units_paid, remaining_debt: remaining, made_progress: advanced })
+        Ok(DutyDrainReport { kind, jobs_run, units_paid, remaining_debt: remaining, made_progress: advanced , lease_held: false })
     }
 
     /// Claim the jobs on `kind`'s stream without running them, for a caller
@@ -424,6 +442,9 @@ impl EstateCoordinator {
                 .reindex_corpus(handle, now_millis)
                 .map(|_| 1)
                 .map_err(|e| Self::duty_failure(kind, format!("{e:?}"))),
+            DutyKind::AnomalySweep => {
+                self.run_anomaly_sweep_batch(handle, self.duty_limits(handle).anomaly_sweep_rooms, now_millis)
+            }
         }
     }
 }
