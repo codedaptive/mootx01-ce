@@ -355,12 +355,10 @@ pub fn run(
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
                 });
-            // Live anomaly closure (signal 12 — AnomalySweepSignal, P3a):
-            // mirrors Swift resident's `anomalyCycle: { now in
-            // kit.anomalyFlagSweep(handle:now:) }`. Uses the architecture-spec
-            // default threshold (ANOMALY_SWEEP_DEFAULT_THRESHOLD = 2.0),
-            // matching Swift's default-threshold parameter path. Returns the
-            // count of drawers whose bit 26 (is_anomalous) changed state.
+            // Live anomaly closure (signal 12 — AnomalySweepSignal): enqueue
+            // only (§ DUTY_LIFECYCLE). The anomaly duty worker scores owed
+            // rooms off the tick, and only the rooms touched since their last
+            // scoring. Twin of the Swift resident's `anomalyCycle`.
             let anomaly_coord = Arc::clone(&coord_for_hnsw);
             let anomaly_handle = handle_for_hnsw;
             let anomaly_cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(
@@ -371,12 +369,12 @@ pub fn run(
                         .as_millis() as i64;
                     match anomaly_coord.lock() {
                         Ok(coord) => coord
-                            .anomaly_flag_sweep(
+                            .enqueue_duty(
                                 &anomaly_handle,
-                                genius_locus_kit::brain::anomaly_flag_sweep::ANOMALY_SWEEP_DEFAULT_THRESHOLD,
+                                genius_locus_kit::brain::duty_queue::DutyKind::AnomalySweep,
                                 now_ms,
                             )
-                            .map(|count| count as i64)
+                            .map(|_| 0)
                             .map_err(|e| format!("{e:?}")),
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
@@ -438,6 +436,7 @@ pub fn run(
                 for (kind, seconds, enqueues) in [
                     (DutyKind::SpanEncode, fast, true),
                     (DutyKind::SubjectBackfill, cadence, true),
+                    (DutyKind::AnomalySweep, cadence, true),
                     (DutyKind::FactsBackfill, fast, false),
                     (DutyKind::RetrainBasis, fast, false),
                 ] {
@@ -1082,6 +1081,7 @@ fn extraction_cycle(
     let fact_handle = handle;
     let cycle: Arc<dyn Fn() -> Result<i64, String> + Send + Sync> = Arc::new(move || {
       let mut settled = 0;
+      let mut lease_waits = 0;
       loop {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1109,7 +1109,22 @@ fn extraction_cycle(
                 let limit = coord.duty_limits(&fact_handle).fact_extraction_batch;
                 let work = coord.prepare_fact_extraction_batch(&fact_handle, limit, now_ms)
                     .map_err(|e| format!("{e:?}"))?;
-                if work.is_none() { return Ok(settled); }
+                if work.is_none() {
+                    // The extractor is registered, so no batch means another
+                    // process holds the stream lease. In the settle cycle wait
+                    // out the lease TTL (a dead holder clears after one) a few
+                    // times before reading "held" as settled.
+                    if settle && lease_waits < 4
+                        && coord.duty_debt(&fact_handle,
+                            genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction).unwrap_or(0) > 0
+                    {
+                        lease_waits += 1;
+                        drop(coord);
+                        std::thread::sleep(std::time::Duration::from_secs_f64(queuekit::DRAIN_LEASE_TTL_SECS + 1.0));
+                        continue;
+                    }
+                    return Ok(settled);
+                }
                 let jobs = coord.claim_duty_jobs(&fact_handle,
                     genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
                     .map_err(|e| format!("{e:?}"))?;
