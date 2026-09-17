@@ -2,7 +2,7 @@
 //!
 //! Product mandate (Bob, 2026-09-16): every long-running function passes
 //! through QueueKit so it is resumable. The duties below were built in their
-//! impatient form only — the caller ran the batch inline — and a signal's work
+//! inline form only — the caller ran the batch itself — and a signal's work
 //! ran inside its emit closure with only a receipt reaching the queue. This
 //! module gives each duty a queued form on the shared per-estate
 //! `queue.sqlite` (the same PersistenceKit backend the encode and dreaming
@@ -18,7 +18,7 @@
 //! debt predicate (bit 27 clear, subject NULL, ssc_facts NULL, bit 28 clear)
 //! is the cursor: a batch is idempotent, so a job reclaimed after a crash
 //! simply runs again and the estate converges. The existing inline functions
-//! are unchanged and remain the impatient path; here they are the batch body
+//! are unchanged and remain the inline path; here they are the batch body
 //! a claimed job runs.
 //!
 //! Producer: `enqueue_duty` sends one job when the estate owes work on that
@@ -28,8 +28,9 @@
 //! batch per job, replies done, and re-enqueues while debt remains so the
 //! stream carries the work forward. The resident queues every owed duty
 //! before its signal tick and drains the duties no signal owns after it;
-//! `pay_duty_until_settled` is the impatient caller's loop (upgrade, dream,
-//! impatient import). Twin of Swift `DutyQueue.swift`.
+//! `pay_duty_until_settled` is the settle loop, the bulk path (`mootx01 drain`,
+//! `mootx01 upgrade`). "Impatient" names only the single-record write mode,
+//! never a duty (§ DUTY_LIFECYCLE). Twin of Swift `DutyQueue.swift`.
 
 use std::collections::HashSet;
 
@@ -97,14 +98,57 @@ pub struct DutyDrainReport {
     pub units_paid: usize,
     /// Debt still owed after the drain (0 for the retrain).
     pub remaining_debt: usize,
+    pub made_progress: bool,
 }
 
-/// Batch sizes per job. The subject figure matches the `dream` finisher
-/// (256 per pass); fact extraction keeps this port's Signal 14 batch (20).
-const DUTY_SUBJECT_BATCH: usize = 256;
-const DUTY_FACT_EXTRACTION_BATCH: usize = 20;
+/// Batch limits and the fact source lease for the row-debt duties
+/// (GENIUSLOCUSKIT_SPEC § DUTY_LIFECYCLE). The host supplies them from the
+/// settings module through `configure_duty_limits`; absent, the defaults equal
+/// the constants the kit shipped with. The span-encode batch is not here: it is
+/// an estate manifest value (`provisioned_encoder_batch`). Twin of Swift
+/// `DutyLimits`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DutyLimits {
+    /// Sources per fact-extraction batch.
+    pub fact_extraction_batch: usize,
+    /// Rows per subject-backfill sweep.
+    pub subject_backfill_batch: usize,
+    /// Per-source in-flight fence while a model call runs, in seconds. It
+    /// must exceed the extractor's request timeout.
+    pub fact_source_lease_seconds: u64,
+}
+
+impl Default for DutyLimits {
+    fn default() -> Self {
+        Self { fact_extraction_batch: 16, subject_backfill_batch: 256, fact_source_lease_seconds: 120 }
+    }
+}
+
+impl DutyLimits {
+    /// The limits the product settings module carries (`duties` object).
+    pub fn from_settings(settings: &moot_product_identity::settings::ProductSettings) -> Self {
+        Self {
+            fact_extraction_batch: settings.duty_fact_extraction_batch.max(1),
+            subject_backfill_batch: settings.duty_subject_backfill_batch.max(1),
+            fact_source_lease_seconds: settings.duty_fact_source_lease_seconds.max(1),
+        }
+    }
+}
+
+/// Host-supplied limits per estate; absent → `DutyLimits::default()`.
+pub type DutyLimitsByHandle = std::cell::RefCell<std::collections::HashMap<EstateHandle, DutyLimits>>;
 
 impl EstateCoordinator {
+    /// Install the limits for `handle`. Absent, `DutyLimits::default()` applies.
+    pub fn configure_duty_limits(&mut self, handle: &EstateHandle, limits: DutyLimits) {
+        self.duty_limits.borrow_mut().insert(handle.clone(), limits);
+    }
+
+    /// The limits in force for `handle`.
+    pub fn duty_limits(&self, handle: &EstateHandle) -> DutyLimits {
+        self.duty_limits.borrow().get(handle).copied().unwrap_or_default()
+    }
+
     fn duty_failure(kind: DutyKind, detail: String) -> GeniusLocusKitError {
         GeniusLocusKitError::UnderlyingEstateFailure {
             reason: format!("duty {}: {detail}", kind.wire_name()),
@@ -117,6 +161,10 @@ impl EstateCoordinator {
     /// backfill has no cheap count and is paid on demand; the retrain is
     /// requested, not inferred.
     pub fn duty_debt(&self, handle: &EstateHandle, kind: DutyKind) -> Result<usize, GeniusLocusKitError> {
+        self.duty_debt_at(handle, kind, (queuekit::wall_now_secs() * 1000.0) as i64)
+    }
+
+    fn duty_debt_at(&self, handle: &EstateHandle, kind: DutyKind, now: i64) -> Result<usize, GeniusLocusKitError> {
         let estate = self.estate_for(handle)?;
         let count = match kind {
             DutyKind::SpanEncode => {
@@ -139,7 +187,8 @@ impl EstateCoordinator {
                 if !self.fact_extractors.contains_key(handle) {
                     return Ok(0);
                 }
-                estate.count_fact_extraction_debt()
+                let state = self.fact_extraction_work_status(handle, now)?;
+                return Ok(state.runnable + state.in_flight + state.retrying + state.blocked + state.rejected);
             }
             DutyKind::FactsBackfill | DutyKind::RetrainBasis => return Ok(0),
         };
@@ -147,16 +196,35 @@ impl EstateCoordinator {
     }
 
     /// Queue one job for `kind` on this estate. Returns `true` when a job was
-    /// sent, `false` when this process already has one queued or, for the
+    /// sent, `false` when one is already queued (in this process's set, or
+    /// pending on the stream from an earlier process) or, for the
     /// debt-driven duties, the estate owes nothing.
     pub fn enqueue_duty(&self, handle: &EstateHandle, kind: DutyKind, now_millis: i64) -> Result<bool, GeniusLocusKitError> {
         if self.duty_queued.borrow().get(handle).is_some_and(|set| set.contains(&kind)) {
             return Ok(false);
         }
-        if kind.debt_driven() && self.duty_debt(handle, kind)? == 0 {
+        if kind == DutyKind::FactExtraction && self.fact_extraction_work_status(handle, now_millis)?.runnable == 0 {
+            return Ok(false);
+        }
+        if kind.debt_driven() && self.duty_debt_at(handle, kind, now_millis)? == 0 {
             return Ok(false);
         }
         self.ensure_dreaming_queue(handle);
+        // Single occupancy is durable: a job left pending by an earlier
+        // process is this process's job, not a reason to queue another.
+        let pending = {
+            let map = self.dreaming_queues.borrow();
+            let Some((queue, _)) = map.get(handle) else {
+                return Err(Self::duty_failure(kind, "queue entry missing after ensure_dreaming_queue".to_string()));
+            };
+            queue
+                .pending_count_for_stream(&kind.stream_id())
+                .map_err(|e| Self::duty_failure(kind, format!("pending count: {e:?}")))?
+        };
+        if pending > 0 {
+            self.duty_queued.borrow_mut().entry(handle.clone()).or_default().insert(kind);
+            return Ok(false);
+        }
         let payload = serde_json::json!({
             "estateUUID": uuid::Uuid::from_bytes(handle.estate_uuid).hyphenated().to_string().to_uppercase(),
             "duty": kind.wire_name(),
@@ -197,6 +265,13 @@ impl EstateCoordinator {
     /// with concerns and is returned after the reply so the queue never holds
     /// a job the process has given up on.
     pub fn drain_duty(&mut self, handle: &EstateHandle, kind: DutyKind, now_millis: i64) -> Result<DutyDrainReport, GeniusLocusKitError> {
+        let extraction = if kind == DutyKind::FactExtraction {
+            self.prepare_fact_extraction_batch(handle, self.duty_limits(handle).fact_extraction_batch, now_millis)?
+        } else { None };
+        if kind == DutyKind::FactExtraction && extraction.is_none() {
+            return Ok(DutyDrainReport { kind, jobs_run: 0, units_paid: 0,
+                remaining_debt: self.duty_debt_at(handle, kind, now_millis)?, made_progress: false });
+        }
         self.ensure_dreaming_queue(handle);
         let batch = {
             let map = self.dreaming_queues.borrow();
@@ -210,17 +285,29 @@ impl EstateCoordinator {
         if let Some(set) = self.duty_queued.borrow_mut().get_mut(handle) {
             set.remove(&kind);
         }
+        // Every job on a duty stream names the same debt, so several claimed
+        // at once (queued across restarts, before the single-occupancy set
+        // existed in this process) are paid by ONE batch, not one batch each.
         let mut jobs_run = 0usize;
         let mut units_paid = 0usize;
-        for (job, _session) in batch {
-            match self.run_duty_batch(handle, kind, now_millis) {
+        let mut advanced = false;
+        if !batch.is_empty() {
+            let result = if kind == DutyKind::FactExtraction {
+                extraction.expect("prepared extraction").run()
+                    .map(|result| { advanced = result.made_progress; result.completed_sources })
+            } else { self.run_duty_batch(handle, kind, now_millis).map(|units| { advanced = units > 0; units }) };
+            match result {
                 Ok(paid) => {
-                    units_paid += paid;
-                    self.reply_duty(handle, &job.id, queuekit::ObservationStatus::Done);
-                    jobs_run += 1;
+                    units_paid = paid;
+                    for (job, _session) in &batch {
+                        self.reply_duty(handle, &job.id, queuekit::ObservationStatus::Done);
+                        jobs_run += 1;
+                    }
                 }
                 Err(error) => {
-                    self.reply_duty(handle, &job.id, queuekit::ObservationStatus::DoneWithConcerns);
+                    for (job, _session) in &batch {
+                        self.reply_duty(handle, &job.id, queuekit::ObservationStatus::DoneWithConcerns);
+                    }
                     eprintln!(
                         "mootx01 duty {}: batch failed (estate {:?}): {error:?}",
                         kind.wire_name(),
@@ -230,13 +317,13 @@ impl EstateCoordinator {
                 }
             }
         }
-        let remaining = self.duty_debt(handle, kind)?;
+        let remaining = self.duty_debt_at(handle, kind, now_millis)?;
         // Carry the work forward: a job that paid something and left debt
         // queues the next batch; a job that paid nothing does not loop.
-        if jobs_run > 0 && units_paid > 0 && remaining > 0 {
+        if jobs_run > 0 && advanced && remaining > 0 {
             self.enqueue_duty(handle, kind, now_millis)?;
         }
-        Ok(DutyDrainReport { kind, jobs_run, units_paid, remaining_debt: remaining })
+        Ok(DutyDrainReport { kind, jobs_run, units_paid, remaining_debt: remaining, made_progress: advanced })
     }
 
     /// Claim the jobs on `kind`'s stream without running them, for a caller
@@ -285,15 +372,26 @@ impl EstateCoordinator {
         Ok(reports)
     }
 
-    /// The impatient loop: enqueue and drain until the duty owes nothing or a
+    /// The settle loop: enqueue and drain until the duty owes nothing or a
     /// batch pays nothing. Returns the units paid in total.
     pub fn pay_duty_until_settled(&mut self, handle: &EstateHandle, kind: DutyKind, now_millis: i64) -> Result<usize, GeniusLocusKitError> {
+        self.pay_duty_until_settled_with(handle, kind, now_millis, |_| {})
+    }
+
+    /// The settle loop with a per-batch observer: `progress` sees every batch
+    /// that ran, so a finisher can report each one. Twin of Swift
+    /// `payDutyUntilSettled(_:in:now:progress:)`.
+    pub fn pay_duty_until_settled_with(
+        &mut self, handle: &EstateHandle, kind: DutyKind, now_millis: i64,
+        mut progress: impl FnMut(&DutyDrainReport),
+    ) -> Result<usize, GeniusLocusKitError> {
         let mut total = 0usize;
         loop {
             self.enqueue_duty(handle, kind, now_millis)?;
             let report = self.drain_duty(handle, kind, now_millis)?;
             total += report.units_paid;
-            if report.jobs_run == 0 || report.units_paid == 0 {
+            if report.jobs_run > 0 { progress(&report); }
+            if report.jobs_run == 0 || !report.made_progress {
                 return Ok(total);
             }
             if !kind.debt_driven() || report.remaining_debt == 0 {
@@ -302,8 +400,8 @@ impl EstateCoordinator {
         }
     }
 
-    /// The existing impatient function for `kind`, run once as the body of a
-    /// claimed job. Returns the units paid.
+    /// The batch body for `kind`, run once as the body of a claimed job.
+    /// Returns the units paid.
     fn run_duty_batch(&mut self, handle: &EstateHandle, kind: DutyKind, now_millis: i64) -> Result<usize, GeniusLocusKitError> {
         match kind {
             DutyKind::SpanEncode => self
@@ -314,13 +412,13 @@ impl EstateCoordinator {
                 if !self.subject_producers.contains_key(handle) {
                     return Ok(0);
                 }
-                self.subject_backfill_sweep(handle, DUTY_SUBJECT_BATCH, now_millis).map(|r| r.written)
+                self.subject_backfill_sweep(handle, self.duty_limits(handle).subject_backfill_batch, now_millis).map(|r| r.written)
             }
             DutyKind::FactsBackfill => self
                 .backfill_ssc_facts(handle)
                 .map_err(|e| Self::duty_failure(kind, format!("{e:?}"))),
             DutyKind::FactExtraction => self
-                .run_fact_extraction_batch(handle, DUTY_FACT_EXTRACTION_BATCH, now_millis)
+                .run_fact_extraction_batch(handle, self.duty_limits(handle).fact_extraction_batch, now_millis)
                 .map(|r| r.completed_sources),
             DutyKind::RetrainBasis => self
                 .reindex_corpus(handle, now_millis)
