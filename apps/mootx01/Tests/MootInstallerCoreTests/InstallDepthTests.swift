@@ -219,6 +219,22 @@ struct InstallDepthTests {
         #expect(!FileManager.default.fileExists(atPath: cursorDir.path))
     }
 
+    @Test("hosts sharing the ~/.agents root get their own plugin directory; a host with its own root keeps the plain name")
+    func hostsSharingTheAgentsRootGetTheirOwnDirectory() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        let codex = try #require(InstallBundle.embedded.host(forClientID: "codex"))
+        let copilot = try #require(InstallBundle.embedded.host(forClientID: "github-copilot"))
+        let claude = try #require(InstallBundle.embedded.host(forClientID: "claude-code"))
+        let codexDir = DepthInstaller.pluginInstallDirectory(host: codex, homeDirectory: home)
+        let copilotDir = DepthInstaller.pluginInstallDirectory(host: copilot, homeDirectory: home)
+        #expect(codexDir != copilotDir, "two hosts on ~/.agents must not share one package directory")
+        #expect(codexDir.lastPathComponent == "mootx01-plugin-codex")
+        #expect(copilotDir.lastPathComponent == "mootx01-plugin-github-copilot")
+        #expect(DepthInstaller.pluginInstallDirectory(host: claude, homeDirectory: home)
+                == home.appendingPathComponent(".claude/mootx01-plugin", isDirectory: true))
+    }
+
     @Test("MCP-only client (claude-desktop) degrades to server at any depth")
     func mcpOnlyDegradesToServer() throws {
         let home = sandbox()
