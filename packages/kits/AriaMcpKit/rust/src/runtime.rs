@@ -153,6 +153,9 @@ pub fn run(
         }
         _ => moot_product_identity::storage::configuration_directory(),
     };
+    // Duty limits and the Signal 14 cadence come from the same settings
+    // directory (§ DUTY_LIFECYCLE).
+    let duty_settings = moot_product_identity::settings::load(&fact_settings_directory);
     // Exits with a nonzero code when the estate cannot be opened (an
     // unreachable PostgreSQL estate fails fast here).
     let mut config = match ServerConfig::for_estate(estate) {
@@ -409,6 +412,12 @@ pub fn run(
             // Signal 14 (FactExtractionDutySignal): activate the estate's
             // selected provider when the master setting is On. `None` is a
             // fail-quiet unavailable-provider result, not a server error.
+            if let Ok(mut coord) = coord_for_hnsw.lock() {
+                coord.configure_duty_limits(
+                    &handle_for_hnsw,
+                    genius_locus_kit::brain::duty_queue::DutyLimits::from_settings(&duty_settings),
+                );
+            }
             let fact_extraction_cycle = build_fact_extraction_cycle(
                 &coord_for_hnsw,
                 handle_for_hnsw,
@@ -609,7 +618,9 @@ pub fn run(
                         || {
                             fact_extraction_cycle
                                 .clone()
-                                .map(|cycle| FactExtractionSignal::spec(Arc::new(move || cycle())))
+                                .map(|cycle| FactExtractionSignal::spec_with_cadence(
+                                    duty_settings.duty_fact_extraction_cadence_seconds,
+                                    Arc::new(move || cycle())))
                         },
                     )?;
                     reconcile_runtime_signal(
@@ -986,7 +997,7 @@ fn extraction_cycle(
     extractor: Arc<dyn fact_extraction_kit::contract::FactExtractor>,
     coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
     handle: genius_locus_kit::EstateHandle,
-    impatient: bool,
+    settle: bool,
 ) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
     // Derive the recipe ID from the extractor's spec. Format is the cross-port
     // contract: "<provider_id>:<model_id>:<model_version>", identical to the
@@ -1034,7 +1045,8 @@ fn extraction_cycle(
                 coord
                     .enqueue_duty(&fact_handle, genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
                     .map_err(|e| format!("{e:?}"))?;
-                let work = coord.prepare_fact_extraction_batch(&fact_handle, 16, now_ms)
+                let limit = coord.duty_limits(&fact_handle).fact_extraction_batch;
+                let work = coord.prepare_fact_extraction_batch(&fact_handle, limit, now_ms)
                     .map_err(|e| format!("{e:?}"))?;
                 if work.is_none() { return Ok(settled); }
                 let jobs = coord.claim_duty_jobs(&fact_handle,
@@ -1056,10 +1068,16 @@ fn extraction_cycle(
         }
         let report = result.map_err(|e| format!("{e:?}"))?;
         let made_progress = report.as_ref().is_some_and(|report| report.made_progress);
-        settled += report.map_or(0, |report| report.completed_sources as i64);
-        if !impatient || !made_progress { return Ok(settled); }
+        let completed = report.as_ref().map_or(0, |report| report.completed_sources as i64);
+        settled += completed;
+        if settle {
+            let remaining = coord.duty_debt(&fact_handle,
+                genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction).unwrap_or(0);
+            eprintln!("mootx01 drain: fact-extraction — {completed} paid, {remaining} remaining");
+        }
+        if !settle || !made_progress { return Ok(settled); }
         // Drop the coordinator guard before the next batch. Deferred failures
-        // never keep the impatient dream spinning; enqueue requires ready work.
+        // never keep the settle loop spinning; enqueue requires ready work.
       }
     });
     Some(cycle)
@@ -1169,9 +1187,10 @@ pub fn build_fact_extraction_cycle(
     configured_extraction_cycle(coord, handle, config_dir, false)
 }
 
-/// Dream uses the same claimed jobs as the resident, continuing while runnable
-/// source chunks make progress. The resident still runs one bounded batch.
-pub fn build_fact_extraction_dream_cycle(
+/// The settle cycle for the `drain` finisher (§ DUTY_LIFECYCLE): the same
+/// claimed jobs as the resident, repeated while a batch makes progress, with
+/// one progress line per batch. The resident and `dream` run one bounded batch.
+pub fn build_fact_extraction_settle_cycle(
     coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
     handle: genius_locus_kit::EstateHandle,
     config_dir: Option<&std::path::Path>,
@@ -1179,11 +1198,33 @@ pub fn build_fact_extraction_dream_cycle(
     configured_extraction_cycle(coord, handle, config_dir, true)
 }
 
+/// Install the host's duty limits on `handle` from the settings directory
+/// (`config_dir`, else the product configuration directory). Called by every
+/// host that pays a duty: the resident, `dream`, `drain`.
+pub fn configure_duty_limits_from_settings(
+    coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: &genius_locus_kit::EstateHandle,
+    config_dir: Option<&std::path::Path>,
+) {
+    let owned;
+    let dir: &std::path::Path = match config_dir {
+        Some(dir) => dir,
+        None => { owned = moot_product_identity::storage::configuration_directory(); &owned }
+    };
+    let settings = moot_product_identity::settings::load(dir);
+    if let Ok(mut coord) = coord.lock() {
+        coord.configure_duty_limits(
+            handle,
+            genius_locus_kit::brain::duty_queue::DutyLimits::from_settings(&settings),
+        );
+    }
+}
+
 fn configured_extraction_cycle(
     coord: &Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
     handle: genius_locus_kit::EstateHandle,
     config_dir: Option<&std::path::Path>,
-    impatient: bool,
+    settle: bool,
 ) -> Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>> {
     // The second preference selects the provider. Apple Foundation Models is
     // an Apple-only runtime; the Rust product fails quiet when it is selected.
@@ -1285,7 +1326,7 @@ fn configured_extraction_cycle(
     // The returned closure re-reads the authoritative estate setting before
     // each activation and extraction batch.
     let client: Arc<dyn fact_extraction_kit::contract::FactExtractor> = Arc::new(client);
-    extraction_cycle(client, coord, handle, impatient)
+    extraction_cycle(client, coord, handle, settle)
 }
 
 // -------------------------------------------------------------------------------
