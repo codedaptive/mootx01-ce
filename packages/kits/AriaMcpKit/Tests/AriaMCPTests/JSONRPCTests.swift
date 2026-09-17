@@ -75,6 +75,17 @@ struct JSONRPCTests {
         #expect(decoded == value)
     }
 
+    /// A non-finite double has no JSON spelling and JSONSerialization throws on
+    /// it, which took the serve down when an association rule's conviction was
+    /// +∞ (confidence 1). It encodes as null, as the Rust port writes it.
+    @Test func nonFiniteDoubleEncodesAsNull() throws {
+        let value: JSONValue = .object([
+            "inf": .double(.infinity), "neg": .double(-.infinity), "nan": .double(.nan), "one": .double(1.5),
+        ])
+        let decoded = try JSONValue.parse(try value.encoded())
+        #expect(decoded == .object(["inf": .null, "neg": .null, "nan": .null, "one": .double(1.5)]))
+    }
+
     // MARK: - integerValue overflow guard (Finding 2)
 
     /// A JSON double far outside Int64 range (1e100) must return nil from
