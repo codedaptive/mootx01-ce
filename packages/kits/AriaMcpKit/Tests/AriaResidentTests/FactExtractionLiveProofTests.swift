@@ -175,7 +175,10 @@ struct FactExtractionLiveProofTests {
         print("live proof: cycle obtained recipe=\(extractor.spec.providerID):\(extractor.spec.modelID):\(extractor.spec.modelVersion)")
 
         // ----------------------------------------------------------------
-        // 5. Run one extraction batch.
+        // 5. Run one extraction batch. The signal cycle only ENQUEUES the
+        //    owed duty (§ DUTY_LIFECYCLE); the resident's duty worker pays
+        //    the batch off the tick, which this test does directly through
+        //    `drainDuty`.
         //    The drawer content carries `Evidence:` / `Asserted:` cue words
         //    so NuExtract produces a non-empty `assertionKind` field and the
         //    grounding validator accepts at least one candidate. Without the
@@ -186,12 +189,13 @@ struct FactExtractionLiveProofTests {
         //    The Rust live proof confirmed that cued content consistently yields
         //    factsFiled >= 1 with the same CoreAI model family.
         // ----------------------------------------------------------------
-        let filed = try await nonNilCycle(Date())
-        print("live proof: batch complete factsFiled=\(filed)")
+        _ = try await nonNilCycle(Date())
+        let filed = try await kit.drainDuty(.factExtraction, in: handle, now: Date()).unitsPaid
+        print("live proof: batch complete sourcesSettled=\(filed)")
         // factsFiled must be >= 1: the cued content is specifically chosen so
         // NuExtract produces a groundable assertion. An implementation that
         // silently drops all candidates or never reaches the store would fail here.
-        #expect(filed >= 1, "factsFiled must be >= 1 with cued content; check grounding validator and assertionKind extraction")
+        #expect(filed >= 1, "at least one source must settle with cued content; check grounding validator and assertionKind extraction")
 
         print("live proof PASS: activation and batch cycle executed end-to-end; " +
               "factsFiled=\(filed) for drawer \(drawer.id)")

@@ -117,13 +117,12 @@ public extension GeniusLocusKit {
         guard let scheduler = schedulers[handle] else {
             throw GeniusLocusKitError.schedulerNotStarted(estateUUID: handle.estateUUID)
         }
-        // Row-debt duties ride QueueKit (DutyQueue.swift): queue what the
-        // estate owes, let the signals drain their own duty streams, then
-        // drain the duties no signal owns, so the resident pays debt as
-        // claimed, resumable jobs on its ordinary cadence.
+        // Row-debt duties ride QueueKit (DutyQueue.swift): the tick only
+        // QUEUES what the estate owes. The host's duty worker pays the
+        // batches off the tick (§ DUTY_LIFECYCLE), so a model-bound batch
+        // never stalls the brain.
         try await enqueueOwedDuties(in: handle, now: now)
         try await scheduler.tick(now: now)
-        _ = try await drainDuties(in: handle, now: now)
     }
 
     /// Fire an event-trigger signal explicitly. The `event` and
