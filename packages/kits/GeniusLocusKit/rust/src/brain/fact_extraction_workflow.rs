@@ -159,7 +159,7 @@ pub(super) fn workflow_recipe(base: &str, spec: &FactExtractorModelSpec) -> Stri
 }
 
 impl EstateCoordinator {
-    fn fact_checkpoints(
+    pub(crate) fn fact_checkpoints(
         &self,
         handle: &EstateHandle,
     ) -> Result<QueueCheckpointStore, GeniusLocusKitError> {
