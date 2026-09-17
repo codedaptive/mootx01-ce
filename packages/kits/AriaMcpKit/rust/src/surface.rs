@@ -765,7 +765,15 @@ fn execute_memory_mutation(
         }
         Err(error) => {
             let (code, message, retryable) = match error {
-                V2MemoryMutationError::Unavailable | V2MemoryMutationError::AdmissionRefused => (
+                // A mutation the estate will not apply (a tunnel the caller
+                // may not review, an endorsement the lower refused, an absent
+                // tunnel) is `mutation_unavailable`, the code and message the
+                // Swift port's AriaV2MemoryMutations.unavailable emits; the
+                // wording is identical for every cause so none can be
+                // oracled. Admission failure keeps the estate-level code.
+                V2MemoryMutationError::Unavailable => (
+                    "mutation_unavailable", "The requested mutation is unavailable in the selected estate.", false),
+                V2MemoryMutationError::AdmissionRefused => (
                     "estate_unavailable", "The requested memory mutation is unavailable.", true),
                 V2MemoryMutationError::OutcomeUnverified(_) => (
                     "outcome_unverified", "The mutation may have landed but its outcome could not be revalidated.", false),
