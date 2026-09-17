@@ -1064,8 +1064,16 @@ impl CoordinatorRecallLensLower {
         ))
     }
 
+    /// Resolve the comparison estate for `moot_lens_overlap` and
+    /// `moot_lens_divergence`. Both lenses compare the selected estate with a
+    /// SECOND estate the caller can read, so the selected estate's own id is
+    /// refused exactly like an unregistered one: comparing an estate with
+    /// itself is not a reading (overlap 1, divergence 0 by construction), and
+    /// answering it would let a caller confirm the selected id through a lens.
+    /// Swift twin: `AriaV2GeniusLocusLensLowerAuthority.comparisonHandle`.
     fn comparison_handle(
         coordinator: &EstateCoordinator,
+        selected_estate_id: uuid::Uuid,
         request: &V2RecallLensRequest,
     ) -> Result<genius_locus_kit::handle::EstateHandle, ()> {
         let comparison_id = required_uuid(request, "comparison_estate_id")?;
@@ -1073,6 +1081,7 @@ impl CoordinatorRecallLensLower {
             .handles()
             .into_iter()
             .find(|handle| uuid::Uuid::from_bytes(handle.estate_uuid) == comparison_id)
+            .filter(|handle| uuid::Uuid::from_bytes(handle.estate_uuid) != selected_estate_id)
             .ok_or(())
     }
 
@@ -1082,7 +1091,7 @@ impl CoordinatorRecallLensLower {
         request: &V2RecallLensRequest,
     ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
-        let comparison = Self::comparison_handle(&coordinator, request)?;
+        let comparison = Self::comparison_handle(&coordinator, admission.estate_id, request)?;
         let output = run_mind_overlap(
             &coordinator,
             &admission.estate_handle,
@@ -1107,7 +1116,7 @@ impl CoordinatorRecallLensLower {
         request: &V2RecallLensRequest,
     ) -> Result<V2RecallLensResult, V2RecallLensError> {
         let coordinator = self.coordinator.lock().map_err(|_| ())?;
-        let comparison = Self::comparison_handle(&coordinator, request)?;
+        let comparison = Self::comparison_handle(&coordinator, admission.estate_id, request)?;
         let output = run_estate_divergence(
             &coordinator,
             &admission.estate_handle,
