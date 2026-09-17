@@ -202,6 +202,60 @@ struct FactExtractionDutyTests {
         #expect(Set(try await estate.allKGFacts().map(\.id)) == Set(active.map(\.id)))
     }
 
+    /// F6: a checkpoint that carries STAGED, UNPUBLISHED grounded-fact
+    /// evidence (`state.candidates` non-empty, `readyToPublish == false`
+    /// because more chunks remain) must not survive an expunge of its
+    /// source. Before the fix, expunge never touched the fact-extraction
+    /// checkpoint stream at all — the debt scan that would otherwise
+    /// revisit and settle it excludes tombstoned drawers, so the retained
+    /// row (and the evidence quotes inside it) would have stayed forever
+    /// with no future pass ever looking at it again.
+    @Test("expunge deletes a staged, unpublished fact-extraction checkpoint")
+    func expungeDeletesStagedCheckpoint() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-expunge-checkpoint")
+        let factText = "Jack's birthday is June 20th."
+        let tail = String(repeating: "é😀 trailing filler content. ", count: 40)
+        let source = factText + tail
+        let drawer = try await capture(kit, handle, content: source)
+        let model = FactExtractorModelSpec(
+            providerID: "test-provider", modelID: "nuextract-test",
+            modelVersion: "q8", schemaVersion: "kgfact-extraction-v1",
+            extractorKind: .specializedModel, maximumInputCharacters: 700,
+            maximumFactsPerSource: 8)
+        let extractor = ClosureFactExtractor(spec: model) { request in
+            let candidates = request.sourceText.contains(factText) ? [FactCandidate(
+                subject: "Jack", predicate: "birthday", object: "June 20th",
+                evidenceQuote: factText, confidence: 0.97)] : []
+            return FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion,
+                candidates: candidates)
+        }
+        _ = try await kit.activateFactExtractor(
+            extractor, recipeID: "nuextract-expunge-checkpoint-v1", for: handle)
+
+        let report = try await kit.runFactExtractionBatch(handle, now: now)
+        #expect(report.chunksProcessed == 1, "precondition: only the first chunk ran this batch")
+        #expect(try await kit.estate(for: handle).getDrawers(ids: [drawer.id]).first?.areFactsExtracted == false,
+            "precondition: not yet published — more chunks remain, so the checkpoint stays partial")
+
+        let checkpoints = try await kit.factCheckpoints(handle)
+        let checkpointID = GeniusLocusKit.factWorkID(drawer.id)
+        let stream = GeniusLocusKit.factWorkStream
+        let stagedPayload = try #require(
+            try await checkpoints.read(id: checkpointID, stream: stream),
+            "precondition: a checkpoint row exists for this source")
+        let staged = try JSONDecoder().decode(FactExtractionProgress.self, from: stagedPayload)
+        #expect(!staged.candidates.isEmpty, "precondition: the checkpoint holds a staged, unpublished candidate")
+
+        _ = try await kit.expunge(handle, ExpungeFrame(
+            rowID: drawer.id, reason: "F6 test expunge", confirmation: true))
+
+        #expect(try await checkpoints.read(id: checkpointID, stream: stream) == nil,
+            "expunge must delete the retained checkpoint, not leave the staged evidence forever")
+    }
+
     @Test("source-exact chunking reaches a fact beyond the first model window")
     func extractsTailFactFromOriginalBody() async throws {
         let (kit, handle) = try await openEstate(owner: "fact-original-body")

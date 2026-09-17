@@ -73,6 +73,28 @@ public struct QueueCheckpointStore: Sendable {
         }
     }
 
+    /// Remove one retained checkpoint row, if present. A no-op (returns
+    /// `false`) when no row matches `id`/`stream` — deleting an already-absent
+    /// checkpoint is not an error, the same idempotent posture `remove`d rows
+    /// have elsewhere in this store.
+    ///
+    /// F6: added so a caller that permanently retires the checkpoint's
+    /// SUBJECT — an expunged or tombstoned source drawer — can remove the row
+    /// outright rather than leaving it retained forever. A retained
+    /// checkpoint holds domain evidence (e.g. `GroundedFactCandidate`
+    /// evidence quotes for fact extraction); the debt scan that would
+    /// otherwise revisit and clean it up excludes tombstoned drawers, so an
+    /// un-deleted row for an expunged source is retained indefinitely with
+    /// no future pass that will ever look at it again.
+    ///
+    /// - Returns: `true` if a row was deleted, `false` if none matched.
+    @discardableResult
+    public func delete(id: JobID, stream: StreamID) async throws -> Bool {
+        let deleted = try await storage.rowStore.delete(table: queueKitTableName,
+            where: Self.predicate(id, stream))
+        return deleted > 0
+    }
+
     public func payloads(stream: StreamID) async throws -> [Data] {
         try await storage.rowStore.query(table: queueKitTableName,
             where: .and([.eq(Self.col("stream_id"), .text(stream.rawValue)),
