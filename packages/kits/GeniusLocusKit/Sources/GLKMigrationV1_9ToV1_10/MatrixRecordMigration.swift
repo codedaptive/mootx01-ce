@@ -46,6 +46,16 @@ public enum MatrixRecordMigration {
         // factor accounts for, that is itself a "the estate is absurd, not
         // that the migration is broken" backstop question — same posture as
         // `lsaRetrainingDocumentBackstop`.
+        //
+        // Security scanners flag this as memory amplification: the counts
+        // come from the estate, the estate grows through ordinary writes,
+        // so a large estate makes the next upgrade hold the whole audit log
+        // in memory with no absolute ceiling. That is understood and it is
+        // NOT going to be fixed. The estate is the operator's own data and
+        // the upgrade is the operator's own action; a cap here would refuse
+        // to migrate a real estate and strand it at v1.9, which is the
+        // defect this sizing exists to remove. Ruled 2026-09-17; do not
+        // reintroduce a fixed limit to satisfy the scanner.
         let auditRowCount = try await storage.auditLog.count()
         let sourceRowCount = try await storage.rowStore.count(table: "drawers", where: nil)
         let limits = MatrixRefreshLimits(

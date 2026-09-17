@@ -313,6 +313,11 @@ public enum OutboxStore {
     /// time, no newer active entry exists for this row; if one were present, the
     /// tombstone would not have won.
     ///
+    /// An OLDER active entry is a different matter: the inbound write beat it
+    /// on the clock, so pushing it afterwards would put a stale value (or a
+    /// stale resurrection of a deleted row) into the cloud. `deleteMatchingOlderThan`
+    /// removes those; the apply path calls both.
+    ///
     /// Uses `deleteSync` so the purge does not produce a new outbox entry (I-10).
     ///
     /// - Parameters:
@@ -342,6 +347,58 @@ public enum OutboxStore {
         for row in parked {
             guard case .uuid(let entryID) = row["id"] else { continue }
             // deleteSync so this internal purge does not emit a new outbox entry (I-10).
+            _ = try? await storage.rowStore.deleteSync(
+                table: table,
+                where: .eq(Column(table: table, name: "id"), .uuid(entryID))
+            )
+            purgedCount += 1
+        }
+        return purgedCount
+    }
+
+    // MARK: - Purge entries an inbound write has beaten
+
+    /// Remove every outbox entry for `(tableName, rowKey)` whose HLC is older
+    /// than `hlc`, parked or not.
+    ///
+    /// The rule is last-changed-wins by the clock, in both directions. Pull
+    /// already applies it when a remote write arrives; this applies it to what
+    /// the device was still about to send. An entry older than the write that
+    /// just came down has lost. Pushing it anyway would hand CloudKit a stale
+    /// value, and because push is a changed-keys save with no clock check, the
+    /// cloud would take it, including a stale live write reviving a record that
+    /// a newer tombstone had deleted. Entries with a newer HLC are kept: they
+    /// won, and the LWW gate will already have kept the local row for them.
+    ///
+    /// Uses `deleteSync` so the purge does not produce a new outbox entry (I-10).
+    ///
+    /// - Parameters:
+    ///   - tableName: Application table of the row the inbound write touched.
+    ///   - rowKey: UUID string of that row (matches the TEXT column format).
+    ///   - hlc: The inbound write's clock; entries strictly older are removed.
+    ///   - storage: The local PersistenceKit storage.
+    /// - Returns: Number of entries removed.
+    @discardableResult
+    public static func deleteMatchingOlderThan(
+        tableName: String,
+        rowKey: String,
+        hlc: HLC,
+        from storage: any Storage
+    ) async throws -> Int {
+        let rows = try await storage.rowStore.query(
+            table: table,
+            where: .and([
+                .eq(Column(table: table, name: "table_name"), .text(tableName)),
+                .eq(Column(table: table, name: "row_key"),    .text(rowKey)),
+            ])
+        )
+        var purgedCount = 0
+        for row in rows {
+            guard case .uuid(let entryID) = row["id"],
+                  case .blob(let wire) = row["hlc_wire"],
+                  let entryHLC = try? HLC(wireBytes: [UInt8](wire)),
+                  entryHLC < hlc
+            else { continue }
             _ = try? await storage.rowStore.deleteSync(
                 table: table,
                 where: .eq(Column(table: table, name: "id"), .uuid(entryID))
