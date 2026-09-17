@@ -297,6 +297,20 @@ struct DreamCommand: AsyncParsableCommand {
                     Logging.stderr.log("mootx01 dream warning: subject backfill error: \(error) — continuing")
                 }
             }
+            // One anomaly-sweep batch per pass: rooms touched since their last
+            // scoring, `DutyLimits.anomalySweepRooms` of them; the settle loop
+            // is `mootx01 drain`.
+            do {
+                _ = try await kit.enqueueDuty(.anomalySweep, in: handle, now: cycleNow)
+                let sweep = try await kit.drainDuty(.anomalySweep, in: handle, now: cycleNow)
+                if sweep.jobsRun > 0 {
+                    Logging.stderr.log(
+                        "mootx01 dream: anomaly sweep — \(sweep.unitsPaid) room(s) scored, "
+                        + "\(sweep.remainingDebt) remaining")
+                }
+            } catch {
+                Logging.stderr.log("mootx01 dream warning: anomaly sweep error: \(error) — continuing")
+            }
         } catch {
             // A cycle error is non-fatal at the command level: the dreaming queue
             // was drained (or partially drained), which is forward progress even if
