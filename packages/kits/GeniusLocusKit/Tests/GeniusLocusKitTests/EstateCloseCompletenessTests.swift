@@ -179,11 +179,21 @@ struct EstateCloseCompletenessTests {
                 emit: { _ in [] }),
             in: handle,
             now: t0)
+        // F1/F9 regression: `dutyLimitsByHandle` and `dutyQueued` are
+        // per-estate registries exactly like the others above, populated
+        // through their own public API and never cleared by pre-fix `close`.
+        // `.retrainBasis` bypasses `enqueueDuty`'s debt gate (it is an
+        // on-demand duty, never inferred), so this populates `dutyQueued`
+        // without needing to manufacture real row debt first.
+        await kit.configureDutyLimits(DutyLimits(factExtractionBatch: 4), for: handle)
+        _ = try await kit.enqueueDuty(.retrainBasis, in: handle, now: t0)
 
         let residentBefore = await kit.residentRegistries(for: handle)
-        // The four this mission closed, plus the three `open` populates.
+        // The four this mission closed, plus the three `open` populates, plus
+        // the two F1/F9 closed.
         for expected in ["subjectProducers", "schedulers", "graphCaches",
-                         "preferenceStores", "registry", "storages", "mountStates"] {
+                         "preferenceStores", "registry", "storages", "mountStates",
+                         "dutyLimitsByHandle", "dutyQueued"] {
             let message = """
                 precondition: \(expected) must hold an entry before close — \
                 resident: \(residentBefore)
