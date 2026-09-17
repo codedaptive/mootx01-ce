@@ -54,5 +54,53 @@ struct MatrixOfflineMigrationTests {
         #expect(try await records.loadCalibration(estateID: id) == calibration)
         await storage.close()
     }
+
+    /// F5: the migration must not refuse when the estate's actual audit-event
+    /// or source-row count exceeds the CALLER-SUPPLIED `limits` floor — it
+    /// widens `limits` to the estate's real counts before calling the
+    /// worker. A fixture with literally 1,000,001 rows would be
+    /// impractically slow for a unit test; passing an artificially tiny
+    /// floor (`1` for every field) against a small real fixture (a handful
+    /// of drawers, each with its own capture audit event) exercises the
+    /// exact same widening code path deterministically and fast — the
+    /// mechanism under test is "does `limits` get raised to cover the actual
+    /// count", not the literal magnitude of the default.
+    ///
+    /// Before the fix this refused with `MatrixRecordError.workingSetLimit`
+    /// on the very first audit-replay page, because the un-widened floor of
+    /// 1 event/row is below the handful this fixture writes.
+    @Test
+    func fixtureOverTheRequestedFloorStillMigrates() async throws {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("matrix-migration-oversize-\(UUID())")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(estateID: UUID(),
+            backend: .sqlite(url: folder.appendingPathComponent("estate.sqlite"), busyTimeout: 5)))
+        let estate = try await LocusKit.Estate.create(storage: storage, owner: .init(ownerIdentifier: "test"))
+        let manifest = try await estate.manifest
+        let id = try #require(UUID(uuidString: manifest.estateUUID))
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let format = EstateFormatStore(storage: storage)
+        try await format.stamp(.v1_9, now: now)
+
+        // Real drawers (and their capture audit events) so the estate's
+        // audit log and drawers table both carry more rows than the tiny
+        // floor below.
+        for i in 0..<6 {
+            _ = try await estate.capture(CaptureFrame(
+                content: "F5 fixture drawer \(i)", channel: .typed, room: "facts",
+                latticeAnchor: LatticeAnchor(udcCode: "000"), addedBy: "f5-fixture",
+                embeddingModelID: "test-v1", eventTime: now))
+        }
+
+        // A floor of 1 for every field is far below the 6 drawers (and
+        // their matching audit events) actually on disk.
+        let tinyFloor = MatrixRefreshLimits(auditEvents: 1, cells: 1, sourceRows: 1)
+        try await MatrixRecordMigration.run(storage: storage, estateID: id, now: now, limits: tinyFloor)
+
+        #expect(try await format.readIfPresent() == .v1_10,
+            "the format must advance to v1.10 on a successful migration")
+        await storage.close()
+    }
 }
 #endif
