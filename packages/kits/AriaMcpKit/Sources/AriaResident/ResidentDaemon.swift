@@ -256,13 +256,22 @@ public enum AriaResident {
         /// Estate→vault poll interval in seconds (default 60).
         /// Controls how often exportable drawers are pushed from estate to vault.
         public var vaultEstatePollSeconds: Int
-        /// Fact extractor to activate at estate open (when the estate's
-        /// fact_extraction setting is `.on`). `nil` means no extractor is available
-        /// and Signal 14 remains inert regardless of the setting. Resolved by the
-        /// caller (ServeCommand) so the daemon reads no environment and no paths
-        /// itself. The extractor carries its own FactExtractorModelSpec, which
-        /// `runResidentDaemon` uses to derive the recipe ID.
-        public var factExtractor: (any FactExtractor)?
+        /// Factory that (re)builds the fact extractor on demand, called fresh at
+        /// daemon start AND at every off→on preference edge (F2/F12: a `nil`
+        /// captured once at daemon start — because `fact_extraction` was `.off`
+        /// when `mootx01 serve` launched, or no model asset was staged yet — used
+        /// to be stored as a static `(any FactExtractor)?` value on this config
+        /// and never rebuilt, so an operator who turned the preference on later
+        /// found Signal 14 permanently inert until the next restart). `nil` means
+        /// no factory is available and Signal 14 remains inert regardless of the
+        /// setting. Resolved by the caller (ServeCommand) so the daemon reads no
+        /// environment and no paths itself; the closure itself re-reads the
+        /// `fact_extraction` / `fact_extractor` preferences and re-runs
+        /// `FactExtractorBuilder.build` each call, so a later asset install or
+        /// provider switch is picked up without a restart. The built extractor
+        /// carries its own FactExtractorModelSpec, which `runResidentDaemon` uses
+        /// to derive the recipe ID.
+        public var factExtractorFactory: (@Sendable () async -> (any FactExtractor)?)?
         /// Signal 14 period (`duties.fact_extraction_cadence_seconds`), resolved
         /// by the caller from the settings module.
         public var factExtractionCadenceSeconds: TimeInterval
@@ -278,7 +287,7 @@ public enum AriaResident {
             statsStorePath: String?,
             vaultPath: String? = nil,
             vaultEstatePollSeconds: Int = 60,
-            factExtractor: (any FactExtractor)? = nil,
+            factExtractorFactory: (@Sendable () async -> (any FactExtractor)?)? = nil,
             factExtractionCadenceSeconds: TimeInterval = FactExtractionSignal.defaultCadenceSeconds,
             dutyLimits: DutyLimits = DutyLimits()
         ) {
@@ -289,7 +298,7 @@ public enum AriaResident {
             self.statsStorePath = statsStorePath
             self.vaultPath = vaultPath
             self.vaultEstatePollSeconds = vaultEstatePollSeconds
-            self.factExtractor = factExtractor
+            self.factExtractorFactory = factExtractorFactory
             self.factExtractionCadenceSeconds = factExtractionCadenceSeconds
             self.dutyLimits = dutyLimits
         }
@@ -369,6 +378,66 @@ public enum AriaResident {
                 "Signal 14 will remain inert.")
             return nil
         }
+    }
+
+    /// Build the FactExtractionSignal spec for the off→on preference edge
+    /// (F2/F12), calling `factExtractorFactory` fresh rather than reading a
+    /// value captured once at daemon start. `reconcilePreferenceSignal` only
+    /// invokes its `makeSpec` closure when the preference has just gone from
+    /// disabled to enabled, so this is exactly the "operator turned it on"
+    /// moment — the factory re-derives the extractor from the estate's
+    /// CURRENT `fact_extraction` / `fact_extractor` preferences, so a model
+    /// asset staged, or a provider switched, after daemon start is picked up
+    /// without a restart. `nil` factory or `nil` build result both leave
+    /// Signal 14 inert, matching `resolveFactExtractionCycle`'s existing
+    /// "no extractor available" posture.
+    static func makeFactExtractionSpec(
+        factExtractorFactory: (@Sendable () async -> (any FactExtractor)?)?,
+        cadenceSeconds: TimeInterval,
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async -> SignalSpec? {
+        guard let cycle = await resolveFactExtractionCycle(
+            setting: .on,
+            extractor: await factExtractorFactory?(),
+            kit: kit,
+            handle: handle
+        ) else { return nil }
+        return FactExtractionSignal.spec(
+            cadenceSeconds: cadenceSeconds, factExtractionCycle: cycle)
+    }
+
+    /// One fact-extraction duty-worker cycle (F2/F12). The duty worker in
+    /// `runResidentDaemon`'s `dutyWorkerTasks` is a SECOND driver of
+    /// `.factExtraction`, independent of the `FactExtractionSignal` the
+    /// preference-reconciliation loop manages — before this fix it enqueued
+    /// and drained on its own cadence unconditionally, never consulting the
+    /// live `fact_extraction` preference, so turning the preference off only
+    /// tore down the signal and left this loop paying debt forever. This
+    /// function reads the preference fresh every cycle:
+    ///
+    /// - `.off`: detach the runtime extractor via `unregisterFactExtractor`
+    ///   (the off-edge action — `dutyDebt(.factExtraction)` gates on the
+    ///   extractor being registered, so detaching also stops the debt count
+    ///   itself, not merely this call site) and enqueue/drain nothing.
+    /// - otherwise: the ordinary enqueue-then-drain pass every other duty in
+    ///   `dutyWorkerTasks` already runs.
+    ///
+    /// Returns `nil` when the cycle was skipped (preference off), so a
+    /// caller/test can distinguish "skipped" from "ran and found no work".
+    @discardableResult
+    static func runFactExtractionDutyCycle(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async throws -> DutyDrainReport? {
+        let setting = try await kit.provisionedPreference(.factExtraction, for: handle)
+        guard setting != .off else {
+            await kit.unregisterFactExtractor(for: handle)
+            return nil
+        }
+        _ = try await kit.enqueueDuty(.factExtraction, in: handle, now: now)
+        return try await kit.drainDuty(.factExtraction, in: handle, now: now)
     }
 
     static func reconcilePreferenceSignal(
@@ -600,7 +669,7 @@ public enum AriaResident {
         }
         let factExtractionCycleClosure = await AriaResident.resolveFactExtractionCycle(
             setting: factExtractionSetting,
-            extractor: config.factExtractor,
+            extractor: await config.factExtractorFactory?(),
             kit: kit,
             handle: handle)
 
@@ -776,11 +845,10 @@ public enum AriaResident {
                         name: FactExtractionSignal.signalName, enabled: factOn, ids: &ids,
                         kit: kit, handle: handle, now: now
                     ) {
-                        guard let cycle = await resolveFactExtractionCycle(
-                            setting: .on, extractor: config.factExtractor, kit: kit, handle: handle
-                        ) else { return nil }
-                        return FactExtractionSignal.spec(
-                            cadenceSeconds: config.factExtractionCadenceSeconds, factExtractionCycle: cycle)
+                        await makeFactExtractionSpec(
+                            factExtractorFactory: config.factExtractorFactory,
+                            cadenceSeconds: config.factExtractionCadenceSeconds,
+                            kit: kit, handle: handle)
                     }
                     try await reconcilePreferenceSignal(name: ConsolidationSignal.signalName, enabled: consolidationOn, ids: &ids, kit: kit, handle: handle, now: now) {
                         ConsolidationSignal.spec(consolidationCycle: consolidationCycleClosure)
@@ -848,11 +916,27 @@ public enum AriaResident {
                     // Date() is permitted here: the daemon is the host boundary.
                     let now = Date()
                     do {
-                        if enqueues { _ = try await kit.enqueueDuty(kind, in: handle, now: now) }
-                        let report = try await kit.drainDuty(kind, in: handle, now: now)
-                        if report.jobsRun > 0 {
-                            Logging.stderr.log(
-                                "AriaResident duty \(kind.rawValue): \(report.unitsPaid) paid, \(report.remainingDebt) remaining")
+                        // F2/F12: `.factExtraction` is the one duty this loop
+                        // must NOT pay unconditionally — it is a second driver
+                        // of the same duty the FactExtractionSignal above
+                        // already gates on the live preference, and unlike the
+                        // other kinds it must consult that preference itself
+                        // every cycle rather than trusting a value captured at
+                        // daemon start. See `runFactExtractionDutyCycle`.
+                        if kind == .factExtraction {
+                            let report = try await runFactExtractionDutyCycle(
+                                kit: kit, handle: handle, now: now)
+                            if let report, report.jobsRun > 0 {
+                                Logging.stderr.log(
+                                    "AriaResident duty \(kind.rawValue): \(report.unitsPaid) paid, \(report.remainingDebt) remaining")
+                            }
+                        } else {
+                            if enqueues { _ = try await kit.enqueueDuty(kind, in: handle, now: now) }
+                            let report = try await kit.drainDuty(kind, in: handle, now: now)
+                            if report.jobsRun > 0 {
+                                Logging.stderr.log(
+                                    "AriaResident duty \(kind.rawValue): \(report.unitsPaid) paid, \(report.remainingDebt) remaining")
+                            }
                         }
                     } catch {
                         Logging.stderr.log("AriaResident duty \(kind.rawValue) failed: \(error)")
