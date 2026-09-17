@@ -1114,6 +1114,9 @@ struct RecipeToolsTests {
 
     /// A disqualified (already-discarded) branch must be refused as winner;
     /// the C-5 verdict fires server-side regardless of what the client claims.
+    /// The refusal is the typed `orchestration_unavailable` envelope with its
+    /// fixed message, the same envelope the Rust port renders; the lower's
+    /// `disqualifiedMigrationBranch` description never reaches the wire.
     @Test func testConfirmRefusesDisqualifiedWinner() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
@@ -1136,9 +1139,9 @@ struct RecipeToolsTests {
             name: "moot_migration_confirm", arguments: confirmArgs)
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == true)
-        let text = try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("disqualified"))
+        let error = try #require(obj["structuredContent"]?.objectValue?["error"]?.objectValue)
+        #expect(error["code"] == .string("orchestration_unavailable"), "got: \(error)")
+        #expect(error["message"] == .string("The selected typed orchestration operation is unavailable."), "got: \(error)")
         // Never promoted.
         #expect(branch.status == .discarded)
     }
