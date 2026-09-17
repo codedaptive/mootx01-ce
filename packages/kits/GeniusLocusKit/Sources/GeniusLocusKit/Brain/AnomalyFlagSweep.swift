@@ -186,6 +186,36 @@ extension GeniusLocusKit {
         return owed
     }
 
+    /// Mark one room dirty in the anomaly-sweep checkpoint stream directly,
+    /// bypassing the audit-event fold `anomalySweepOwedRooms` otherwise relies
+    /// on (§11.18 F4).
+    ///
+    /// The fold cannot recover a drawer's PRIOR room from the audit trail: a
+    /// reanchor's `AuditEvent.beforeLatticeAnchor`/`afterLatticeAnchor` record
+    /// the UDC classification lattice code, not room membership — a pure
+    /// room move with no `toLattice` leaves both anchors byte-identical (see
+    /// `DrawerStore.reanchorGated`) — and the `drawers` row itself carries
+    /// only the CURRENT `parent_node_id`, never a history of prior values.
+    /// So once a reanchor has happened, "what room did this drawer just
+    /// leave" is answerable only at the moment of the move, by the caller
+    /// that already holds both the before and after room names. The GLK
+    /// `reanchor` verb is that caller: it calls this once for the room the
+    /// drawer left and once for the room it landed in, so a moved drawer's
+    /// former room-mates are rescored (their cohesion peer set changed) in
+    /// the same duty cycle as the room it joined.
+    func markAnomalySweepRoomDirty(
+        wing: String, room: String, for handle: EstateHandle, now: Date
+    ) async throws {
+        let checkpoints = try await factCheckpoints(handle)
+        let stream = Self.anomalySweepStream
+        let stamp = HLC(physicalTime: Int64(now.timeIntervalSince1970 * 1000), logicalCount: 0, nodeID: 0)
+        let id = Self.anomalySweepRoomID(wing: wing, room: room)
+        let previous = try await checkpoints.read(id: id, stream: stream)
+        let state = AnomalySweepRoomState(wing: wing, room: room, dirty: true)
+        _ = try await checkpoints.compareAndSwap(id: id, stream: stream, expected: previous,
+            payload: try JSONEncoder().encode(state), stamp: stamp)
+    }
+
     /// Score up to `limit` owed rooms and mark them clean. Returns the rooms
     /// scored; the duty queue carries the remainder forward.
     func runAnomalySweepBatch(_ handle: EstateHandle, limit: Int, now: Date) async throws -> Int {
