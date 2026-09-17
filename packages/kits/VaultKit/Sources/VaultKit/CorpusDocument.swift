@@ -52,6 +52,18 @@ public enum VaultKitError: Error, Equatable, Sendable {
     /// `VaultKitError::AdapterError(String)`.
     case adapterError(String)
 
+    /// The JSON seed file handed to `JsonImportBridge.importSeed` failed to
+    /// decode or validate: malformed JSON, a wrong `format_version`, a record
+    /// missing `event_time`, an unknown key, and every other rule
+    /// `JsonSeedFile.parse` enforces. The message names the first offending
+    /// element. This is the CALLER's file to fix, so ARIA answers it as an
+    /// `invalid_argument` refusal carrying the message. `adapterError` keeps
+    /// the other import failures — a path that does not resolve, the on-disk
+    /// byte ceiling, a lineage collision against the estate — which stay an
+    /// availability refusal so paths and estate contents cannot be oracled.
+    /// Mirrors the Rust `VaultKitError::SeedFileInvalid(String)`.
+    case seedFileInvalid(String)
+
     /// Export aborted because the estate's corpus appears bricked: recall
     /// returned 0 drawers but raw storage contains at least one drawer row.
     /// The most common cause is a poison timestamp in a drawer row that the
