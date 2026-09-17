@@ -514,17 +514,10 @@ pub struct SerialLaneScheduler<D: Dispatcher> {
     /// the caller based on the estate's backend configuration.
     queue: SignalsQueue,
     /// Stream-keyed drain lease, mirroring Swift `StandingSignalScheduler.drainLease`.
-    /// `Some` on SQLite estates, `None` on in-memory estates (single-process).
-    /// Reserved for future multi-process drain coordination: the lease is
-    /// constructed and held, but the current single in-process governor drainer
-    /// does not acquire or heartbeat it (hence `#[allow(dead_code)]` — the field
-    /// is intentionally never read), exactly as the Swift scheduler holds its
-    /// `drainLease` without acquiring it in the drain loop. `DrainLease` has no
-    /// `Drop`, so holding the field does not by itself touch the filesystem; a
-    /// future multi-process drainer can call `try_acquire`/`heartbeat`/`release`
-    /// without an API change. Parity note: keep this inert-but-present in both
-    /// ports until a multi-process signal drainer is actually built.
-    #[allow(dead_code)]
+    /// `Some` on SQLite estates, `None` on in-memory estates. Acquired for
+    /// each drain and heartbeated per batch (§ DUTY_LIFECYCLE): the GC sweep
+    /// reclaims in-flight signal jobs only when no fresh lease is held, so a
+    /// running job is never handed back mid-flight.
     drain_lease: Option<DrainLease>,
     /// HLC for stamping signal job submissions. Derives its node identity from
     /// the estate UUID for determinism across reopens of the same estate.
@@ -751,7 +744,26 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
     /// so a burst enqueued during one fire_signal pass is fully processed in the
     /// same tick.
     fn drain_lane(&mut self, now_nanos: i64) {
+        // Held by another drainer → stand down. The wall clock is used
+        // because the lease is infrastructure, not the deterministic engine
+        // now. The lease is taken out of `self` for the drain so the drain
+        // body may borrow `self` mutably, and put back released afterwards.
+        let lease = self.drain_lease.take();
+        let held = lease.as_ref().map_or(true, |lease| lease.try_acquire(queuekit::wall_now_secs()));
+        if held {
+            self.drain_lane_held(now_nanos, lease.as_ref());
+            if let Some(lease) = &lease {
+                lease.release();
+            }
+        }
+        self.drain_lease = lease;
+    }
+
+    fn drain_lane_held(&mut self, now_nanos: i64, lease: Option<&DrainLease>) {
         loop {
+            if let Some(lease) = lease {
+                lease.heartbeat(queuekit::wall_now_secs());
+            }
             let claimed = match self
                 .queue
                 .drain_for_stream(&signal_stream_id(), drain_telemetry_now())
