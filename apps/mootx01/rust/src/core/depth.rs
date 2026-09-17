@@ -708,15 +708,39 @@ fn refresh_stranded_plugin_cache(
     // cached copy's MCP manifest with the package just materialised, and
     // when they differ reinstall through the CLI, which rebuilds the cache
     // from the current package. Twin of the Swift `refreshStrandedPluginCache`.
-    if cached_manifest_differs(&entry, home)
-        && !(claude_cli.run(&["plugin", "uninstall", CLAUDE_CODE_PLUGIN_ID])
+    if cached_manifest_differs(&entry, home) {
+        // `claude plugin install` is an activation: it writes
+        // `enabledPlugins[id] = true`, and the uninstall before it drops the
+        // entry, so a user who deliberately turned the plugin off would come
+        // out of a routine upgrade with it on again. Read the recorded
+        // decision first and put it back after the rebuild; the cache is
+        // fresh either way, and the plugin stays exactly as the user left
+        // it. `mootx01 install` is how they turn it back on.
+        let recorded_disable =
+            crate::core::mcp_ownership::recorded_plugin_disable(CLAUDE_CODE_PLUGIN_ID, home);
+        if !(claude_cli.run(&["plugin", "uninstall", CLAUDE_CODE_PLUGIN_ID])
             && claude_cli.run(&["plugin", "install", CLAUDE_CODE_PLUGIN_ID]))
-    {
-        return Some(format!(
-            "  ⓘ The cached mootx01 plugin is stale under the same version — run \
-             `claude plugin uninstall {CLAUDE_CODE_PLUGIN_ID}` then `claude plugin install \
-             {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
-        ));
+        {
+            return Some(format!(
+                "  ⓘ The cached mootx01 plugin is stale under the same version — run \
+                 `claude plugin uninstall {CLAUDE_CODE_PLUGIN_ID}` then `claude plugin install \
+                 {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
+            ));
+        }
+        if recorded_disable {
+            return Some(
+                match crate::core::mcp_ownership::write_plugin_enabled(false, CLAUDE_CODE_PLUGIN_ID, home) {
+                    Ok(()) => "  ✓ Claude Code plugin cache refreshed; the plugin stays disabled as \
+                               your settings record — run `mootx01 install` to turn it back on."
+                        .to_string(),
+                    Err(err) => format!(
+                        "  ⓘ Claude Code plugin cache refreshed, but your recorded disable could not \
+                         be restored ({err}) — run `claude plugin disable {CLAUDE_CODE_PLUGIN_ID}` \
+                         yourself if you want it to stay off."
+                    ),
+                },
+            );
+        }
     }
     Some(
         "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new \
@@ -1408,6 +1432,45 @@ mod tests {
         refresh_stranded_plugin_cache(&home, &fake);
         assert_eq!(fake.invocations().len(), 1);
         std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn stranded_cache_rebuild_honours_recorded_enablement() {
+        let home = tmp_home("stranded-enablement");
+        write_installed_plugins(&home, "1.1.0-rc1");
+        let package = home.join(".claude").join("mootx01-plugin");
+        let cache = home.join(".claude").join("plugins").join("cache/mootx01/mootx01/1.1.0-rc1");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(package.join(".mcp.json"), r#"{"mcpServers":{"memory":{}}}"#).unwrap();
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"mootx01":{}}}"#).unwrap();
+        let settings = home.join(".claude").join("settings.json");
+        let enabled_state = |settings: &Path| -> Option<bool> {
+            let root: serde_json::Value = serde_json::from_slice(&std::fs::read(settings).unwrap()).unwrap();
+            root["enabledPlugins"]["mootx01@mootx01"].as_bool()
+        };
+
+        // A recorded disable survives the uninstall + install the rebuild runs.
+        std::fs::write(
+            &settings,
+            r#"{"enabledPlugins":{"mootx01@mootx01":false,"other@m":true},"theme":"dark"}"#,
+        )
+        .unwrap();
+        let line = refresh_stranded_plugin_cache(&home, &FakeClaudeCliRunner::new(true)).unwrap();
+        assert_eq!(enabled_state(&settings), Some(false), "the recorded disable is put back after the reinstall");
+        assert!(line.contains("stays disabled"), "the line says the plugin stayed off: {line}");
+        assert!(line.contains("mootx01 install"), "the line names how to turn it back on: {line}");
+        let root: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(root["theme"], "dark", "other settings keys are kept");
+        assert_eq!(root["enabledPlugins"]["other@m"], true, "other plugins are kept");
+
+        // No recorded disable: the rebuild's install stands and the line is the plain success.
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"mootx01":{}}}"#).unwrap();
+        std::fs::write(&settings, r#"{"enabledPlugins":{"mootx01@mootx01":true}}"#).unwrap();
+        let plain = refresh_stranded_plugin_cache(&home, &FakeClaudeCliRunner::new(true)).unwrap();
+        assert_eq!(enabled_state(&settings), Some(true), "an enabled plugin is left enabled");
+        assert!(!plain.contains("stays disabled"));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

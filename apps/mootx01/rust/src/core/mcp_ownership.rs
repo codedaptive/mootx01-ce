@@ -285,6 +285,62 @@ pub fn is_plugin_enabled(plugin_id: &str, home: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True only when `~/.claude/settings.json` records an EXPLICIT
+/// `enabledPlugins[plugin_id] = false`. An absent file, absent map or absent
+/// entry is not a recorded decision and reads `false` here — this answers
+/// "did the user turn it off", not "is it on", which is `is_plugin_enabled`'s
+/// question. The cache refresh reads this before it reinstalls and puts the
+/// disable back afterwards. Twin of Swift `recordedPluginDisable`.
+pub fn recorded_plugin_disable(plugin_id: &str, home: &Path) -> bool {
+    let path = home.join(".claude").join("settings.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return false;
+    };
+    let lossy = String::from_utf8_lossy(&bytes);
+    let Ok(root) = serde_json::from_str::<Value>(&lossy) else {
+        return false;
+    };
+    root.get("enabledPlugins")
+        .and_then(|e| e.get(plugin_id))
+        .and_then(|v| v.as_bool())
+        == Some(false)
+}
+
+/// Write `enabledPlugins[plugin_id] = value` into `~/.claude/settings.json`,
+/// keeping every other key. A settings file that exists but is not valid JSON
+/// is left untouched (never overwrite a user's settings with an empty
+/// document). Used by the cache refresh to restore a recorded disable after
+/// `claude plugin install` enabled the plugin. Twin of Swift
+/// `writePluginEnabled`.
+pub fn write_plugin_enabled(value: bool, plugin_id: &str, home: &Path) -> std::io::Result<()> {
+    let claude_dir = home.join(".claude");
+    let path = claude_dir.join("settings.json");
+    let mut root = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(map)) => Value::Object(map),
+            _ => return Ok(()),
+        },
+        Err(_) => {
+            std::fs::create_dir_all(&claude_dir)?;
+            Value::Object(serde_json::Map::new())
+        }
+    };
+    let enabled = root
+        .as_object_mut()
+        .expect("root is an object by construction")
+        .entry("enabledPlugins")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !enabled.is_object() {
+        *enabled = Value::Object(serde_json::Map::new());
+    }
+    enabled
+        .as_object_mut()
+        .expect("enabledPlugins is an object by construction")
+        .insert(plugin_id.to_string(), Value::Bool(value));
+    let out = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(&path, out + "\n")
+}
+
 /// True when the plugin both HAS an installed entry and IS enabled — the
 /// combined condition that actually means "this plugin owns the MCP
 /// connection right now" (plugin-owned MCP connections, Adams #5 correction). Callers

@@ -582,12 +582,54 @@ public enum DepthInstaller {
         // just materialised, and when they differ reinstall through the CLI,
         // which rebuilds the cache from the current package.
         if cachedManifestDiffers(entry: entry, homeDirectory: homeDirectory) {
+            // `claude plugin install` is an activation: it writes
+            // `enabledPlugins[id] = true`, and the uninstall before it drops
+            // the entry, so a user who deliberately turned the plugin off
+            // would come out of a routine upgrade with it on again. Read the
+            // recorded decision first and put it back after the rebuild; the
+            // cache is fresh either way, and the plugin stays exactly as the
+            // user left it. `mootx01 install` is how they turn it back on.
+            let recordedDisable = PluginDetector.recordedPluginDisable(
+                pluginID: claudeCodePluginID, homeDirectory: homeDirectory)
             guard claudeCLIRunner.run(arguments: ["plugin", "uninstall", claudeCodePluginID]),
                   claudeCLIRunner.run(arguments: ["plugin", "install", claudeCodePluginID]) else {
                 return "  ⓘ The cached mootx01 plugin is stale under the same version — run `claude plugin uninstall \(claudeCodePluginID)` then `claude plugin install \(claudeCodePluginID)` yourself, then restart Claude Code."
             }
+            if recordedDisable {
+                do {
+                    try writePluginEnabled(false, pluginID: claudeCodePluginID, homeDirectory: homeDirectory)
+                } catch {
+                    return "  ⓘ Claude Code plugin cache refreshed, but your recorded disable could not be restored (\(error.localizedDescription)) — run `claude plugin disable \(claudeCodePluginID)` yourself if you want it to stay off."
+                }
+                return "  ✓ Claude Code plugin cache refreshed; the plugin stays disabled as your settings record — run `mootx01 install` to turn it back on."
+            }
         }
         return "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new session) to load the updated plugin."
+    }
+
+    /// Write `enabledPlugins[pluginID] = value` into `~/.claude/settings.json`,
+    /// keeping every other key. A settings file that exists but is not valid
+    /// JSON is left untouched (same posture as the marketplace registration:
+    /// never overwrite a user's settings with an empty document). Used by the
+    /// cache refresh to restore a recorded disable after `claude plugin
+    /// install` enabled the plugin.
+    static func writePluginEnabled(_ value: Bool, pluginID: String, homeDirectory: URL) throws {
+        let fm = FileManager.default
+        let claudeDir = homeDirectory.appendingPathComponent(".claude", isDirectory: true)
+        let settingsURL = claudeDir.appendingPathComponent("settings.json", isDirectory: false)
+        var root: [String: Any] = [:]
+        if fm.fileExists(atPath: settingsURL.path) {
+            let data = try Data(contentsOf: settingsURL)
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            root = obj
+        } else {
+            try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+        }
+        var enabled = root["enabledPlugins"] as? [String: Any] ?? [:]
+        enabled[pluginID] = value
+        root["enabledPlugins"] = enabled
+        let out = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try out.write(to: settingsURL, options: .atomic)
     }
 
     /// True when the cached plugin copy's `.mcp.json` differs from the
