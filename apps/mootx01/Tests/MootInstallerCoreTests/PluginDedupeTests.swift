@@ -255,7 +255,9 @@ struct PluginDedupeTests {
 
         // The stranded-cache refresh must have
         // invoked the CLI-update seam, since the plugin is already installed.
-        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]],
+        // The fixture's cache carries no .mcp.json, so after the version-only
+        // update the refresh reads it as stale and rebuilds it by reinstalling.
+        #expect(fake.invokedArguments.map { $0[1] } == ["update", "uninstall", "install"],
                 "rematerializing an already-installed plugin must invoke `claude plugin update`")
 
         // No direct entry must exist — the plugin still owns the connection.
