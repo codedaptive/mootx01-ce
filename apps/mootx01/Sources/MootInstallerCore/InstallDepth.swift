@@ -381,11 +381,20 @@ public enum DepthInstaller {
     /// something explicitly requests convergence.
     public static func pluginInstallDirectory(host: InstallMapHost, homeDirectory: URL) -> URL {
         let skillDest = expandTilde(host.skillUserPath, homeDirectory: homeDirectory)
-        return skillDest
+        let root = skillDest
             .deletingLastPathComponent()  // mootx01-memory/
             .deletingLastPathComponent()  // skills/
             .deletingLastPathComponent()  // host plugin root
-            .appendingPathComponent("mootx01-plugin", isDirectory: true)
+        // `~/.agents` is the agent-neutral skills root more than one host reads
+        // (Codex and GitHub Copilot today). A package directory shared there
+        // is overwritten by whichever host materializes last — on 2026-09-17
+        // the Copilot package replaced the Codex one a second after it was
+        // written and Codex's marketplace registration then failed against a
+        // tree with no `.codex-plugin/`. Hosts on that root get their own
+        // directory, named by host id; every host with a root of its own
+        // keeps the plain name.
+        let name = root.lastPathComponent == ".agents" ? "mootx01-plugin-\(host.id)" : "mootx01-plugin"
+        return root.appendingPathComponent(name, isDirectory: true)
     }
 
     /// Every plugin-capable host that ALREADY has a plugin directory on disk
