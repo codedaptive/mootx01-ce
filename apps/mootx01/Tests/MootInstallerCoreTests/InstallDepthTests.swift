@@ -434,6 +434,33 @@ struct InstallDepthTests {
         #expect(unwrapped.contains("✓"))
     }
 
+    @Test("stranded cache: a cache stale under the same version is reinstalled; a matching cache is left alone")
+    func strandedCacheStaleUnderSameVersionIsReinstalled() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home, version: "1.1.0-rc1")
+        let package = home.appendingPathComponent(".claude/mootx01-plugin", isDirectory: true)
+        let cache = home.appendingPathComponent(".claude/plugins/cache/mootx01/mootx01/1.1.0-rc1", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try #"{"mcpServers":{"memory":{}}}"#.write(to: package.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try #"{"mcpServers":{"mootx01":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+
+        let fake = FakeClaudeCLIRunner(shouldSucceed: true)
+        let line = try #require(DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: fake))
+        #expect(fake.invokedArguments == [
+            ["plugin", "update", "mootx01@mootx01"],
+            ["plugin", "uninstall", "mootx01@mootx01"],
+            ["plugin", "install", "mootx01@mootx01"],
+        ], "a stale cache under the same version is rebuilt by reinstalling")
+        #expect(line.contains("✓"))
+
+        try #"{"mcpServers":{"memory":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        let quiet = FakeClaudeCLIRunner(shouldSucceed: true)
+        _ = DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: quiet)
+        #expect(quiet.invokedArguments == [["plugin", "update", "mootx01@mootx01"]], "a matching cache is left alone")
+    }
+
     @Test("stranded cache: refresh is a no-op when the plugin is not yet installed")
     func strandedCacheRefreshNoopWhenNotInstalled() {
         let home = sandbox()
@@ -491,7 +518,9 @@ struct InstallDepthTests {
             clientID: "claude-code", depth: .plugin, homeDirectory: home,
             binaryPath: "/safe/bin/mootx01", claudeCLIRunner: fake
         )
-        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]])
+        // The fixture's cache carries no .mcp.json, so after the version-only
+        // update the refresh reads it as stale and rebuilds it by reinstalling.
+        #expect(fake.invokedArguments.map { $0[1] } == ["update", "uninstall", "install"])
     }
 
     @Test("stranded cache refresh does not fire for a client other than claude-code")
@@ -544,8 +573,8 @@ struct InstallDepthTests {
         let mcpText = try String(contentsOf: pluginDir.appendingPathComponent(".mcp.json"), encoding: .utf8)
         #expect(mcpText.contains("\"type\" : \"http\""), "converged package must be HTTP-shaped")
         #expect(!mcpText.contains("\"serve\""), "stdio-era serve entry must not survive rematerialization")
-        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]],
-                "the stranded cache must be refreshed as part of convergence")
+        #expect(fake.invokedArguments.map { $0[1] } == ["update", "uninstall", "install"],
+                "the stranded cache must be refreshed as part of convergence; the fixture's cache has no manifest, so it is rebuilt")
     }
 
     // MARK: - sandbox helpers
