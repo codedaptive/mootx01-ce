@@ -69,6 +69,12 @@ extension CloudKitStateActor {
                     from: storage, sideTable: CKSideSchema.pendingSkewTable)
                 _ = try? await OutboxStore.deleteMatchingParked(
                     tableName: decoded.table, rowKey: decoded.rowKey.uuidString, from: storage)
+                // The tombstone won the clock; a pending local write older than it
+                // has lost and must not be pushed afterwards (it would revive the
+                // row in the cloud, which never compares clocks on a push).
+                _ = try? await OutboxStore.deleteMatchingOlderThan(
+                    tableName: decoded.table, rowKey: decoded.rowKey.uuidString,
+                    hlc: decoded.syncMeta.hlc, from: storage)
             case .lastWriterWinsByHLC:
                 // LWW gate: a stale tombstone (incoming HLC < local `_ck_sync_meta` HLC)
                 // must not delete a newer local row (D2 fix).
@@ -120,6 +126,12 @@ extension CloudKitStateActor {
                     from: storage, sideTable: CKSideSchema.pendingSkewTable)
                 _ = try? await OutboxStore.deleteMatchingParked(
                     tableName: decoded.table, rowKey: decoded.rowKey.uuidString, from: storage)
+                // The tombstone won the clock; a pending local write older than it
+                // has lost and must not be pushed afterwards (it would revive the
+                // row in the cloud, which never compares clocks on a push).
+                _ = try? await OutboxStore.deleteMatchingOlderThan(
+                    tableName: decoded.table, rowKey: decoded.rowKey.uuidString,
+                    hlc: decoded.syncMeta.hlc, from: storage)
 
             case .fieldLevelLWW:
                 // Tombstone interplay: edit-beats-delete rule.
@@ -174,6 +186,12 @@ extension CloudKitStateActor {
                     from: storage, sideTable: CKSideSchema.pendingSkewTable)
                 _ = try? await OutboxStore.deleteMatchingParked(
                     tableName: decoded.table, rowKey: decoded.rowKey.uuidString, from: storage)
+                // The tombstone won the clock; a pending local write older than it
+                // has lost and must not be pushed afterwards (it would revive the
+                // row in the cloud, which never compares clocks on a push).
+                _ = try? await OutboxStore.deleteMatchingOlderThan(
+                    tableName: decoded.table, rowKey: decoded.rowKey.uuidString,
+                    hlc: decoded.syncMeta.hlc, from: storage)
             }
             return
         }
@@ -256,6 +274,12 @@ extension CloudKitStateActor {
                     hlc: decoded.syncMeta.hlc, schemaVersion: decoded.syncMeta.schemaVersion,
                     kitID: decoded.syncMeta.kitID)
             }
+            // The remote write won the clock; a pending local write older than
+            // it has lost and must not be pushed afterwards (push never compares
+            // clocks, so the cloud would take the stale value).
+            _ = try? await OutboxStore.deleteMatchingOlderThan(
+                tableName: decoded.table, rowKey: decoded.rowKey.uuidString,
+                hlc: decoded.syncMeta.hlc, from: storage)
 
         case .remoteWins:
             _ = try await storage.rowStore.upsertSync(
@@ -263,6 +287,11 @@ extension CloudKitStateActor {
                 values: inboundValues,
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
+            // Remote wins unconditionally; whatever this device still had queued
+            // for the row that is older than the remote write is superseded.
+            _ = try? await OutboxStore.deleteMatchingOlderThan(
+                tableName: decoded.table, rowKey: decoded.rowKey.uuidString,
+                hlc: decoded.syncMeta.hlc, from: storage)
 
         case .localWins:
             // Only insert if no row exists.
