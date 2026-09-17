@@ -416,10 +416,12 @@ pub struct V2MemoryMutationResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2MemoryMutationError {
-    /// The mutation cannot be applied, or the estate is unreachable.
+    /// The mutation cannot be applied, or the estate is unreachable. Rendered
+    /// as the `mutation_unavailable` operational refusal, the Swift
+    /// `AriaV2MemoryMutations.unavailable` twin.
     Unavailable,
     /// Estate admission failed before the target and sensitivity were resolved.
-    /// The public renderer intentionally keeps the `Unavailable` wire shape.
+    /// Rendered as `estate_unavailable`, the estate-level code.
     AdmissionRefused,
     /// The mutation landed but the readback confirmation failed.
     OutcomeUnverified(V2MemoryMutationOperation),
