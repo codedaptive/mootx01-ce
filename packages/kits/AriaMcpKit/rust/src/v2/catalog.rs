@@ -1239,7 +1239,9 @@ fn drain_entry_schema() -> Value {
     json!({"type":"object","properties":{
         "name":{"type":"string"},
         "state":{"type":"string","enum":["draining","idle"]},
-        "pending":{"type":"integer","minimum":0}
+        "pending":{"type":"integer","minimum":0},
+        "detail":{"type":"string"},
+        "rejected":{"type":"integer","minimum":0}
     },"required":["name","state","pending"],"additionalProperties":false})
 }
 

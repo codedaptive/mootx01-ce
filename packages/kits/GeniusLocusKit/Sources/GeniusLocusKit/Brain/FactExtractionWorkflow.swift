@@ -38,6 +38,10 @@ public struct FactExtractionWorkStatus: Sendable {
     public var rejected = 0
     public var notApplicable = 0
     public var completedEmpty = 0
+    /// Earliest `nextAttemptAt` among sources scheduled for retry (not
+    /// blocked-provider), so a settle loop can wait out the backoff instead
+    /// of stopping on it. Nil when nothing is scheduled.
+    public var nextRetryAt: Date? = nil
     // False when no extractor is registered for the estate; the detail
     // prepends the explanation so an operator reading moot_drain_status with
     // 54,000 pending rows sees "no extractor registered" ahead of the counts.
@@ -134,7 +138,9 @@ extension GeniusLocusKit {
             if state.outcome == .completedEmpty || (state.readyToPublish && state.candidates.isEmpty && source.areFactsExtracted) {
                 status.completedEmpty += 1
             }
-            guard !source.hasFeatureFlag(.factsExtracted) else { continue }
+            // Bit 28 sits above the 12-bit feature-flag region, so
+            // `hasFeatureFlag` cannot see it; the computed accessor can.
+            guard !source.areFactsExtracted else { continue }
             if state.leaseUntil > now.timeIntervalSince1970 {
                 status.inFlight += 1; status.runnable -= 1
             } else if state.outcome == .notApplicable {
@@ -143,12 +149,19 @@ extension GeniusLocusKit {
                 status.rejected += 1; status.runnable -= 1
             } else if state.nextAttemptAt > now.timeIntervalSince1970 {
                 if state.outcome == .blockedProvider { status.blocked += 1 }
-                else { status.retrying += 1 }
+                else {
+                    status.retrying += 1
+                    let at = Date(timeIntervalSince1970: state.nextAttemptAt)
+                    if status.nextRetryAt.map({ at < $0 }) ?? true { status.nextRetryAt = at }
+                }
                 status.runnable -= 1
             }
             if state.nextStart > 0 && !state.outcome.isTerminal { status.partial += 1 }
         }
         status.runnable = max(0, status.runnable)
+        // Rejected sources carry bits 28 and 29 and are settled for this
+        // recipe; they are reported, never owed (ruling 2026-09-16).
+        status.rejected = try await estate.countFactExtractionRejected()
         return status
     }
 }
@@ -194,6 +207,16 @@ public struct FactExtractionBatchWork: Sendable {
                     maximumCharacters: extractor.spec.maximumInputCharacters)
             }
             if state.outcome.isTerminal || state.nextAttemptAt > epoch || state.leaseUntil > epoch {
+                // A checkpoint already rejected before bit 29 existed (or by a
+                // process that died between the checkpoint and the mark) is
+                // settled now, so it leaves the debt instead of being re-read
+                // by every batch. Idempotent: 0 when the bit is already set.
+                if state.outcome == .rejected && !drawer.areFactsExtracted {
+                    if try await store.markFactExtractionRejected(
+                        sourceID: drawer.id, expectedContent: drawer.content, recipeID: recipeID) == 1 {
+                        advanced = true
+                    }
+                }
                 deferred += 1; continue
             }
             state.leaseToken = UUID().uuidString.lowercased()
@@ -274,6 +297,13 @@ public struct FactExtractionBatchWork: Sendable {
             guard try await checkpoints.compareAndSwap(id: id, stream: stream,
                 expected: claim, payload: staged, stamp: stamp) else { skipped += 1; continue }
             advanced = true
+            if state.outcome == .rejected {
+                // Rejected is settled for this recipe: bits 28 and 29 go on
+                // together and the row leaves the debt. The reason stays in
+                // the checkpoint row as the analysis corpus.
+                _ = try await store.markFactExtractionRejected(
+                    sourceID: drawer.id, expectedContent: drawer.content, recipeID: recipeID)
+            }
             if state.readyToPublish && state.outcome == .partial {
                 // Progress is durable BEFORE publication. If the process dies
                 // after the transaction, bit 28 prevents publishing twice.
