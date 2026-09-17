@@ -692,20 +692,55 @@ fn refresh_stranded_plugin_cache(
     home: &Path,
     claude_cli: &dyn ClaudeCliRunning,
 ) -> Option<String> {
-    if !crate::core::mcp_ownership::is_plugin_installed(CLAUDE_CODE_PLUGIN_ID, home) {
+    let Some(entry) = crate::core::mcp_ownership::installed_entry(CLAUDE_CODE_PLUGIN_ID, home) else {
         return None;
+    };
+    if !claude_cli.run(&["plugin", "update", CLAUDE_CODE_PLUGIN_ID]) {
+        return Some(format!(
+            "  ⓘ Could not refresh the cached mootx01 plugin automatically — run \
+             `claude plugin update {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
+        ));
     }
-    if claude_cli.run(&["plugin", "update", CLAUDE_CODE_PLUGIN_ID]) {
-        return Some(
-            "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new \
-             session) to load the updated plugin."
-                .to_string(),
-        );
+    // `claude plugin update` compares manifest VERSIONS only: a package
+    // rewritten under the same version (the server key moved from "mootx01"
+    // to "memory" on 2026-09-16 with no version bump) reports "already at the
+    // latest version" and leaves the stale cache in place. So compare the
+    // cached copy's MCP manifest with the package just materialised, and
+    // when they differ reinstall through the CLI, which rebuilds the cache
+    // from the current package. Twin of the Swift `refreshStrandedPluginCache`.
+    if cached_manifest_differs(&entry, home)
+        && !(claude_cli.run(&["plugin", "uninstall", CLAUDE_CODE_PLUGIN_ID])
+            && claude_cli.run(&["plugin", "install", CLAUDE_CODE_PLUGIN_ID]))
+    {
+        return Some(format!(
+            "  ⓘ The cached mootx01 plugin is stale under the same version — run \
+             `claude plugin uninstall {CLAUDE_CODE_PLUGIN_ID}` then `claude plugin install \
+             {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
+        ));
     }
-    Some(format!(
-        "  ⓘ Could not refresh the cached mootx01 plugin automatically — run \
-         `claude plugin update {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
-    ))
+    Some(
+        "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new \
+         session) to load the updated plugin."
+            .to_string(),
+    )
+}
+
+/// True when the cached plugin copy's `.mcp.json` differs from the package
+/// on disk. An unreadable cache reads as different (it must be rebuilt); an
+/// unreadable package reads as not different (nothing to compare against).
+fn cached_manifest_differs(entry: &serde_json::Value, home: &Path) -> bool {
+    let claude_home = home.join(".claude");
+    let Some(install_path) = entry.get("installPath").and_then(|v| v.as_str()) else { return false };
+    let cache_root = if Path::new(install_path).is_absolute() {
+        PathBuf::from(install_path)
+    } else {
+        claude_home.join("plugins").join(install_path)
+    };
+    let Ok(package) = std::fs::read(claude_home.join("mootx01-plugin").join(".mcp.json")) else { return false };
+    match std::fs::read(cache_root.join(".mcp.json")) {
+        Ok(cached) => cached != package,
+        Err(_) => true,
+    }
 }
 
 /// Inject
@@ -1351,6 +1386,31 @@ mod tests {
     }
 
     #[test]
+    fn stranded_cache_stale_under_the_same_version_is_reinstalled() {
+        let home = tmp_home("stranded-stale");
+        write_installed_plugins(&home, "1.1.0-rc1");
+        let package = home.join(".claude").join("mootx01-plugin");
+        let cache = home.join(".claude").join("plugins").join("cache/mootx01/mootx01/1.1.0-rc1");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(package.join(".mcp.json"), r#"{"mcpServers":{"memory":{}}}"#).unwrap();
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"mootx01":{}}}"#).unwrap();
+        let fake = FakeClaudeCliRunner::new(true);
+        let line = refresh_stranded_plugin_cache(&home, &fake).unwrap();
+        let calls: Vec<Vec<String>> = fake.invocations();
+        assert_eq!(calls.len(), 3, "update, then uninstall + install because the cache is stale: {calls:?}");
+        assert_eq!(calls[1][1], "uninstall");
+        assert_eq!(calls[2][1], "install");
+        assert!(line.contains("✓"));
+        // A cache that matches the package is left alone after the update call.
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"memory":{}}}"#).unwrap();
+        let fake = FakeClaudeCliRunner::new(true);
+        refresh_stranded_plugin_cache(&home, &fake);
+        assert_eq!(fake.invocations().len(), 1);
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
     fn stranded_cache_refresh_noop_when_not_installed() {
         let home = tmp_home("stranded-absent");
         let fake = FakeClaudeCliRunner::new(true);
@@ -1435,9 +1495,11 @@ mod tests {
             "converged package must be HTTP-shaped"
         );
         assert!(!mcp_text.contains("\"serve\""), "stdio-era serve entry must not survive rematerialization");
+        // The fixture's cache carries no .mcp.json, so after the version-only
+        // update the refresh reads it as stale and rebuilds it by reinstalling.
         assert_eq!(
-            fake.invocations(),
-            vec![vec!["plugin".to_string(), "update".to_string(), "mootx01@mootx01".to_string()]],
+            fake.invocations().iter().map(|c| c[1].as_str()).collect::<Vec<_>>(),
+            vec!["update", "uninstall", "install"],
             "the stranded cache must be refreshed as part of convergence"
         );
 
