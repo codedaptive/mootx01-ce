@@ -165,6 +165,16 @@ public enum CKRecordMapping {
         }
         record[SyncMetadataField.schemaVersion] = NSNumber(value: schemaVersion)
         record[SyncMetadataField.kitID] = kitID as NSString
+        // A live save clears the tombstone marker EXPLICITLY. Pushes save with
+        // `.changedKeys`, so a key this record never sets keeps whatever the
+        // server holds: a live upsert that reuses the record ID of an earlier
+        // delete (a newer write after a delete, which the HLC guards admit)
+        // would merge its values and HLC onto the stored `moot_sync_deleted =
+        // 1` and decode as a tombstone carrying the live HLC. Writing 0 marks
+        // the key changed and overwrites the stale 1; `tombstoneRecord` keeps
+        // writing 1. No lifecycle decision is made here — the write was
+        // admitted before it was serialized.
+        record[SyncTombstone.deletedFieldKey] = NSNumber(value: 0)
         // moot_sync_column_hlcs: present only for fieldLevelLWW records (B-8).
         // JSON-encoded ColumnHLCMap blob. Omitted when nil or empty so non-fieldLevelLWW
         // records stay compact on the wire.
