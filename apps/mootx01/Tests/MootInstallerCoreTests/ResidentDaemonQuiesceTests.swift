@@ -102,6 +102,35 @@ struct ResidentDaemonQuiesceTests {
         #expect(daemon.calls == ["isRunning", "stop"])
     }
 
+    @Test("a hold stops the daemon once around many steps and restarts it once after the last")
+    func holdQuiescesOnceAroundTheSequence() async {
+        let daemon = DaemonRecorder(running: true)
+        var steps: [String] = []
+        let result = await ResidentDaemonQuiesce.hold(residentServes: true, daemon: daemon.control) {
+            for step in ["schema", "kg_facts", "span encode"] {
+                _ = await ResidentDaemonQuiesce.run(residentServes: true, step: step, daemon: daemon.control) {
+                    steps.append(step); return true
+                }
+            }
+            return steps.count
+        }
+        #expect(result == 3)
+        #expect(steps == ["schema", "kg_facts", "span encode"])
+        #expect(daemon.calls == ["isRunning", "stop", "start"])
+    }
+
+    @Test("a hold whose daemon will not stop runs nothing and reports nil")
+    func holdThatCannotStopRunsNothing() async {
+        let daemon = DaemonRecorder(running: true, stopSucceeds: false)
+        var ran = false
+        let result = await ResidentDaemonQuiesce.hold(residentServes: true, daemon: daemon.control) {
+            ran = true; return true
+        }
+        #expect(result == nil)
+        #expect(!ran)
+        #expect(daemon.calls == ["isRunning", "stop"])
+    }
+
     @Test("the PID marker decides: absent, dead or our own pid means no resident")
     func pidMarkerDecidesResidency() throws {
         let dir = FileManager.default.temporaryDirectory

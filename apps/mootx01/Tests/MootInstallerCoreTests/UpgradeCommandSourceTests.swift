@@ -97,7 +97,11 @@ struct UpgradeCommandSourceTests {
         let branch = source[branchStart..<branchEnd]
         // The schema step gates the rest: a refused version must stop the
         // sequence before any other step can open the schema and stamp it.
-        #expect(branch.contains("guard await runSchemaUpgrade(estate: estate, home: home) else { throw ExitCode.failure }"))
+        // The sequence runs inside one daemon hold (one Keychain read), so
+        // the gate returns false out of the hold and the branch throws on it.
+        #expect(branch.contains("ResidentDaemonQuiesce.hold("))
+        #expect(branch.contains("guard await runSchemaUpgrade(estate: estate, home: home) else { return false }"))
+        #expect(branch.contains("guard settled == true else { throw ExitCode.failure }"))
         #expect(branch.contains("retireLegacyEncryptionOptOut(estate: estate)"))
         #expect(branch.contains("refreshManifest(estate: estate)"))
         #expect(branch.contains("await runKGFactIdentityBackfill(estate: estate, home: home)"))
