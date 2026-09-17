@@ -2816,13 +2816,30 @@ impl EstateCoordinator {
         }
 
         let facts = self.fact_extraction_work_status(handle, (queuekit::wall_now_secs() * 1000.0) as i64)?;
-        statuses.push(DrainStatus {
-            name: DrainStatus::FACT_EXTRACTION_NAME.to_string(),
-            pending: facts.runnable + facts.retrying + facts.blocked,
-            in_flight: facts.in_flight,
-            detail: Some(facts.detail()),
-            rejected: Some(facts.rejected),
-        });
+        // With the master preference off nothing is owed: the lane reads
+        // idle and says why, so a settle loop on an estate that turned
+        // extraction off (the Rust artifact build) finishes.
+        let extraction_off = self
+            .provisioned_preference(handle, crate::EstatePreferenceKey::FactExtraction)
+            .map(|value| value == crate::EstatePreferenceValue::Off)
+            .unwrap_or(false);
+        if extraction_off {
+            statuses.push(DrainStatus {
+                name: DrainStatus::FACT_EXTRACTION_NAME.to_string(),
+                pending: 0,
+                in_flight: 0,
+                detail: Some("fact_extraction off".to_string()),
+                rejected: None,
+            });
+        } else {
+            statuses.push(DrainStatus {
+                name: DrainStatus::FACT_EXTRACTION_NAME.to_string(),
+                pending: facts.runnable + facts.retrying + facts.blocked,
+                in_flight: facts.in_flight,
+                detail: Some(facts.detail()),
+                rejected: Some(facts.rejected),
+            });
+        }
 
         Ok(statuses)
     }
