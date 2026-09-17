@@ -290,4 +290,74 @@ struct AriaV2DiagnosticsDispatchCoverageTests {
                 "moot_migration_confirm must produce -32602 invalidParams for missing winner_branch_id; got code: \(error.code)")
         }
     }
+
+    // MARK: - typed orchestration refusals
+
+    private func expectOrchestrationUnavailable(_ result: JSONValue, tool: String) throws {
+        #expect(result.objectValue?["isError"] == .bool(true), "\(tool) must refuse; got: \(result)")
+        #expect(result.objectValue?["structuredContent"]?.objectValue?["tool"] == .string(tool))
+        let error = try #require(result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue)
+        #expect(error["code"] == .string("orchestration_unavailable"), "\(tool): \(error)")
+        #expect(error["message"] == .string("The selected typed orchestration operation is unavailable."), "\(tool): \(error)")
+        #expect(error["retryable"] == .bool(true), "\(tool): \(error)")
+    }
+
+    /// An empty plan is refused by the recipe (insufficient branches). The
+    /// refusal is the typed `orchestration_unavailable` envelope with its fixed
+    /// message — the same envelope the Rust port renders — and the recipe's own
+    /// error text never reaches the wire.
+    @Test("moot_migration_run with an empty plan is an orchestration_unavailable refusal")
+    func migrationRunEmptyPlanIsOrchestrationUnavailable() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        let result = try await dispatcher.dispatch(name: "moot_migration_run", arguments: .object([
+            "corpusName": .string("catalog-exercise"),
+            "entries": .array([]),
+            "plans": .array([]),
+        ]))
+        try expectOrchestrationUnavailable(result, tool: "moot_migration_run")
+    }
+
+    /// An unknown branch id is refused with the same typed envelope.
+    @Test("moot_migration_confirm with an unknown branch is an orchestration_unavailable refusal")
+    func migrationConfirmUnknownBranchIsOrchestrationUnavailable() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        let result = try await dispatcher.dispatch(name: "moot_migration_confirm", arguments: .object([
+            "winner_branch_id": .string("00000000-0000-0000-0000-000000000000"),
+        ]))
+        try expectOrchestrationUnavailable(result, tool: "moot_migration_confirm")
+    }
+
+    /// `endorse` on the link the same stdio caller just filed (an active edge;
+    /// only proposed edges take endorsements) is refused, and the refusal is the
+    /// `mutation_unavailable` envelope with the fixed message — the envelope the
+    /// Rust port renders for this situation and for an unknown tunnel, so
+    /// neither case can be told from the other. This is the release-qualification
+    /// catalog call.
+    @Test("moot_review_tunnel endorse by the stdio caller is a mutation_unavailable refusal")
+    func reviewTunnelEndorseByStdioCallerIsMutationUnavailable() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        let a = try await kit.capture(handle, CaptureFrame(
+            content: "endorse source node", channel: .typed, room: "connectivity",
+            latticeAnchor: .udc("004"), addedBy: "dispatch-coverage",
+            embeddingModelID: "test-model-v1", subject: "endorse-src"))
+        let b = try await kit.capture(handle, CaptureFrame(
+            content: "endorse target node", channel: .typed, room: "connectivity",
+            latticeAnchor: .udc("004"), addedBy: "dispatch-coverage",
+            embeddingModelID: "test-model-v1", subject: "endorse-tgt"))
+        let link = try await dispatcher.dispatch(name: "moot_link_memories", arguments: .object([
+            "from_id": .string(a.id), "to_id": .string(b.id), "relationship": .string("supports"),
+        ]))
+        let tunnelID = try #require(data(link)?["tunnel_id"]?.stringValue)
+        let result = try await dispatcher.dispatch(name: "moot_review_tunnel", arguments: .object([
+            "tunnel_id": .string(tunnelID), "decision": .string("endorse"),
+        ]))
+        #expect(result.objectValue?["isError"] == .bool(true), "endorse must be refused; got: \(result)")
+        let error = try #require(result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue)
+        #expect(error["code"] == .string("mutation_unavailable"))
+        #expect(error["message"] == .string("The requested mutation is unavailable in the selected estate."))
+        #expect(error["retryable"] == .bool(false))
+    }
 }
