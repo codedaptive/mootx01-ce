@@ -498,24 +498,33 @@ struct ServeCommand: AsyncParsableCommand {
             // silently misreport what the estate asked for.
             let factSettingsDirectory = estate.kind == .registered
                 ? EstateCatalog.configurationDirectory : estate.directory
-            let factExtractor: (any FactExtractor)?
-            do {
-                let factExtractionSetting = try await kit.provisionedPreference(
-                    .factExtraction, for: handle)
-                let factExtractorSetting = try await kit.provisionedPreference(
-                    .factExtractor, for: handle)
-                guard let workerExecutableURL = Self.resolvedCurrentExecutableURL() else {
-                    Logging.stderr.log("mootx01 serve fatal: could not resolve current executable path for fact extraction")
-                    throw ExitCode.failure
-                }
-                factExtractor = FactExtractorBuilder.build(
-                    masterSetting: factExtractionSetting,
-                    extractorSetting: factExtractorSetting,
-                    settingsDirectory: factSettingsDirectory,
-                    workerExecutableURL: workerExecutableURL)
-            } catch {
-                Logging.stderr.log("mootx01 serve fatal: fact-extraction preference read failed: \(error)")
+            guard let workerExecutableURL = Self.resolvedCurrentExecutableURL() else {
+                Logging.stderr.log("mootx01 serve fatal: could not resolve current executable path for fact extraction")
                 throw ExitCode.failure
+            }
+            // F2/F12: a factory, not a built value — a value captured HERE (at
+            // daemon start) stays nil forever once the operator turns
+            // fact_extraction on later, or stages a model asset after launch,
+            // because a resident daemon never restarts on a preference edit.
+            // The factory re-reads both preferences and re-runs
+            // FactExtractorBuilder.build fresh every time AriaResident calls
+            // it — at daemon start and again at each off→on edge the
+            // preference-reconciliation loop detects.
+            let factExtractorFactory: @Sendable () async -> (any FactExtractor)? = {
+                do {
+                    let factExtractionSetting = try await kit.provisionedPreference(
+                        .factExtraction, for: handle)
+                    let factExtractorSetting = try await kit.provisionedPreference(
+                        .factExtractor, for: handle)
+                    return FactExtractorBuilder.build(
+                        masterSetting: factExtractionSetting,
+                        extractorSetting: factExtractorSetting,
+                        settingsDirectory: factSettingsDirectory,
+                        workerExecutableURL: workerExecutableURL)
+                } catch {
+                    Logging.stderr.log("mootx01 serve: fact-extraction preference read failed (\(error)); extractor stays inert this cycle")
+                    return nil
+                }
             }
             // Batch limits and the Signal 14 cadence come from the same settings
             // directory (§ DUTY_LIFECYCLE); the stdio path installs the limits
@@ -531,7 +540,7 @@ struct ServeCommand: AsyncParsableCommand {
                 statsStorePath: MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 vaultPath: AriaResident.vaultPath(env: environment),
                 vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment),
-                factExtractor: factExtractor,
+                factExtractorFactory: factExtractorFactory,
                 factExtractionCadenceSeconds: TimeInterval(dutySettings.dutyFactExtractionCadenceSeconds),
                 dutyLimits: DutyLimits(settings: dutySettings)
             )
