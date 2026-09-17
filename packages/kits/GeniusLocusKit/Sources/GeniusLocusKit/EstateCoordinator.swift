@@ -275,6 +275,7 @@ public extension GeniusLocusKit {
             // for this open.
             dutyQueued[handle] = nil
             dutyLimitsByHandle[handle] = nil
+            lastReindexCompleted[handle] = nil
             mountStates[handle] = nil
             // Drop the sync engine so no engine reference outlives the estate.
             syncEngines[handle] = nil
@@ -339,6 +340,7 @@ public extension GeniusLocusKit {
         // F1/F9: see the matching comment in the error path above.
         dutyQueued[handle] = nil
         dutyLimitsByHandle[handle] = nil
+        lastReindexCompleted[handle] = nil
         mountStates[handle] = nil
         // Drop the sync engine so no engine reference outlives the estate.
         syncEngines[handle] = nil
