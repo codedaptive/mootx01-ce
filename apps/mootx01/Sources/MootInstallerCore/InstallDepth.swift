@@ -566,7 +566,7 @@ public enum DepthInstaller {
         homeDirectory: URL,
         claudeCLIRunner: ClaudeCLIRunning
     ) -> String? {
-        guard PluginDetector.isPluginInstalled(
+        guard let entry = PluginDetector.installedEntry(
             pluginID: claudeCodePluginID, homeDirectory: homeDirectory
         ) else {
             return nil
@@ -574,7 +574,36 @@ public enum DepthInstaller {
         guard claudeCLIRunner.run(arguments: ["plugin", "update", claudeCodePluginID]) else {
             return "  ⓘ Could not refresh the cached mootx01 plugin automatically — run `claude plugin update \(claudeCodePluginID)` yourself, then restart Claude Code."
         }
+        // `claude plugin update` compares manifest VERSIONS only: a package
+        // rewritten under the same version (the server key moved from
+        // "mootx01" to "memory" on 2026-09-16 with no version bump) reports
+        // "already at the latest version" and leaves the stale cache in
+        // place. So compare the cached copy's MCP manifest with the package
+        // just materialised, and when they differ reinstall through the CLI,
+        // which rebuilds the cache from the current package.
+        if cachedManifestDiffers(entry: entry, homeDirectory: homeDirectory) {
+            guard claudeCLIRunner.run(arguments: ["plugin", "uninstall", claudeCodePluginID]),
+                  claudeCLIRunner.run(arguments: ["plugin", "install", claudeCodePluginID]) else {
+                return "  ⓘ The cached mootx01 plugin is stale under the same version — run `claude plugin uninstall \(claudeCodePluginID)` then `claude plugin install \(claudeCodePluginID)` yourself, then restart Claude Code."
+            }
+        }
         return "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new session) to load the updated plugin."
+    }
+
+    /// True when the cached plugin copy's `.mcp.json` differs from the
+    /// package on disk. An unreadable cache reads as different (it must be
+    /// rebuilt); an unreadable package reads as not different (nothing to
+    /// compare against, and the update call above already ran).
+    static func cachedManifestDiffers(entry: [String: Any], homeDirectory: URL) -> Bool {
+        let claudeHome = homeDirectory.appendingPathComponent(".claude", isDirectory: true)
+        guard let installPath = entry["installPath"] as? String else { return false }
+        let cacheRoot = installPath.hasPrefix("/")
+            ? URL(fileURLWithPath: installPath)
+            : claudeHome.appendingPathComponent("plugins", isDirectory: true).appendingPathComponent(installPath)
+        let packageManifest = claudeHome.appendingPathComponent("mootx01-plugin/.mcp.json")
+        guard let package = try? Data(contentsOf: packageManifest) else { return false }
+        guard let cached = try? Data(contentsOf: cacheRoot.appendingPathComponent(".mcp.json")) else { return true }
+        return cached != package
     }
 
     /// Register the just-materialised plugin dir as a local (directory-source)
