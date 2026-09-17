@@ -264,7 +264,7 @@ pub mod settings {
         // ---- duties block (GeniusLocusKit § DUTY_LIFECYCLE) ----
         /// `duties.fact_extraction_batch`: sources per fact-extraction batch (default 16).
         pub duty_fact_extraction_batch: usize,
-        /// `duties.subject_backfill_batch`: rows per subject sweep (default 256).
+        /// `duties.subject_backfill_batch`: rows per subject sweep (default 32: one batch of ~10 s Apple calls fits the cadence).
         pub duty_subject_backfill_batch: usize,
         /// `duties.fact_source_lease_seconds`: per-source in-flight fence while a
         /// model call runs (default 120; must exceed the extractor's request timeout).
@@ -288,7 +288,7 @@ pub mod settings {
                 context_distill_reference_expansion_max_ratio: 64,
                 recall_distillation_max_source_bytes: 32768,
                 duty_fact_extraction_batch: 16,
-                duty_subject_backfill_batch: 256,
+                duty_subject_backfill_batch: 32,
                 duty_fact_source_lease_seconds: 120,
                 duty_fact_extraction_cadence_seconds: 300,
             }
@@ -375,7 +375,7 @@ pub mod settings {
             fact_extraction_tokenizer,
             fact_extraction_model_version,
             duty_fact_extraction_batch: duty_positive("fact_extraction_batch", 16) as usize,
-            duty_subject_backfill_batch: duty_positive("subject_backfill_batch", 256) as usize,
+            duty_subject_backfill_batch: duty_positive("subject_backfill_batch", 32) as usize,
             duty_fact_source_lease_seconds: duty_positive("fact_source_lease_seconds", 120),
             duty_fact_extraction_cadence_seconds: duty_positive("fact_extraction_cadence_seconds", 300),
         }

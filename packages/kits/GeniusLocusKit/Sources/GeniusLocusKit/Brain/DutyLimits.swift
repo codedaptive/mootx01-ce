@@ -18,7 +18,7 @@ public struct DutyLimits: Sendable, Equatable {
     public var factSourceLeaseSeconds: Int
 
     public init(factExtractionBatch: Int = 16,
-                subjectBackfillBatch: Int = 256,
+                subjectBackfillBatch: Int = 32,
                 factSourceLeaseSeconds: Int = 120) {
         self.factExtractionBatch = max(1, factExtractionBatch)
         self.subjectBackfillBatch = max(1, subjectBackfillBatch)

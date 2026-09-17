@@ -358,10 +358,10 @@ public enum AriaResident {
                 "AriaResident fact extraction activated: recipe=\(recipeID) " +
                 "provider=\(spec.providerID) cleared=\(cleared)")
             return { now in
-                // The batch runs as a claimed QueueKit job (DutyQueue): queue
-                // the owed duty if the tick has not, then drain its stream.
+                // Enqueue only (§ DUTY_LIFECYCLE): the duty worker pays the
+                // batch off the tick, so Signal 14 returns at once.
                 _ = try await kit.enqueueDuty(.factExtraction, in: handle, now: now)
-                return try await kit.drainDuty(.factExtraction, in: handle, now: now).unitsPaid
+                return 0
             }
         } catch {
             Logging.stderr.log(
@@ -730,10 +730,10 @@ public enum AriaResident {
                     // registered encoder and writes their int8 span rows. A
                     // no-op (0) when no encoder is active for the estate.
                     spanEncodeCycle: { now in
-                        // The batch runs as a claimed QueueKit job (DutyQueue):
-                        // queue the owed duty if the tick has not, then drain it.
+                        // Enqueue only (§ DUTY_LIFECYCLE): the duty worker pays
+                        // the batch off the tick.
                         _ = try await kit.enqueueDuty(.spanEncode, in: handle, now: now)
-                        return try await kit.drainDuty(.spanEncode, in: handle, now: now).unitsPaid
+                        return 0
                     },
                     // Live fact-extraction cycle (FACT_EXTRACTION_WIRE §2b):
                     // non-nil when setting=.on AND an extractor is provisioned;
@@ -822,6 +822,34 @@ public enum AriaResident {
         }
 
         let pumpTask = Task { await governor.run() }
+
+        // The duty worker (§ DUTY_LIFECYCLE): the tick and the signals only
+        // enqueue owed duties; this task pays ONE bounded batch per duty per
+        // cadence, off the tick, so a model-bound batch never stalls the brain.
+        // The two on-demand duties (facts backfill, basis retrain) are drained
+        // when something queued them, never enqueued here.
+        let dutyWorkerTask = Task {
+            let cadence = max(1, config.factExtractionCadenceSeconds)
+            while !Task.isCancelled {
+                // Date() is permitted here: the daemon is the host boundary.
+                let now = Date()
+                for kind in DutyKind.residentDuties + [.factsBackfill, .retrainBasis] {
+                    do {
+                        if DutyKind.residentDuties.contains(kind) {
+                            _ = try await kit.enqueueDuty(kind, in: handle, now: now)
+                        }
+                        let report = try await kit.drainDuty(kind, in: handle, now: now)
+                        if report.jobsRun > 0 {
+                            Logging.stderr.log(
+                                "AriaResident duty \(kind.rawValue): \(report.unitsPaid) paid, \(report.remainingDebt) remaining")
+                        }
+                    } catch {
+                        Logging.stderr.log("AriaResident duty \(kind.rawValue) failed: \(error)")
+                    }
+                }
+                try? await Task.sleep(for: .seconds(cadence))
+            }
+        }
 
         // Continuous monitoring gate: the observer program re-decides its enable
         // state on each poll from the live store flag (OR the ARIA_MCP_OBSERVER
@@ -929,6 +957,7 @@ public enum AriaResident {
             try await server.run()   // resident: returns only on bind failure
         } catch {
             pumpTask.cancel()
+            dutyWorkerTask.cancel()
             preferenceTask.cancel()
             monitoringTask?.cancel()
             serverMetricsTask?.cancel()
@@ -936,6 +965,7 @@ public enum AriaResident {
             throw error
         }
         pumpTask.cancel()
+        dutyWorkerTask.cancel()
         preferenceTask.cancel()
         monitoringTask?.cancel()
         serverMetricsTask?.cancel()
