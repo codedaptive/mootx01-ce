@@ -145,6 +145,29 @@ impl QueueCheckpointStore {
         Ok(changed)
     }
 
+    /// Remove one retained checkpoint row, if present. A no-op (returns
+    /// `false`) when no row matches `id`/`stream` — deleting an already-absent
+    /// checkpoint is not an error.
+    ///
+    /// F6: added so a caller that permanently retires the checkpoint's
+    /// SUBJECT — an expunged or tombstoned source drawer — can remove the row
+    /// outright rather than leaving it retained forever. A retained
+    /// checkpoint holds domain evidence (e.g. grounded-fact-candidate
+    /// evidence quotes for fact extraction); the debt scan that would
+    /// otherwise revisit and clean it up excludes tombstoned drawers, so an
+    /// un-deleted row for an expunged source is retained indefinitely with
+    /// no future pass that will ever look at it again.
+    ///
+    /// Twin of Swift `QueueCheckpointStore.delete(id:stream:)`.
+    pub fn delete(&self, id: &JobId, stream: &StreamId) -> Result<bool, QueueError> {
+        let deleted = self
+            .storage
+            .row_store()
+            .delete(TABLE, &predicate(id, stream))
+            .map_err(error)?;
+        Ok(deleted > 0)
+    }
+
     pub fn payloads(&self, stream: &StreamId) -> Result<Vec<Vec<u8>>, QueueError> {
         self.storage
             .row_store()

@@ -121,10 +121,13 @@ impl FactExtractionWorkStatus {
         counts
     }
 }
-fn stream() -> StreamId {
+// F6: `pub(crate)` (not module-private) so `EstateCoordinator::expunge`
+// (coordinator.rs) can address a source's checkpoint row directly to delete
+// it on expunge, without duplicating the stream name or the digest formula.
+pub(crate) fn stream() -> StreamId {
     StreamId("fact-extraction-checkpoints".into())
 }
-fn work_id(source: &str) -> JobId {
+pub(crate) fn work_id(source: &str) -> JobId {
     JobId(source_digest(&format!("fact-work-v1|{source}"))[..32].into())
 }
 fn stamp(now: i64) -> HLC {
@@ -632,6 +635,25 @@ impl FactExtractionBatchWork {
                         .map_err(failure)?;
                 } else {
                     report.skipped_sources += 1;
+                    // F6: publish declined because the source predicate no
+                    // longer matched (content edit, recipe deactivation, or
+                    // the source is gone). If the source is now tombstoned
+                    // — expunged since this batch was queued — its
+                    // checkpoint is truly abandoned: the fact-extraction
+                    // debt scan excludes tombstoned drawers, so no future
+                    // pass will ever revisit it to clean up the retained
+                    // GroundedFactCandidate evidence quotes in
+                    // `state.candidates`. Delete the checkpoint outright
+                    // rather than leaving it forever. A content-edit or
+                    // recipe-inactive nil (the source is still alive) is
+                    // left alone — a later pass can still legitimately
+                    // settle it against fresh content or the newly active
+                    // recipe.
+                    if let Ok(Some(current)) = self.estate.get_drawer(&drawer.id) {
+                        if current.tombstoned_at.is_some() {
+                            let _ = self.checkpoints.delete(&id, &stream());
+                        }
+                    }
                 }
             }
         }

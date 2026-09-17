@@ -53,6 +53,51 @@ struct PersistenceKitBackendTests {
         #expect(try await reopened.read(id: id, stream: stream) == second)
     }
 
+    /// F6: `delete` removes a retained checkpoint outright — the seam GLK's
+    /// expunge fan-out uses so a permanently-retired subject (an expunged
+    /// source drawer) does not keep its checkpoint row forever with no future
+    /// pass ever revisiting it.
+    @Test func deleteRemovesRetainedCheckpoint() async throws {
+        let backend = try await makeBackend()
+        let queue = QueueKit(backend: backend)
+        let store = try QueueCheckpointStore(queue: queue)
+        let id = JobID.generate(), stream = StreamID(rawValue: "checkpoints")
+        let stamp = HLC(physicalTime: 1, logicalCount: 0, nodeID: 1)
+        let payload = Data("evidence".utf8)
+        #expect(try await store.compareAndSwap(id: id, stream: stream, expected: nil, payload: payload, stamp: stamp))
+        #expect(try await store.read(id: id, stream: stream) == payload)
+
+        #expect(try await store.delete(id: id, stream: stream), "the row was present, so delete must report true")
+        #expect(try await store.read(id: id, stream: stream) == nil,
+            "the checkpoint must be gone, not merely marked done")
+
+        // Idempotent: deleting an already-absent checkpoint is not an error.
+        #expect(!(try await store.delete(id: id, stream: stream)),
+            "deleting an absent checkpoint must report false, not throw")
+    }
+
+    /// F6: `delete` must not touch a DIFFERENT job's checkpoint on the same
+    /// stream — the predicate scopes on (id, stream, status == "checkpoint")
+    /// exactly as `read` and `compareAndSwap` do.
+    @Test func deleteIsScopedToExactID() async throws {
+        let backend = try await makeBackend()
+        let queue = QueueKit(backend: backend)
+        let store = try QueueCheckpointStore(queue: queue)
+        let stream = StreamID(rawValue: "checkpoints")
+        let targetID = JobID.generate(), otherID = JobID.generate()
+        let stamp = HLC(physicalTime: 1, logicalCount: 0, nodeID: 1)
+        let payload = Data("evidence".utf8)
+
+        #expect(try await store.compareAndSwap(id: targetID, stream: stream, expected: nil, payload: payload, stamp: stamp))
+        #expect(try await store.compareAndSwap(id: otherID, stream: stream, expected: nil, payload: payload, stamp: stamp))
+
+        _ = try await store.delete(id: targetID, stream: stream)
+
+        #expect(try await store.read(id: targetID, stream: stream) == nil)
+        #expect(try await store.read(id: otherID, stream: stream) == payload,
+            "a different job on the same stream must survive")
+    }
+
     @Test func writeThenDrain() async throws {
         let backend = try await makeBackend()
         let job = Job(
