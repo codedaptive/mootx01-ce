@@ -261,6 +261,38 @@ impl EstateCoordinator {
         Ok(owed)
     }
 
+    /// Mark one room dirty directly — the write-path half of the incremental
+    /// sweep, called from `reanchor` for both the room a drawer left and the
+    /// room it joined. Twin of Swift `markAnomalySweepRoomDirty`.
+    ///
+    /// F4: `anomaly_sweep_owed_rooms`'s audit-fold above dirties a room by
+    /// resolving each touched row's CURRENT `parent_node_id` at fold time —
+    /// correct for the room a drawer moved INTO, but the room it moved OUT
+    /// OF is invisible to that fold: by the time the fold runs, the row's
+    /// live parent is already the new room, and `LatticeAnchor` (the only
+    /// before/after state the audit event itself carries) encodes UDC
+    /// classification, not room — a pure room move leaves it byte-identical.
+    /// The source room can only be recovered at the call site, before the
+    /// move happens, which is exactly what `reanchor` does with this method.
+    pub(crate) fn mark_anomaly_sweep_room_dirty(
+        &self,
+        handle: &EstateHandle,
+        wing: &str,
+        room: &str,
+        now: i64,
+    ) -> Result<(), GeniusLocusKitError> {
+        let checkpoints = self.fact_checkpoints(handle)?;
+        let stream = stream();
+        let id = room_id(wing, room);
+        let previous = checkpoints.read(&id, &stream).map_err(failure)?;
+        let state = RoomState { wing: wing.to_string(), room: room.to_string(), dirty: true };
+        checkpoints
+            .compare_and_swap(&id, &stream, previous.as_deref(),
+                &serde_json::to_vec(&state).map_err(failure)?, stamp(now))
+            .map_err(failure)?;
+        Ok(())
+    }
+
     /// Score up to `limit` owed rooms and mark them clean. Returns the rooms
     /// scored; the duty queue carries the remainder forward. Twin of Swift
     /// `runAnomalySweepBatch`.
@@ -291,7 +323,9 @@ impl EstateCoordinator {
 
 /// Room node id → (wing, room) through the estate's node store; drawers whose
 /// room cannot be resolved are skipped (an estate opened without a node tree).
-fn resolve_room_names<'a>(
+/// `pub(crate)` so `coordinator::reanchor` can resolve a drawer's
+/// pre-move room before calling `Estate::reanchor` (F4).
+pub(crate) fn resolve_room_names<'a>(
     estate: &Estate,
     parent_ids: impl Iterator<Item = &'a str>,
 ) -> BTreeMap<String, (String, String)> {
