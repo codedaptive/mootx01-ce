@@ -105,7 +105,8 @@ extension GeniusLocusKit {
             stamp: HLC(physicalTime: Int64(now.timeIntervalSince1970 * 1000), logicalCount: 0, nodeID: 0))
         return FactExtractionBatchWork(drawers: pending, extractor: extractor, recipeID: recipeID,
             checkpoints: checkpoints, store: try await ensureKGStore(for: handle), now: now,
-            traversedForward: !wrapped && !pending.isEmpty, lease: lease)
+            traversedForward: !wrapped && !pending.isEmpty, lease: lease,
+            sourceLeaseSeconds: dutyLimits(for: handle).factSourceLeaseSeconds)
     }
 
     public func factExtractionWorkStatus(_ handle: EstateHandle, now: Date) async throws -> FactExtractionWorkStatus {
@@ -163,6 +164,8 @@ public struct FactExtractionBatchWork: Sendable {
     let now: Date
     let traversedForward: Bool
     let lease: QueueCheckpointLease
+    /// Per-source in-flight fence (DutyLimits.factSourceLeaseSeconds).
+    let sourceLeaseSeconds: Int
 
     public func run() async throws -> FactExtractionBatchResult {
         defer { lease.release() }
@@ -194,7 +197,7 @@ public struct FactExtractionBatchWork: Sendable {
                 deferred += 1; continue
             }
             state.leaseToken = UUID().uuidString.lowercased()
-            state.leaseUntil = epoch + 120
+            state.leaseUntil = epoch + Double(sourceLeaseSeconds)
             let stamp = HLC(physicalTime: Int64(epoch * 1000), logicalCount: 0, nodeID: 0)
             let claim = try JSONEncoder().encode(state)
             guard try await checkpoints.compareAndSwap(id: id, stream: stream,

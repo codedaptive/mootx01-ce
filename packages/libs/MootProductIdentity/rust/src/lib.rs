@@ -260,6 +260,17 @@ pub mod settings {
         /// `recall_distillation.max_source_bytes`: UTF-8 admission budget,
         /// default/ceiling 32768. Config may lower it; oversized bodies stay intact.
         pub recall_distillation_max_source_bytes: usize,
+
+        // ---- duties block (GeniusLocusKit § DUTY_LIFECYCLE) ----
+        /// `duties.fact_extraction_batch`: sources per fact-extraction batch (default 16).
+        pub duty_fact_extraction_batch: usize,
+        /// `duties.subject_backfill_batch`: rows per subject sweep (default 256).
+        pub duty_subject_backfill_batch: usize,
+        /// `duties.fact_source_lease_seconds`: per-source in-flight fence while a
+        /// model call runs (default 120; must exceed the extractor's request timeout).
+        pub duty_fact_source_lease_seconds: u64,
+        /// `duties.fact_extraction_cadence_seconds`: the resident's Signal 14 period (default 300).
+        pub duty_fact_extraction_cadence_seconds: u64,
     }
 
     /// A missing or unreadable config file yields the same values as `{}`:
@@ -276,6 +287,10 @@ pub mod settings {
                 context_distill_reference_expansion_max_bytes: 8_388_608,
                 context_distill_reference_expansion_max_ratio: 64,
                 recall_distillation_max_source_bytes: 32768,
+                duty_fact_extraction_batch: 16,
+                duty_subject_backfill_batch: 256,
+                duty_fact_source_lease_seconds: 120,
+                duty_fact_extraction_cadence_seconds: 300,
             }
         }
     }
@@ -336,6 +351,13 @@ pub mod settings {
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
 
+        // `duties.*` — batch limits and the fact source lease. A non-positive
+        // or malformed value keeps the default.
+        let duties = root.get("duties");
+        let duty_positive = |key: &str, fallback: u64| -> u64 {
+            duties.and_then(|v| v.get(key)).and_then(|v| v.as_i64())
+                .filter(|v| *v > 0).map(|v| v as u64).unwrap_or(fallback)
+        };
         let distill = root.get("context_distill");
         let distill_positive = |key: &str, fallback: usize| -> usize {
             distill.and_then(|v| v.get(key)).and_then(|v| v.as_i64())
@@ -352,6 +374,10 @@ pub mod settings {
             fact_extraction_gguf,
             fact_extraction_tokenizer,
             fact_extraction_model_version,
+            duty_fact_extraction_batch: duty_positive("fact_extraction_batch", 16) as usize,
+            duty_subject_backfill_batch: duty_positive("subject_backfill_batch", 256) as usize,
+            duty_fact_source_lease_seconds: duty_positive("fact_source_lease_seconds", 120),
+            duty_fact_extraction_cadence_seconds: duty_positive("fact_extraction_cadence_seconds", 300),
         }
     }
 
