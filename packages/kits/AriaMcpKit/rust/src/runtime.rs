@@ -420,31 +420,36 @@ pub fn run(
                 handle_for_hnsw.clone(),
                 Some(&fact_settings_directory),
             );
-            // The duty worker (§ DUTY_LIFECYCLE): the tick and the signals only
-            // enqueue owed duties; this thread pays ONE bounded batch per duty
-            // per cadence, off the tick. Span and subject batches run under the
-            // coordinator (no model call); the fact batch runs through the
-            // one-batch cycle, which holds the coordinator only around the claim
-            // and the row write. The two on-demand duties are drained when
-            // something queued them, never enqueued here.
+            // The duty workers (§ DUTY_LIFECYCLE): the tick and the signals only
+            // enqueue owed duties; ONE thread per duty pays ONE bounded batch per
+            // cadence, off the tick, so a model-bound batch never stalls the
+            // brain and a fast lane (span encode, 30 s) never waits behind a
+            // slow one. Span and subject batches run under the coordinator (no
+            // model call); the fact batch runs through the one-batch cycle,
+            // which holds the coordinator only around the claim and the row
+            // write. The two on-demand duties are drained when something queued
+            // them, never enqueued here.
             {
-                let worker_coord = Arc::clone(&coord_for_hnsw);
-                let worker_handle = handle_for_hnsw.clone();
-                let worker_fact = fact_extraction_cycle.clone();
+                use genius_locus_kit::brain::duty_queue::DutyKind;
+                use genius_locus_kit::brain::signals::SpanEncodeSignal;
+                let fast = SpanEncodeSignal::DEFAULT_CADENCE_SECONDS.max(1);
                 let cadence = duty_settings.duty_fact_extraction_cadence_seconds.max(1);
-                std::thread::spawn(move || loop {
-                    use genius_locus_kit::brain::duty_queue::DutyKind;
-                    let now_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    for kind in [DutyKind::SpanEncode, DutyKind::SubjectBackfill] {
+                let now_millis = || SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                for (kind, seconds, enqueues) in [
+                    (DutyKind::SpanEncode, fast, true),
+                    (DutyKind::SubjectBackfill, cadence, true),
+                    (DutyKind::FactsBackfill, fast, false),
+                    (DutyKind::RetrainBasis, fast, false),
+                ] {
+                    let worker_coord = Arc::clone(&coord_for_hnsw);
+                    let worker_handle = handle_for_hnsw.clone();
+                    std::thread::spawn(move || loop {
+                        let now_ms = now_millis();
                         if let Ok(mut coord) = worker_coord.lock() {
-                            if let Err(e) = coord.enqueue_duty(&worker_handle, kind, now_ms) {
-                                eprintln!("AriaResident duty {} enqueue failed: {e:?}", kind.wire_name());
-                                continue;
-                            }
-                            match coord.drain_duty(&worker_handle, kind, now_ms) {
+                            let queued = if enqueues {
+                                coord.enqueue_duty(&worker_handle, kind, now_ms).map(|_| ())
+                            } else { Ok(()) };
+                            match queued.and_then(|_| coord.drain_duty(&worker_handle, kind, now_ms)) {
                                 Ok(r) if r.jobs_run > 0 => eprintln!(
                                     "AriaResident duty {}: {} paid, {} remaining",
                                     kind.wire_name(), r.units_paid, r.remaining_debt),
@@ -452,23 +457,19 @@ pub fn run(
                                 Err(e) => eprintln!("AriaResident duty {} failed: {e:?}", kind.wire_name()),
                             }
                         }
-                    }
-                    if let Some(cycle) = &worker_fact {
+                        std::thread::sleep(std::time::Duration::from_secs(seconds));
+                    });
+                }
+                if let Some(cycle) = fact_extraction_cycle.clone() {
+                    std::thread::spawn(move || loop {
                         match cycle() {
                             Ok(n) if n > 0 => eprintln!("AriaResident duty fact-extraction: {n} source(s) settled"),
                             Ok(_) => {}
                             Err(e) => eprintln!("AriaResident duty fact-extraction failed: {e}"),
                         }
-                    }
-                    for kind in [DutyKind::FactsBackfill, DutyKind::RetrainBasis] {
-                        if let Ok(mut coord) = worker_coord.lock() {
-                            if let Err(e) = coord.drain_duty(&worker_handle, kind, now_ms) {
-                                eprintln!("AriaResident duty {} failed: {e:?}", kind.wire_name());
-                            }
-                        }
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(cadence));
-                });
+                        std::thread::sleep(std::time::Duration::from_secs(cadence));
+                    });
+                }
             }
             // Signal 11 (ConsolidationSignal) and the contradiction sweep are
             // preference-gated: each cycle is built only when the estate's
