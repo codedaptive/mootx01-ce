@@ -413,11 +413,12 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
 
     /// Dispatches moot_federated_recall against a single-estate dispatcher with no
     /// peer grants. The operation reaches the federation lower, which throws
-    /// noAuthorizedFederationSource. executeV2Core catches it generically and wraps
-    /// it as an isError=true refusal with code "operation_failed". The refusal proves
+    /// noAuthorizedFederationSource; AriaV2Orchestration answers with the typed
+    /// operational refusal "orchestration_unavailable" and its fixed message, the
+    /// same envelope the Rust port renders for a no-peer estate. The refusal proves
     /// the production dispatch path was reached — a stub that short-circuits would
     /// not produce structuredContent.error with this code.
-    @Test func federatedRecallNoPeerGrantsProducesOperationFailedRefusal() async throws {
+    @Test func federatedRecallNoPeerGrantsProducesOrchestrationUnavailableRefusal() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
 
@@ -428,13 +429,15 @@ struct AriaV2MemoryGraphDispatchCoverageTests {
         #expect(result.objectValue?["isError"] == .bool(true),
                 "single-estate federated_recall must produce isError=true; got: \(result)")
         let errorObj = try requireError(result, operation: "moot_federated_recall")
-        // "operation_failed" is the generic catch re-wrap applied by executeV2Core when
-        // the lower throws noAuthorizedFederationSource. A stub short-circuiting before
-        // the lower would not produce structuredContent.error at all.
-        #expect(errorObj["code"] == .string("operation_failed"),
-                "error code must be operation_failed; got error: \(errorObj)")
-        #expect(errorObj["message"]?.stringValue?.isEmpty == false,
-                "error message must be non-empty")
+        // The typed orchestration refusal: the lower's own error description
+        // (noAuthorizedFederationSource) must not reach the wire. A stub
+        // short-circuiting before the lower would not produce
+        // structuredContent.error at all.
+        #expect(errorObj["code"] == .string("orchestration_unavailable"),
+                "error code must be orchestration_unavailable; got error: \(errorObj)")
+        #expect(errorObj["message"] == .string("The selected typed orchestration operation is unavailable."),
+                "error message must be the fixed orchestration refusal; got error: \(errorObj)")
+        #expect(errorObj["retryable"] == .bool(true))
     }
 
     // MARK: - moot_erase_memory partial-expunge gate
