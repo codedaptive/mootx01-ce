@@ -510,6 +510,44 @@ struct PermissionsWriterTests {
         #expect(!allow.contains("mcp__mootx01__moot_memory_search"), "must not take classify's allow default")
     }
 
+    @Test("a legacy plugin-prefix deny binds the absent current plugin twin")
+    func mergeTieredLegacyPluginDenyBindsAbsentCurrentPluginTwin() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // F7: the user denied the tool under the pre-v1.1.0 plugin prefix,
+        // and separately allowed it under the direct namespace (an install
+        // predating the rename, migrated forward but never re-tiered under
+        // the legacy prefix). Reading only `allPrefixes` for inheritance
+        // ignores the legacy deny entirely and lets the current plugin twin
+        // inherit the direct namespace's `allow` — silently dropping the
+        // user's explicit deny. The legacy entry itself is never rewritten
+        // (`allReadPrefixes` is read-only); only the current plugin prefix
+        // inherits from it.
+        let existing: [String: Any] = [
+            "permissions": [
+                "allow": ["mcp__mootx01__moot_memory_search"],
+                "deny": ["mcp__plugin_mootx01_mootx01__moot_memory_search"],
+            ]
+        ]
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        try JSONSerialization.data(withJSONObject: existing).write(to: settingsURL)
+
+        _ = try PermissionsWriter.mergeTiered(into: settingsURL, toolNames: toolNames)
+
+        let perms = try readPermissions(settingsURL)
+        let allow = perms["allow"] as? [String] ?? []
+        let deny = perms["deny"] as? [String] ?? []
+        #expect(
+            deny.contains("mcp__plugin_mootx01_memory__moot_memory_search"),
+            "the current plugin twin must inherit deny from the legacy prefix, not allow from the direct namespace"
+        )
+        #expect(
+            !allow.contains("mcp__plugin_mootx01_memory__moot_memory_search"),
+            "the legacy deny must not be bypassed by the direct namespace's allow"
+        )
+    }
+
     @Test("siblings that disagree are both left exactly where the user put them")
     func mergeTieredDisagreeingSiblingsAreNeverMoved() throws {
         let dir = try makeSandboxDir()
