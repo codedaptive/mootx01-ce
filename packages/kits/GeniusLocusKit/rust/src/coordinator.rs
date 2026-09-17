@@ -8074,6 +8074,14 @@ impl EstateCoordinator {
     /// / `to_lattice` must be present; an empty reanchor raises
     /// `VerbError::EmptyReanchor` at the boundary before dispatch — parity
     /// of the Swift guard.
+    ///
+    /// F4: when this move changes room (`to_room` or `to_wing` supplied),
+    /// the incremental anomaly sweep's source room is dirtied here, before
+    /// the move, in addition to the destination room the sweep's own
+    /// audit-fold already dirties. See
+    /// `anomaly_flag_sweep::mark_anomaly_sweep_room_dirty`'s doc comment for
+    /// why the fold cannot recover the source room on its own. Best-effort:
+    /// a dirty-mark failure must not abort a move that already committed.
     pub fn reanchor(
         &self,
         handle: &EstateHandle,
@@ -8089,9 +8097,39 @@ impl EstateCoordinator {
             .into());
         }
         let estate = self.estate_for_verb(handle)?;
+        let moves_room = to_room.is_some() || to_wing.is_some();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let prior_room = if moves_room {
+            estate.get_drawers(&[row_id]).ok().and_then(|drawers| {
+                let drawer = drawers.into_iter().next()?;
+                let names = crate::brain::anomaly_flag_sweep::resolve_room_names(
+                    &estate, std::iter::once(drawer.parent_node_id.as_str()));
+                names.get(&drawer.parent_node_id).cloned()
+            })
+        } else {
+            None
+        };
         estate
             .reanchor(row_id, to_room, to_wing, to_lattice)
-            .map_err(|e| remap("reanchor", &uuid_to_str(&handle.estate_uuid), e).into())
+            .map_err(|e| remap("reanchor", &uuid_to_str(&handle.estate_uuid), e))?;
+        if moves_room {
+            if let Ok(drawers) = estate.get_drawers(&[row_id]) {
+                if let Some(drawer) = drawers.into_iter().next() {
+                    let names = crate::brain::anomaly_flag_sweep::resolve_room_names(
+                        &estate, std::iter::once(drawer.parent_node_id.as_str()));
+                    if let Some((new_wing, new_room)) = names.get(&drawer.parent_node_id) {
+                        let _ = self.mark_anomaly_sweep_room_dirty(handle, new_wing, new_room, now);
+                    }
+                }
+            }
+            if let Some((old_wing, old_room)) = prior_room {
+                let _ = self.mark_anomaly_sweep_room_dirty(handle, &old_wing, &old_room, now);
+            }
+        }
+        Ok(())
     }
 
     // MARK: - reanchor_anchor
