@@ -1,32 +1,32 @@
 # Editions
 
-*Open Community product, personal Pro product, organizational Enterprise product. Same substrate; different operational surfaces.*
+*Open Community product, personal Pro product, organizational Enterprise product. The same software underneath; different levels of convenience and support.*
 
 ---
 
-MOOTx01 ships as an open source substrate under the Apache License,
-Version 2.0, with a commercial lane for the organizations and use cases
-that need Codedaptive standing behind a deployment. The substrate is the
-product. The commercial lane is the promise.
+MOOTx01 is open source under the Apache License, Version 2.0, with a
+commercial lane for the organizations and use cases that need Codedaptive
+standing behind a deployment. What you pay for there is the commitment, not
+access to the code.
 
 The source ships through two repository editions. The native application ships
 at three product levels. Those are different axes and their names must not be
 used interchangeably.
 
-- **Community Edition (CE repository)** publishes the open substrate and the
+- **Community Edition (CE repository)** publishes the open source code and the
   open **MOOTx01 Community** desktop application.
 - **Enterprise Edition (EE repository)** is the private canonical workshop and
   carries **MOOTx01 Pro** and **MOOTx01 Enterprise**, plus the Community source
   used to prove curated CE publications.
 
-The open core is the substrate itself, available to anyone, runnable on any
-hardware, under the user's control. The commercial products make that substrate
-convenient on personal Apple devices or operational in environments that need a
-contract behind it.
+The open core is MOOTx01 itself, available to anyone, runnable on any
+hardware, under the user's control. The commercial products make it convenient
+on personal Apple devices, or deployable in environments that need a contract
+behind the software they run.
 
-Both repository editions share the same substrate code. The open core makes the
-substrate exist. Pro makes it convenient across one person's Apple devices;
-Enterprise makes it operational where unsupported software alone cannot go.
+Both repository editions build from the same code. The open core makes MOOTx01
+exist. Pro makes it convenient across one person's Apple devices; Enterprise
+makes it deployable where unsupported software cannot go.
 
 ## Native application product levels
 
@@ -53,23 +53,21 @@ Community. Enterprise capabilities add organizational control above the
 single-owner model; they do not take ownership of a person's estate away from
 that person.
 
-The application stays beside the substrate in each repository. It is not a
-third repository. EE is the development and security-validation workshop. A
+The application lives beside the code in each repository. It is not a third
+repository. EE is the development and security-validation workshop. A
 curated app publication moves from an EE worktree into CE only after review;
 the CE backporter never merges the noisy EE development history and never
 copies the private app directory wholesale.
 
 ---
 
-## The open substrate
+## The open source release
 
-Everything in the Community Edition repository (`mootx01-ce`) is
-Apache-2.0: the seventeen foundation
-libraries and kits, the composition layer (GeniusLocusKit — estates,
-grants, federation composition, composed recall), the Brain layers
-(NeuronKit and CognitionKit), VaultKit, the ARIA interface surfaces, the
-conformance harness, the architecture specification, and the MOOTx01
-Community application.
+Everything in the Community Edition repository (`mootx01-ce`) is Apache-2.0:
+the seventeen foundation libraries and kits, the layer that composes them into
+an estate, the parts that read and reason over what is stored, the vault, the
+ARIA interface, the conformance harness, the architecture specification, and
+the MOOTx01 Community application.
 
 It runs where the user puts it. Laptop, phone, home server, machine in a
 closet, a tenant the user runs themselves. There is no cloud requirement,
@@ -83,18 +81,16 @@ venues. With the product core now under the same license, the venue and
 the main repository grant identical rights; the venues persist as stable,
 narrow dependency surfaces for downstream builders.
 
-The open substrate has no service level agreement, no supported builds,
+The open source release has no service level agreement, no supported builds,
 no indemnification, and no compliance documentation. The user is
 responsible for their own deployment. That is appropriate for most users.
 It is not appropriate for everyone.
 
 ## The applications
 
-One application family, three products, one capability hierarchy:
-
-```text
-Community ⊂ Pro ⊂ Enterprise
-```
+There is one application. Pro is Community plus the personal Apple layer;
+Enterprise is Pro plus the organizational layer. Nothing is taken away going
+up.
 
 **MOOTx01 Community** lives in the Community Edition repository and is
 Apache-2.0. It is
@@ -119,13 +115,12 @@ certified integrations. A named Enterprise capability is not a claim that
 its surface has shipped; absent surfaces remain absent until their
 implementation passes its own release gates.
 
-Pro does not add organizational ownership or administration to a person's
-estate. Every capability in Community stays in Community. The commercial
-products add layers; they never take the open application hostage.
+Pro does not put an administrator over a person's estate. Everything
+Community can do, it keeps doing, whether or not anyone buys anything.
 
 ## Enterprise Edition: the assurance lane
 
-Enterprise is not a different substrate. It is the Community and Pro capability
+Enterprise is not different software. It is the Community and Pro capability
 set plus the organizational identity, policy, federation, deployment, and
 assurance layer that enterprise environments require.
 
@@ -134,7 +129,7 @@ Regulated industries, large enterprises, organizations whose legal or
 compliance posture demands a contract behind the software they run.
 These are not failures of the model. They are operational realities.
 
-Enterprise Edition is the same substrate with the operational layer those
+Enterprise Edition is the same software with the operational layer those
 environments require:
 
 - **Supported builds** — hardened, tested, packaged for production, with
@@ -142,7 +137,7 @@ environments require:
 - **Compliance material** — the evidence packages FedRAMP- and
   CMMC-aligned deployments require, stated per agreement rather than
   implied by an edition name.
-- **FIPS Sponsorship Program** — the substrate is built FIPS-ready: the
+- **FIPS Sponsorship Program** — MOOTx01 is built FIPS-ready: the
   cryptography is our own conformance-gated code and already-validated
   cryptographic modules. Full CMVP validation is a lab-and-fee process
   measured in months; we undertake it with a sponsoring organization,
@@ -152,12 +147,12 @@ environments require:
 - **Language editions** — the Go implementation for financial-sector use
   and the planned maximum-portability C edition ship in Enterprise
   Edition. Swift (Apple Silicon) and Rust (PC/Linux) are the open
-  reference implementations; the standalone Python build arrives in the
-  open substrate at v1.0 and remains single-machine by design, for the
-  supply-chain reasons documented in the engineering references.
+  reference implementations; the standalone Python build ships in the open
+  source release and stays single-machine by design, for the supply-chain
+  reasons documented in the engineering references.
 
 Two further artifacts are available to enterprise clients under NDA: the
-mathematical treatment of the substrate's algorithms, and the
+mathematical treatment of the algorithms, and the
 knowledge-sharing RFC ahead of its public release. The NDA period on the
 RFC is a review window before an open release, not a wall around a
 proprietary standard.
@@ -168,32 +163,30 @@ We relicensed the product core from FSL-1.1-ALv2 to Apache-2.0,
 retroactively, in August 2026 ([`RELICENSE.md`](./RELICENSE.md)). We are
 plain about the reasoning.
 
-Pro makes the substrate convenient for an individual across Apple devices.
-Enterprise makes the substrate deployable at organizational scale. The
+Pro makes MOOTx01 convenient for one person across their Apple devices.
+Enterprise makes it deployable at organizational scale. The
 organizations that need a contract are the organizations that move serious
 workloads.
 
-All three products reinforce each other. Community adoption creates ecosystem
-gravity, Pro funds a polished personal product, and Enterprise funds the
-operational work required by organizations. None undermines the others.
+The three pay for each other. Community brings the users and the scrutiny,
+Pro funds a polished personal application, and Enterprise funds the support and
+compliance work organizations need.
 
 The FSL protected against a competitor reselling our code. That is not
-the competition that exists. In a field where working memory substrates
-are rebuilt from scratch in months, a use restriction taxes every
+the competition that exists. In a field where a memory engine can be
+rebuilt from scratch in months, a use restriction taxes every
 good-faith adopter while restraining no rival. The value that cannot be
 regenerated is not the source: it is the estate a user accrues, the
 assurance a vendor stands behind, the products on top, and the trademark.
 So the code is free, and the business is everything a license cannot copy.
 
-The durable rule is: **The code is free. Assurance is Enterprise.** A
-MOOT is always free — at home, at work, embedded, hosted, at any scale.
-Commercial agreements exist where organizations want commitments:
-supported builds, compliance evidence, certified integrations, the
-commercial applications, and sponsored validation programs.
+So the rule is short. The code is free — at home, at work, embedded, hosted,
+at any scale. You pay when you want someone on the hook: supported builds,
+compliance evidence, certified integrations, the commercial applications, and
+sponsored validation programs.
 
-This is the posture Red Hat proved: not the only way to use the
-substrate, but the credible way to deploy it where deployment is
-hardest. RHEL never won by restricting Linux. It won on operational
+This is the posture Red Hat proved: not the only way to run MOOTx01, but the
+credible way to deploy it where deployment is hardest. RHEL never won by restricting Linux. It won on operational
 credibility and a trademark a rebuild could not use. Our protection now
 rests where theirs did — and the ARIA portability commitment stands
 unchanged and non-negotiable: the interface specification, the grammar,
