@@ -823,21 +823,27 @@ public enum AriaResident {
 
         let pumpTask = Task { await governor.run() }
 
-        // The duty worker (§ DUTY_LIFECYCLE): the tick and the signals only
-        // enqueue owed duties; this task pays ONE bounded batch per duty per
-        // cadence, off the tick, so a model-bound batch never stalls the brain.
-        // The two on-demand duties (facts backfill, basis retrain) are drained
-        // when something queued them, never enqueued here.
-        let dutyWorkerTask = Task {
-            let cadence = max(1, config.factExtractionCadenceSeconds)
-            while !Task.isCancelled {
-                // Date() is permitted here: the daemon is the host boundary.
-                let now = Date()
-                for kind in DutyKind.residentDuties + [.factsBackfill, .retrainBasis] {
+        // The duty workers (§ DUTY_LIFECYCLE): the tick and the signals only
+        // enqueue owed duties; ONE task per duty pays ONE bounded batch per
+        // cadence, off the tick, so a model-bound batch never stalls the
+        // brain and a fast lane (span encode, 30 s) never waits behind a slow
+        // one (a subject or fact batch runs minutes). The two on-demand
+        // duties (facts backfill, basis retrain) are drained when something
+        // queued them, never enqueued here.
+        let dutyCadence = max(1, config.factExtractionCadenceSeconds)
+        let dutyWorkerTasks: [Task<Void, Never>] = [
+            (DutyKind.spanEncode, SpanEncodeSignal.defaultCadenceSeconds, true),
+            (DutyKind.subjectBackfill, dutyCadence, true),
+            (DutyKind.factExtraction, dutyCadence, true),
+            (DutyKind.factsBackfill, SpanEncodeSignal.defaultCadenceSeconds, false),
+            (DutyKind.retrainBasis, SpanEncodeSignal.defaultCadenceSeconds, false),
+        ].map { kind, cadence, enqueues in
+            Task {
+                while !Task.isCancelled {
+                    // Date() is permitted here: the daemon is the host boundary.
+                    let now = Date()
                     do {
-                        if DutyKind.residentDuties.contains(kind) {
-                            _ = try await kit.enqueueDuty(kind, in: handle, now: now)
-                        }
+                        if enqueues { _ = try await kit.enqueueDuty(kind, in: handle, now: now) }
                         let report = try await kit.drainDuty(kind, in: handle, now: now)
                         if report.jobsRun > 0 {
                             Logging.stderr.log(
@@ -846,8 +852,8 @@ public enum AriaResident {
                     } catch {
                         Logging.stderr.log("AriaResident duty \(kind.rawValue) failed: \(error)")
                     }
+                    try? await Task.sleep(for: .seconds(cadence))
                 }
-                try? await Task.sleep(for: .seconds(cadence))
             }
         }
 
@@ -957,7 +963,7 @@ public enum AriaResident {
             try await server.run()   // resident: returns only on bind failure
         } catch {
             pumpTask.cancel()
-            dutyWorkerTask.cancel()
+            dutyWorkerTasks.forEach { $0.cancel() }
             preferenceTask.cancel()
             monitoringTask?.cancel()
             serverMetricsTask?.cancel()
@@ -965,7 +971,7 @@ public enum AriaResident {
             throw error
         }
         pumpTask.cancel()
-        dutyWorkerTask.cancel()
+        dutyWorkerTasks.forEach { $0.cancel() }
         preferenceTask.cancel()
         monitoringTask?.cancel()
         serverMetricsTask?.cancel()
