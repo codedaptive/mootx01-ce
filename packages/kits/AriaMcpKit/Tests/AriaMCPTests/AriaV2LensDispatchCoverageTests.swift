@@ -242,4 +242,21 @@ struct AriaV2LensDispatchCoverageTests {
             try await d.dispatch(name: "moot_lens_rhythm", arguments: .object([:]))
         }
     }
+
+    /// The comparison lenses need a SECOND estate the caller can read; the
+    /// serving estate's own id is refused exactly like an unregistered one, in
+    /// both ports (Rust twin: selected_comparison_lenses_refuse_the_estate_itself).
+    @Test("moot_lens_overlap and moot_lens_divergence refuse the serving estate itself")
+    func comparisonLensesRefuseTheEstateItself() async throws {
+        let d = try await makeDispatcher()
+        let status = try await d.dispatch(name: "moot_estate_status", arguments: .object([:]))
+        let ownID = try #require(data(status)["estate_id"]?.stringValue)
+        for name in ["moot_lens_overlap", "moot_lens_divergence"] {
+            let result = try await d.dispatch(
+                name: name, arguments: .object(["comparison_estate_id": .string(ownID)]))
+            #expect(isError(result), "\(name) must refuse a self comparison; got: \(result)")
+            let code = result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]?.stringValue
+            #expect(code == "lens_unavailable", "\(name): got \(String(describing: code))")
+        }
+    }
 }
