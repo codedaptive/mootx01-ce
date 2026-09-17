@@ -176,22 +176,23 @@ pub fn run_one_dreaming_cycle(
         .map_err(|e| format!("dream: estate open failed: {e}"))?;
     let handle = reg.default.handle.clone();
 
-    // The one-shot finisher owns Signal 14 while it has the estate open. Build
-    // and activate through the same production function as the resident, then
-    // drain runnable fact chunks even when the REM-ALPHA queue is empty.
+    // The coordinator pays ONE bounded Signal 14 batch while it has the estate
+    // open (§ DUTY_LIFECYCLE), built and activated through the same production
+    // function as the resident. It never loops until settled; `drain` does.
     let fact_settings_directory = if opening.federate {
         None
     } else {
         Path::new(estate_path).parent()
     };
-    if let Some(fact_cycle) = crate::runtime::build_fact_extraction_dream_cycle(
+    crate::runtime::configure_duty_limits_from_settings(&reg.coord, &handle, fact_settings_directory);
+    if let Some(fact_cycle) = crate::runtime::build_fact_extraction_cycle(
         &reg.coord,
         handle,
         fact_settings_directory,
     ) {
         match fact_cycle() {
             Ok(settled) => eprintln!(
-                "mootx01 dream: fact extraction cycle complete — {settled} source(s) settled"
+                "mootx01 dream: fact extraction batch complete — {settled} source(s) settled"
             ),
             Err(error) => eprintln!(
                 "mootx01 dream: fact extraction cycle failed: {error}"
@@ -210,8 +211,9 @@ pub fn run_one_dreaming_cycle(
     // estate whose drawers still owe spans. The batch attempts encoder
     // activation itself when none is registered; with no model it is a clean
     // 0. Twin of the Swift dream command's span step.
-    // Both duties run as claimed QueueKit jobs (duty_queue): one 256-item
-    // subject batch and one span batch per pass, as the Swift finisher does.
+    // Both duties run as claimed QueueKit jobs (duty_queue): one bounded
+    // subject batch and one span batch per pass (DutyLimits), as the Swift
+    // coordinator does.
     match reg.coord.lock() {
         Ok(mut coord) => {
             use genius_locus_kit::brain::duty_queue::DutyKind;

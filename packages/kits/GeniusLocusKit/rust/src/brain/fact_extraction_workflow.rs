@@ -255,6 +255,7 @@ impl EstateCoordinator {
             now,
             traversed_forward,
             _lease: lease,
+            source_lease_secs: self.duty_limits(handle).fact_source_lease_seconds as f64,
         }))
     }
 
@@ -352,6 +353,8 @@ pub struct FactExtractionBatchWork {
     now: i64,
     traversed_forward: bool,
     _lease: queuekit::QueueCheckpointLease,
+    /// Per-source in-flight fence (DutyLimits.fact_source_lease_seconds).
+    source_lease_secs: f64,
 }
 impl FactExtractionBatchWork {
     pub fn run(self) -> Result<FactExtractionBatchResult, GeniusLocusKitError> {
@@ -398,7 +401,7 @@ impl FactExtractionBatchWork {
                 continue;
             }
             state.lease_token = uuid::Uuid::new_v4().to_string();
-            state.lease_until = epoch + 120.0;
+            state.lease_until = epoch + self.source_lease_secs;
             let claim = serde_json::to_vec(&state).map_err(failure)?;
             if !self
                 .checkpoints
