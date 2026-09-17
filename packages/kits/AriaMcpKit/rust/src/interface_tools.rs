@@ -848,6 +848,9 @@ pub struct JsonImportReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JsonImportFailure {
     Adapter(String),
+    /// The seed file failed to decode or validate (`VaultKitError::SeedFileInvalid`);
+    /// the message names the first offending element and is the caller's to fix.
+    InvalidSeed(String),
     Failed(String),
 }
 
@@ -1402,6 +1405,7 @@ pub fn import_json_seed(
         mode,
     ).map_err(|error| match error {
         vault_kit::VaultKitError::AdapterError(message) => JsonImportFailure::Adapter(message),
+        vault_kit::VaultKitError::SeedFileInvalid(message) => JsonImportFailure::InvalidSeed(message),
         error => JsonImportFailure::Failed(format!("json import failed: {error}")),
     })?;
     Ok(JsonImportReceipt {
