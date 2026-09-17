@@ -1628,6 +1628,18 @@ impl Estate {
         self.store.count_fact_extraction_debt()
     }
 
+    /// Settle one source as rejected by the active recipe (bits 28 and 29).
+    /// Mirrors Swift `Estate.markFactExtractionRejected`.
+    pub fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        self.store.mark_fact_extraction_rejected(source_id, expected_content, recipe_id)
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set).
+    pub fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.store.count_fact_extraction_rejected()
+    }
+
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
     /// over `DrawerStore::set_subject_representation` — the seam the
     /// filing surface, backfill, and the (future) subject rider write

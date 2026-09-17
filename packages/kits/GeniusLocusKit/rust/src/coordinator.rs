@@ -1546,6 +1546,10 @@ pub struct DrainStatus {
     /// reports `"encoded_chunks: 7218"` so forward progress is visible). `None`
     /// when a drain has no extra detail to report.
     pub detail: Option<String>,
+    /// Rows the lane settled by REJECTING them (fact extraction: bit 29).
+    /// Settled, so never part of `pending`; reported so a caller can see the
+    /// rejected corpus. `None` for lanes that have no such outcome.
+    pub rejected: Option<usize>,
 }
 
 impl DrainStatus {
@@ -2738,6 +2742,7 @@ impl EstateCoordinator {
                 pending,
                 in_flight,
                 detail: Some(format!("encoded_chunks: {encoded_chunks}")),
+                rejected: None,
             });
         }
 
@@ -2757,6 +2762,7 @@ impl EstateCoordinator {
                 pending: dreaming_pending,
                 in_flight: 0,
                 detail: Some("stream: dreaming".to_string()),
+                rejected: None,
             });
         }
 
@@ -2777,6 +2783,7 @@ impl EstateCoordinator {
                 pending: debt,
                 in_flight: 0,
                 detail: Some(format!("pipeline: {}", producer.pipeline_version())),
+                rejected: None,
             });
         }
 
@@ -2804,15 +2811,17 @@ impl EstateCoordinator {
                     Some(encoder) => format!("model: {}", encoder.spec().model_id),
                     None => "encoder not loaded".to_string(),
                 }),
+                rejected: None,
             });
         }
 
         let facts = self.fact_extraction_work_status(handle, (queuekit::wall_now_secs() * 1000.0) as i64)?;
         statuses.push(DrainStatus {
             name: DrainStatus::FACT_EXTRACTION_NAME.to_string(),
-            pending: facts.runnable + facts.retrying + facts.blocked + facts.rejected,
+            pending: facts.runnable + facts.retrying + facts.blocked,
             in_flight: facts.in_flight,
             detail: Some(facts.detail()),
+            rejected: Some(facts.rejected),
         });
 
         Ok(statuses)

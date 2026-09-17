@@ -188,7 +188,7 @@ impl EstateCoordinator {
                     return Ok(0);
                 }
                 let state = self.fact_extraction_work_status(handle, now)?;
-                return Ok(state.runnable + state.in_flight + state.retrying + state.blocked + state.rejected);
+                return Ok(state.runnable + state.in_flight + state.retrying + state.blocked);
             }
             DutyKind::FactsBackfill | DutyKind::RetrainBasis => return Ok(0),
         };
