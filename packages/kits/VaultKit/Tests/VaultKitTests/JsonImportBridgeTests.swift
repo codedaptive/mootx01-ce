@@ -32,7 +32,7 @@ struct JsonImportBridgeTests {
         try JsonSeedFile.parse(data: Data(json.utf8), limits: limits, now: Date(timeIntervalSince1970: 1_790_000_000))
     }
 
-    /// Expect `parse` to throw `VaultKitError.adapterError` whose message
+    /// Expect `parse` to throw `VaultKitError.seedFileInvalid` whose message
     /// contains every given fragment (the "one error naming the first
     /// offending element" contract).
     private func expectParseError(
@@ -44,9 +44,9 @@ struct JsonImportBridgeTests {
         do {
             _ = try parse(json, limits: limits)
             Issue.record(
-                "expected adapterError containing \(fragments); parse succeeded",
+                "expected seedFileInvalid containing \(fragments); parse succeeded",
                 sourceLocation: sourceLocation)
-        } catch let VaultKitError.adapterError(message) {
+        } catch let VaultKitError.seedFileInvalid(message) {
             for fragment in fragments {
                 #expect(
                     message.contains(fragment),
@@ -55,7 +55,7 @@ struct JsonImportBridgeTests {
             }
         } catch {
             Issue.record(
-                "expected VaultKitError.adapterError; got \(error)",
+                "expected VaultKitError.seedFileInvalid; got \(error)",
                 sourceLocation: sourceLocation)
         }
     }
@@ -700,7 +700,7 @@ struct JsonImportWriteTests {
         do {
             _ = try await bridge.importSeed(at: url, into: handle, now: Date())
             Issue.record("expected validation error")
-        } catch let VaultKitError.adapterError(message) {
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("\"r999\""), "got: \(message)")
         }
 
@@ -895,12 +895,12 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for subject exceeding 120 chars")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for subject exceeding 120 chars")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
             #expect(message.contains("120"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -914,11 +914,11 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for empty subject")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for empty subject")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -936,12 +936,12 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for multiline subject")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for multiline subject")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
             #expect(message.contains("single line"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -957,12 +957,12 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for untrimmed subject")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for untrimmed subject")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
             #expect(message.contains("whitespace"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -1193,12 +1193,12 @@ struct JsonImportCaptureDateTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for malformed capture_date")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for malformed capture_date")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("capture_date"), "got: \(message)")
             #expect(message.contains("cd-bad"), "error must name the record id; got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -1215,11 +1215,11 @@ struct JsonImportCaptureDateTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for offset capture_date")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for offset capture_date")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("capture_date"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 

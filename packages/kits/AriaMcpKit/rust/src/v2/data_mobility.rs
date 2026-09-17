@@ -493,7 +493,27 @@ pub enum V2DataMobilityResult {
     VaultImport(V2VaultImportResult), VaultStatus(V2VaultStatusResult), VaultReconcile(V2VaultReconcileResult), VaultJob(V2VaultJobResult),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum V2DataMobilityError { Unavailable, OutcomeUnverified(V2DataMobilityOperation) }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V2DataMobilityError {
+    Unavailable,
+    OutcomeUnverified(V2DataMobilityOperation),
+    /// The caller's input failed to decode — today only a JSON seed file
+    /// (`V2JsonImportLowerError::InvalidSeed`). Rendered as the
+    /// `invalid_argument` refusal carrying the message, never as
+    /// `mobility_unavailable`, so the caller can tell "I wrote the file wrong"
+    /// from "the estate is unavailable".
+    InvalidArgument(String),
+}
+
+/// Why a lower JSON import produced no report. `InvalidSeed` is the file-decode
+/// class — the message names the first offending element — and is the only
+/// lower failure that reaches the wire as text, because it is the caller's file.
+/// Every other failure (a path that does not resolve, the on-disk byte ceiling,
+/// a lineage collision, an estate write fault) is `Unavailable`, so nothing
+/// about paths or estate contents can be oracled. Swift twin:
+/// `VaultKitError.seedFileInvalid` caught in `AriaV2DataMobility.execute`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V2JsonImportLowerError { Unavailable, InvalidSeed(String) }
 
 /// Direct lower-kit boundary.  A production adapter may use coordinator,
 /// VaultKit, and DatasetStore calls, but must never delegate to an ARIA v1
@@ -504,7 +524,7 @@ pub trait V2DataMobilityLower: Send + Sync {
     fn reindex(&self, admission: &V2DataMobilityAdmission, request: &V2ReindexRequest) -> Result<V2ReindexState, ()>;
     fn reclassify_fdc(&self, admission: &V2DataMobilityAdmission, request: &V2ReclassifyFdcRequest) -> Result<V2ReclassifyFdcReport, ()>;
     fn palace_import(&self, admission: &V2DataMobilityAdmission, request: &V2PalaceImportRequest) -> Result<V2PalaceImportReport, ()>;
-    fn json_import(&self, admission: &V2DataMobilityAdmission, request: &V2JsonImportRequest) -> Result<V2JsonImportReport, ()>;
+    fn json_import(&self, admission: &V2DataMobilityAdmission, request: &V2JsonImportRequest) -> Result<V2JsonImportReport, V2JsonImportLowerError>;
     fn file_dataset(&self, admission: &V2DataMobilityAdmission, request: &V2FileDatasetRequest) -> Result<V2DatasetFiled, ()>;
     fn dataset_query(&self, admission: &V2DataMobilityAdmission, request: &V2DatasetQueryRequest) -> Result<V2DatasetQueryResult, ()>;
     fn dataset_stats(&self, admission: &V2DataMobilityAdmission, request: &V2DatasetStatsRequest) -> Result<V2DatasetStatsResult, ()>;
@@ -524,7 +544,14 @@ impl<A: V2DataMobilityAuthority, L: V2DataMobilityLower> V2DataMobilityService<A
     pub fn reindex(&self, r: V2ReindexRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> { let a=self.admitted(V2DataMobilityOperation::Reindex,r.estate_id)?; let v=self.lower.reindex(&a,&r).map_err(|_|V2DataMobilityError::Unavailable)?; self.finish(a,V2DataMobilityOperation::Reindex,V2DataMobilityResult::Reindex(v)) }
     pub fn reclassify_fdc(&self, r: V2ReclassifyFdcRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> { let a=self.admitted(V2DataMobilityOperation::ReclassifyFdc,r.estate_id)?; let v=self.lower.reclassify_fdc(&a,&r).map_err(|_|V2DataMobilityError::Unavailable)?; self.finish(a,V2DataMobilityOperation::ReclassifyFdc,V2DataMobilityResult::ReclassifyFdc(v)) }
     pub fn palace_import(&self, r: V2PalaceImportRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> { let a=self.admitted(V2DataMobilityOperation::PalaceImport,r.estate_id)?; let v=self.lower.palace_import(&a,&r).map_err(|_|V2DataMobilityError::Unavailable)?; self.finish(a,V2DataMobilityOperation::PalaceImport,V2DataMobilityResult::PalaceImport(v)) }
-    pub fn json_import(&self, r: V2JsonImportRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> { let a=self.admitted(V2DataMobilityOperation::JsonImport,r.estate_id)?; let v=self.lower.json_import(&a,&r).map_err(|_|V2DataMobilityError::Unavailable)?; self.finish(a,V2DataMobilityOperation::JsonImport,V2DataMobilityResult::JsonImport(v)) }
+    pub fn json_import(&self, r: V2JsonImportRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> {
+        let a=self.admitted(V2DataMobilityOperation::JsonImport,r.estate_id)?;
+        let v=self.lower.json_import(&a,&r).map_err(|error| match error {
+            V2JsonImportLowerError::Unavailable => V2DataMobilityError::Unavailable,
+            V2JsonImportLowerError::InvalidSeed(message) => V2DataMobilityError::InvalidArgument(message),
+        })?;
+        self.finish(a,V2DataMobilityOperation::JsonImport,V2DataMobilityResult::JsonImport(v))
+    }
     pub fn file_dataset(&self, r: V2FileDatasetRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> { let a=self.admitted(V2DataMobilityOperation::FileDataset,r.estate_id)?; let v=self.lower.file_dataset(&a,&r).map_err(|_|V2DataMobilityError::Unavailable)?; self.finish(a,V2DataMobilityOperation::FileDataset,V2DataMobilityResult::DatasetFiled(v)) }
     pub fn dataset_query(&self, r: V2DatasetQueryRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> { let a=self.admitted(V2DataMobilityOperation::DatasetQuery,r.estate_id)?; let v=self.lower.dataset_query(&a,&r).map_err(|_|V2DataMobilityError::Unavailable)?; self.finish(a,V2DataMobilityOperation::DatasetQuery,V2DataMobilityResult::DatasetQuery(v)) }
     pub fn dataset_stats(&self, r: V2DatasetStatsRequest) -> Result<V2DataMobilityResult, V2DataMobilityError> { let a=self.admitted(V2DataMobilityOperation::DatasetStats,r.estate_id)?; let v=self.lower.dataset_stats(&a,&r).map_err(|_|V2DataMobilityError::Unavailable)?; self.finish(a,V2DataMobilityOperation::DatasetStats,V2DataMobilityResult::DatasetStats(v)) }

@@ -135,7 +135,7 @@ struct JsonImportDeterminismTests {
         var errored = false
         do {
             _ = try await bridge.importSeed(at: url, into: handle, now: Date())
-        } catch VaultKitError.adapterError {
+        } catch VaultKitError.seedFileInvalid {
             errored = true
         }
         #expect(errored, "a malformed seed MUST error — a stub that succeeds is a mission failure")
