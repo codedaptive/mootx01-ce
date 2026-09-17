@@ -1093,17 +1093,30 @@ impl DrawerStore for DrawerStoreCore {
                     Some(&StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(request.target_drawer_id.clone()))),
                     &[], Some(1), None,
                 ).map_err(map_storage_err)?;
+                // Every guard below answers `Stale` (nothing written) in the
+                // same order as the Swift filer: missing or tombstoned rows,
+                // then the pair key and digests, then lifecycle state,
+                // sensitivity and endpoint placement. A storage fault still
+                // propagates as an error.
                 let (Some(source_row), Some(target_row)) = (source_rows.first(), target_rows.first()) else {
-                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is unavailable".to_owned()));
+                    return Ok(AtomicConflictProposalOutcome::Stale);
                 };
                 let source = drawer_from_row(source_row)?;
                 let target = drawer_from_row(target_row)?;
                 if source.tombstoned_at.is_some() || target.tombstoned_at.is_some() {
-                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is unavailable".to_owned()));
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                }
+                // The pair key is the hunt's canonical spelling: both ids
+                // lowercased, sorted, joined by a double bar (GeniusLocusKit
+                // conflict_projection_sweep::pair_key and the Swift twin).
+                let mut ordered = [source.id.to_lowercase(), target.id.to_lowercase()];
+                ordered.sort();
+                if request.pair_key != format!("{}||{}", ordered[0], ordered[1]) {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
                 }
                 let (source_digest, evidence_digest) = conflict_proposal_digests(&source, &target, request.tier, &request.renewal_identity);
                 if source_digest != request.source_digest || evidence_digest != request.evidence_digest {
-                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is stale".to_owned()));
+                    return Ok(AtomicConflictProposalOutcome::Stale);
                 }
                 // Atomic filing is an authority boundary, so inspect the raw
                 // bitmap fields here rather than using the retrieval-facing
@@ -1128,18 +1141,15 @@ impl DrawerStore for DrawerStoreCore {
                     || !is_recognized_sensitivity_raw(source_sensitivity_raw)
                     || !is_recognized_sensitivity_raw(target_sensitivity_raw)
                 {
-                    return Err(LocusKitError::InvalidContent("selected contradiction evidence is stale".to_owned()));
+                    return Ok(AtomicConflictProposalOutcome::Stale);
                 }
                 // Endpoint placement is part of the write authority: resolve
                 // both active room/wing paths from the same serializable
                 // snapshot as the evidence, pair history, and insertion.
                 // Caller-supplied coordinates would create a TOCTOU seam.
-                let endpoint = |drawer: &Drawer| -> Result<(String, String), LocusKitError> {
-                    let unavailable = || {
-                        LocusKitError::InvalidContent(
-                            "selected contradiction endpoints are unavailable".to_owned(),
-                        )
-                    };
+                // `Ok(None)` is a drawer without an active endpoint (the
+                // filing is stale); `Err` is a storage fault.
+                let endpoint = |drawer: &Drawer| -> Result<Option<(String, String)>, LocusKitError> {
                     let node_is_active_at_depth = |node: &StorageRow, expected_depth: i64| {
                         matches!(node.get("depth"), Some(TypedValue::Int(depth)) if *depth == expected_depth)
                             && matches!(node.get("lifecycle"), Some(TypedValue::Int(0)))
@@ -1150,7 +1160,7 @@ impl DrawerStore for DrawerStoreCore {
                         matches!(value, None | Some(TypedValue::Null))
                     };
                     if Uuid::parse_str(&drawer.parent_node_id).is_err() {
-                        return Err(unavailable());
+                        return Ok(None);
                     }
                     let room_rows = row_store.query(
                         T_NODES,
@@ -1160,14 +1170,14 @@ impl DrawerStore for DrawerStoreCore {
                         )),
                         &[], Some(1), None,
                     ).map_err(map_storage_err)?;
-                    let room = room_rows.first().ok_or_else(unavailable)?;
+                    let Some(room) = room_rows.first() else { return Ok(None) };
                     if !node_is_active_at_depth(room, 2) {
-                        return Err(unavailable());
+                        return Ok(None);
                     }
                     let room_name = string_value_of(room.get("display_name"));
                     let wing_id = string_value_of(room.get("parent_id"));
                     if room_name.is_empty() || Uuid::parse_str(&wing_id).is_err() {
-                        return Err(unavailable());
+                        return Ok(None);
                     }
                     let wing_rows = row_store.query(
                         T_NODES,
@@ -1177,14 +1187,14 @@ impl DrawerStore for DrawerStoreCore {
                         )),
                         &[], Some(1), None,
                     ).map_err(map_storage_err)?;
-                    let wing = wing_rows.first().ok_or_else(unavailable)?;
+                    let Some(wing) = wing_rows.first() else { return Ok(None) };
                     let wing_name = string_value_of(wing.get("display_name"));
                     let root_id = string_value_of(wing.get("parent_id"));
                     if !node_is_active_at_depth(wing, 1)
                         || wing_name.is_empty()
                         || Uuid::parse_str(&root_id).is_err()
                     {
-                        return Err(unavailable());
+                        return Ok(None);
                     }
                     let root_rows = row_store.query(
                         T_NODES,
@@ -1194,16 +1204,20 @@ impl DrawerStore for DrawerStoreCore {
                         )),
                         &[], Some(1), None,
                     ).map_err(map_storage_err)?;
-                    let root = root_rows.first().ok_or_else(unavailable)?;
+                    let Some(root) = root_rows.first() else { return Ok(None) };
                     if !node_is_active_at_depth(root, 0)
                         || !node_value_is_null(root.get("parent_id"))
                     {
-                        return Err(unavailable());
+                        return Ok(None);
                     }
-                    Ok((wing_name, room_name))
+                    Ok(Some((wing_name, room_name)))
                 };
-                let (source_wing, source_room) = endpoint(&source)?;
-                let (target_wing, target_room) = endpoint(&target)?;
+                let Some((source_wing, source_room)) = endpoint(&source)? else {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                };
+                let Some((target_wing, target_room)) = endpoint(&target)? else {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                };
                 let pair = StoragePredicate::Or(vec![
                     StoragePredicate::And(vec![
                         StoragePredicate::Eq(Column::new(T_TUNNELS, "sourceDrawerId"), TypedValue::Text(source.id.clone())),
@@ -8538,6 +8552,13 @@ mod tests {
     /// Seed nodes and create a drawer whose parent_node_id points to the
     /// room node. Replaces sample_drawer for tests that need node-tree
     /// resolution (drawers_in_wing, drawers_in_wing_room, list_wings, etc.).
+    /// The hunt's canonical pair spelling for two drawer ids.
+    fn conflict_pair_key(a: &str, b: &str) -> String {
+        let mut ordered = [a.to_lowercase(), b.to_lowercase()];
+        ordered.sort();
+        format!("{}||{}", ordered[0], ordered[1])
+    }
+
     fn sample_drawer_with_nodes(
         store: &InMemoryDrawerStore,
         id: &str,
@@ -9431,6 +9452,7 @@ mod tests {
             conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
         let request = || AtomicConflictProposalRequest {
             source_drawer_id: source_id.clone(), target_drawer_id: target_id.clone(),
+            pair_key: conflict_pair_key(&source_id, &target_id),
             tier: 2, renewal_identity: "tier2:negation@1".to_owned(),
             label: "tier2:negation@1".to_owned(), replay_identity: "aria-v2:test-replay".to_owned(),
             source_digest: source_digest.clone(), evidence_digest: evidence_digest.clone(),
@@ -9491,6 +9513,7 @@ mod tests {
         let request = AtomicConflictProposalRequest {
             source_drawer_id: source_id.clone(),
             target_drawer_id: target_id.clone(),
+            pair_key: conflict_pair_key(&source_id, &target_id),
             tier: 2,
             renewal_identity: "tier2:negation@1".to_owned(),
             label: "tier2:negation@1".to_owned(),
@@ -9510,12 +9533,13 @@ mod tests {
             )
             .unwrap();
 
-        let error = store
+        let outcome = store
             .atomic_file_conflict_proposal(&request, NOW + 2)
-            .unwrap_err();
-        assert!(
-            matches!(error, LocusKitError::InvalidContent(ref message) if message == "selected contradiction evidence is stale"),
-            "withdrawn hunt-selected evidence must be stale, got {error:?}"
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::drawer_store::AtomicConflictProposalOutcome::Stale,
+            "withdrawn hunt-selected evidence must be stale"
         );
         assert!(
             store.all_tunnels().unwrap().is_empty(),
@@ -9547,6 +9571,7 @@ mod tests {
         let (source_digest, evidence_digest) =
             conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
         let request = AtomicConflictProposalRequest {
+            pair_key: conflict_pair_key(&source_id, &target_id),
             source_drawer_id: source_id,
             target_drawer_id: target_id,
             tier: 2,
@@ -9574,12 +9599,13 @@ mod tests {
             .unwrap();
         assert_eq!(updated, 1, "fixture must corrupt exactly the source room role");
 
-        let error = store
+        let outcome = store
             .atomic_file_conflict_proposal(&request, NOW + 1)
-            .unwrap_err();
-        assert!(
-            matches!(error, LocusKitError::InvalidContent(ref message) if message == "selected contradiction endpoints are unavailable"),
-            "malformed source room must reject filing, got {error:?}"
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::drawer_store::AtomicConflictProposalOutcome::Stale,
+            "malformed source room must reject filing as stale"
         );
         assert!(
             store.all_tunnels().unwrap().is_empty(),
