@@ -137,19 +137,51 @@ fn reopen_does_not_resurrect_the_subject_producer() {
 /// no runtime reflection to enumerate them.
 const COORDINATOR_SRC: &str = include_str!("../src/coordinator.rs");
 
-/// Every `HashMap<EstateHandle, …>` field declared on `EstateCoordinator`.
+/// `duty_queue.rs`, read at compile time SOLELY to discover type aliases that
+/// resolve to a `HashMap<EstateHandle, …>` (F1/F9 — see `handle_keyed_type_aliases`).
+const DUTY_QUEUE_SRC: &str = include_str!("../src/brain/duty_queue.rs");
+
+/// Every `pub type` alias in `src` whose right-hand side names
+/// `HashMap<EstateHandle, …>` (`RefCell`-wrapped or not).
+///
+/// `EstateCoordinator` fields are sometimes declared with an alias
+/// (`duty_queued: crate::brain::duty_queue::DutyQueued`) rather than the
+/// literal `HashMap<EstateHandle, …>` text. `declared_registries` cannot see
+/// through that on its own — a purely literal-text scan is exactly why
+/// `duty_queued` and `duty_limits` (F1/F9) shipped without a `close`
+/// entry and without this test catching it: the scanner never knew they were
+/// handle-keyed maps at all. Resolving aliases here closes that gap for any
+/// alias with this shape, not only the two the finding named.
+fn handle_keyed_type_aliases(src: &str) -> Vec<String> {
+    src.lines()
+        .map(str::trim)
+        .filter(|line| line.contains("type ") && line.contains("HashMap<EstateHandle,"))
+        .filter_map(|line| {
+            // `pub type DutyQueued = std::cell::RefCell<std::collections::HashMap<EstateHandle, …>>;`
+            // → `DutyQueued`
+            let after_type = line.split("type ").nth(1)?;
+            after_type.split('=').next().map(str::trim).map(str::to_string)
+        })
+        .collect()
+}
+
+/// Every per-estate registry field declared on `EstateCoordinator`: either a
+/// literal `HashMap<EstateHandle, …>` field, or one typed by an alias
+/// `handle_keyed_aliases` resolved to that same shape.
 ///
 /// Two exclusions keep the scan honest: lines containing `fn ` (the
 /// crate-internal `registry()` accessor mentions the same type in its return
 /// position) and comment lines (the declaration block's own guidance names the
 /// type in prose).
-fn declared_registries(src: &str) -> Vec<String> {
+fn declared_registries(src: &str, handle_keyed_aliases: &[String]) -> Vec<String> {
     src.lines()
         .map(str::trim)
         .filter(|line| {
-            line.contains("HashMap<EstateHandle,")
-                && !line.contains("fn ")
-                && !line.starts_with("//")
+            let is_literal = line.contains("HashMap<EstateHandle,");
+            let is_alias = handle_keyed_aliases
+                .iter()
+                .any(|alias| line.contains(&format!("::{alias}")) || line.contains(&format!(": {alias}")));
+            (is_literal || is_alias) && !line.contains("fn ") && !line.starts_with("//")
         })
         .filter_map(|line| {
             // `pub(crate) subject_producers: HashMap<EstateHandle, …>,`
@@ -179,7 +211,8 @@ fn close_body(src: &str) -> &str {
 
 #[test]
 fn close_removes_every_declared_per_estate_registry() {
-    let declared = declared_registries(COORDINATOR_SRC);
+    let aliases = handle_keyed_type_aliases(DUTY_QUEUE_SRC);
+    let declared = declared_registries(COORDINATOR_SRC, &aliases);
     let body = close_body(COORDINATOR_SRC);
 
     // Guard the scanner itself: if the declaration syntax ever drifts far
