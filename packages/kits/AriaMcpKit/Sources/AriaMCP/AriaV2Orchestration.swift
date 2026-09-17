@@ -290,7 +290,15 @@ public struct AriaV2Orchestration: Sendable {
 
     public func runMigration(_ request: AriaV2RunMigrationRequest) async throws -> JSONValue {
         try validate(request.estateID)
-        return response(.runMigration, data: try await provider.runMigration(request, context: context).json)
+        let data: AriaV2MigrationData
+        do {
+            data = try await provider.runMigration(request, context: context)
+        } catch let error as JSONRPCError {
+            throw error
+        } catch {
+            return orchestrationUnavailable(.runMigration)
+        }
+        return response(.runMigration, data: data.json)
     }
 
     public func confirmMigration(arguments: JSONValue) async throws -> JSONValue {
@@ -299,7 +307,14 @@ public struct AriaV2Orchestration: Sendable {
 
     public func confirmMigration(_ request: AriaV2ConfirmMigrationRequest) async throws -> JSONValue {
         try validate(request.estateID)
-        let data = try await provider.confirmMigration(request, context: context)
+        let data: AriaV2MigrationConfirmationData
+        do {
+            data = try await provider.confirmMigration(request, context: context)
+        } catch let error as JSONRPCError {
+            throw error
+        } catch {
+            return orchestrationUnavailable(.confirmMigration)
+        }
         return response(.confirmMigration, data: try data.verifiedJSON())
     }
 
@@ -311,7 +326,33 @@ public struct AriaV2Orchestration: Sendable {
         if let requester = request.requesterEstateID, requester != context.estateID {
             throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "The requested estate is not available to this caller.")
         }
-        return response(.federatedSearch, data: try await provider.federatedSearch(request, context: context).json)
+        let data: AriaV2FederatedSearchData
+        do {
+            data = try await provider.federatedSearch(request, context: context)
+        } catch let error as JSONRPCError {
+            throw error
+        } catch {
+            return orchestrationUnavailable(.federatedSearch)
+        }
+        return response(.federatedSearch, data: data.json)
+    }
+
+    /// A lower failure on a typed orchestration operation is the operational
+    /// refusal `orchestration_unavailable`: an empty migration plan, an
+    /// unknown or terminal branch, or a federated recall with no authorized
+    /// peer all answer with this one code and fixed message, which is what the
+    /// Rust port's `render_orchestration` (surface.rs) emits for the same
+    /// situations. The lower's own error description never reaches the wire,
+    /// so the caller cannot read estate structure out of a refusal. A thrown
+    /// `JSONRPCError` is a syntax fault the caller can fix and is rethrown for
+    /// the dispatcher to answer as `invalid_argument`. `retryable` is true
+    /// because the same call can succeed once the estate changes (a peer is
+    /// granted, a plan is supplied), matching the Rust value.
+    private func orchestrationUnavailable(_ operation: AriaV2OrchestrationOperation) -> JSONValue {
+        AriaV2Envelope.refusal(tool: operation.rawValue, error: .init(
+            code: "orchestration_unavailable",
+            message: "The selected typed orchestration operation is unavailable.",
+            retryable: true))
     }
 
     private func validate(_ estateID: UUID?) throws {
