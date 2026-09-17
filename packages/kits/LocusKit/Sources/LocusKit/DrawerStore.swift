@@ -2263,8 +2263,13 @@ public actor DrawerStore {
                   target.tombstonedAt == nil else {
                 return .stale
             }
+            // The pair key is the hunt's canonical spelling: both ids lowercased,
+            // sorted, joined by a double bar (TieredContradictionCore.pairKey and
+            // its Rust twin). A single-bar guard here read every proposal as
+            // changed and refused it as stale (found by release qualification,
+            // 2026-09-17).
             let ordered = [source.id.lowercased(), target.id.lowercased()].sorted()
-            guard request.pairKey == "\(ordered[0])|\(ordered[1])",
+            guard request.pairKey == "\(ordered[0])||\(ordered[1])",
                   AtomicConflictProposalRequest.drawerDigest(id: source.id, content: source.content) == request.sourceDigest,
                   AtomicConflictProposalRequest.drawerDigest(id: target.id, content: target.content) == request.targetDigest,
                   AtomicConflictProposalRequest.evidenceDigest(

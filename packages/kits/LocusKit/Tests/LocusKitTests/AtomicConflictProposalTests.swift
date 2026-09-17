@@ -29,7 +29,7 @@ struct AtomicConflictProposalTests {
 
     private func request(source: Drawer, target: Drawer) -> AtomicConflictProposalRequest {
         let ordered = [source.id.lowercased(), target.id.lowercased()].sorted()
-        let pairKey = "\(ordered[0])|\(ordered[1])"
+        let pairKey = "\(ordered[0])||\(ordered[1])"   // the hunt's canonical spelling
         let sourceDigest = AtomicConflictProposalRequest.drawerDigest(id: source.id, content: source.content)
         let targetDigest = AtomicConflictProposalRequest.drawerDigest(id: target.id, content: target.content)
         let renewalKey = "tier1:\(pairKey):evidence-1"
