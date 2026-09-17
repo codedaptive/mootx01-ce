@@ -2180,6 +2180,16 @@ impl EstateCoordinator {
         // no worker to tear down — remove so a reopened same-estate handle
         // never inherits a stale span.
         self.derived_rebuild_depth.remove(handle);
+        // F1/F9: the duty-queue single-occupancy set and the host-supplied
+        // batch limits are per-estate registries like any other — handles
+        // are equal across reopens, so leaving either behind lets a reopened
+        // estate inherit a stale in-process "already queued" marker (silently
+        // dropping a duty enqueue that should have gone through) or a
+        // batch-limit override the caller never re-supplied for this open.
+        // Parity of Swift `close` which nils `dutyQueued[handle]` and
+        // `dutyLimitsByHandle[handle]`.
+        self.duty_queued.borrow_mut().remove(handle);
+        self.duty_limits.borrow_mut().remove(handle);
         // Drop the subject-backfill rider (PR-09). A producer is registered
         // against a handle, and handles are stable across reopens of the same
         // estate (`handle.rs` — `estate_uuid` comes from the manifest, so

@@ -266,6 +266,15 @@ public extension GeniusLocusKit {
             // counter — remove so a reopened same-estate handle never
             // inherits a stale span.
             derivedRebuildDepth[handle] = nil
+            // F1/F9: the duty-queue single-occupancy set and the host-supplied
+            // batch limits are per-estate registries like any other — handles
+            // are equal across reopens, so leaving either behind lets a
+            // reopened estate inherit a stale in-process "already queued"
+            // marker (silently dropping a duty enqueue that should have gone
+            // through) or a batch-limit override the caller never re-supplied
+            // for this open.
+            dutyQueued[handle] = nil
+            dutyLimitsByHandle[handle] = nil
             mountStates[handle] = nil
             // Drop the sync engine so no engine reference outlives the estate.
             syncEngines[handle] = nil
@@ -327,6 +336,9 @@ public extension GeniusLocusKit {
         spanRerankSources[handle] = nil
         pairScorers[handle] = nil
         derivedRebuildDepth[handle] = nil
+        // F1/F9: see the matching comment in the error path above.
+        dutyQueued[handle] = nil
+        dutyLimitsByHandle[handle] = nil
         mountStates[handle] = nil
         // Drop the sync engine so no engine reference outlives the estate.
         syncEngines[handle] = nil
