@@ -36,15 +36,20 @@ private actor FakeGrowthProbe: CorpusGrowthProbe {
     /// Whether `reindex(now:)` should throw.
     var shouldThrow: Bool
 
+    /// F11: whether `reindex(now:)` should report a DEGRADED retrain (a
+    /// backstop reached, serving basis kept) instead of a full one.
+    var shouldDegrade: Bool
+
     /// Timestamps of `reindex(now:)` calls.
     private(set) var reindexCalls: [Date] = []
 
     /// Counts of `vocabAnchor()` calls.
     private(set) var vocabCallCount: Int = 0
 
-    init(vocab: Int = 0, shouldThrow: Bool = false) {
+    init(vocab: Int = 0, shouldThrow: Bool = false, shouldDegrade: Bool = false) {
         self.vocab = vocab
         self.shouldThrow = shouldThrow
+        self.shouldDegrade = shouldDegrade
     }
 
     func vocabAnchor() async throws -> Int {
@@ -52,17 +57,20 @@ private actor FakeGrowthProbe: CorpusGrowthProbe {
         return vocab
     }
 
-    func reindex(now: Date) async throws {
+    @discardableResult
+    func reindex(now: Date) async throws -> Bool {
         if shouldThrow {
             // Simulate a storage error.
             struct FakeReindexError: Error {}
             throw FakeReindexError()
         }
         reindexCalls.append(now)
+        return !shouldDegrade
     }
 
     func setVocab(_ n: Int) { vocab = n }
     func setShouldThrow(_ v: Bool) { shouldThrow = v }
+    func setShouldDegrade(_ v: Bool) { shouldDegrade = v }
     func reindexCallCount() -> Int { reindexCalls.count }
 }
 

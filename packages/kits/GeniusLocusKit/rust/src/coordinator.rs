@@ -5211,11 +5211,17 @@ impl EstateCoordinator {
 
     /// Rebuild every derived lane of the estate's corpus (BM25 and dense)
     /// from the current content. Twin of Swift
-    /// `GeniusLocusKit.reindexCorpus(handle:now:)`. A no-op when no corpus
-    /// is registered for the estate (locus-only estate).
-    pub fn reindex_corpus(&self, handle: &EstateHandle, now: i64) -> Result<(), VerbDispatchError> {
+    /// `GeniusLocusKit.reindexCorpus(handle:now:)`. A no-op (returns `true`
+    /// — nothing to skip) when no corpus is registered for the estate
+    /// (locus-only estate).
+    ///
+    /// F11: returns `Ok(true)` for a full retrain, `Ok(false)` when the
+    /// document/time backstop was reached and the serving basis was kept
+    /// (DEGRADED). Callers must not advance a vocabulary baseline on
+    /// `Ok(false)` — see `bounded_retraining::reindex_with_settings`.
+    pub fn reindex_corpus(&self, handle: &EstateHandle, now: i64) -> Result<bool, VerbDispatchError> {
         let Some(corpus) = self.corpus_kits.get(handle) else {
-            return Ok(());
+            return Ok(true);
         };
         crate::brain::bounded_retraining::reindex_with_settings(corpus, now).map_err(|e| {
             VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {

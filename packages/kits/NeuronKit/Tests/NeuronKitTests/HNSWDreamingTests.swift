@@ -110,8 +110,10 @@ private actor FakeGrowthProbe: CorpusGrowthProbe {
     private(set) var reindexCalls: [Date] = []
     var reindexCount: Int { reindexCalls.count }
 
-    func reindex(now: Date) async throws {
+    @discardableResult
+    func reindex(now: Date) async throws -> Bool {
         reindexCalls.append(now)
+        return true
     }
 }
 
