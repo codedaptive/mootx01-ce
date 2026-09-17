@@ -64,6 +64,10 @@ public struct DrainLease: Sendable {
     /// Matches the Rust twin's `DRAIN_LEASE_HEARTBEAT_SECS`.
     public static let heartbeatInterval: TimeInterval = 5
 
+    /// The default TTL (15 s; matches Rust `DRAIN_LEASE_TTL_SECS`). A caller
+    /// waiting for a dead holder's lease to clear waits this long.
+    public static let defaultTTL: TimeInterval = 15
+
     /// - Parameters:
     ///   - directory: The durable queue directory for this estate.
     ///   - stream: The stream key (e.g. `"encode"`, `"dreaming"`). Used as the
@@ -72,7 +76,7 @@ public struct DrainLease: Sendable {
     ///     uniquely identifies this drainer (prevents PID reuse impersonation).
     ///   - ttl: Time-to-live for a heartbeat before the lease is reclaimable.
     ///     Defaults to 15 seconds.
-    public init(directory: URL, stream: String, instanceToken: String, ttl: TimeInterval = 15) {
+    public init(directory: URL, stream: String, instanceToken: String, ttl: TimeInterval = DrainLease.defaultTTL) {
         // Sanitise the stream key so the filename is safe on all platforms.
         let safe = stream.unicodeScalars.map {
             $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-")
