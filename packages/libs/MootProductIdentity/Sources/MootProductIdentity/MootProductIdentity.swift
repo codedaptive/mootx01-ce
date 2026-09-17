@@ -363,6 +363,8 @@ public enum MootProductIdentity {
         public let dutyFactSourceLeaseSeconds: Int
         /// `duties.fact_extraction_cadence_seconds`: the resident's Signal 14 period (default 300).
         public let dutyFactExtractionCadenceSeconds: Int
+        /// `duties.anomaly_sweep_rooms`: rooms scored per anomaly-sweep batch (default 8).
+        public let dutyAnomalySweepRooms: Int
 
         /// Maximum expanded reference output bytes (`context_distill.reference_expansion_max_bytes`).
         public let contextDistillReferenceExpansionMaxBytes: Int
@@ -426,7 +428,8 @@ public enum MootProductIdentity {
                 dutyFactExtractionBatch: positiveIntegerOrDefault(duties?["fact_extraction_batch"], fallback: 16),
                 dutySubjectBackfillBatch: positiveIntegerOrDefault(duties?["subject_backfill_batch"], fallback: 32),
                 dutyFactSourceLeaseSeconds: positiveIntegerOrDefault(duties?["fact_source_lease_seconds"], fallback: 120),
-                dutyFactExtractionCadenceSeconds: positiveIntegerOrDefault(duties?["fact_extraction_cadence_seconds"], fallback: 300))
+                dutyFactExtractionCadenceSeconds: positiveIntegerOrDefault(duties?["fact_extraction_cadence_seconds"], fallback: 300),
+                dutyAnomalySweepRooms: positiveIntegerOrDefault(duties?["anomaly_sweep_rooms"], fallback: 8))
         }
 
         // MARK: Writing
@@ -512,7 +515,8 @@ public enum MootProductIdentity {
             dutyFactExtractionBatch: Int = 16,
             dutySubjectBackfillBatch: Int = 32,
             dutyFactSourceLeaseSeconds: Int = 120,
-            dutyFactExtractionCadenceSeconds: Int = 300
+            dutyFactExtractionCadenceSeconds: Int = 300,
+            dutyAnomalySweepRooms: Int = 8
         ) {
             self.daemonStatsStore = daemonStatsStore
             self.factExtractionCoreAIAsset = factExtractionCoreAIAsset
@@ -525,6 +529,7 @@ public enum MootProductIdentity {
             self.dutySubjectBackfillBatch = dutySubjectBackfillBatch
             self.dutyFactSourceLeaseSeconds = dutyFactSourceLeaseSeconds
             self.dutyFactExtractionCadenceSeconds = dutyFactExtractionCadenceSeconds
+            self.dutyAnomalySweepRooms = dutyAnomalySweepRooms
         }
     }
 }

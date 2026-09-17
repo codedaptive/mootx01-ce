@@ -26,9 +26,16 @@
 //   • Gate: z-score ≤ −threshold (low-cohesion outlier) → isAnomalous = true
 //   • Default threshold: 2.0 (≈ 2σ below-mean cutoff)
 //   • Derived signal: no audit event, no lifecycle/lineage field touched
-//   • Complexity: O(n²) per room — acceptable on the maintenance path
+//   • Complexity: O(n²) per room, so the resident never scores the whole
+//     estate at once: the sweep is a row-debt DUTY (§ DUTY_LIFECYCLE) whose
+//     debt is the set of rooms touched since they were last scored, found by
+//     folding the estate's audit events; a batch scores a bounded number of
+//     owed rooms with the cohesion math off the kit actor. `anomalyFlagSweep`
+//     remains the whole-estate form (tests, operator tooling).
 
 import Foundation
+import QueueKit
+import SubstrateTypes
 import MootProductIdentity
 import LocusKit
 import OSLog
@@ -62,26 +69,17 @@ extension GeniusLocusKit {
         Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
-    /// Compute room-cohesion z-scores and set/clear the `isAnomalous` bit
-    /// (bit 26 of `operationalBitmap`) on every active drawer in the estate.
-    ///
-    /// For each room with ≥ `GeniusLocusKit.anomalySweepMinRoomSize` drawers:
-    ///   1. Compute each drawer's mean char-4-shingle Jaccard similarity to
-    ///      all OTHER drawers in the room (cohesion score) via
-    ///      `ShingleSimilarity.similarity(_:_:)`.
-    ///   2. Derive z-scores from the room's cohesion distribution (mean, stddev).
-    ///   3. Set bit 26 on drawers whose cohesion z-score ≤ −threshold
-    ///      (low-cohesion outlier); clear bit 26 on all others in the room.
-    ///
-    /// Rooms with fewer than `anomalySweepMinRoomSize` drawers have all members'
-    /// bit 26 cleared — z-score is statistically unstable with too few peers.
+    // MARK: Whole-estate form
+
+    /// Score every room and set/clear bit 26 (`isAnomalous`) on every drawer.
     ///
     /// This is a DERIVED SIGNAL write: no audit event, no supersession cascade,
     /// no lifecycle or lineage field touched. The bit is owned entirely by this
     /// sweep and should not be set through any other path.
     ///
-    /// Thread the cycle's `now` parameter for call-site determinism discipline;
-    /// the write itself carries no timestamp (bit 26 is stateless).
+    /// The resident does not call this: on a large estate it is minutes of
+    /// pure compute. The resident pays `runAnomalySweepBatch` through the duty
+    /// queue, which scores only rooms touched since their last scoring.
     ///
     /// - Parameters:
     ///   - handle: The estate handle to sweep. Must be open in this kit.
@@ -97,70 +95,170 @@ extension GeniusLocusKit {
     ) async throws -> Int {
         let estate = try estate(for: handle)
         var changed = 0
+        for entry in try await estate.roomLevelFingerprints() {
+            changed += try await scoreRoom(estate: estate, wing: entry.wing, room: entry.room,
+                                           threshold: threshold, now: now)
+        }
+        Self.anomalyLog.debug(
+            "anomalyFlagSweep: \(changed, privacy: .public) drawer(s) updated")
+        return changed
+    }
 
-        // Rooms-first sweep: enumerate room-level fingerprint entries,
-        // then load drawers per room. Matches the subject backfill's
-        // iteration pattern (SubjectBackfillCycle.swift) for consistency.
-        let rooms = try await estate.roomLevelFingerprints()
+    // MARK: Incremental duty form (§ DUTY_LIFECYCLE)
 
-        for entry in rooms {
-            // Sensitivity cohort gate (codex finding 2026-08-26):
-            // restricted/secret drawers are EXCLUDED from the cohesion
-            // cohort entirely — they neither receive bit 26 nor influence
-            // any other drawer's score. Including them let a caller without
-            // a sensitivity grant plant visible probe rows and read
-            // anomalous_filter results to observe lexical similarity to
-            // hidden content. Excluded rows also get any stale bit 26
-            // cleared, matching the small-room path's flag hygiene.
-            let allDrawers = try await estate.drawersIn(wing: entry.wing, room: entry.room)
-            var drawers: [Drawer] = []
-            for drawer in allDrawers {
-                if drawer.sensitivity == .restricted || drawer.sensitivity == .secret {
-                    if drawer.isAnomalous {
-                        changed += try await estate.setAnomalousFlag(
-                            drawerId: drawer.id, anomalous: false, now: now)
-                    }
-                } else {
-                    drawers.append(drawer)
-                }
+    /// Checkpoint stream for the incremental sweep: one `cursor` row (the last
+    /// audit HLC folded into room dirtiness) and one row per room (dirty or
+    /// not). Lives in the estate's queue database beside the other duty state;
+    /// no schema, no migration. A room with no row has never been scored and
+    /// is owed.
+    static var anomalySweepStream: StreamID { StreamID(rawValue: "anomaly-sweep-checkpoints") }
+    static var anomalySweepCursorID: JobID { JobID(rawValue: "cursor") }
+    static func anomalySweepRoomID(wing: String, room: String) -> JobID {
+        JobID(rawValue: String(factSourceDigest("anomaly-room-v1|" + wing + "/" + room).prefix(32)))
+    }
+    /// Audit events folded per debt read; bounded so a burst of writes costs
+    /// a few passes, never one long one.
+    static let anomalySweepAuditFold = 2_000
+
+    struct AnomalySweepCursor: Codable, Sendable {
+        var physicalTime: Int64
+        var logicalCount: Int32
+        var nodeID: Int32
+        var hlc: HLC { HLC(physicalTime: physicalTime, logicalCount: logicalCount, nodeID: nodeID) }
+        init(hlc: HLC) { physicalTime = hlc.physicalTime; logicalCount = hlc.logicalCount; nodeID = hlc.nodeID }
+    }
+    struct AnomalySweepRoomState: Codable, Sendable {
+        var wing: String
+        var room: String
+        var dirty: Bool
+    }
+
+    /// The rooms owed a scoring: fold every audit event since the cursor into
+    /// room dirtiness (a write to any drawer dirties its room), then list the
+    /// rooms that are dirty or have never been scored. This is the duty's
+    /// debt count and its work list.
+    func anomalySweepOwedRooms(_ handle: EstateHandle, now: Date) async throws -> [(wing: String, room: String)] {
+        let estate = try estate(for: handle)
+        let checkpoints = try await factCheckpoints(handle)
+        let stream = Self.anomalySweepStream
+        let stamp = HLC(physicalTime: Int64(now.timeIntervalSince1970 * 1000), logicalCount: 0, nodeID: 0)
+
+        // 1. Fold new audit events into dirty rooms, advancing the cursor.
+        var cursorData = try await checkpoints.read(id: Self.anomalySweepCursorID, stream: stream)
+        var after = try cursorData.map { try JSONDecoder().decode(AnomalySweepCursor.self, from: $0).hlc }
+        var folds = 0
+        while folds < 8 {
+            let events = try await estate.auditEvents(after: after, limit: Self.anomalySweepAuditFold)
+            guard let last = events.last else { break }
+            let ids = Array(Set(events.map { $0.rowId.uuidString }))
+            let drawers = try await estate.getDrawers(ids: ids)
+            let names = try await resolveNodeNames(handle, parentNodeIds: Array(Set(drawers.map { $0.parentNodeId })))
+            var touched: Set<String> = []
+            for drawer in drawers {
+                guard let name = names[drawer.parentNodeId] else { continue }
+                let key = name.wing + "/" + name.room
+                guard touched.insert(key).inserted else { continue }
+                let id = Self.anomalySweepRoomID(wing: name.wing, room: name.room)
+                let previous = try await checkpoints.read(id: id, stream: stream)
+                let state = AnomalySweepRoomState(wing: name.wing, room: name.room, dirty: true)
+                _ = try await checkpoints.compareAndSwap(id: id, stream: stream, expected: previous,
+                    payload: try JSONEncoder().encode(state), stamp: stamp)
             }
-            guard !drawers.isEmpty else { continue }
+            let next = try JSONEncoder().encode(AnomalySweepCursor(hlc: last.hlc))
+            _ = try await checkpoints.compareAndSwap(id: Self.anomalySweepCursorID, stream: stream,
+                expected: cursorData, payload: next, stamp: stamp)
+            cursorData = next
+            after = last.hlc
+            folds += 1
+            if events.count < Self.anomalySweepAuditFold { break }
+        }
 
-            if drawers.count < GeniusLocusKit.anomalySweepMinRoomSize {
-                // Too few peers for a meaningful z-score. Clear bit 26
-                // on any drawer that currently has it set. Drawers in
-                // small rooms are not anomalous by definition — the room
-                // has no cohesion baseline to score against.
-                for drawer in drawers where drawer.isAnomalous {
-                    let n = try await estate.setAnomalousFlag(
+        // 2. Owed = dirty or never scored.
+        var known: [String: Bool] = [:]
+        for payload in try await checkpoints.payloads(stream: stream) {
+            guard let state = try? JSONDecoder().decode(AnomalySweepRoomState.self, from: payload) else { continue }
+            known[state.wing + "/" + state.room] = state.dirty
+        }
+        var owed: [(wing: String, room: String)] = []
+        for entry in try await estate.roomLevelFingerprints() {
+            if known[entry.wing + "/" + entry.room] ?? true { owed.append((entry.wing, entry.room)) }
+        }
+        return owed
+    }
+
+    /// Score up to `limit` owed rooms and mark them clean. Returns the rooms
+    /// scored; the duty queue carries the remainder forward.
+    func runAnomalySweepBatch(_ handle: EstateHandle, limit: Int, now: Date) async throws -> Int {
+        let estate = try estate(for: handle)
+        let checkpoints = try await factCheckpoints(handle)
+        let stream = Self.anomalySweepStream
+        let stamp = HLC(physicalTime: Int64(now.timeIntervalSince1970 * 1000), logicalCount: 0, nodeID: 0)
+        var scored = 0
+        for (wing, room) in try await anomalySweepOwedRooms(handle, now: now).prefix(max(0, limit)) {
+            _ = try await scoreRoom(estate: estate, wing: wing, room: room,
+                                    threshold: Self.anomalySweepDefaultThreshold, now: now)
+            let id = Self.anomalySweepRoomID(wing: wing, room: room)
+            let previous = try await checkpoints.read(id: id, stream: stream)
+            let clean = AnomalySweepRoomState(wing: wing, room: room, dirty: false)
+            _ = try await checkpoints.compareAndSwap(id: id, stream: stream, expected: previous,
+                payload: try JSONEncoder().encode(clean), stamp: stamp)
+            scored += 1
+        }
+        if scored > 0 {
+            Self.anomalyLog.debug("anomalySweepBatch: \(scored, privacy: .public) room(s) scored")
+        }
+        return scored
+    }
+
+    // MARK: One room
+
+    /// Score one room: the O(n²) cohesion pass runs in a detached task so the
+    /// kit actor keeps answering verbs while it computes; only the flag writes
+    /// come back to the actor.
+    private func scoreRoom(estate: LocusKit.Estate, wing: String, room: String,
+                           threshold: Float32, now: Date) async throws -> Int {
+        var changed = 0
+        // Sensitivity cohort gate (codex finding 2026-08-26):
+        // restricted/secret drawers are EXCLUDED from the cohesion
+        // cohort entirely — they neither receive bit 26 nor influence
+        // any other drawer's score. Including them let a caller without
+        // a sensitivity grant plant visible probe rows and read
+        // anomalous_filter results to observe lexical similarity to
+        // hidden content. Excluded rows also get any stale bit 26
+        // cleared, matching the small-room path's flag hygiene.
+        let allDrawers = try await estate.drawersIn(wing: wing, room: room)
+        var drawers: [Drawer] = []
+        for drawer in allDrawers {
+            if drawer.sensitivity == .restricted || drawer.sensitivity == .secret {
+                if drawer.isAnomalous {
+                    changed += try await estate.setAnomalousFlag(
                         drawerId: drawer.id, anomalous: false, now: now)
-                    changed += n
                 }
-                continue
+            } else {
+                drawers.append(drawer)
             }
+        }
+        guard !drawers.isEmpty else { return changed }
 
-            // Step 1: Compute per-drawer cohesion = mean shingle-similarity
-            // to all OTHER drawers in the room.
-            //
-            // Complexity O(n²) per room. Acceptable on the maintenance path
-            // (rooms are small in practice; the sweep is rate-limited by
-            // the caller's maintenance cycle). Same formula as
-            // CognitionKit.Contradiction for cross-recipe result parity.
-            let count = drawers.count
+        if drawers.count < GeniusLocusKit.anomalySweepMinRoomSize {
+            for drawer in drawers where drawer.isAnomalous {
+                changed += try await estate.setAnomalousFlag(
+                    drawerId: drawer.id, anomalous: false, now: now)
+            }
+            return changed
+        }
+
+        let contents = drawers.map(\.content)
+        let flags: [Bool] = await Task.detached(priority: .utility) {
+            let count = contents.count
             var cohesion: [Float32] = Array(repeating: 0, count: count)
             for i in 0..<count {
                 var sum: Float32 = 0
                 for j in 0..<count where i != j {
-                    // char-4-shingle Jaccard similarity; conformance-gated
-                    // byte-identical across Swift and Rust legs.
-                    sum += ShingleSimilarity.similarity(
-                        drawers[i].content, drawers[j].content)
+                    sum += ShingleSimilarity.similarity(contents[i], contents[j])
                 }
-                // (count - 1) peers; safe because count >= anomalySweepMinRoomSize (3).
                 cohesion[i] = sum / Float32(count - 1)
             }
-
-            // Step 2: Derive z-scores from the room's cohesion distribution.
             let n = Float32(count)
             let mean = cohesion.reduce(0, +) / n
             let variance = cohesion.reduce(Float32(0)) { acc, x in
@@ -168,27 +266,15 @@ extension GeniusLocusKit {
                 return acc + d * d
             } / n
             let stddev = variance.squareRoot()
+            return cohesion.map { AnomalyDetection.zScore(value: $0, mean: mean, stddev: stddev) <= -threshold }
+        }.value
 
-            // Step 3: Set/clear bit 26 on each drawer per its z-score.
-            // Anomalous = low-cohesion outlier: z ≤ −threshold.
-            // zScore returns 0 when stddev == 0 (all identical content) —
-            // safe: threshold > 0 so no drawer is flagged in that case.
-            for (idx, drawer) in drawers.enumerated() {
-                let z = AnomalyDetection.zScore(
-                    value: cohesion[idx], mean: mean, stddev: stddev)
-                // Negative z = below-average cohesion = low-cohesion outlier.
-                let shouldBeAnomalous = z <= -threshold
-                // Skip write when the bit is already in the correct state;
-                // avoids spurious UPDATE traffic on stable estates.
-                guard drawer.isAnomalous != shouldBeAnomalous else { continue }
-                let n = try await estate.setAnomalousFlag(
-                    drawerId: drawer.id, anomalous: shouldBeAnomalous, now: now)
-                changed += n
-            }
+        for (idx, drawer) in drawers.enumerated() {
+            let shouldBeAnomalous = flags[idx]
+            guard drawer.isAnomalous != shouldBeAnomalous else { continue }
+            changed += try await estate.setAnomalousFlag(
+                drawerId: drawer.id, anomalous: shouldBeAnomalous, now: now)
         }
-
-        Self.anomalyLog.debug(
-            "anomalyFlagSweep: \(changed, privacy: .public) drawer(s) updated")
         return changed
     }
 }
