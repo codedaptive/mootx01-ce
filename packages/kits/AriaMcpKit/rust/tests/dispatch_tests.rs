@@ -2945,6 +2945,45 @@ fn confirm_migration_missing_winner_returns_invalid_params() {
     assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
 }
 
+/// An empty plan is refused by the recipe (insufficient branches). The refusal
+/// is the typed `orchestration_unavailable` envelope with its fixed message —
+/// the same envelope the Swift port renders — and the recipe's own error text
+/// never reaches the wire.
+#[test]
+fn run_migration_empty_plan_is_orchestration_unavailable() {
+    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(registry);
+    let result = session.call(
+        "moot_migration_run",
+        &args![
+            "corpusName" => "catalog-exercise",
+            "entries" => serde_json::Value::Array(vec![]),
+            "plans" => serde_json::Value::Array(vec![])
+        ],
+    ).expect("an empty plan is an operational refusal, not a transport fault");
+    assert!(is_tool_error(&result), "{result:?}");
+    let error = &result["structuredContent"]["error"];
+    assert_eq!(error["code"], "orchestration_unavailable", "{result:?}");
+    assert_eq!(error["message"], "The selected typed orchestration operation is unavailable.", "{result:?}");
+    assert_eq!(error["retryable"], serde_json::json!(true), "{result:?}");
+}
+
+/// An unknown branch id is refused with the same typed envelope.
+#[test]
+fn confirm_migration_unknown_branch_is_orchestration_unavailable() {
+    let registry = EstateRegistry::new_inmemory();
+    let session = SelectedV2Session::new(registry);
+    let result = session.call(
+        "moot_migration_confirm",
+        &args!["winner_branch_id" => "00000000-0000-0000-0000-000000000000"],
+    ).expect("an unknown branch is an operational refusal, not a transport fault");
+    assert!(is_tool_error(&result), "{result:?}");
+    let error = &result["structuredContent"]["error"];
+    assert_eq!(error["code"], "orchestration_unavailable", "{result:?}");
+    assert_eq!(error["message"], "The selected typed orchestration operation is unavailable.", "{result:?}");
+    assert_eq!(error["retryable"], serde_json::json!(true), "{result:?}");
+}
+
 // ---------------------------------------------------------------------------
 // 12. Lens tools — success + error paths (moot_lens_* prefix)
 // ---------------------------------------------------------------------------

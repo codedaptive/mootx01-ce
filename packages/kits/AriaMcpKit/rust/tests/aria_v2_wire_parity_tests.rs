@@ -995,6 +995,39 @@ fn review_tunnel_accept_flips_proposed_to_active() {
     assert_eq!(after_count, 1, "active tunnel must be visible after accept; got {after_count}");
 }
 
+/// Gate: `endorse` on the link the same stdio caller just filed (an active
+/// edge; only proposed edges take endorsements) is refused, and the refusal is
+/// the `mutation_unavailable` envelope with the fixed message — the code and
+/// wording the Swift port's AriaV2MemoryMutations.unavailable emits. An
+/// unknown tunnel answers with the identical envelope, so neither case can be
+/// told from the other. This is the release-qualification catalog call.
+#[test]
+fn review_tunnel_endorse_by_the_stdio_caller_is_mutation_unavailable() {
+    let registry = EstateRegistry::new_inmemory();
+    let dispatcher = Dispatcher::new(registry, "ARIA_MCP_Rust", "test", "test-serial", None);
+
+    let from = file_api(&dispatcher, "endorse-test source", None);
+    let to   = file_api(&dispatcher, "endorse-test target", None);
+    let link_result = call(&dispatcher, "moot_link_memories", json!({
+        "from_id": from, "to_id": to, "relationship": "supports",
+    }));
+    assert!(is_success(&link_result), "proposed link must succeed: {link_result}");
+    let tunnel_id = data(&link_result)["tunnel_id"].as_str().expect("link must carry tunnel_id").to_owned();
+
+    for tunnel in [tunnel_id, uuid::Uuid::new_v4().hyphenated().to_string()] {
+        let endorse = call(&dispatcher, "moot_review_tunnel", json!({
+            "tunnel_id": tunnel, "decision": "endorse",
+        }));
+        // `call` returns the JSON-RPC envelope; the tool result is under `result`.
+        let result = &endorse["result"];
+        assert_eq!(result["isError"], json!(true), "endorse must be refused: {endorse}");
+        let error = &result["structuredContent"]["error"];
+        assert_eq!(error["code"], "mutation_unavailable", "{endorse}");
+        assert_eq!(error["message"], "The requested mutation is unavailable in the selected estate.", "{endorse}");
+        assert_eq!(error["retryable"], json!(false), "{endorse}");
+    }
+}
+
 /// Gate: moot_review_tunnel reject marks the proposed tunnel withdrawn.
 ///
 /// The row persists in storage, is marked withdrawn, and is invisible to
