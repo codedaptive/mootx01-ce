@@ -2786,15 +2786,17 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     /// Count of active, non-empty drawers whose bit 27 is clear — the
-    /// span-encode drain's `pending`. Projected to `id` only. Mirrors Swift
-    /// `DrawerStore.countSpanIndexDebt()`.
+    /// span-encode drain's `pending`. F10: a single `COUNT(*)` query
+    /// (`RowStore::count`) rather than materializing and decoding every
+    /// matching row just to measure `rows.len()` — this duty polls on a
+    /// five-second cadence, so the old form re-paid the full matching-row
+    /// materialization cost on every tick regardless of how large the debt
+    /// was. Mirrors Swift `DrawerStore.countSpanIndexDebt()`.
     fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
-        let rows = self
-            .storage
+        self.storage
             .row_store()
-            .query_projected(T_DRAWERS, &["id"], Some(&span_index_debt_predicate()), &[], None, None)
-            .map_err(map_storage_err)?;
-        Ok(rows.len())
+            .count(T_DRAWERS, Some(&span_index_debt_predicate()))
+            .map_err(map_storage_err)
     }
 
     fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
@@ -3431,15 +3433,17 @@ impl DrawerStore for DrawerStoreCore {
         self.count_subject_debt_including(&[])
     }
 
-    /// Tier-aware debt count (PR-10). Mirrors Swift
-    /// `countSubjectDebt(includingPipelines:)`.
+    /// Tier-aware debt count (PR-10). F10: a single `COUNT(*)` query
+    /// (`RowStore::count`) rather than materializing and decoding every
+    /// matching row just to measure `rows.len()` — see
+    /// `count_span_index_debt`'s note; the same five-second poll cadence
+    /// applies here. Mirrors Swift `countSubjectDebt(includingPipelines:)`.
     fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
-        let row_store = self.storage.row_store();
         let predicate = subject_debt_predicate(pipelines);
-        let rows = row_store
-            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
-            .map_err(map_storage_err)?;
-        Ok(rows.len())
+        self.storage
+            .row_store()
+            .count(T_DRAWERS, Some(&predicate))
+            .map_err(map_storage_err)
     }
 
     /// The subject-backfill sweep enumerator (PR-09). Deterministic

@@ -5723,15 +5723,15 @@ public actor DrawerStore {
     }
 
     /// Count of active, non-empty drawers whose bit 27 is clear — the
-    /// span-encode drain's `pending`, measured off the rows themselves.
-    /// Projected to `id` only. Mirrors Rust `count_span_index_debt`.
+    /// span-encode drain's `pending`. F10: a single `COUNT(*)` query
+    /// (`RowStore.count(table:where:)`) rather than materializing and
+    /// decoding every matching row just to measure `rows.count` — this duty
+    /// polls on a five-second cadence, so the old form re-paid the full
+    /// matching-row materialization cost on every tick regardless of how
+    /// large the debt was. Mirrors Rust `count_span_index_debt`.
     public func countSpanIndexDebt() async throws -> Int {
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: Self.spanIndexDebtPredicate,
-            orderBy: [], limit: nil, offset: nil, columns: ["id"]
-        )
-        return rows.count
+        try await storage.rowStore.count(
+            table: "drawers", where: Self.spanIndexDebtPredicate)
     }
 
     /// Active, non-empty, bit 27 clear.
@@ -6368,15 +6368,15 @@ public actor DrawerStore {
     }
 
     /// Tier-aware debt count (PR-10): NULL rows plus rows produced under
-    /// any of `includingPipelines`. Mirrors Rust
-    /// `count_subject_debt_including`.
+    /// any of `includingPipelines`. F10: a single `COUNT(*)` query
+    /// (`RowStore.count(table:where:)`) rather than materializing and
+    /// decoding every matching row just to measure `rows.count` — see
+    /// `countSpanIndexDebt`'s note; the same five-second poll cadence
+    /// applies here. Mirrors Rust `count_subject_debt_including`.
     public func countSubjectDebt(includingPipelines pipelines: [String]) async throws -> Int {
-        let rows = try await storage.rowStore.query(
+        try await storage.rowStore.count(
             table: "drawers",
-            where: Self.subjectDebtPredicate(includingPipelines: pipelines),
-            orderBy: [], limit: nil, offset: nil, columns: ["id"]
-        )
-        return rows.count
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines))
     }
 
     /// The subject-backfill sweep enumerator (PR-09): up to `limit`
