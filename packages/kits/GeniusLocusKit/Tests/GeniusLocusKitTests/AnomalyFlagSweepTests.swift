@@ -179,6 +179,77 @@ struct AnomalyFlagSweepTests {
         #expect(owedAfter.first?.room == Self.room)
     }
 
+    // MARK: - Test 1c: F4 — a reanchor move dirties BOTH the room a drawer
+    // leaves and the room it joins; an expunge dirties its own room.
+
+    @Test("F4: moving a drawer to another room owes both rooms; expunging a drawer owes its room")
+    func anomalySweepOwesBothRoomsAfterMoveAndOwesRoomAfterExpunge() async throws {
+        let (kit, handle) = try await openEstate()
+        let t0 = Date(timeIntervalSince1970: 1_750_000_000)
+        let destinationRoom = "test-cohort-destination"
+
+        // Room A ("test-cohort") starts with 4 drawers; a fifth is a
+        // second drawer used for the expunge half of the test below. Keeping
+        // 3 drawers in room A after the move means room A never drops out of
+        // `roomLevelFingerprints()` entirely — a room with zero remaining
+        // drawers would not be a fair test of "still-owed", since an absent
+        // room is filtered out of the owed list by construction (step 2 of
+        // `anomalySweepOwedRooms` only ever reports rooms the fingerprint
+        // store still knows about).
+        var roomADrawers: [Drawer] = []
+        for content in Self.cohortContents {
+            roomADrawers.append(try await captureInRoom(content: content, kit: kit, handle: handle))
+        }
+        let mover = roomADrawers[0]
+        let toExpunge = roomADrawers[1]
+        // Seed the destination room with a capture BEFORE the move. The
+        // room-level fingerprint aggregate (`ContainerFingerprintStore`,
+        // read by `roomLevelFingerprints()`, the source of the owed list's
+        // candidate rooms) is written only by `containerFP.orIn` on capture
+        // — `reanchorGated` never touches it. A destination room with no
+        // prior capture would never appear in `roomLevelFingerprints()` at
+        // all regardless of dirtying, which is a separate, pre-existing gap
+        // from the one this test targets (see completion report).
+        let destFrame = CaptureFrame(
+            content: "destination room seed", channel: .typed, room: destinationRoom,
+            latticeAnchor: LatticeAnchor.udc("000"), addedBy: "anomaly-sweep-tests",
+            embeddingModelID: Self.modelID)
+        _ = try await kit.capture(handle, destFrame)
+
+        // Settle all debt before the move so the owed set below reflects
+        // ONLY what the move itself (not the initial captures) creates.
+        let owedInitially = try await kit.anomalySweepOwedRooms(handle, now: t0)
+        _ = try await kit.runAnomalySweepBatch(handle, limit: owedInitially.count, now: t0)
+        #expect(try await kit.anomalySweepOwedRooms(handle, now: t0).isEmpty)
+
+        // Move one drawer out of room A into a brand-new room. Before the F4
+        // fix, `anomalySweepOwedRooms` read only the drawer's CURRENT (post-
+        // move) parentNodeId off the audit-touched row, so only the
+        // destination room was ever dirtied — room A's now-changed cohesion
+        // peer set was silently skipped.
+        try await kit.reanchor(handle, ReanchorFrame(rowID: mover.id, toRoom: destinationRoom))
+        let owedAfterMove = try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(1))
+        let owedKeys = Set(owedAfterMove.map { $0.wing + "/" + $0.room })
+        #expect(owedKeys.contains(Self.wing + "/" + Self.room), "the room the drawer LEFT must be owed")
+        #expect(owedKeys.contains(Self.wing + "/" + destinationRoom), "the room the drawer JOINED must be owed")
+
+        // Settle again so the expunge half below starts from zero debt.
+        _ = try await kit.runAnomalySweepBatch(
+            handle, limit: owedAfterMove.count, now: t0.addingTimeInterval(1))
+        #expect(try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(1)).isEmpty)
+
+        // Expunging a drawer must owe its (unchanged) room — no reanchor
+        // involved, so the existing audit-fold path already resolves the
+        // CURRENT parentNodeId correctly; this pins that it stays correct.
+        _ = try await kit.expunge(handle, ExpungeFrame(
+            rowID: toExpunge.id, reason: "F4 test expunge", confirmation: true))
+        let owedAfterExpunge = try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(2))
+        #expect(
+            owedAfterExpunge.contains { $0.wing == Self.wing && $0.room == Self.room },
+            "expunging a drawer must owe the room it was filed in"
+        )
+    }
+
     // MARK: - Test 2: Small room clears bit 26
 
     @Test("anomalyFlagSweep clears bit 26 in rooms below the minimum size")
