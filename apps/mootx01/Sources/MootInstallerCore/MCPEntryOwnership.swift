@@ -251,7 +251,7 @@ public enum PluginDetector {
         installedEntry(pluginID: pluginID, homeDirectory: homeDirectory)?["version"] as? String
     }
 
-    private static func installedEntry(pluginID: String, homeDirectory: URL) -> [String: Any]? {
+    static func installedEntry(pluginID: String, homeDirectory: URL) -> [String: Any]? {
         let path = homeDirectory
             .appendingPathComponent(".claude/plugins/installed_plugins.json", isDirectory: false)
         guard let data = try? Data(contentsOf: path),
