@@ -771,8 +771,14 @@ pub fn execute_coordinator_proposal(
         digest.update([0]);
         digest.update(candidate.candidate_id.as_bytes());
         let replay_identity = format!("aria-v2:{}", digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        // The hunt's canonical pair spelling (both ids lowercased, sorted,
+        // joined by a double bar); the retained candidate already holds the
+        // pair in canonical order (resolve_proposal refuses any other).
+        let mut pair = [candidate.source_memory_id.to_lowercase(), candidate.target_memory_id.to_lowercase()];
+        pair.sort();
         genius_locus_kit::coordinator::SelectedConflictProposal {
             source_drawer_id: candidate.source_memory_id.clone(), target_drawer_id: candidate.target_memory_id.clone(),
+            pair_key: format!("{}||{}", pair[0], pair[1]),
             tier: candidate.tier, renewal_identity: candidate.renewal_identity.clone(), label: candidate.renewal_identity.clone(),
             replay_identity, source_digest: candidate.source_digest.clone(), evidence_digest: candidate.evidence_digest.clone(),
         }
@@ -780,9 +786,17 @@ pub fn execute_coordinator_proposal(
     let outcomes = coordinator.lock().map_err(|_| V2ContradictionProposalRefusal::stale())?
         .file_selected_conflict_proposals(handle, &selected, now_ms)
         .map_err(|_| V2ContradictionProposalRefusal::stale())?;
-    Ok(outcomes.into_iter().map(|outcome| match outcome {
-        locus_kit::drawer_store::AtomicConflictProposalOutcome::Created { tunnel_id, lifecycle } => V2ContradictionProposalStatus::Created { tunnel_id, lifecycle },
-        locus_kit::drawer_store::AtomicConflictProposalOutcome::Existing { tunnel_id, lifecycle } => V2ContradictionProposalStatus::Existing { tunnel_id, lifecycle },
-        locus_kit::drawer_store::AtomicConflictProposalOutcome::Settled => V2ContradictionProposalStatus::Settled,
-    }).collect())
+    // A stale outcome halts with the top-level `proposal_stale` refusal rather
+    // than reporting partial results, as Swift's AriaV2Contradictions.propose
+    // does at the first stale candidate.
+    let mut statuses = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        statuses.push(match outcome {
+            locus_kit::drawer_store::AtomicConflictProposalOutcome::Created { tunnel_id, lifecycle } => V2ContradictionProposalStatus::Created { tunnel_id, lifecycle },
+            locus_kit::drawer_store::AtomicConflictProposalOutcome::Existing { tunnel_id, lifecycle } => V2ContradictionProposalStatus::Existing { tunnel_id, lifecycle },
+            locus_kit::drawer_store::AtomicConflictProposalOutcome::Settled => V2ContradictionProposalStatus::Settled,
+            locus_kit::drawer_store::AtomicConflictProposalOutcome::Stale => return Err(V2ContradictionProposalRefusal::stale()),
+        });
+    }
+    Ok(statuses)
 }
