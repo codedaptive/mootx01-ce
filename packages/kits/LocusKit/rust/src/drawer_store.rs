@@ -107,6 +107,12 @@ use unicode_segmentation::UnicodeSegmentation;
 pub struct AtomicConflictProposalRequest {
     pub source_drawer_id: String,
     pub target_drawer_id: String,
+    /// The hunt's canonical pair spelling: both ids lowercased, sorted, joined
+    /// by a double bar (GeniusLocusKit `conflict_projection_sweep` and the
+    /// Swift `TieredContradictionCore.pairKey`). The filer recomputes it from
+    /// the fresh rows and answers `Stale` when the request's pair no longer
+    /// names these two drawers.
+    pub pair_key: String,
     pub tier: u8,
     pub renewal_identity: String,
     pub label: String,
@@ -116,11 +122,20 @@ pub struct AtomicConflictProposalRequest {
     pub decline_suppresses: fn(u8, &str, &[(u8, String)]) -> bool,
 }
 
+/// A serializable contradiction filing has a distinct creation, replay,
+/// settlement and stale result. A settled decision deliberately carries no
+/// tunnel id. Swift twin: `AtomicConflictProposalOutcome`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtomicConflictProposalOutcome {
     Created { tunnel_id: String, lifecycle: String },
     Existing { tunnel_id: String, lifecycle: String },
     Settled,
+    /// The selected evidence no longer matches the fresh rows: a drawer is
+    /// missing or tombstoned, the pair key or a digest differs, a lifecycle
+    /// state left cluster A, a sensitivity field is unrecognised, or an
+    /// endpoint room is not active. Nothing is written; the caller answers
+    /// `proposal_stale` and the hunt must run again. Swift twin: `.stale`.
+    Stale,
 }
 
 /// Compute the two digests binding a temporary ARIA candidate to fresh lower
