@@ -78,6 +78,18 @@ public enum PermissionsWriter {
     /// Every namespace prefix a tool name must be written under.
     public static let allPrefixes = [mcpPrefix, pluginMcpPrefix]
 
+    /// Prefixes consulted when READING a tool's existing tier for
+    /// cross-namespace inheritance — `allPrefixes` plus the legacy
+    /// pre-v1.1.0 plugin prefix. A user's explicit allow/ask/deny recorded
+    /// under the legacy prefix (before the plugin's server key renamed to
+    /// `"memory"`) is a decision about the capability, not about a string
+    /// that happened to change; `mergeTiered`'s inheritance must see it or
+    /// the legacy decision is silently overridden by the classifier
+    /// default on the current prefixes. This is READ-only: `allPrefixes`
+    /// remains the WRITE set, so a grant path never creates a new legacy
+    /// entry — only `remove` still strips one that already exists.
+    public static let allReadPrefixes = allPrefixes + [legacyPluginMcpPrefix]
+
     /// Tool names retired from the installer authorization inventory. This is a
     /// defensive floor applied to whatever tool list is injected at the call site
     /// (both production call sites inject the in-process linked projection, which
@@ -291,12 +303,15 @@ public enum PermissionsWriter {
         var added = (allow: 0, ask: 0, deny: 0)
         for tool in authorizedToolNames(from: toolNames) {
             // Computed from the pre-existing state, once per tool and before
-            // either entry is appended. Scanning every prefix rather than
-            // only "the other one" is equivalent here and stays correct if a
+            // either entry is appended. Scanning every READ prefix (current
+            // namespaces plus the legacy plugin prefix) rather than only
+            // "the other one" is equivalent here and stays correct if a
             // third namespace is ever added: a prefix whose entry is absent
             // contributes nothing, and one whose entry is present is exactly
-            // a sibling to inherit from.
-            let inherited = allPrefixes
+            // a sibling to inherit from. The legacy prefix is read-only here
+            // — it can supply an inherited tier but is never a write target
+            // in the loop below, which iterates `allPrefixes` only.
+            let inherited = allReadPrefixes
                 .compactMap { existingTier["\($0)\(tool)"] }
                 .max { $0.restrictiveness < $1.restrictiveness }
             let tier = inherited ?? classify(tool)

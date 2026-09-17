@@ -45,6 +45,18 @@ const LEGACY_PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_mootx01__";
 /// Every namespace prefix a tool name must be written under.
 const ALL_PREFIXES: [&str; 2] = [PREFIX, PLUGIN_PREFIX];
 
+/// Prefixes consulted when READING a tool's existing tier for
+/// cross-namespace inheritance — `ALL_PREFIXES` plus the legacy pre-v1.1.0
+/// plugin prefix. A user's explicit allow/ask/deny recorded under the
+/// legacy prefix (before the plugin's server key renamed to `"memory"`) is
+/// a decision about the capability, not about a string that happened to
+/// change; `grant_tiered`'s inheritance must see it or the legacy decision
+/// is silently overridden by the classifier default on the current
+/// prefixes. This is READ-only: `ALL_PREFIXES` remains the WRITE set, so a
+/// grant path never creates a new legacy entry — only `revoke` still strips
+/// one that already exists.
+const ALL_READ_PREFIXES: [&str; 3] = [PREFIX, PLUGIN_PREFIX, LEGACY_PLUGIN_PREFIX];
+
 /// Tool names retired from the installer authorization inventory. This is a
 /// defensive floor applied to whatever tool list is built from the linked server.
 /// The linked projection does not carry a retired name today; the filter guards
@@ -382,13 +394,16 @@ pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), Merge
     let mut added = (0usize, 0usize, 0usize);
     for name in names {
         // Computed from the pre-existing state, once per tool and before
-        // either entry is pushed. Scanning every prefix rather than only
-        // "the other one" is equivalent here and stays correct if a third
+        // either entry is pushed. Scanning every READ prefix (current
+        // namespaces plus the legacy plugin prefix) rather than only "the
+        // other one" is equivalent here and stays correct if a third
         // namespace is ever added: a prefix whose entry is absent
         // contributes nothing, and one whose entry is present is exactly a
         // sibling to inherit from. `max()` is most-restrictive-wins — see
-        // `Tier`'s variant-order note.
-        let inherited = ALL_PREFIXES
+        // `Tier`'s variant-order note. The legacy prefix is read-only here —
+        // it can supply an inherited tier but is never a write target in
+        // the loop below, which iterates `ALL_PREFIXES` only.
+        let inherited = ALL_READ_PREFIXES
             .iter()
             .filter_map(|p| existing_tier.get(&format!("{p}{name}")).copied())
             .max();
@@ -1073,6 +1088,33 @@ mod tests {
         assert!(
             !allow.iter().any(|e| e == DIRECT_SEARCH),
             "must not take classify's allow default"
+        );
+    }
+
+    #[test]
+    fn grant_tiered_legacy_plugin_deny_binds_absent_current_plugin_twin() {
+        // F7: the user denied the tool under the pre-v1.1.0 plugin prefix,
+        // and separately allowed it under the direct namespace (an install
+        // predating the rename, migrated forward but never re-tiered under
+        // the legacy prefix). Reading only ALL_PREFIXES for inheritance
+        // ignores the legacy deny entirely and lets the current plugin twin
+        // inherit the direct namespace's `allow` — silently dropping the
+        // user's explicit deny. The legacy entry itself is never rewritten;
+        // only the current plugin prefix inherits from it.
+        const LEGACY_SEARCH: &str = "mcp__plugin_mootx01_mootx01__moot_memory_search";
+        let (allow, _ask, deny) = seed_and_grant(
+            "grant-tiered-legacy-deny-binds-twin",
+            serde_json::json!({
+                "permissions": { "allow": [DIRECT_SEARCH], "deny": [LEGACY_SEARCH] }
+            }),
+        );
+        assert!(
+            deny.iter().any(|e| e == PLUGIN_SEARCH),
+            "the current plugin twin must inherit deny from the legacy prefix, not allow from the direct namespace"
+        );
+        assert!(
+            !allow.iter().any(|e| e == PLUGIN_SEARCH),
+            "the legacy deny must not be bypassed by the direct namespace's allow"
         );
     }
 
