@@ -20,9 +20,38 @@ public enum MatrixRecordMigration {
     /// Returns `true` when a legacy snapshot blob was found and retired — i.e.
     /// actual data migration occurred. Returns `false` for a no-op pass (no
     /// blob row, nothing to rebuild), which stamps the format without moving data.
+    ///
+    /// F5: `limits` is a FLOOR, not the working budget. `MatrixRefreshLimits`'
+    /// 1,000,000-per-field defaults are sized for the LIVE resident's refresh
+    /// admission gate (Bob's ruling: those defaults stay unchanged there).
+    /// This is a ONE-TIME, quiesced, offline rebuild
+    /// (`ResidentDaemonQuiesce.run` holds exclusive access for the whole
+    /// operation) — an estate whose audit log or drawer count the disk
+    /// already holds beyond that default must still migrate, not refuse with
+    /// `MatrixRecordError.workingSetLimit` and strand the estate at v1.9
+    /// forever. Before calling the worker, this counts the estate's actual
+    /// audit-event and source-row totals and widens `limits` to cover them.
     @discardableResult
     public static func run(storage: any Storage, estateID: UUID, now: Date,
-                           limits: MatrixRefreshLimits = .init()) async throws -> Bool {
+                           limits requestedLimits: MatrixRefreshLimits = .init()) async throws -> Bool {
+        // Sized to what the disk actually holds, never smaller than the
+        // caller-supplied floor. `cells` has no cheap exact count without
+        // building the tier (chicken-and-egg — the worker computes it), so it
+        // is bounded by a generous multiple of the two counts that DO have a
+        // cheap COUNT(*): the F/O/C/T maps are keyed by field- and row-pairs
+        // that co-occur within the audit trail, not by the full cross-product
+        // of every row against every other row, so a small constant factor
+        // over (audit events + source rows) covers real corpora with room to
+        // spare. If a future estate's cell count grows faster than this
+        // factor accounts for, that is itself a "the estate is absurd, not
+        // that the migration is broken" backstop question — same posture as
+        // `lsaRetrainingDocumentBackstop`.
+        let auditRowCount = try await storage.auditLog.count()
+        let sourceRowCount = try await storage.rowStore.count(table: "drawers", where: nil)
+        let limits = MatrixRefreshLimits(
+            auditEvents: max(requestedLimits.auditEvents, auditRowCount),
+            cells: max(requestedLimits.cells, (auditRowCount + sourceRowCount) * 8),
+            sourceRows: max(requestedLimits.sourceRows, sourceRowCount))
         let format = EstateFormatStore(storage: storage)
         let found = try await format.readIfPresent()
         if let found, found > .v1_10 { throw MatrixRecordError.corrupt("newer estate format") }
