@@ -352,6 +352,18 @@ public enum MootProductIdentity {
         /// the safety ceiling; nonpositive integers clamp to 1, invalid values default.
         public let recallDistillationMaxSourceBytes: Int
 
+        // MARK: Duty limits (`duties` object; GeniusLocusKit § DUTY_LIFECYCLE)
+
+        /// `duties.fact_extraction_batch`: sources per fact-extraction batch (default 16).
+        public let dutyFactExtractionBatch: Int
+        /// `duties.subject_backfill_batch`: rows per subject sweep (default 256).
+        public let dutySubjectBackfillBatch: Int
+        /// `duties.fact_source_lease_seconds`: the per-source in-flight fence while a
+        /// model call runs (default 120; it must exceed the extractor's request timeout).
+        public let dutyFactSourceLeaseSeconds: Int
+        /// `duties.fact_extraction_cadence_seconds`: the resident's Signal 14 period (default 300).
+        public let dutyFactExtractionCadenceSeconds: Int
+
         /// Maximum expanded reference output bytes (`context_distill.reference_expansion_max_bytes`).
         public let contextDistillReferenceExpansionMaxBytes: Int
         /// Maximum output/input UTF-8 expansion ratio (`context_distill.reference_expansion_max_ratio`).
@@ -399,6 +411,9 @@ public enum MootProductIdentity {
             let modelVersion = (factExtraction?["model_version"] as? String)
                 .flatMap { $0.isEmpty ? nil : $0 }
             let distill = root["context_distill"] as? [String: Any]
+            // `duties` — batch limits and the fact source lease (§ DUTY_LIFECYCLE).
+            // A non-positive or malformed value keeps the default.
+            let duties = root["duties"] as? [String: Any]
             return Settings(
                 daemonStatsStore: storeOrNil,
                 factExtractionCoreAIAsset: coreaiAsset,
@@ -407,7 +422,11 @@ public enum MootProductIdentity {
                 contextDistillReferenceExpansionMaxBytes: positiveIntegerOrDefault(distill?["reference_expansion_max_bytes"], fallback: 8_388_608),
                 contextDistillReferenceExpansionMaxRatio: positiveIntegerOrDefault(distill?["reference_expansion_max_ratio"], fallback: 64),
                 recallDistillationMaxSourceBytes: min(32768, positiveInteger(
-                    (root["recall_distillation"] as? [String: Any])?["max_source_bytes"], fallback: 32768)))
+                    (root["recall_distillation"] as? [String: Any])?["max_source_bytes"], fallback: 32768)),
+                dutyFactExtractionBatch: positiveIntegerOrDefault(duties?["fact_extraction_batch"], fallback: 16),
+                dutySubjectBackfillBatch: positiveIntegerOrDefault(duties?["subject_backfill_batch"], fallback: 256),
+                dutyFactSourceLeaseSeconds: positiveIntegerOrDefault(duties?["fact_source_lease_seconds"], fallback: 120),
+                dutyFactExtractionCadenceSeconds: positiveIntegerOrDefault(duties?["fact_extraction_cadence_seconds"], fallback: 300))
         }
 
         // MARK: Writing
@@ -489,7 +508,11 @@ public enum MootProductIdentity {
             factExtractionModelVersion: String?,
             contextDistillReferenceExpansionMaxBytes: Int = 8_388_608,
             contextDistillReferenceExpansionMaxRatio: Int = 64,
-            recallDistillationMaxSourceBytes: Int = 32768
+            recallDistillationMaxSourceBytes: Int = 32768,
+            dutyFactExtractionBatch: Int = 16,
+            dutySubjectBackfillBatch: Int = 256,
+            dutyFactSourceLeaseSeconds: Int = 120,
+            dutyFactExtractionCadenceSeconds: Int = 300
         ) {
             self.daemonStatsStore = daemonStatsStore
             self.factExtractionCoreAIAsset = factExtractionCoreAIAsset
@@ -498,6 +521,10 @@ public enum MootProductIdentity {
             self.contextDistillReferenceExpansionMaxBytes = contextDistillReferenceExpansionMaxBytes
             self.contextDistillReferenceExpansionMaxRatio = contextDistillReferenceExpansionMaxRatio
             self.recallDistillationMaxSourceBytes = recallDistillationMaxSourceBytes
+            self.dutyFactExtractionBatch = dutyFactExtractionBatch
+            self.dutySubjectBackfillBatch = dutySubjectBackfillBatch
+            self.dutyFactSourceLeaseSeconds = dutyFactSourceLeaseSeconds
+            self.dutyFactExtractionCadenceSeconds = dutyFactExtractionCadenceSeconds
         }
     }
 }
