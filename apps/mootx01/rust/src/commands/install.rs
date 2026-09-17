@@ -1403,12 +1403,16 @@ mod tests {
             "the stale bare `command: mootx01` placeholder must be gone; got: {rewritten}"
         );
 
-        // The stranded-cache refresh must have
-        // invoked the CLI-update seam, since the plugin is already installed.
+        // The stranded-cache refresh must have invoked the CLI-update seam,
+        // since the plugin is already installed. The fixture's cache carries
+        // no .mcp.json, so after the version-only update the refresh reads it
+        // as stale and rebuilds it by reinstalling. Twin of the Swift
+        // PluginDedupeTests expectation.
+        let verbs: Vec<String> = fake.invoked.borrow().iter().map(|call| call[1].clone()).collect();
         assert_eq!(
-            fake.invoked.borrow().as_slice(),
-            &[vec!["plugin".to_string(), "update".to_string(), "mootx01@mootx01".to_string()]],
-            "rematerializing an already-installed plugin must invoke `claude plugin update`"
+            verbs,
+            vec!["update".to_string(), "uninstall".to_string(), "install".to_string()],
+            "rematerializing an already-installed plugin must invoke `claude plugin update`, then rebuild the manifest-less cache"
         );
 
         // No direct entry must exist — the plugin still owns the connection.
