@@ -328,7 +328,25 @@ public struct FactExtractionBatchWork: Sendable {
                     state.candidates.removeAll()
                     _ = try await checkpoints.compareAndSwap(id: id, stream: stream,
                         expected: staged, payload: try JSONEncoder().encode(state), stamp: stamp)
-                } else { skipped += 1 }
+                } else {
+                    skipped += 1
+                    // F6: publish declined because the source predicate no
+                    // longer matched (content edit, recipe deactivation, or
+                    // the source is gone). If the source is now tombstoned
+                    // — expunged since this batch was queued — its
+                    // checkpoint is truly abandoned: the fact-extraction
+                    // debt scan excludes tombstoned drawers, so no future
+                    // pass will ever revisit it to clean up the retained
+                    // GroundedFactCandidate evidence quotes in `state.candidates`.
+                    // Delete the checkpoint outright rather than leaving it
+                    // forever. A content-edit or recipe-inactive nil (the
+                    // source is still alive) is left alone — a later pass
+                    // can still legitimately settle it against fresh
+                    // content or the newly active recipe.
+                    if let current = try? await store.getDrawer(id: drawer.id), current.tombstonedAt != nil {
+                        _ = try? await checkpoints.delete(id: id, stream: stream)
+                    }
+                }
             }
             filed += filedThisSource
         }
