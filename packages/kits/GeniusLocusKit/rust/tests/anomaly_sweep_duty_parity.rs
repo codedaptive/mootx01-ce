@@ -96,3 +96,56 @@ fn anomaly_duty_scores_only_touched_rooms() {
     let owed_after = coord.anomaly_sweep_owed_rooms(&handle, NOW + 1).expect("owed");
     assert_eq!(owed_after, vec![(WING.to_string(), ROOM.to_string())]);
 }
+
+/// F4: a reanchor that moves a drawer to another room owes BOTH rooms a
+/// rescoring — the room it joined (visible to the audit-fold, which resolves
+/// a touched row's CURRENT parent at fold time) and the room it left (only
+/// recoverable at the `reanchor` call site, since a pure room move leaves
+/// `LatticeAnchor` — the only before/after state the audit event itself
+/// carries — byte-identical). Before the fix, only the destination room was
+/// ever owed; the source room's cohort silently went unscored after every
+/// member it used to influence was gone. Twin of Swift
+/// `anomalySweepOwesBothRoomsAfterMoveAndOwesRoomAfterExpunge`'s move half.
+///
+/// The destination room is seeded with a capture before the move (matching
+/// the Swift fixture's workaround): `room_level_fingerprints` only lists a
+/// room once something has been captured into it, so a never-captured room
+/// cannot appear in the owed list regardless of this fix.
+#[test]
+fn anomaly_duty_owes_both_rooms_after_a_cross_room_move() {
+    const DEST_ROOM: &str = "test-cohort-dest";
+    let (coord, handle) = provision();
+    for content in COHORT {
+        capture(&coord, &handle, content);
+    }
+    let moved = capture(&coord, &handle, OUTLIER);
+
+    // Seed the destination room so it is a known (already-scored) room, then
+    // settle every current debt so the assertion below observes ONLY the
+    // dirtying the move itself causes.
+    let dest_frame = CaptureFrame::new(
+        "seed content for the destination room", CaptureChannel::Typed, DEST_ROOM,
+        LatticeAnchor::udc("000"), "anomaly-duty", "test-embed-v1");
+    coord.capture(&handle, dest_frame, NOW).expect("seed capture");
+    let owed_before_move = coord.anomaly_sweep_owed_rooms(&handle, NOW).expect("owed");
+    let settled = coord
+        .run_anomaly_sweep_batch(&handle, owed_before_move.len(), NOW)
+        .expect("settle batch");
+    assert_eq!(settled, owed_before_move.len(), "precondition: every room starts scored");
+    assert_eq!(coord.duty_debt(&handle, DutyKind::AnomalySweep).expect("debt"), 0);
+
+    // Move the outlier drawer from ROOM into DEST_ROOM.
+    coord
+        .reanchor(&handle, &moved, Some(DEST_ROOM), Some(WING), None)
+        .expect("reanchor");
+
+    let owed_after_move = coord.anomaly_sweep_owed_rooms(&handle, NOW + 1).expect("owed");
+    assert!(
+        owed_after_move.iter().any(|(w, r)| w == WING && r == ROOM),
+        "the source room must be owed a rescoring — {owed_after_move:?}"
+    );
+    assert!(
+        owed_after_move.iter().any(|(w, r)| w == WING && r == DEST_ROOM),
+        "the destination room must be owed a rescoring — {owed_after_move:?}"
+    );
+}
