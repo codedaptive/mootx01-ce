@@ -5790,6 +5790,51 @@ public actor DrawerStore {
         }
     }
 
+    /// Settle one source as REJECTED by the active recipe: sets bits 28 and 29
+    /// together, only while the drawer is live, its content still equals the
+    /// inference snapshot, and `recipeID` is the active recipe. Returns nil when
+    /// the source or recipe changed, 0 when already settled, 1 when written.
+    /// The rejected row stays in the estate as the analysis corpus; the reason
+    /// lives in the duty's checkpoint row. Mirrors Rust
+    /// `mark_fact_extraction_rejected`.
+    public func markFactExtractionRejected(
+        sourceID: String, expectedContent: String, recipeID: String
+    ) async throws -> Int? {
+        try Self.validateNonEmpty(sourceID, label: "sourceID")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let predicate: StoragePredicate = .and([
+                .eq(Column(table: "drawers", name: "id"), .text(sourceID)),
+                .eq(Column(table: "drawers", name: "content"), .text(expectedContent)),
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
+            ])
+            guard let source = try await txn.rowStore.query(table: "drawers",
+                where: predicate, orderBy: [], limit: 1, offset: nil,
+                columns: ["operationalBitmap"]).first else { return nil }
+            let registry = try await txn.rowStore.query(table: "fact_extractor_models", where: .and([
+                .eq(Column(table: "fact_extractor_models", name: "recipe_id"), .text(recipeID)),
+                .eq(Column(table: "fact_extractor_models", name: "is_active"), .int(1)),
+            ]), orderBy: [], limit: 1, offset: nil)
+            guard !registry.isEmpty else { return nil }
+            let current = Self.int64(source["operationalBitmap"])
+            let settled = DrawerFeatureFlags.factsExtracted.rawValue | DrawerFeatureFlags.factsRejected.rawValue
+            if current & DrawerFeatureFlags.factsExtracted.rawValue != 0 { return 0 }
+            return try await txn.rowStore.update(
+                table: "drawers", values: ["operationalBitmap": .bitmap(current | settled)],
+                where: predicate)
+        }
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set): the rejected corpus.
+    public func countFactExtractionRejected() async throws -> Int {
+        try await storage.rowStore.count(table: "drawers", where: .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
+            .bitmaskAll(Column(table: "drawers", name: "operationalBitmap"),
+                        mask: DrawerFeatureFlags.factsRejected.rawValue),
+        ]))
+    }
+
     /// Publish one completely processed source generation atomically. Nil means
     /// the source/recipe changed. A replay returns zero. Empty success never
     /// retires facts; absence from new model output is not a retraction.

@@ -39,7 +39,12 @@ import SubstrateLib
 /// bit  26     isAnomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
 /// bit  27     spanIndexed — encoder span rows exist for the current content
 ///             (Encoder Rerank Program, 2026-09-05)
-/// bits 28–30  FREE (3 bits headroom)
+/// bit  28     factsExtracted — fact extraction settled for the current content
+///             under the active recipe (may be zero facts)
+/// bit  29     factsRejected — the active recipe rejected the current content;
+///             settled (bit 28 is set with it) and queryable as the rejected
+///             corpus (ruling 2026-09-16)
+/// bit  30     FREE (1 bit headroom)
 /// bits 31–63  FREE (33 bits headroom)
 /// ```
 ///
@@ -234,13 +239,22 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     /// may contain zero facts. Cleared by content writes and recipe activation.
     public static let factsExtracted = DrawerFeatureFlags(rawValue: 1 << 28)
 
+    /// Bit 29 — the active recipe rejected this drawer's current content (the
+    /// extractor's output failed source grounding twice, or the request was
+    /// invalid). Always set together with bit 28: a rejection is settled for
+    /// the recipe, and the row is the rejected corpus for analysis. The
+    /// checkpoint row keeps the reason. Cleared with bit 28 by content writes
+    /// and recipe activation. Wire value: 1 << 29 = 536870912 (0x20000000).
+    public static let factsRejected = DrawerFeatureFlags(rawValue: 1 << 29)
+
     /// The bits every content write clears in the same UPDATE that changes
     /// `content`: bit 19 (retained, always cleared), bit 27 (the span rows
-    /// describe the previous content), and bit 28 (the extraction that set it
-    /// described the previous content, so the drawer owes a fresh extraction
-    /// attempt). Applied as `operationalBitmap & ~clearedOnContentWrite`.
+    /// describe the previous content), and bits 28 and 29 (the extraction
+    /// outcome described the previous content, so the drawer owes a fresh
+    /// extraction attempt). Applied as `operationalBitmap & ~clearedOnContentWrite`.
     public static let clearedOnContentWrite: Int64 =
-        hasCurrentRepresentation.rawValue | spanIndexed.rawValue | factsExtracted.rawValue
+        hasCurrentRepresentation.rawValue | spanIndexed.rawValue
+        | factsExtracted.rawValue | factsRejected.rawValue
 
 }
 
@@ -385,6 +399,11 @@ public extension Drawer {
     }
 
     /// True when bit 28 is set for the current content and active extractor.
+    /// Bit 29: the active recipe rejected the current content (settled).
+    var areFactsRejected: Bool {
+        operationalBitmap & DrawerFeatureFlags.factsRejected.rawValue != 0
+    }
+
     var areFactsExtracted: Bool {
         operationalBitmap & DrawerFeatureFlags.factsExtracted.rawValue != 0
     }
