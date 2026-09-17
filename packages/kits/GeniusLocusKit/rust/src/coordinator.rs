@@ -7590,6 +7590,49 @@ impl EstateCoordinator {
         let unsealed_event = storage_outcome.event;
         let refused_sibling_ids = storage_outcome.refused_sibling_ids;
 
+        // Step 1.5 — Fact-extraction checkpoint cleanup (F6). Best-effort and
+        // independent of corpus/vector_store registration: a retained
+        // checkpoint (QueueKit's "fact-extraction-checkpoints" stream) holds
+        // domain evidence — GroundedFactCandidate evidence quotes — keyed by
+        // source drawer id. The fact-extraction debt scan that would
+        // otherwise revisit and clean up a source's checkpoint excludes
+        // tombstoned drawers, so an un-deleted row for an expunged source is
+        // retained forever with no future pass that will ever look at it
+        // again. Runs for every lineage member the storage expunge actually
+        // scrubbed (mirrors the `ids_to_delete` computation in step 2 below).
+        // A checkpoint-store failure here must never abort the erase that
+        // already committed — logged and swallowed, matching the orphan-audit
+        // posture in step 2. Mirrors Swift `VerbSurface.expunge`'s step 1.5.
+        {
+            let checkpoint_ids: Vec<String> = match estate.lineage_chain(row_id) {
+                Ok(chain) if !chain.is_empty() => chain,
+                _ => vec![row_id.to_string()],
+            }
+            .into_iter()
+            .filter(|id| !refused_sibling_ids.contains(id))
+            .collect();
+            match self.fact_checkpoints(handle) {
+                Ok(checkpoints) => {
+                    let stream = crate::brain::fact_extraction_workflow::stream();
+                    for delete_id in &checkpoint_ids {
+                        let id = crate::brain::fact_extraction_workflow::work_id(delete_id);
+                        if let Err(error) = checkpoints.delete(&id, &stream) {
+                            eprintln!(
+                                "expunge fact-extraction checkpoint cleanup failed — rowID={row_id} estate={} error={error:?}",
+                                uuid_to_str(&handle.estate_uuid)
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "expunge fact-extraction checkpoint cleanup failed — rowID={row_id} estate={} error={error:?}",
+                        uuid_to_str(&handle.estate_uuid)
+                    );
+                }
+            }
+        }
+
         // Step 2 — Cross-kit vector delete (fail-closed; must not be silent).
         //
         // GLK is the composition layer responsible for coordinating the cross-kit
@@ -17707,6 +17750,90 @@ mod tests {
             fact_after.unwrap().state(),
             locus_kit::adjectives::State::Active,
             "fact must remain Active after fault-aborted withdraw"
+        );
+    }
+
+    /// F6: a checkpoint that carries STAGED, UNPUBLISHED grounded-fact
+    /// evidence (`candidates` non-empty, not yet ready to publish because
+    /// more chunks remain) must not survive an expunge of its source. Before
+    /// the fix, expunge never touched the fact-extraction checkpoint
+    /// stream at all — the debt scan that would otherwise revisit and
+    /// settle it excludes tombstoned drawers, so the retained row (and the
+    /// evidence quotes inside it) would have stayed forever with no future
+    /// pass ever looking at it again. Placed in this crate-internal module
+    /// (not the external `fact_extraction_duty_tests.rs`) because it needs
+    /// `pub(crate)` access to `fact_checkpoints`/`work_id`/`stream`.
+    #[test]
+    fn expunge_deletes_staged_fact_extraction_checkpoint() {
+        use fact_extraction_kit::contract::{
+            FactCandidate, FactExtractionError, FactExtractionRequest, FactExtractionResponse,
+            FactExtractor, FactExtractorKind, FactExtractorModelSpec,
+        };
+
+        struct StagingExtractor {
+            spec: FactExtractorModelSpec,
+            fact_text: &'static str,
+        }
+        impl FactExtractor for StagingExtractor {
+            fn spec(&self) -> &FactExtractorModelSpec { &self.spec }
+            fn extract(
+                &self, request: &FactExtractionRequest,
+            ) -> Result<FactExtractionResponse, FactExtractionError> {
+                let candidates = if request.source_text.contains(self.fact_text) {
+                    vec![FactCandidate {
+                        subject: "Jack".into(), predicate: "birthday".into(),
+                        object: "June 20th".into(), evidence_quote: self.fact_text.into(),
+                        confidence: 0.97,
+                        assertion_kind: fact_extraction_kit::contract::FactAssertionKind::Asserted,
+                        search_aliases: vec![],
+                    }]
+                } else { vec![] };
+                Ok(FactExtractionResponse {
+                    source_digest: request.source_digest.clone(),
+                    provider_id: self.spec.provider_id.clone(),
+                    model_id: self.spec.model_id.clone(),
+                    model_version: self.spec.model_version.clone(),
+                    schema_version: self.spec.schema_version.clone(),
+                    candidates,
+                })
+            }
+        }
+
+        let (mut coord, handle) = open_one();
+        let fact_text = "Jack's birthday is June 20th.";
+        let tail = "é😀 trailing filler content. ".repeat(40);
+        let source = format!("{fact_text}{tail}");
+        let drawer = coord.capture(&handle, cap_frame(&source), NOW).expect("capture");
+        let spec = FactExtractorModelSpec {
+            provider_id: "test-provider".into(), model_id: "nuextract-test".into(),
+            model_version: "q8".into(), schema_version: "kgfact-extraction-v1".into(),
+            extractor_kind: FactExtractorKind::SpecializedModel,
+            maximum_input_characters: 700, maximum_facts_per_source: 8,
+        };
+        coord.activate_fact_extractor(
+            std::sync::Arc::new(StagingExtractor { spec, fact_text }),
+            "nuextract-expunge-checkpoint-v1", &handle,
+        ).unwrap();
+
+        let report = coord.run_fact_extraction_batch(&handle, 16, NOW).unwrap();
+        assert_eq!(report.chunks_processed, 1, "precondition: only the first chunk ran this batch");
+
+        let checkpoints = coord.fact_checkpoints(&handle).expect("fact checkpoints");
+        let checkpoint_id = crate::brain::fact_extraction_workflow::work_id(&drawer.id);
+        let stream = crate::brain::fact_extraction_workflow::stream();
+        let staged_payload = checkpoints.read(&checkpoint_id, &stream).unwrap()
+            .expect("precondition: a checkpoint row exists for this source");
+        let staged: serde_json::Value = serde_json::from_slice(&staged_payload).unwrap();
+        assert!(
+            !staged["candidates"].as_array().unwrap().is_empty(),
+            "precondition: the checkpoint holds a staged, unpublished candidate"
+        );
+
+        coord.expunge(&handle, &drawer.id, "F6 test expunge", true, NOW).expect("expunge");
+
+        assert!(
+            checkpoints.read(&checkpoint_id, &stream).unwrap().is_none(),
+            "expunge must delete the retained checkpoint, not leave the staged evidence forever"
         );
     }
 }
