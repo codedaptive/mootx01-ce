@@ -1436,6 +1436,8 @@ pub struct EstateCoordinator {
     /// Duties this process has queued and not yet drained, per estate: the
     /// single-occupancy guard for `enqueue_duty` (brain/duty_queue.rs).
     pub(crate) duty_queued: crate::brain::duty_queue::DutyQueued,
+    /// Host-supplied batch limits per estate (brain/duty_queue.rs `DutyLimits`).
+    pub(crate) duty_limits: crate::brain::duty_queue::DutyLimitsByHandle,
 
     // ── Recall degradation test seams (P1 fail-loud contract) ──
     //
@@ -1642,6 +1644,7 @@ impl EstateCoordinator {
             sync_engines: HashMap::new(),
             dreaming_queues: RefCell::new(HashMap::new()),
             duty_queued: std::cell::RefCell::new(HashMap::new()),
+            duty_limits: std::cell::RefCell::new(HashMap::new()),
             // Test seams start clear; only `inject_*` methods set them.
             #[cfg(any(test, feature = "test-seams"))]
             test_force_vector_hamming_error: std::cell::RefCell::new(None),
