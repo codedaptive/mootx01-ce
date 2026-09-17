@@ -549,6 +549,20 @@ public actor Estate {
         try await store.countFactExtractionDebt()
     }
 
+    /// Settle one source as rejected by the active recipe (bits 28 and 29).
+    /// Pass-through over `DrawerStore.markFactExtractionRejected`.
+    public func markFactExtractionRejected(
+        sourceID: String, expectedContent: String, recipeID: String
+    ) async throws -> Int? {
+        try await store.markFactExtractionRejected(
+            sourceID: sourceID, expectedContent: expectedContent, recipeID: recipeID)
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set).
+    public func countFactExtractionRejected() async throws -> Int {
+        try await store.countFactExtractionRejected()
+    }
+
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
     /// over `DrawerStore.setSubjectRepresentation` — the seam the filing
     /// surface, backfill, and the (future) subject rider write through.

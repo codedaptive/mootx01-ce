@@ -158,6 +158,13 @@ pub struct EstateDrain {
     pub name: String,
     pub state: EstateDrainState,
     pub pending: u64,
+    /// Lane detail as the kit reports it. Omitted when the lane has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Rows the lane settled by rejecting them. Omitted for lanes without
+    /// that outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

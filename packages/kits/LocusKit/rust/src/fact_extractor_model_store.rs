@@ -241,7 +241,7 @@ fn clear_extraction_debt(store: &dyn persistence_kit::RowStore) -> Result<usize,
         let mut values = BTreeMap::new();
         values.insert(
             "operationalBitmap".into(),
-            TypedValue::Bitmap(current & !DrawerFeatureFlags::FACTS_EXTRACTED),
+            TypedValue::Bitmap(current & !(DrawerFeatureFlags::FACTS_EXTRACTED | DrawerFeatureFlags::FACTS_REJECTED)),
         );
         cleared += store
             .update(

@@ -418,6 +418,13 @@ impl DrawerStore for SqliteDrawerStore {
     fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
         self.0.count_fact_extraction_debt()
     }
+    fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        self.0.mark_fact_extraction_rejected(source_id, expected_content, recipe_id)
+    }
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.0.count_fact_extraction_rejected()
+    }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.0.set_anomalous_flag(drawer_id, anomalous)
     }
