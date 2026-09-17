@@ -88,25 +88,23 @@ pub fn run(
                 record.directory.display()
             );
         }
-        if !run_schema_upgrade(&record) {
-            return ExitCode::from(exit::FAILURE);
-        }
-        if !run_matrix_records_upgrade(&record) { return ExitCode::from(exit::FAILURE); }
-        retire_legacy_encryption_opt_out(&record);
-        refresh_manifest(&record);
-        let ok_kg    = run_kg_fact_identity_backfill(&record);
-        let ok_sp    = run_search_projection_backfill(&record);
-        let ok_vacuum = run_whole_record_vacuum(&record);
-        let ok_recl  = run_shared_content_reclaim_if_pending(&record);
-        let ok_facts = run_ssc_facts_backfill(&record);
-        let ok_dense = run_dense_pooling_convergence(&record);
-        let ok_span  = run_span_encode_backfill(&record);
-        let ok_vec   = run_vector_reclaim(&record);
-        if ok_kg && ok_sp && ok_vacuum && ok_recl && ok_facts && ok_dense && ok_span && ok_vec {
-            return ExitCode::from(exit::OK);
-        } else {
-            return ExitCode::from(exit::FAILURE);
-        }
+        // One quiesce around the whole sequence (one Keychain read).
+        let settled = hold_resident_daemon_quiesced(&record.pid_path(), &PlatformDaemon, || {
+            if !run_schema_upgrade(&record) { return false; }
+            if !run_matrix_records_upgrade(&record) { return false; }
+            retire_legacy_encryption_opt_out(&record);
+            refresh_manifest(&record);
+            let ok_kg    = run_kg_fact_identity_backfill(&record);
+            let ok_sp    = run_search_projection_backfill(&record);
+            let ok_vacuum = run_whole_record_vacuum(&record);
+            let ok_recl  = run_shared_content_reclaim_if_pending(&record);
+            let ok_facts = run_ssc_facts_backfill(&record);
+            let ok_dense = run_dense_pooling_convergence(&record);
+            let ok_span  = run_span_encode_backfill(&record);
+            let ok_vec   = run_vector_reclaim(&record);
+            ok_kg && ok_sp && ok_vacuum && ok_recl && ok_facts && ok_dense && ok_span && ok_vec
+        });
+        return if settled == Some(true) { ExitCode::from(exit::OK) } else { ExitCode::from(exit::FAILURE) };
     }
 
     // Local-build path: --from skips the online check entirely.
@@ -150,19 +148,24 @@ pub fn run(
             // Bob's ruling: `mootx01 upgrade` is the ONLY migration vehicle,
             // and it converges whether or not a new version is available — so
             // the up-to-date early return still runs all migration steps and offers.
-            if run_schema_upgrade(&record) {
-                if !run_matrix_records_upgrade(&record) { return ExitCode::from(exit::FAILURE); }
-                retire_legacy_encryption_opt_out(&record);
-                refresh_manifest(&record);
-                run_kg_fact_identity_backfill(&record);
-                run_search_projection_backfill(&record);
-                run_whole_record_vacuum(&record);
-                run_shared_content_reclaim_if_pending(&record);
-                run_ssc_facts_backfill(&record);
-                run_dense_pooling_convergence(&record);
-                run_span_encode_backfill(&record);
-                run_vector_reclaim(&record);
-            }
+            // One quiesce around the whole sequence (one Keychain read).
+            let matrix_ok = hold_resident_daemon_quiesced(&record.pid_path(), &PlatformDaemon, || {
+                if run_schema_upgrade(&record) {
+                    if !run_matrix_records_upgrade(&record) { return false; }
+                    retire_legacy_encryption_opt_out(&record);
+                    refresh_manifest(&record);
+                    run_kg_fact_identity_backfill(&record);
+                    run_search_projection_backfill(&record);
+                    run_whole_record_vacuum(&record);
+                    run_shared_content_reclaim_if_pending(&record);
+                    run_ssc_facts_backfill(&record);
+                    run_dense_pooling_convergence(&record);
+                    run_span_encode_backfill(&record);
+                    run_vector_reclaim(&record);
+                }
+                true
+            });
+            if matrix_ok == Some(false) { return ExitCode::from(exit::FAILURE); }
             offer_estate_encryption_if_needed(&record);
             return ExitCode::from(exit::OK);
         }
@@ -278,19 +281,24 @@ fn run_convergence(record: &EstateRecord, refresh_plugins: bool) -> bool {
     // each step is independent and retryable; the next `mootx01 upgrade` catches failures.
     // A refused schema version skips every data step: each of them would
     // open the LocusKit schema and stamp the estate current.
-    if run_schema_upgrade(record) {
-        if !run_matrix_records_upgrade(record) { return false; }
-        retire_legacy_encryption_opt_out(record);
-        refresh_manifest(record);
-        let _ = run_kg_fact_identity_backfill(record);
-        let _ = run_ssc_facts_backfill(record);
-        let _ = run_search_projection_backfill(record);
-        let _ = run_whole_record_vacuum(record);
-        let _ = run_shared_content_reclaim_if_pending(record);
-        let _ = run_dense_pooling_convergence(record);
-        let _ = run_span_encode_backfill(record);
-        let _ = run_vector_reclaim(record);
-    }
+    // One quiesce around the whole sequence (one Keychain read).
+    let matrix_ok = hold_resident_daemon_quiesced(&record.pid_path(), &PlatformDaemon, || {
+        if run_schema_upgrade(record) {
+            if !run_matrix_records_upgrade(record) { return false; }
+            retire_legacy_encryption_opt_out(record);
+            refresh_manifest(record);
+            let _ = run_kg_fact_identity_backfill(record);
+            let _ = run_ssc_facts_backfill(record);
+            let _ = run_search_projection_backfill(record);
+            let _ = run_whole_record_vacuum(record);
+            let _ = run_shared_content_reclaim_if_pending(record);
+            let _ = run_dense_pooling_convergence(record);
+            let _ = run_span_encode_backfill(record);
+            let _ = run_vector_reclaim(record);
+        }
+        true
+    });
+    if matrix_ok == Some(false) { return false; }
     run_corpus_counts_migration(record);
     if refresh_plugins && record.kind != EstateRecordKind::Transient {
         refresh_installed_codex_plugin(&super::install::home_dir());
@@ -1938,6 +1946,59 @@ pub(crate) fn with_resident_daemon_quiesced<T>(
     with_resident_serving(resident_serves(estate_pid_file), step, daemon, work)
 }
 
+thread_local! {
+    /// The daemon is already held down by an enclosing `hold`; every step
+    /// inside it runs its work without stopping or starting anything.
+    static HELD_BY_ENCLOSING_HOLD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Quiesce the resident daemon ONCE around a whole sequence of steps. Every
+/// step still calls `with_resident_daemon_quiesced`; inside the hold it finds
+/// the daemon already stopped and just does its work. One stop and one start
+/// per upgrade: each restart of the resident on an encrypted estate is a
+/// Keychain read, and the per-step quiesce cost the operator one prompt per
+/// migration step. Twin of the Swift `ResidentDaemonQuiesce.hold`.
+pub(crate) fn hold_resident_daemon_quiesced<T>(
+    estate_pid_file: &std::path::Path,
+    daemon: &dyn DaemonControl,
+    sequence: impl FnOnce() -> T,
+) -> Option<T> {
+    hold_resident_serving(resident_serves(estate_pid_file), daemon, sequence)
+}
+
+/// The decision already made; tests inject it. `None` only when the daemon
+/// would not stop, in which case nothing in the sequence runs.
+pub(crate) fn hold_resident_serving<T>(
+    resident_serves: bool,
+    daemon: &dyn DaemonControl,
+    sequence: impl FnOnce() -> T,
+) -> Option<T> {
+    struct Held;
+    impl Drop for Held {
+        fn drop(&mut self) { HELD_BY_ENCLOSING_HOLD.with(|h| h.set(false)); }
+    }
+    if !resident_serves {
+        println!("  no live resident serves this estate; daemon left running");
+        HELD_BY_ENCLOSING_HOLD.with(|h| h.set(true));
+        let _held = Held;
+        return Some(sequence());
+    }
+    let was_running = daemon.is_running();
+    if was_running && !daemon.stop() {
+        println!("  ✗ estate migration skipped — the resident daemon would not stop; run `mootx01 upgrade` again");
+        return None;
+    }
+    let out = {
+        HELD_BY_ENCLOSING_HOLD.with(|h| h.set(true));
+        let _held = Held;
+        sequence()
+    };
+    if was_running {
+        let _ = daemon.start();
+    }
+    Some(out)
+}
+
 /// The decision already made: `resident_serves` says whether a live resident
 /// serves the estate the step will open. Tests inject it directly.
 ///
@@ -1952,6 +2013,9 @@ pub(crate) fn with_resident_serving<T>(
     daemon: &dyn DaemonControl,
     work: impl FnOnce() -> T,
 ) -> Option<T> {
+    if HELD_BY_ENCLOSING_HOLD.with(|h| h.get()) {
+        return Some(work());
+    }
     if !resident_serves {
         println!("  no live resident serves this estate; daemon left running");
         return Some(work());
@@ -2893,6 +2957,31 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let pid_file = tmp.path().join("estate.pid");
         (tmp, pid_file)
+    }
+
+    #[test]
+    fn hold_quiesces_once_around_the_sequence() {
+        let daemon = RecordingDaemon::new(true, true);
+        let steps = std::cell::RefCell::new(Vec::new());
+        let out = super::hold_resident_serving(true, &daemon, || {
+            for step in ["schema", "kg_facts", "span encode"] {
+                super::with_resident_serving(true, step, &daemon, || steps.borrow_mut().push(step));
+            }
+            steps.borrow().len()
+        });
+        assert_eq!(out, Some(3));
+        assert_eq!(*steps.borrow(), vec!["schema", "kg_facts", "span encode"]);
+        assert_eq!(daemon.calls(), vec!["is_running", "stop", "start"], "one stop and one start for the whole sequence");
+    }
+
+    #[test]
+    fn hold_that_cannot_stop_runs_nothing() {
+        let daemon = RecordingDaemon::new(true, false);
+        let ran = std::cell::Cell::new(false);
+        let out = super::hold_resident_serving(true, &daemon, || { ran.set(true); 1 });
+        assert_eq!(out, None);
+        assert!(!ran.get());
+        assert_eq!(daemon.calls(), vec!["is_running", "stop"]);
     }
 
     #[test]
