@@ -21,7 +21,7 @@ use super::data_mobility::{
     V2DatasetQueryRequest, V2DatasetQueryResult, V2DatasetStatsRequest,
     V2DatasetStatsResult, V2DatasetSensitivity, V2FdcReclassifyChange,
     V2FdcReclassifyMode, V2FileDatasetRequest, V2JsonImportReport,
-    V2ImportMode, V2JsonImportRequest, V2PalaceImportReport, V2PalaceImportRequest,
+    V2ImportMode, V2JsonImportLowerError, V2JsonImportRequest, V2PalaceImportReport, V2PalaceImportRequest,
     V2ReclassifyFdcReport, V2ReclassifyFdcRequest, V2ReindexRequest,
     V2ReindexState, V2VaultCandidate, V2VaultExportRequest,
     V2VaultExportResult, V2VaultImportRequest, V2VaultImportResult,
@@ -292,28 +292,36 @@ impl V2DataMobilityLower for DirectDataMobilityLower<'_> {
         &self,
         admission: &V2DataMobilityAdmission,
         request: &V2JsonImportRequest,
-    ) -> Result<V2JsonImportReport, ()> {
-        let open = self.selected_open(admission)?;
+    ) -> Result<V2JsonImportReport, V2JsonImportLowerError> {
+        use crate::interface_tools::JsonImportFailure;
+        use V2JsonImportLowerError::Unavailable;
+        let open = self.selected_open(admission).map_err(|_| Unavailable)?;
         let receipt = crate::interface_tools::import_json_seed(
             open,
             Path::new(&request.path),
             None,
             genius_locus_kit::EncodeSpeed::Foreground,
             admission.now_millis,
-        ).map_err(|_| ())?;
+        ).map_err(|failure| match failure {
+            // Only the seed-file decode class carries its message out; a path
+            // that does not resolve, a collision, or a write fault stays the
+            // availability refusal.
+            JsonImportFailure::InvalidSeed(message) => V2JsonImportLowerError::InvalidSeed(message),
+            JsonImportFailure::Adapter(_) | JsonImportFailure::Failed(_) => Unavailable,
+        })?;
         let id_map = receipt.drawer_id_by_record_id.into_iter()
             .map(|(record_id, drawer_id)| {
                 uuid::Uuid::parse_str(&drawer_id).map(|drawer_id| (record_id, drawer_id))
             })
-            .collect::<Result<_, _>>().map_err(|_| ())?;
+            .collect::<Result<_, _>>().map_err(|_| Unavailable)?;
         Ok(V2JsonImportReport {
             seed_name: receipt.seed_name,
-            drawers_written: u64::try_from(receipt.drawers_written).map_err(|_| ())?,
-            facts_written: u64::try_from(receipt.facts_written).map_err(|_| ())?,
-            tunnels_created: u64::try_from(receipt.tunnels_created).map_err(|_| ())?,
-            enqueued_for_encode: u64::try_from(receipt.enqueued_for_encode).map_err(|_| ())?,
-            subjects_provided: u64::try_from(receipt.subjects_provided).map_err(|_| ())?,
-            subjects_debt: u64::try_from(receipt.subjects_debt).map_err(|_| ())?,
+            drawers_written: u64::try_from(receipt.drawers_written).map_err(|_| Unavailable)?,
+            facts_written: u64::try_from(receipt.facts_written).map_err(|_| Unavailable)?,
+            tunnels_created: u64::try_from(receipt.tunnels_created).map_err(|_| Unavailable)?,
+            enqueued_for_encode: u64::try_from(receipt.enqueued_for_encode).map_err(|_| Unavailable)?,
+            subjects_provided: u64::try_from(receipt.subjects_provided).map_err(|_| Unavailable)?,
+            subjects_debt: u64::try_from(receipt.subjects_debt).map_err(|_| Unavailable)?,
             seed_sha256: receipt.seed_sha256,
             id_map: Some(id_map),
         })
@@ -636,7 +644,9 @@ mod tests {
                     return_id_map: false,
                 },
             ),
-            Err(()),
+            // A path that does not resolve is the availability class, never
+            // the seed-decode class (no oracle on paths).
+            Err(V2JsonImportLowerError::Unavailable),
         );
     }
 
@@ -647,7 +657,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("aria-v2-json-retry-{}.json", Uuid::new_v4()));
         std::fs::write(&path, "{not-json").expect("write malformed seed");
         let request = V2JsonImportRequest { path: path.display().to_string(), estate_id: None, return_id_map: false };
-        assert_eq!(lower.json_import(&admission(&registry), &request), Err(()));
+        assert!(
+            matches!(lower.json_import(&admission(&registry), &request), Err(V2JsonImportLowerError::InvalidSeed(_))),
+            "a malformed seed is the file-decode class"
+        );
         std::fs::write(&path, r#"{"format_version":1,"name":"retry","records":[{"id":"once","content":"corrected retry","event_time":"2026-09-09T00:00:00Z","room":"handoff/room","exportability":"public"}]}"#)
             .expect("write corrected seed");
         let report = lower.json_import(&admission(&registry), &request);

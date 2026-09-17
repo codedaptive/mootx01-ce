@@ -170,14 +170,19 @@ const TUNNEL_KEYS: [&str; 4] = ["from", "to", "kind", "label"];
 const TUNNEL_KIND_VOCABULARY: &str = "supersedes, references, blocks, validates, contradicts, \
      derivesFrom, covers, elaborates, respondsTo, parent";
 
+/// Every decode and validation rule in `JsonSeedFile::parse` answers with the
+/// seed-file class, which the ARIA surface reports as the caller's argument
+/// problem. Path, byte-ceiling, read and lineage-collision failures in
+/// `import_seed_windowed` and `assert_strict_append` build
+/// `VaultKitError::AdapterError` directly and stay availability refusals.
 fn err(message: String) -> VaultKitError {
-    VaultKitError::AdapterError(message)
+    VaultKitError::SeedFileInvalid(message)
 }
 
 impl JsonSeedFile {
     /// Parse and validate a whole seed file BEFORE any estate work.
     ///
-    /// Any violation returns `VaultKitError::AdapterError` with ONE message
+    /// Any violation returns `VaultKitError::SeedFileInvalid` with ONE message
     /// naming the first offending element (record index + id where
     /// applicable). Messages are pinned byte-identical to the Swift twin.
     /// `now_ms` is the import instant supplied by the caller (deterministic
@@ -908,7 +913,7 @@ pub fn assert_strict_append(
     for (index, record) in file.records.iter().enumerate() {
         let lineage = DrawerMapping::lineage_id(&record.id);
         if occupied.contains(&lineage) {
-            return Err(err(format!(
+            return Err(VaultKitError::AdapterError(format!(
                 "record[{index}] (id \"{}\"): lineage collision — this id's lineage already exists in the estate (strict append: the JSON lane never dedups)",
                 record.id
             )));
@@ -1059,10 +1064,10 @@ impl JsonImportBridge<'_> {
         // file is read (palace pattern), then parse + total validation
         // (phase 2). Zero estate interaction until both pass.
         let metadata = std::fs::metadata(seed_path)
-            .map_err(|_| err(format!("seed file not found at {}", seed_path.display())))?;
+            .map_err(|_| VaultKitError::AdapterError(format!("seed file not found at {}", seed_path.display())))?;
         let on_disk_bytes = metadata.len() as usize;
         if on_disk_bytes > self.limits.max_seed_file_bytes {
-            return Err(err(format!(
+            return Err(VaultKitError::AdapterError(format!(
                 "seed file exceeds byte ceiling: {} bytes > limit {} at {}",
                 on_disk_bytes,
                 self.limits.max_seed_file_bytes,
@@ -1070,7 +1075,7 @@ impl JsonImportBridge<'_> {
             )));
         }
         let data = std::fs::read(seed_path).map_err(|e| {
-            err(format!(
+            VaultKitError::AdapterError(format!(
                 "seed file could not be read at {}: {e}",
                 seed_path.display()
             ))
@@ -1469,11 +1474,11 @@ mod tests {
         JsonSeedFile::parse(json.as_bytes(), &JsonImportLimits::default(), 1_790_000_000_000)
     }
 
-    /// Expect an AdapterError whose message contains every fragment.
+    /// Expect a SeedFileInvalid whose message contains every fragment.
     fn expect_parse_error(json: &str, limits: &JsonImportLimits, fragments: &[&str]) {
         match JsonSeedFile::parse(json.as_bytes(), limits, 1_790_000_000_000) {
-            Ok(_) => panic!("expected AdapterError containing {fragments:?}; parse succeeded"),
-            Err(VaultKitError::AdapterError(message)) => {
+            Ok(_) => panic!("expected SeedFileInvalid containing {fragments:?}; parse succeeded"),
+            Err(VaultKitError::SeedFileInvalid(message)) => {
                 for fragment in fragments {
                     assert!(
                         message.contains(fragment),
@@ -1481,7 +1486,7 @@ mod tests {
                     );
                 }
             }
-            Err(other) => panic!("expected AdapterError; got {other:?}"),
+            Err(other) => panic!("expected SeedFileInvalid; got {other:?}"),
         }
     }
 
@@ -2232,10 +2237,10 @@ mod tests {
         std::fs::remove_file(&path).ok();
         match result {
             Ok(_) => panic!("expected validation error"),
-            Err(VaultKitError::AdapterError(message)) => {
+            Err(VaultKitError::SeedFileInvalid(message)) => {
                 assert!(message.contains("\"r999\""), "got: {message}");
             }
-            Err(other) => panic!("expected AdapterError; got {other:?}"),
+            Err(other) => panic!("expected SeedFileInvalid; got {other:?}"),
         }
 
         let frame = RecallFrame {
@@ -2544,7 +2549,7 @@ mod tests {
         };
         std::fs::remove_file(&path).ok();
         assert!(
-            matches!(result, Err(VaultKitError::AdapterError(_))),
+            matches!(result, Err(VaultKitError::SeedFileInvalid(_))),
             "a malformed seed MUST error — a stub that succeeds is a mission failure"
         );
 

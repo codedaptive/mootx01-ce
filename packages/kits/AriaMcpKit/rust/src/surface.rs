@@ -890,7 +890,7 @@ impl crate::v2::data_mobility::V2DataMobilityLower for SelectedVaultMobilityLowe
         &self,
         admission: &crate::v2::data_mobility::V2DataMobilityAdmission,
         request: &crate::v2::data_mobility::V2JsonImportRequest,
-    ) -> Result<crate::v2::data_mobility::V2JsonImportReport, ()> {
+    ) -> Result<crate::v2::data_mobility::V2JsonImportReport, crate::v2::data_mobility::V2JsonImportLowerError> {
         crate::v2::data_mobility::V2DataMobilityLower::json_import(
             &crate::v2::data_mobility_lower::DirectDataMobilityLower::new(self.registry), admission, request,
         )
@@ -1152,6 +1152,20 @@ fn execute_vault_lifecycle(
             &crate::v2::render::V2OperationalRefusal {
                 code: "mobility_unavailable".to_owned(),
                 message: "The requested data-mobility operation is unavailable in the selected estate.".to_owned(),
+                retryable: false,
+                recovery: None,
+            },
+            &meta,
+        )),
+        // A seed file that failed to decode is the caller's argument problem:
+        // the bridge's message names the offending record. Same call again
+        // will not help, so `retryable` is false. Swift twin:
+        // AriaV2DataMobility.execute's `seedFileInvalid` catch.
+        Err(V2DataMobilityError::InvalidArgument(message)) => Ok(crate::v2::render::refusal(
+            tool,
+            &crate::v2::render::V2OperationalRefusal {
+                code: "invalid_argument".to_owned(),
+                message,
                 retryable: false,
                 recovery: None,
             },
