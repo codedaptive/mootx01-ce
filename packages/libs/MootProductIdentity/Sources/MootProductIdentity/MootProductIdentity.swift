@@ -356,7 +356,7 @@ public enum MootProductIdentity {
 
         /// `duties.fact_extraction_batch`: sources per fact-extraction batch (default 16).
         public let dutyFactExtractionBatch: Int
-        /// `duties.subject_backfill_batch`: rows per subject sweep (default 256).
+        /// `duties.subject_backfill_batch`: rows per subject sweep (default 32: one batch of ~10 s Apple calls fits the cadence).
         public let dutySubjectBackfillBatch: Int
         /// `duties.fact_source_lease_seconds`: the per-source in-flight fence while a
         /// model call runs (default 120; it must exceed the extractor's request timeout).
@@ -424,7 +424,7 @@ public enum MootProductIdentity {
                 recallDistillationMaxSourceBytes: min(32768, positiveInteger(
                     (root["recall_distillation"] as? [String: Any])?["max_source_bytes"], fallback: 32768)),
                 dutyFactExtractionBatch: positiveIntegerOrDefault(duties?["fact_extraction_batch"], fallback: 16),
-                dutySubjectBackfillBatch: positiveIntegerOrDefault(duties?["subject_backfill_batch"], fallback: 256),
+                dutySubjectBackfillBatch: positiveIntegerOrDefault(duties?["subject_backfill_batch"], fallback: 32),
                 dutyFactSourceLeaseSeconds: positiveIntegerOrDefault(duties?["fact_source_lease_seconds"], fallback: 120),
                 dutyFactExtractionCadenceSeconds: positiveIntegerOrDefault(duties?["fact_extraction_cadence_seconds"], fallback: 300))
         }
@@ -510,7 +510,7 @@ public enum MootProductIdentity {
             contextDistillReferenceExpansionMaxRatio: Int = 64,
             recallDistillationMaxSourceBytes: Int = 32768,
             dutyFactExtractionBatch: Int = 16,
-            dutySubjectBackfillBatch: Int = 256,
+            dutySubjectBackfillBatch: Int = 32,
             dutyFactSourceLeaseSeconds: Int = 120,
             dutyFactExtractionCadenceSeconds: Int = 300
         ) {
