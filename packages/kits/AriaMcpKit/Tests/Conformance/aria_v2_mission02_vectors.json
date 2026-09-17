@@ -2028,10 +2028,17 @@
                   "items": {
                     "additionalProperties": false,
                     "properties": {
+                      "detail": {
+                        "type": "string"
+                      },
                       "name": {
                         "type": "string"
                       },
                       "pending": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "rejected": {
                         "minimum": 0,
                         "type": "integer"
                       },
@@ -2612,10 +2619,17 @@
                   "items": {
                     "additionalProperties": false,
                     "properties": {
+                      "detail": {
+                        "type": "string"
+                      },
                       "name": {
                         "type": "string"
                       },
                       "pending": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "rejected": {
                         "minimum": 0,
                         "type": "integer"
                       },

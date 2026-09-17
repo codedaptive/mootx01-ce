@@ -2925,6 +2925,46 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
+    fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        validate_non_empty(source_id, "sourceID")?;
+        let store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(source_id.into())),
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "content"), TypedValue::Text(expected_content.into())),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"),
+                TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
+        ]);
+        let rows = store.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else { return Ok(None) };
+        let active = store.query_projected("fact_extractor_models", &["recipe_id"],
+            Some(&StoragePredicate::And(vec![
+                StoragePredicate::Eq(Column::new("fact_extractor_models", "recipe_id"), TypedValue::Text(recipe_id.into())),
+                StoragePredicate::Eq(Column::new("fact_extractor_models", "is_active"), TypedValue::Int(1)),
+            ])), &[], Some(1), None).map_err(map_storage_err)?;
+        if active.is_empty() { return Ok(None); }
+        let current = i64_value_of(row.get("operationalBitmap"));
+        if current & DrawerFeatureFlags::FACTS_EXTRACTED != 0 { return Ok(Some(0)); }
+        let settled = DrawerFeatureFlags::FACTS_EXTRACTED | DrawerFeatureFlags::FACTS_REJECTED;
+        let mut values = BTreeMap::new();
+        values.insert("operationalBitmap".into(), TypedValue::Bitmap(current | settled));
+        store.update(T_DRAWERS, values, &predicate).map_err(map_storage_err).map(Some)
+    }
+
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.storage.row_store().count(T_DRAWERS, Some(&StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"),
+                TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
+            StoragePredicate::BitmaskAll {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                mask: DrawerFeatureFlags::FACTS_REJECTED,
+            },
+        ]))).map_err(map_storage_err)
+    }
+
     /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
     ///
     /// A DERIVED SIGNAL write — no audit event, no supersession cascade, no
@@ -6467,6 +6507,13 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
         self.inner.count_fact_extraction_debt()
+    }
+    fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        self.inner.mark_fact_extraction_rejected(source_id, expected_content, recipe_id)
+    }
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_fact_extraction_rejected()
     }
     fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
         self.inner.set_anomalous_flag(drawer_id, anomalous)

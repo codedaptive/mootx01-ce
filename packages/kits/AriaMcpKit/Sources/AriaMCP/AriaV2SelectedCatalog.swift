@@ -1829,6 +1829,10 @@ enum AriaV2SelectedCatalog {
                 "name": stringSchema(),
                 "state": enumSchema(["draining", "idle"]),
                 "pending": .object(["type": .string("integer"), "minimum": .integer(0)]),
+                // Optional: the lane's detail and the rows it settled by
+                // rejecting (§ DUTY_LIFECYCLE, 2026-09-16).
+                "detail": stringSchema(),
+                "rejected": .object(["type": .string("integer"), "minimum": .integer(0)]),
             ]),
             "required": .array([.string("name"), .string("state"), .string("pending")]),
             "additionalProperties": .bool(false),
