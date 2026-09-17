@@ -214,19 +214,26 @@ struct UpgradeCommand: AsyncParsableCommand {
             if estate.kind == .transient, !backfillOnly {
                 print("Transient estate '\(estate.name)' at \(estate.directory.path): running the estate migration steps only.")
             }
-            guard await runSchemaUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
-            guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
-            retireLegacyEncryptionOptOut(estate: estate)
-            refreshManifest(estate: estate)
-            let okKG     = await runKGFactIdentityBackfill(estate: estate, home: home)
-            let okSP     = await runSearchProjectionBackfill(estate: estate, home: home)
-            let okVacuum = await runWholeRecordVacuum(estate: estate, home: home)
-            let okRecl   = await runSharedContentReclaimIfPending(estate: estate, home: home)
-            let okFacts  = await runSSCFactsBackfill(estate: estate, home: home)
-            let okDense  = await runDensePoolingConvergence(estate: estate, home: home)
-            let okSpan   = await runSpanEncodeBackfill(estate: estate, home: home)
-            let okVec    = await runVectorReclaim(estate: estate, home: home)
-            guard okKG && okSP && okVacuum && okRecl && okFacts && okDense && okSpan && okVec else { throw ExitCode.failure }
+            // One quiesce around the whole sequence (one Keychain read), the
+            // steps run inside it.
+            let settled: Bool? = await ResidentDaemonQuiesce.hold(
+                estatePIDURL: estate.pidURL, daemon: .launchd(homeDirectory: home)
+            ) {
+                guard await runSchemaUpgrade(estate: estate, home: home) else { return false }
+                guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { return false }
+                retireLegacyEncryptionOptOut(estate: estate)
+                refreshManifest(estate: estate)
+                let okKG     = await runKGFactIdentityBackfill(estate: estate, home: home)
+                let okSP     = await runSearchProjectionBackfill(estate: estate, home: home)
+                let okVacuum = await runWholeRecordVacuum(estate: estate, home: home)
+                let okRecl   = await runSharedContentReclaimIfPending(estate: estate, home: home)
+                let okFacts  = await runSSCFactsBackfill(estate: estate, home: home)
+                let okDense  = await runDensePoolingConvergence(estate: estate, home: home)
+                let okSpan   = await runSpanEncodeBackfill(estate: estate, home: home)
+                let okVec    = await runVectorReclaim(estate: estate, home: home)
+                return okKG && okSP && okVacuum && okRecl && okFacts && okDense && okSpan && okVec
+            }
+            guard settled == true else { throw ExitCode.failure }
             return
         }
 
@@ -345,8 +352,12 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // Plugin manifest cache refresh IS included: a prior upgrade
                 // may have placed a new binary but left the Claude Code plugin
                 // cache stale (version_skew advisory firing on every ping).
-                if await runSchemaUpgrade(estate: estate, home: home) {
-                    guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
+                // One quiesce around the whole sequence (one Keychain read).
+                let matrixOK: Bool? = await ResidentDaemonQuiesce.hold(
+                    estatePIDURL: estate.pidURL, daemon: .launchd(homeDirectory: home)
+                ) {
+                    guard await runSchemaUpgrade(estate: estate, home: home) else { return true }
+                    guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { return false }
                     retireLegacyEncryptionOptOut(estate: estate)
                     refreshManifest(estate: estate)
                     await runKGFactIdentityBackfill(estate: estate, home: home)
@@ -357,7 +368,9 @@ struct UpgradeCommand: AsyncParsableCommand {
                     await runDensePoolingConvergence(estate: estate, home: home)
                     await runSpanEncodeBackfill(estate: estate, home: home)
                     _ = await runVectorReclaim(estate: estate, home: home)
+                    return true
                 }
+                guard matrixOK != false else { throw ExitCode.failure }
                 updatePluginManifestIfNeeded(home: home)
                 convergeDaemonBundle(home: home)
                 restartAgents(home: home)
