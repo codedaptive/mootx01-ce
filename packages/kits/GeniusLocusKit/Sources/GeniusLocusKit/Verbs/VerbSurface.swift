@@ -998,6 +998,32 @@ public extension GeniusLocusKit {
         let refusedIds = Set(storageOutcome.refusedSiblingIDs)
         let idsToDelete = (lineageIds.isEmpty ? [frame.rowID] : lineageIds)
             .filter { !refusedIds.contains($0) }
+
+        // Step 1.5 — Fact-extraction checkpoint cleanup (F6). Best-effort and
+        // independent of corpus/vectorStore registration: a retained
+        // checkpoint (QueueKit's "fact-extraction-checkpoints" stream) holds
+        // domain evidence — GroundedFactCandidate evidence quotes — keyed by
+        // source drawer id. The fact-extraction debt scan that would
+        // otherwise revisit and clean up a source's checkpoint excludes
+        // tombstoned drawers, so an un-deleted row for an expunged source is
+        // retained forever with no future pass that will ever look at it
+        // again. Runs for every lineage member the storage expunge actually
+        // scrubbed (idsToDelete — a refused sibling's checkpoint, if any,
+        // survives with the rest of its content). A checkpoint-store
+        // failure here must never abort the erase that already committed —
+        // logged and swallowed, matching the orphan-audit posture below.
+        do {
+            let checkpoints = try await factCheckpoints(handle)
+            for deleteId in idsToDelete {
+                _ = try await checkpoints.delete(
+                    id: Self.factWorkID(deleteId), stream: Self.factWorkStream)
+            }
+        } catch {
+            Self.verbLog.error(
+                "expunge fact-extraction checkpoint cleanup failed — rowID=\(frame.rowID, privacy: .public) estate=\(handle.estateUUID.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+
         let corpus = corpusKits[handle]
         let vectorStore = vectorStores[handle]
 
