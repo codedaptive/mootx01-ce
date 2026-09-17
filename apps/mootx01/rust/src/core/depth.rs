@@ -559,7 +559,19 @@ pub fn plugin_install_directory(host: &InstallMapHost, home: &Path) -> PathBuf {
         .and_then(|p| p.parent()) // host plugin root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| home.to_path_buf());
-    plugin_root.join("mootx01-plugin")
+    // `~/.agents` is the agent-neutral skills root more than one host reads
+    // (Codex and GitHub Copilot today). A package directory shared there is
+    // overwritten by whichever host materializes last, and the Codex
+    // marketplace registration then fails against a tree with no
+    // `.codex-plugin/`. Hosts on that root get their own directory, named by
+    // host id; every host with a root of its own keeps the plain name. Twin
+    // of the Swift `pluginInstallDirectory`.
+    let shared_root = plugin_root.file_name().is_some_and(|n| n == ".agents");
+    if shared_root {
+        plugin_root.join(format!("mootx01-plugin-{}", host.id))
+    } else {
+        plugin_root.join("mootx01-plugin")
+    }
 }
 
 /// Mode 2: write the embedded canonical SKILL.md to the host's skillUserPath.
@@ -875,6 +887,20 @@ mod tests {
         assert!(Path::new(&path).join(".codex-plugin/plugin.json").is_file());
         std::fs::remove_dir_all(home).unwrap();
     }
+    #[test]
+    fn hosts_sharing_the_agents_root_get_their_own_plugin_directory() {
+        let home = codex_test_home();
+        let bundle = InstallBundle::embedded();
+        let codex = plugin_install_directory(bundle.host("codex").unwrap(), &home);
+        let copilot = plugin_install_directory(bundle.host("github-copilot").unwrap(), &home);
+        let claude = plugin_install_directory(bundle.host("claude-code").unwrap(), &home);
+        assert_ne!(codex, copilot, "two hosts on ~/.agents must not share one package directory");
+        assert_eq!(codex.file_name().unwrap(), "mootx01-plugin-codex");
+        assert_eq!(copilot.file_name().unwrap(), "mootx01-plugin-github-copilot");
+        assert_eq!(claude, join_rel(&home, ".claude/mootx01-plugin"), "a host with its own root keeps the plain name");
+        std::fs::remove_dir_all(home).ok();
+    }
+
     #[test]
     fn codex_upgrade_uses_registry_not_materialized_directory() {
         for reply in [Some(r#"{"installed":[]}"#),
