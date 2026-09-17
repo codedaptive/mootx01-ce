@@ -325,6 +325,22 @@ pub fn to_sj(v: JsonValue) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    /// A non-finite double has no JSON spelling; it goes out as null, the
+    /// same as the Swift port's wire encoder (an association rule's
+    /// conviction is +∞ when its confidence is 1).
+    #[test]
+    fn non_finite_double_serializes_as_null() {
+        let value = super::JsonValue::Object(vec![
+            ("inf".to_owned(), super::JsonValue::Double(f64::INFINITY)),
+            ("nan".to_owned(), super::JsonValue::Double(f64::NAN)),
+            ("one".to_owned(), super::JsonValue::Double(1.5)),
+        ].into_iter().collect());
+        let out = super::to_sj(value);
+        assert_eq!(out["inf"], serde_json::Value::Null);
+        assert_eq!(out["nan"], serde_json::Value::Null);
+        assert_eq!(out["one"], serde_json::json!(1.5));
+    }
+
     use super::*;
 
     #[test]

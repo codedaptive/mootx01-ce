@@ -92,7 +92,12 @@ extension JSONValue {
         case .integer(let i):
             return NSNumber(value: i)
         case .double(let d):
-            return NSNumber(value: d)
+            // JSON has no spelling for NaN or ±infinity and JSONSerialization
+            // throws on them, which would take the whole serve down for one
+            // value (a rule's conviction is +∞ when its confidence is 1).
+            // Such a value goes out as null, the same as the Rust port's
+            // serde_json path writes it.
+            return d.isFinite ? NSNumber(value: d) : NSNull()
         case .string(let s):
             return s
         case .array(let arr):
