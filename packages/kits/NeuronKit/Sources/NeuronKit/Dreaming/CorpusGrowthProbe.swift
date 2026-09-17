@@ -87,7 +87,14 @@ public protocol CorpusGrowthProbe: Sendable {
     ///
     /// - Parameter now: Deterministic timestamp from the caller (never
     ///   `Date()` inside the engine; CLAUDE.md determinism rule).
-    func reindex(now: Date) async throws
+    /// - Returns: `true` for a full retrain, `false` when a backstop was
+    ///   reached and the serving basis was kept (F11: DEGRADED). The caller
+    ///   (`DreamingDaemon.check_corpus_growth`-equivalent gate) must not
+    ///   advance its vocabulary baseline on `false`, so a degraded retrain
+    ///   re-fires on the next cycle instead of the drift it hit the backstop
+    ///   under being silently accepted as caught up.
+    @discardableResult
+    func reindex(now: Date) async throws -> Bool
 }
 
 // MARK: - Production adapter
@@ -122,10 +129,13 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
     }
 
     /// Full basis retrain via `GeniusLocusKit.reindexCorpus(handle:now:)`.
-    public func reindex(now: Date) async throws {
-        try await kit.reindexCorpus(handle: handle, now: now)
+    /// Returns GLK's own completed/degraded outcome unchanged (F11).
+    @discardableResult
+    public func reindex(now: Date) async throws -> Bool {
+        let completed = try await kit.reindexCorpus(handle: handle, now: now)
         Self.log.info(
-            "auto-reindex: corpus retrained for estate \(handle.estateUUID, privacy: .public)"
+            "auto-reindex: corpus retrained for estate \(handle.estateUUID, privacy: .public) (completed: \(completed, privacy: .public))"
         )
+        return completed
     }
 }

@@ -18,12 +18,21 @@ pub const LSA_RETRAINING_DOCUMENT_BACKSTOP: usize = 10_000_000;
 /// The time backstop for one retrain attempt.
 pub const LSA_RETRAINING_TIME_BACKSTOP: Duration = Duration::from_secs(24 * 60 * 60);
 
-pub fn reindex_with_settings(engine: &CorpusContentEngine, now: i64) -> Result<(), CorpusKitError> {
+/// F11: returns `Ok(true)` for a full retrain and `Ok(false)` when a backstop
+/// was reached and the serving basis was kept (DEGRADED) — the caller MUST
+/// treat `Ok(false)` the same as an error for vocabulary-baseline purposes:
+/// do NOT advance `last_reindex_vocab`/`lastReindexVocab`, so the next ALPHA
+/// or THETA cycle retries instead of silently accepting a stale basis as
+/// current. Before this fix `Ok(())` covered both outcomes, so a degraded
+/// retrain still advanced the baseline exactly like a full one — the
+/// vocabulary drift the backstop was hit under was never revisited.
+pub fn reindex_with_settings(engine: &CorpusContentEngine, now: i64) -> Result<bool, CorpusKitError> {
     let deadline = Instant::now().checked_add(LSA_RETRAINING_TIME_BACKSTOP);
     let budget = RetrainingBudget::new(LSA_RETRAINING_DOCUMENT_BACKSTOP, 30, deadline);
     let report = engine.reindex_with_budget(now, &budget)?;
     if !report.skipped_model_ids.is_empty() {
         eprintln!("mootx01 reindex: LSA retraining DEGRADED, a backstop was reached and the serving basis was kept: {:?}", report.skipped_model_ids);
+        return Ok(false);
     }
-    Ok(())
+    Ok(true)
 }
