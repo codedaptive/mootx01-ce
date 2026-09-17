@@ -1075,7 +1075,24 @@ fn extraction_cycle(
                 genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction).unwrap_or(0);
             eprintln!("mootx01 drain: fact-extraction — {completed} paid, {remaining} remaining");
         }
-        if !settle || !made_progress { return Ok(settled); }
+        if !settle { return Ok(settled); }
+        if !made_progress {
+            // No progress plus something retrying is a wait, not settlement:
+            // sleep out the earliest scheduled retry (at most 120 s; a
+            // malformed response retries at 30 s, longer backoffs mean
+            // provider trouble) and try again. A blocked provider is not
+            // waited for.
+            let status = coord.fact_extraction_work_status(&fact_handle, now_ms).map_err(|e| format!("{e:?}"))?;
+            let wait = status.next_retry_at.map(|at| at - now_ms as f64 / 1000.0);
+            match wait {
+                Some(secs) if status.retrying > 0 && secs <= 120.0 => {
+                    drop(coord);
+                    std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0) + 1.0));
+                    continue;
+                }
+                _ => return Ok(settled),
+            }
+        }
         // Drop the coordinator guard before the next batch. Deferred failures
         // never keep the settle loop spinning; enqueue requires ready work.
       }

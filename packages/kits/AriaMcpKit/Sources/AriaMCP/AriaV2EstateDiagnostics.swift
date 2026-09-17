@@ -224,6 +224,20 @@ public struct AriaV2DrainStatusEntry: Sendable, Equatable {
     public let name: String
     public let state: String
     public let pending: Int
+    /// Lane detail as the kit reports it (outcome counts, model, missing
+    /// extractor). Omitted when the lane has none.
+    public let detail: String?
+    /// Rows the lane settled by rejecting them. Omitted for lanes without
+    /// that outcome.
+    public let rejected: Int?
+
+    public init(name: String, state: String, pending: Int, detail: String? = nil, rejected: Int? = nil) {
+        self.name = name
+        self.state = state
+        self.pending = pending
+        self.detail = detail
+        self.rejected = rejected
+    }
 }
 
 public struct AriaV2DrainStatusData: Sendable, Equatable {
@@ -452,7 +466,9 @@ public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnostic
             AriaV2DrainStatusEntry(
                 name: $0.name,
                 state: $0.isDraining ? "draining" : "idle",
-                pending: $0.pending)
+                pending: $0.pending,
+                detail: $0.detail,
+                rejected: $0.rejected)
         }
     }
 }
@@ -656,11 +672,16 @@ private extension AriaV2RebuildStatusData {
 
 private extension AriaV2DrainStatusEntry {
     var json: JSONValue {
-        .object([
+        var value: [String: JSONValue] = [
             "name": .string(name),
             "state": .string(state),
             "pending": .integer(Int64(pending)),
-        ])
+        ]
+        // Omitted rather than null: absence means the lane has no detail
+        // or no rejected outcome.
+        if let detail { value["detail"] = .string(detail) }
+        if let rejected { value["rejected"] = .integer(Int64(rejected)) }
+        return .object(value)
     }
 }
 

@@ -40,7 +40,7 @@ fn snapshot(mounted: bool) -> EstateDiagnosticsSnapshot {
             DiagnosticsFact { lifecycle: DiagnosticsLifecycle::CurrentClusterA, bulk_exportable: false },
             DiagnosticsFact { lifecycle: DiagnosticsLifecycle::Other, bulk_exportable: true },
         ],
-        drains: vec![EstateDrain { name: "corpus_encode".to_owned(), state: EstateDrainState::Draining, pending: 4 }],
+        drains: vec![EstateDrain { name: "corpus_encode".to_owned(), state: EstateDrainState::Draining, pending: 4, detail: None, rejected: None }],
         rebuild: EstateRebuildState::Running,
         matrix: None,
         timing: EstateTiming { watermark_ms: 1_700_000_123_456, truncated: true },
@@ -202,6 +202,7 @@ fn drain_rebuild_and_timing_use_the_frozen_data_shapes() {
     let drains = service.drain(request(), &context()).unwrap();
     assert_eq!(drains.drains, vec![EstateDrain {
         name: "corpus_encode".to_owned(), state: EstateDrainState::Draining, pending: 4,
+        detail: None, rejected: None,
     }]);
     let rebuild = service.rebuild(request(), &context()).unwrap();
     assert_eq!(rebuild.state, EstateRebuildState::Running);

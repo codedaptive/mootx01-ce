@@ -84,6 +84,9 @@ pub struct FactExtractionWorkStatus {
     pub rejected: usize,
     pub not_applicable: usize,
     pub completed_empty: usize,
+    /// Earliest `next_attempt_at` (epoch seconds) among sources scheduled for
+    /// retry (not blocked-provider), so a settle loop can wait out the backoff.
+    pub next_retry_at: Option<f64>,
     // False when no extractor is registered for the estate; the detail
     // prepends the explanation so an operator reading moot_drain_status with
     // pending rows sees "no extractor registered" ahead of the counts.
@@ -100,6 +103,7 @@ impl Default for FactExtractionWorkStatus {
             rejected: 0,
             not_applicable: 0,
             completed_empty: 0,
+            next_retry_at: None,
             extractor_registered: true,
         }
     }
@@ -326,6 +330,9 @@ impl EstateCoordinator {
                     status.blocked += 1;
                 } else {
                     status.retrying += 1;
+                    if status.next_retry_at.map_or(true, |at| state.next_attempt_at < at) {
+                        status.next_retry_at = Some(state.next_attempt_at);
+                    }
                 }
                 true
             } else {
@@ -338,6 +345,9 @@ impl EstateCoordinator {
                 status.partial += 1;
             }
         }
+        // Rejected sources carry bits 28 and 29 and are settled for this
+        // recipe; they are reported, never owed (ruling 2026-09-16).
+        status.rejected = estate.count_fact_extraction_rejected().map_err(failure)?;
         Ok(status)
     }
 }
@@ -397,6 +407,18 @@ impl FactExtractionBatchWork {
                 || state.next_attempt_at > epoch
                 || state.lease_until > epoch
             {
+                // A checkpoint already rejected before bit 29 existed (or by a
+                // process that died between the checkpoint and the mark) is
+                // settled now, so it leaves the debt instead of being re-read
+                // by every batch. Idempotent: Some(0) when the bit is set.
+                if state.outcome == Outcome::Rejected && !drawer.are_facts_extracted() {
+                    if self.estate
+                        .mark_fact_extraction_rejected(&drawer.id, &drawer.content, &self.recipe_id)
+                        .map_err(failure)? == Some(1)
+                    {
+                        report.made_progress = true;
+                    }
+                }
                 report.deferred_sources += 1;
                 continue;
             }
@@ -538,6 +560,14 @@ impl FactExtractionBatchWork {
                 continue;
             }
             report.made_progress = true;
+            if state.outcome == Outcome::Rejected {
+                // Rejected is settled for this recipe: bits 28 and 29 go on
+                // together and the row leaves the debt. The reason stays in
+                // the checkpoint row as the analysis corpus.
+                self.estate
+                    .mark_fact_extraction_rejected(&drawer.id, &drawer.content, &self.recipe_id)
+                    .map_err(failure)?;
+            }
             if state.ready_to_publish && state.outcome == Outcome::Partial {
                 let facts: Vec<_> = state
                     .candidates
