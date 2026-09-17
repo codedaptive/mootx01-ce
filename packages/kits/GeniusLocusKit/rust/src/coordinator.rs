@@ -802,6 +802,10 @@ struct ConflictFilingState {
 pub struct SelectedConflictProposal {
     pub source_drawer_id: String,
     pub target_drawer_id: String,
+    /// The hunt's canonical pair spelling (`conflict_projection_sweep::pair_key`);
+    /// the lower filer refuses the proposal as stale when it no longer names
+    /// these two drawers.
+    pub pair_key: String,
     pub tier: u8,
     pub renewal_identity: String,
     pub label: String,
@@ -813,7 +817,10 @@ pub struct SelectedConflictProposal {
 /// File explicitly selected contradiction candidates without re-running a
 /// hunt. Every candidate enters the lower serializable boundary independently;
 /// each boundary freshly reads both endpoints and their pair history before
-/// returning created, existing, or settled.
+/// returning created, existing, settled, or stale. A stale outcome halts the
+/// batch: it is the last element returned and nothing after it is filed, the
+/// order Swift's `AriaV2Contradictions.propose` observes when it answers
+/// `proposal_stale` at the first stale candidate.
 impl EstateCoordinator {
     pub fn file_selected_conflict_proposals(
         &self,
@@ -822,15 +829,24 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<Vec<locus_kit::drawer_store::AtomicConflictProposalOutcome>, VerbDispatchError> {
         use crate::brain::conflict_projection_sweep::decline_matrix_suppresses;
+        use locus_kit::drawer_store::AtomicConflictProposalOutcome;
         let estate = self.estate_for_verb(handle)?;
-        selected.iter().map(|candidate| {
-            estate.atomic_file_conflict_proposal(&locus_kit::drawer_store::AtomicConflictProposalRequest {
+        let mut outcomes = Vec::with_capacity(selected.len());
+        for candidate in selected {
+            let outcome = estate.atomic_file_conflict_proposal(&locus_kit::drawer_store::AtomicConflictProposalRequest {
                 source_drawer_id: candidate.source_drawer_id.clone(), target_drawer_id: candidate.target_drawer_id.clone(),
+                pair_key: candidate.pair_key.clone(),
                 tier: candidate.tier, renewal_identity: candidate.renewal_identity.clone(), label: candidate.label.clone(),
                 replay_identity: candidate.replay_identity.clone(), source_digest: candidate.source_digest.clone(), evidence_digest: candidate.evidence_digest.clone(),
                 decline_suppresses: decline_matrix_suppresses,
-            }, now).map_err(|error| VerbDispatchError::from(remap("file_selected_conflict_proposals", "", error)))
-        }).collect()
+            }, now).map_err(|error| VerbDispatchError::from(remap("file_selected_conflict_proposals", "", error)))?;
+            let stale = matches!(outcome, AtomicConflictProposalOutcome::Stale);
+            outcomes.push(outcome);
+            if stale {
+                break;
+            }
+        }
+        Ok(outcomes)
     }
 }
 
