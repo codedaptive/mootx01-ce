@@ -39,12 +39,38 @@ pub fn legacy_matrix_schema() -> SchemaDeclaration {
 /// snapshot blob was found and retired (actual data migration occurred);
 /// returns `false` for a no-op pass that only stamps the new format. The
 /// caller may discard the bool when it does not track migration state.
+///
+/// F5: `limits` is a FLOOR, not the working budget. `MatrixRefreshLimits`'
+/// 1,000,000-per-field defaults are sized for the LIVE resident's refresh
+/// admission gate (Bob's ruling: those defaults stay unchanged there). This
+/// is a ONE-TIME, quiesced, offline rebuild — the caller holds exclusive
+/// estate access for the whole operation — so an estate whose audit log or
+/// drawer count the disk already holds beyond that default must still
+/// migrate, not refuse and strand the estate at v1.9 forever. Before calling
+/// the worker, this counts the estate's actual audit-event and source-row
+/// totals and widens `limits` to cover them. `cells` has no cheap exact
+/// count without building the tier (chicken-and-egg — the worker computes
+/// it), so it is bounded by a generous multiple of the two counts that DO
+/// have a cheap COUNT(*): the F/O/C/T maps are keyed by field- and row-pairs
+/// that co-occur within the audit trail, not the full cross-product of every
+/// row against every other row, so a small constant factor over (audit
+/// events + source rows) covers real corpora with room to spare. Twin of
+/// Swift `MatrixRecordMigration.run`.
 pub fn migrate_matrix_records(
     storage: Arc<dyn Storage>,
     id: &str,
     now_millis: i64,
-    limits: MatrixRefreshLimits,
+    requested_limits: MatrixRefreshLimits,
 ) -> StorageResult<bool> {
+    let audit_row_count = storage.audit_log().count()?;
+    let source_row_count = storage.row_store().count("drawers", None)?;
+    let limits = MatrixRefreshLimits {
+        audit_events: requested_limits.audit_events.max(audit_row_count),
+        cells: requested_limits
+            .cells
+            .max((audit_row_count + source_row_count).saturating_mul(8)),
+        source_rows: requested_limits.source_rows.max(source_row_count),
+    };
     let format = EstateFormatStore::new(storage.clone());
     let found = format
         .read_if_present()
