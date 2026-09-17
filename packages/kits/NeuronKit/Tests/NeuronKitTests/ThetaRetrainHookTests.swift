@@ -35,18 +35,26 @@ private actor FakeThetaRetrainHook: ThetaBasisRetrainHook {
     /// When true, `retrain(now:)` throws a captured error (non-fatal test).
     var shouldThrow: Bool
 
-    init(shouldThrow: Bool = false) {
+    /// F11: when true, `retrain(now:)` reports a DEGRADED retrain (a
+    /// backstop reached, serving basis kept) instead of a full one.
+    var shouldDegrade: Bool
+
+    init(shouldThrow: Bool = false, shouldDegrade: Bool = false) {
         self.shouldThrow = shouldThrow
+        self.shouldDegrade = shouldDegrade
     }
 
-    func retrain(now: Date) async throws {
+    @discardableResult
+    func retrain(now: Date) async throws -> Bool {
         if shouldThrow {
             struct FakeRetrainError: Error {}
             throw FakeRetrainError()
         }
         retrainCalls.append(now)
+        return !shouldDegrade
     }
 
+    func setShouldDegrade(_ v: Bool) { shouldDegrade = v }
     var callCount: Int { retrainCalls.count }
 }
 
@@ -341,7 +349,8 @@ private actor FakeDriftProbeForTheta: CorpusGrowthProbe {
     /// THETA's drift gate reads vocabAnchor() only; it does not call
     /// reindex() on the probe (the probe is the observer, the hook is
     /// the worker). This body is a required conformance stub.
-    func reindex(now: Date) async throws {}
+    @discardableResult
+    func reindex(now: Date) async throws -> Bool { true }
 
     func setVocab(_ v: Int) { vocab = v }
 }

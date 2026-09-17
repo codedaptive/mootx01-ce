@@ -66,7 +66,11 @@ public protocol ThetaBasisRetrainHook: Sendable {
     ///
     /// - Parameter now: Deterministic timestamp from the caller (never
     ///   `Date()` inside the engine; CLAUDE.md determinism rule).
-    func retrain(now: Date) async throws
+    /// - Returns: `true` for a full retrain, `false` when a backstop was
+    ///   reached and the serving basis was kept (F11: DEGRADED). The caller
+    ///   must not advance its vocabulary baseline on `false`.
+    @discardableResult
+    func retrain(now: Date) async throws -> Bool
 }
 
 // MARK: - Production adapter
@@ -102,13 +106,24 @@ public struct EstateThetaBasisRetrainHook: ThetaBasisRetrainHook {
     ///
     /// A nil corpus (LocusOnly estate) is handled gracefully by GLK — the
     /// method returns without error when no Corpus is registered.
-    public func retrain(now: Date) async throws {
+    ///
+    /// F11: `payDutyUntilSettled`'s own return value (units paid) cannot
+    /// carry the completed/degraded distinction, so this reads
+    /// `kit.reindexCompleted(for:)` immediately after the call returns — the
+    /// side-channel seam `reindexCorpus` records the outcome on. Preserves
+    /// the crash-recovery property (a dreamer that dies mid-retrain leaves a
+    /// reclaimable job, not a silently skipped day) that calling
+    /// `reindexCorpus` directly would drop.
+    @discardableResult
+    public func retrain(now: Date) async throws -> Bool {
         // The retrain runs as a claimed QueueKit job (DutyQueue `retrainBasis`)
         // so a dreamer that dies mid-retrain leaves a reclaimable job, not a
         // silently skipped day.
         try await kit.payDutyUntilSettled(.retrainBasis, in: handle, now: now)
+        let completed = await kit.reindexCompleted(for: handle)
         Self.log.info(
-            "theta-retrain: corpus basis retrained for estate \(handle.estateUUID, privacy: .public)"
+            "theta-retrain: corpus basis retrained for estate \(handle.estateUUID, privacy: .public) (completed: \(completed, privacy: .public))"
         )
+        return completed
     }
 }
