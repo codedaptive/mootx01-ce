@@ -251,6 +251,21 @@ public enum PluginDetector {
         installedEntry(pluginID: pluginID, homeDirectory: homeDirectory)?["version"] as? String
     }
 
+    /// True only when `~/.claude/settings.json` records an EXPLICIT
+    /// `enabledPlugins[pluginID] = false`. An absent file, absent map or
+    /// absent entry is not a recorded decision and reads `false` here —
+    /// this answers "did the user turn it off", not "is it on", which is
+    /// `isPluginEnabled`'s question. The cache refresh reads this before it
+    /// reinstalls and puts the disable back afterwards.
+    public static func recordedPluginDisable(pluginID: String, homeDirectory: URL) -> Bool {
+        let path = homeDirectory.appendingPathComponent(".claude/settings.json", isDirectory: false)
+        guard let data = try? Data(contentsOf: path),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let enabled = root["enabledPlugins"] as? [String: Any]
+        else { return false }
+        return (enabled[pluginID] as? Bool) == false
+    }
+
     static func installedEntry(pluginID: String, homeDirectory: URL) -> [String: Any]? {
         let path = homeDirectory
             .appendingPathComponent(".claude/plugins/installed_plugins.json", isDirectory: false)

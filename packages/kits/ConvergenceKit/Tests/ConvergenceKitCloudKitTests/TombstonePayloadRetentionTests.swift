@@ -214,6 +214,77 @@ struct TombstonePayloadRetentionTests {
                 "parked outbox entry must be purged when tombstone applies (P5-M1b / Perkins P4-M4)")
     }
 
+    // MARK: - Case 2b: an inbound winner cancels the older PENDING outbox entry
+
+    /// Add a pending (not parked) outbox entry for (tableName, rowKey), as a
+    /// local write the device has not pushed yet would leave behind.
+    func enqueuePendingOutbox(
+        tableName: String = "items", rowKey: UUID, hlcTime: Int64,
+        storage: any Storage
+    ) async throws {
+        let rawHLC = HLC(physicalTime: hlcTime, logicalCount: 0, nodeID: 2)
+        try await OutboxStore.append(entry: OutboxEntry(
+            id: UUID(),
+            tableName: tableName,
+            rowKey: rowKey.uuidString,
+            event: .update,
+            valuesData: nil,
+            hlcWireBytes: Data(rawHLC.wireBytes),
+            enqueuedAt: ISO8601DateFormatter().string(from: Date()),
+            retryCount: 0,
+            isParked: false
+        ), to: storage)
+    }
+
+    func pendingOutboxCount(tableName: String = "items", rowKey: UUID, storage: any Storage) async throws -> Int {
+        let rows = try await OutboxStore.readBatch(from: storage)
+        return rows.filter { $0.tableName == tableName && $0.rowKey == rowKey.uuidString }.count
+    }
+
+    @Test("an inbound tombstone cancels an older pending outbox entry and keeps a newer one")
+    func inboundWinnerCancelsOlderPendingOutboxEntry() async throws {
+        let storage = try await makeStorage()
+        let engine = CloudKitStateActor(containerIdentifier: nil)
+
+        // Row 1: the device queued an edit at T=600, then a delete at T=1000
+        // arrives. The delete won the clock; the queued edit must not be
+        // pushed afterwards, or the cloud would take it and revive the row.
+        let older = UUID()
+        try await engine.applyInbound(makeUpsert(id: older, note: "row", hlcTime: 500),
+                                      syncedTable: lwwTable, storage: storage)
+        try await enqueuePendingOutbox(rowKey: older, hlcTime: 600, storage: storage)
+        #expect(try await pendingOutboxCount(rowKey: older, storage: storage) == 1)
+        try await engine.applyInbound(makeTombstone(id: older, hlcTime: 1000),
+                                      syncedTable: lwwTable, storage: storage)
+        #expect(try await pendingOutboxCount(rowKey: older, storage: storage) == 0,
+                "a pending entry older than the tombstone that beat it is cancelled")
+
+        // Row 2: the queued edit at T=1100 is newer than the delete at T=1000.
+        // It won; it stays queued and will be pushed.
+        let newer = UUID()
+        try await engine.applyInbound(makeUpsert(id: newer, note: "row", hlcTime: 500),
+                                      syncedTable: lwwTable, storage: storage)
+        try await enqueuePendingOutbox(rowKey: newer, hlcTime: 1100, storage: storage)
+        try await engine.applyInbound(makeTombstone(id: newer, hlcTime: 1000),
+                                      syncedTable: lwwTable, storage: storage)
+        #expect(try await pendingOutboxCount(rowKey: newer, storage: storage) == 1,
+                "a pending entry newer than the tombstone is kept")
+    }
+
+    @Test("an inbound edit that wins cancels an older pending outbox entry (lastWriterWinsByHLC)")
+    func inboundEditCancelsOlderPendingOutboxEntry() async throws {
+        let storage = try await makeStorage()
+        let engine = CloudKitStateActor(containerIdentifier: nil)
+        let rowID = UUID()
+        try await engine.applyInbound(makeUpsert(id: rowID, note: "v1", hlcTime: 500),
+                                      syncedTable: lwwTable, storage: storage)
+        try await enqueuePendingOutbox(rowKey: rowID, hlcTime: 600, storage: storage)
+        try await engine.applyInbound(makeUpsert(id: rowID, note: "v2", hlcTime: 1000),
+                                      syncedTable: lwwTable, storage: storage)
+        #expect(try await pendingOutboxCount(rowKey: rowID, storage: storage) == 0,
+                "the remote edit at T=1000 beat the queued edit at T=600; the queued edit is cancelled")
+    }
+
     // MARK: - Case 3: newer skew entry SURVIVES tombstone
 
     @Test("skew entry with HLC newer than tombstone survives")

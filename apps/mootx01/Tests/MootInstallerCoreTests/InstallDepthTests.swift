@@ -461,6 +461,44 @@ struct InstallDepthTests {
         #expect(quiet.invokedArguments == [["plugin", "update", "mootx01@mootx01"]], "a matching cache is left alone")
     }
 
+    @Test("stranded cache: a rebuild keeps the enablement the user recorded")
+    func strandedCacheRebuildHonoursRecordedEnablement() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home, version: "1.1.0-rc1")
+        let package = home.appendingPathComponent(".claude/mootx01-plugin", isDirectory: true)
+        let cache = home.appendingPathComponent(".claude/plugins/cache/mootx01/mootx01/1.1.0-rc1", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try #"{"mcpServers":{"memory":{}}}"#.write(to: package.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try #"{"mcpServers":{"mootx01":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        let settings = home.appendingPathComponent(".claude/settings.json", isDirectory: false)
+        func enabledState() throws -> Any? {
+            let root = try JSONSerialization.jsonObject(with: Data(contentsOf: settings)) as? [String: Any]
+            return (root?["enabledPlugins"] as? [String: Any])?["mootx01@mootx01"]
+        }
+
+        // A recorded disable survives the uninstall + install the rebuild runs.
+        try #"{"enabledPlugins":{"mootx01@mootx01":false,"other@m":true},"theme":"dark"}"#
+            .write(to: settings, atomically: true, encoding: .utf8)
+        let line = try #require(DepthInstaller.refreshStrandedPluginCache(
+            homeDirectory: home, claudeCLIRunner: FakeClaudeCLIRunner(shouldSucceed: true)))
+        #expect(try enabledState() as? Bool == false, "the recorded disable is put back after the reinstall")
+        #expect(line.contains("stays disabled"), "the line says the plugin stayed off: \(line)")
+        #expect(line.contains("mootx01 install"), "the line names how to turn it back on: \(line)")
+        let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: settings)) as? [String: Any])
+        #expect(root["theme"] as? String == "dark", "other settings keys are kept")
+        #expect((root["enabledPlugins"] as? [String: Any])?["other@m"] as? Bool == true, "other plugins are kept")
+
+        // No recorded disable: the rebuild's install stands and the line is the plain success.
+        try #"{"mcpServers":{"mootx01":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try #"{"enabledPlugins":{"mootx01@mootx01":true}}"#.write(to: settings, atomically: true, encoding: .utf8)
+        let plain = try #require(DepthInstaller.refreshStrandedPluginCache(
+            homeDirectory: home, claudeCLIRunner: FakeClaudeCLIRunner(shouldSucceed: true)))
+        #expect(try enabledState() as? Bool == true, "an enabled plugin is left enabled")
+        #expect(!plain.contains("stays disabled"))
+    }
+
     @Test("stranded cache: refresh is a no-op when the plugin is not yet installed")
     func strandedCacheRefreshNoopWhenNotInstalled() {
         let home = sandbox()
