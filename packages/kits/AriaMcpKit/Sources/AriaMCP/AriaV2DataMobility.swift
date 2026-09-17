@@ -1034,6 +1034,15 @@ public struct AriaV2DataMobility: Sendable {
             case .refusal(let refusal):
                 return AriaV2Envelope.refusal(tool: request.tool, error: refusal)
             }
+        } catch let VaultKitError.seedFileInvalid(message) {
+            // A seed file that failed to decode is the CALLER's argument
+            // problem (ruling 2026-09-17): the bridge's message names the
+            // offending record, and the same call again will not help. Only
+            // this class is surfaced as text; every other lower failure — a
+            // path that does not resolve, a collision, a write fault — stays
+            // the availability refusal below so paths and estate contents
+            // cannot be oracled. Rust twin: V2DataMobilityError::InvalidArgument.
+            return AriaV2Envelope.refusal(tool: request.tool, error: .init(code: "invalid_argument", message: message, retryable: false))
         } catch {
             return AriaV2Envelope.refusal(tool: request.tool, error: .init(code: "mobility_unavailable", message: "The requested data-mobility operation is unavailable in the selected estate.", retryable: false))
         }

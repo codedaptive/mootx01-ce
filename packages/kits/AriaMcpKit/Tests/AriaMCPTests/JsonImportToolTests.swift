@@ -124,4 +124,53 @@ struct JsonImportToolTests {
                 ]))
         }
     }
+
+    /// A record missing `event_time` is a decode failure of the caller's file: an
+    /// `invalid_argument` refusal carrying the bridge's message, which names the
+    /// record (ruling 2026-09-17). Nothing is written. Rust twin:
+    /// selected_json_import_missing_event_time_is_an_invalid_argument_refusal.
+    @Test("a record lacking event_time is an invalid_argument refusal naming the record")
+    func missingEventTimeIsInvalidArgument() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        // The provisioned estate carries its charter drawers; the theorem is
+        // that the refused import adds none.
+        let before = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100)).count
+        let url = try tempSeedFile("""
+            {"format_version": 1, "name": "missing-event-time", "records": [
+              {"id": "r1", "content": "no event time", "room": "handoff/room"}]}
+            """)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_json_import", arguments: .object(["path": .string(url.path)]))
+        #expect(isError(of: result), "a seed decode failure must be refused; got: \(result)")
+        let error = try #require(result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue)
+        #expect(error["code"] == .string("invalid_argument"), "got: \(error)")
+        #expect(error["retryable"] == .bool(false))
+        let message = try #require(error["message"]?.stringValue)
+        for fragment in ["record[0]", "\"r1\"", "event_time is missing"] {
+            #expect(message.contains(fragment), "message must name the record and field; got: \(message)")
+        }
+        let after = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100)).count
+        #expect(after == before, "a refused import must write zero drawers")
+    }
+
+    /// A path that does not resolve stays the availability refusal: the no-oracle
+    /// rule for paths is unchanged by the decode-class ruling.
+    @Test("a nonexistent seed path stays a mobility_unavailable refusal")
+    func nonexistentPathStaysMobilityUnavailable() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        let absent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mcp-json-import-absent-\(UUID().uuidString).json")
+        let result = try await dispatcher.dispatch(
+            name: "moot_json_import", arguments: .object(["path": .string(absent.path)]))
+        #expect(isError(of: result), "an absent seed must be refused; got: \(result)")
+        let error = try #require(result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue)
+        #expect(error["code"] == .string("mobility_unavailable"), "got: \(error)")
+        #expect(error["message"] == .string("The requested data-mobility operation is unavailable in the selected estate."))
+    }
 }
