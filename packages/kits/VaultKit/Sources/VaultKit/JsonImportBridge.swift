@@ -470,8 +470,13 @@ public struct JsonSeedFile: Sendable, Equatable {
 
     // MARK: Small helpers
 
+    /// Every decode and validation rule in `parse` answers with the
+    /// seed-file class, which the ARIA surface reports as the caller's
+    /// argument problem. Path, byte-ceiling and lineage-collision failures
+    /// in `importSeed` throw `.adapterError` directly and stay availability
+    /// refusals.
     private static func err(_ message: String) -> VaultKitError {
-        .adapterError(message)
+        .seedFileInvalid(message)
     }
 
     /// `facts` / `tunnels` are optional sections; when present they must be
