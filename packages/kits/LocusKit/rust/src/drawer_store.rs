@@ -919,6 +919,23 @@ pub trait DrawerStore: Send + Sync {
             "count_fact_extraction_debt not implemented for this DrawerStore impl".to_string()))
     }
 
+    /// Settle one source as REJECTED by the active recipe: bits 28 and 29
+    /// together, only while the drawer is live, its content equals the
+    /// inference snapshot, and `recipe_id` is active. `None` refuses a changed
+    /// source/recipe; `Some(0)` is already settled. Twin of Swift
+    /// `markFactExtractionRejected`.
+    fn mark_fact_extraction_rejected(&self, _source_id: &str, _expected_content: &str,
+        _recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "mark_fact_extraction_rejected not implemented for this DrawerStore impl".to_string()))
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set).
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_fact_extraction_rejected not implemented for this DrawerStore impl".to_string()))
+    }
+
     // (SUBJECT_LENGTH_CONTRACT is a module-level const below the trait.)
 
     /// Write the subject line of one drawer — all three subject columns

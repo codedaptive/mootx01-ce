@@ -91,7 +91,10 @@ impl<'a> SelectedEstateDiagnosticsAuthority<'a> {
             .into_iter()
             .map(|status| {
                 let state = if status.is_draining() { EstateDrainState::Draining } else { EstateDrainState::Idle };
-                EstateDrain { name: status.name, state, pending: status.pending as u64 }
+                EstateDrain {
+                    name: status.name, state, pending: status.pending as u64,
+                    detail: status.detail, rejected: status.rejected.map(|n| n as u64),
+                }
             })
             .collect();
         drains.sort_by(|left, right| left.name.cmp(&right.name));
