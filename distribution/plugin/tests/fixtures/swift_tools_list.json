@@ -1644,10 +1644,17 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "detail": {
+                      "type": "string"
+                    },
                     "name": {
                       "type": "string"
                     },
                     "pending": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "rejected": {
                       "minimum": 0,
                       "type": "integer"
                     },
@@ -2155,10 +2162,17 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "detail": {
+                      "type": "string"
+                    },
                     "name": {
                       "type": "string"
                     },
                     "pending": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "rejected": {
                       "minimum": 0,
                       "type": "integer"
                     },
@@ -8528,6 +8542,52 @@
           "data": {
             "additionalProperties": false,
             "properties": {
+              "matrix": {
+                "additionalProperties": false,
+                "properties": {
+                  "generation": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "migration_phase": {
+                    "type": "string"
+                  },
+                  "phase": {
+                    "enum": [
+                      "idle",
+                      "queued",
+                      "running",
+                      "deferred",
+                      "failed"
+                    ],
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "reclaimed_bytes": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "watermark": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "generation",
+                  "migration_phase",
+                  "phase",
+                  "reason",
+                  "reclaimed_bytes",
+                  "watermark"
+                ],
+                "type": "object"
+              },
               "state": {
                 "enum": [
                   "running",
