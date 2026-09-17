@@ -272,14 +272,21 @@ impl DrawerFeatureFlags {
     /// under the active recipe. Zero extracted facts is a settled result.
     pub const FACTS_EXTRACTED: i64 = 1 << 28;
 
+    /// Bit 29 — the active recipe rejected this drawer's current content.
+    /// Always set together with bit 28: a rejection is settled for the recipe,
+    /// and the row is the rejected corpus for analysis (the checkpoint row
+    /// keeps the reason). Cleared with bit 28 by content writes and recipe
+    /// activation. Wire value: 1 << 29. Mirrors Swift `factsRejected`.
+    pub const FACTS_REJECTED: i64 = 1 << 29;
+
     /// The bits every content write clears in the same UPDATE that changes
     /// `content`: bit 19 (retained, always cleared), bit 27 (the span rows
-    /// describe the previous content), and bit 28 (the extraction that set it
-    /// described the previous content, so the drawer owes a fresh extraction
-    /// attempt). Applied as `operational_bitmap & !CLEARED_ON_CONTENT_WRITE`.
+    /// describe the previous content), and bits 28 and 29 (the extraction
+    /// outcome described the previous content, so the drawer owes a fresh
+    /// extraction attempt). Applied as `operational_bitmap & !CLEARED_ON_CONTENT_WRITE`.
     /// Mirrors Swift `DrawerFeatureFlags.clearedOnContentWrite`.
-    pub const CLEARED_ON_CONTENT_WRITE: i64 =
-        Self::HAS_CURRENT_REPRESENTATION | Self::SPAN_INDEXED | Self::FACTS_EXTRACTED;
+    pub const CLEARED_ON_CONTENT_WRITE: i64 = Self::HAS_CURRENT_REPRESENTATION
+        | Self::SPAN_INDEXED | Self::FACTS_EXTRACTED | Self::FACTS_REJECTED;
 }
 
 // MARK: - Drawer accessors
@@ -360,6 +367,11 @@ impl Drawer {
     /// True when bit 28 is set for the current content and active extractor.
     pub fn are_facts_extracted(&self) -> bool {
         (self.operational_bitmap & DrawerFeatureFlags::FACTS_EXTRACTED) != 0
+    }
+
+    /// Bit 29: the active recipe rejected the current content (settled).
+    pub fn are_facts_rejected(&self) -> bool {
+        (self.operational_bitmap & DrawerFeatureFlags::FACTS_REJECTED) != 0
     }
 
     // ── Wave-2 vague tier accessors (cookbook §2.4.2) ─────────────────────
