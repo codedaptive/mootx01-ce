@@ -120,7 +120,7 @@ pub struct DutyLimits {
 
 impl Default for DutyLimits {
     fn default() -> Self {
-        Self { fact_extraction_batch: 16, subject_backfill_batch: 256, fact_source_lease_seconds: 120 }
+        Self { fact_extraction_batch: 16, subject_backfill_batch: 32, fact_source_lease_seconds: 120 }
     }
 }
 
