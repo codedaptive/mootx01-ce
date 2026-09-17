@@ -24,6 +24,7 @@ fn status(name: &str, pending: usize, in_flight: usize) -> DrainStatus {
         pending,
         in_flight,
         detail: None,
+        rejected: None,
     }
 }
 

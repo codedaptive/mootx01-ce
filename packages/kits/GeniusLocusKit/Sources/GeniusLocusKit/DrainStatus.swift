@@ -62,11 +62,17 @@ public struct DrainStatus: Sendable, Equatable {
     /// when a drain has no extra detail to report.
     public let detail: String?
 
-    public init(name: String, pending: Int, inFlight: Int, detail: String? = nil) {
+    /// Rows the lane settled by REJECTING them (fact extraction: bit 29).
+    /// Settled, so never part of `pending`; reported so a caller can see the
+    /// rejected corpus. Nil for lanes that have no such outcome.
+    public let rejected: Int?
+
+    public init(name: String, pending: Int, inFlight: Int, detail: String? = nil, rejected: Int? = nil) {
         self.name = name
         self.pending = pending
         self.inFlight = inFlight
         self.detail = detail
+        self.rejected = rejected
     }
 
     /// True while the drain has outstanding work on either frontier. False
@@ -106,9 +112,10 @@ public struct DrainStatus: Sendable, Equatable {
     /// corpus finisher does not own the standing span duty.
     public static let spanEncodeName = "span_encode"
 
-    /// Canonical name of the fact-extraction row-debt lane. `pending` is
-    /// `Estate.countFactExtractionDebt()` — drawers whose bit 28 (facts
-    /// extracted for the active recipe) is clear. Always rendered, extractor
+    /// Canonical name of the fact-extraction row-debt lane. `pending` is the
+    /// runnable, retrying and blocked work owed to the active recipe (bit 28
+    /// clear); a rejected source is settled (bits 28 and 29) and is reported
+    /// in `rejected`, never in `pending`. Always rendered, extractor
     /// or not: a caller settling an estate (the benchmark bulk build, a
     /// `mootx01 dream` loop) reads this lane to learn whether extraction is
     /// finished, and an absent lane would read as "nothing owed". `in_flight`
@@ -230,9 +237,10 @@ extension GeniusLocusKit {
         let facts = try await factExtractionWorkStatus(handle, now: Date())
         statuses.append(DrainStatus(
             name: DrainStatus.factExtractionName,
-            pending: facts.runnable + facts.retrying + facts.blocked + facts.rejected,
+            pending: facts.runnable + facts.retrying + facts.blocked,
             inFlight: facts.inFlight,
-            detail: facts.detail
+            detail: facts.detail,
+            rejected: facts.rejected
         ))
 
         return statuses

@@ -107,7 +107,8 @@ public extension GeniusLocusKit {
         case .factExtraction:
             guard factExtractors[handle] != nil else { return 0 }
             let state = try await factExtractionWorkStatus(handle, now: now)
-            return state.runnable + state.inFlight + state.retrying + state.blocked + state.rejected
+            // Rejected is settled (bits 28 and 29): reported, never owed.
+            return state.runnable + state.inFlight + state.retrying + state.blocked
         case .factsBackfill, .retrainBasis:
             return 0
         }
@@ -239,15 +240,46 @@ public extension GeniusLocusKit {
         progress: (@Sendable (DutyDrainReport) -> Void)? = nil
     ) async throws -> Int {
         var total = 0
+        // The loop's clock advances by every wait it sleeps, so a retry that
+        // came due during the sleep is due on the next pass. `now` itself is
+        // never re-read from the system clock inside the loop.
+        var now = now
         while true {
             _ = try await enqueueDuty(kind, in: handle, now: now)
             let report = try await drainDuty(kind, in: handle, now: now)
             total += report.unitsPaid
             if report.jobsRun > 0 { progress?(report) }
-            if report.jobsRun == 0 || !report.madeProgress { return total }
+            if report.jobsRun == 0 || !report.madeProgress {
+                // Fact extraction schedules a short retry after a malformed
+                // response. No progress plus something retrying is a wait,
+                // not settlement; a blocked provider is not waited for.
+                if kind == .factExtraction, let slept = try await waitForFactRetry(handle, now: now) {
+                    now = now.addingTimeInterval(slept)
+                    continue
+                }
+                return total
+            }
             if kind == .retrainBasis || kind == .factsBackfill { return total }
             if report.remainingDebt == 0 { return total }
         }
+    }
+
+    /// The seconds slept out to the earliest scheduled retry, measured from
+    /// the loop's `now`. Called only when a batch made no progress, so
+    /// whatever counts as runnable could not move this pass; if something is
+    /// retrying, the pass is a wait, not settlement. Nil when nothing is
+    /// retrying or the wait would exceed `maxRetryWaitSeconds` (a malformed
+    /// response retries at 30 s; longer backoffs mean provider trouble and
+    /// the finisher exits instead). Zero when the retry is already due.
+    private static let maxRetryWaitSeconds: TimeInterval = 120
+    private func waitForFactRetry(_ handle: EstateHandle, now: Date) async throws -> TimeInterval? {
+        let status = try await factExtractionWorkStatus(handle, now: now)
+        guard status.retrying > 0, let at = status.nextRetryAt else { return nil }
+        let wait = at.timeIntervalSince(now)
+        guard wait > 0 else { return 0 }
+        guard wait <= Self.maxRetryWaitSeconds else { return nil }
+        try await Task.sleep(for: .seconds(wait + 1))
+        return wait + 1
     }
 
     // MARK: - Batch body
