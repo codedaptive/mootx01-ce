@@ -146,6 +146,39 @@ struct AnomalyFlagSweepTests {
         }
     }
 
+    // MARK: - Test 1b: The incremental duty scores only touched rooms
+
+    @Test("anomaly duty owes a room until scored, then only after a write touches it again")
+    func anomalyDutyScoresOnlyTouchedRooms() async throws {
+        let (kit, handle) = try await openEstate()
+        let t0 = Date(timeIntervalSince1970: 1_750_000_000)
+        for content in Self.cohortContents {
+            _ = try await captureInRoom(content: content, kit: kit, handle: handle)
+        }
+        let outlier = try await captureInRoom(content: Self.outlierContent, kit: kit, handle: handle)
+
+        // Never scored: the room is owed.
+        let owedBefore = try await kit.anomalySweepOwedRooms(handle, now: t0)
+        #expect(owedBefore.contains { $0.wing == Self.wing && $0.room == Self.room })
+        #expect(try await kit.dutyDebt(.anomalySweep, in: handle, now: t0) == owedBefore.count)
+
+        // One batch wide enough for every owed room scores them all and flags the outlier.
+        let scored = try await kit.runAnomalySweepBatch(handle, limit: owedBefore.count, now: t0)
+        #expect(scored == owedBefore.count)
+        let estate = try await kit.estate(for: handle)
+        let flagged = try await estate.drawersIn(wing: Self.wing, room: Self.room).filter(\.isAnomalous).map(\.id)
+        #expect(flagged == [outlier.id])
+
+        // Scored and untouched: nothing owed, so the resident's tick costs no scoring.
+        #expect(try await kit.dutyDebt(.anomalySweep, in: handle, now: t0) == 0)
+
+        // A write into the room makes exactly that room owed again.
+        _ = try await captureInRoom(content: Self.cohortContents[0], kit: kit, handle: handle)
+        let owedAfter = try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(1))
+        #expect(owedAfter.count == 1)
+        #expect(owedAfter.first?.room == Self.room)
+    }
+
     // MARK: - Test 2: Small room clears bit 26
 
     @Test("anomalyFlagSweep clears bit 26 in rooms below the minimum size")

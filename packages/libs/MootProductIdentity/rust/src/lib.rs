@@ -271,6 +271,8 @@ pub mod settings {
         pub duty_fact_source_lease_seconds: u64,
         /// `duties.fact_extraction_cadence_seconds`: the resident's Signal 14 period (default 300).
         pub duty_fact_extraction_cadence_seconds: u64,
+        /// `duties.anomaly_sweep_rooms`: rooms scored per anomaly-sweep batch (default 8).
+        pub duty_anomaly_sweep_rooms: usize,
     }
 
     /// A missing or unreadable config file yields the same values as `{}`:
@@ -291,6 +293,7 @@ pub mod settings {
                 duty_subject_backfill_batch: 32,
                 duty_fact_source_lease_seconds: 120,
                 duty_fact_extraction_cadence_seconds: 300,
+                duty_anomaly_sweep_rooms: 8,
             }
         }
     }
@@ -378,6 +381,7 @@ pub mod settings {
             duty_subject_backfill_batch: duty_positive("subject_backfill_batch", 32) as usize,
             duty_fact_source_lease_seconds: duty_positive("fact_source_lease_seconds", 120),
             duty_fact_extraction_cadence_seconds: duty_positive("fact_extraction_cadence_seconds", 300),
+            duty_anomaly_sweep_rooms: duty_positive("anomaly_sweep_rooms", 8) as usize,
         }
     }
 

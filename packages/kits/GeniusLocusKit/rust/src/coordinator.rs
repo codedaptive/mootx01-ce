@@ -5224,147 +5224,27 @@ impl EstateCoordinator {
     ///
     /// `now` is epoch milliseconds — deterministic clock, threaded from the
     /// caller per the no-internal-clock discipline.
+    ///
+    /// The resident does not call this: on a large estate it is minutes of
+    /// pure compute. The resident pays `run_anomaly_sweep_batch` through the
+    /// duty queue, which scores only rooms touched since their last scoring.
     pub fn anomaly_flag_sweep(
         &self,
         handle: &EstateHandle,
         threshold: f32,
         now: i64,
     ) -> Result<usize, VerbDispatchError> {
-        use crate::brain::anomaly_flag_sweep::{
-            ANOMALY_SWEEP_MIN_ROOM_SIZE, ANOMALY_SWEEP_DEFAULT_THRESHOLD,
-        };
-        use substrate_ml::anomaly::AnomalyDetection;
-        use substrate_ml::shingle_similarity;
-
-        // Use the supplied threshold, or fall back to the default constant.
-        // (The argument is always explicit from callers, but the constant
-        // documents the intended default for signal-driven invocations.)
-        let _ = ANOMALY_SWEEP_DEFAULT_THRESHOLD; // suppress unused-constant lint
-
         let estate = self.estate_for_verb(handle)?;
         let rooms = estate
             .room_level_fingerprints()
             .map_err(|e| remap("anomaly_flag_sweep", "", e))?;
-
         let mut changed: usize = 0;
-
         for entry in &rooms {
-            // Rooms-first sweep: enumerate rooms via room_level_fingerprints,
-            // then load drawers via drawers_in_wing_room. Matches the Swift
-            // AnomalyFlagSweep iteration pattern.
-            let drawers = estate
-                .drawers_in_wing_room(&entry.wing, &entry.room)
-                .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
-
-            // Sensitivity cohort gate (codex finding 2026-08-26):
-            // restricted/secret drawers are EXCLUDED from the cohesion
-            // cohort entirely — they neither receive bit 26 nor influence
-            // any other drawer's score. Including them let a caller without
-            // a sensitivity grant plant visible probe rows and read
-            // anomalous_filter results to observe lexical similarity to
-            // hidden content. Excluded rows also get any stale bit 26
-            // cleared. Twin of the Swift AnomalyFlagSweep gate.
-            let mut drawers_vec = Vec::with_capacity(drawers.len());
-            for drawer in drawers {
-                use locus_kit::provenance::Sensitivity;
-                let s = drawer.sensitivity();
-                if s == Sensitivity::Restricted || s == Sensitivity::Secret {
-                    if drawer.is_anomalous() {
-                        let n = estate
-                            .set_anomalous_flag(&drawer.id, false, now)
-                            .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
-                        changed += n;
-                    }
-                } else {
-                    drawers_vec.push(drawer);
-                }
-            }
-            let drawers = drawers_vec;
-
-            if drawers.is_empty() {
-                continue;
-            }
-
-            if drawers.len() < ANOMALY_SWEEP_MIN_ROOM_SIZE {
-                // Too few peers for a meaningful z-score. Clear bit 26 on any
-                // drawer that currently has it set. Drawers in small rooms are
-                // not anomalous by definition — the room has no cohesion
-                // baseline to score against. Mirrors Swift small-room branch.
-                for drawer in &drawers {
-                    if drawer.is_anomalous() {
-                        let n = estate
-                            .set_anomalous_flag(&drawer.id, false, now)
-                            .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
-                        changed += n;
-                    }
-                }
-                continue;
-            }
-
-            let count = drawers.len();
-
-            // Step 1: Compute per-drawer cohesion = mean shingle-similarity
-            // to all OTHER drawers in the room.
-            //
-            // Complexity O(n²) per room. Acceptable on the maintenance path;
-            // rooms are small in practice. Precompute shingle sets to avoid
-            // recomputing them for every pair (the set-based overload is
-            // ~181s faster over a 250-drawer pool per the SubstrateML comment).
-            // Mirrors the Swift double-loop with `ShingleSimilarity.similarity`.
-            let shingle_sets: Vec<_> = drawers
-                .iter()
-                .map(|d| shingle_similarity::shingles(&d.content))
-                .collect();
-
-            let mut cohesion: Vec<f32> = vec![0.0; count];
-            for i in 0..count {
-                let mut sum: f32 = 0.0;
-                for j in 0..count {
-                    if i == j {
-                        continue;
-                    }
-                    // char-3-shingle Jaccard similarity; conformance-gated
-                    // byte-identical across Swift and Rust legs (the Swift
-                    // ShingleSimilarity.windowSize is 3, matching WINDOW_SIZE
-                    // in substrate_ml::shingle_similarity).
-                    sum += shingle_similarity::similarity_sets(
-                        &shingle_sets[i],
-                        &shingle_sets[j],
-                    );
-                }
-                // (count - 1) peers; safe because count >= ANOMALY_SWEEP_MIN_ROOM_SIZE (3).
-                cohesion[i] = sum / (count - 1) as f32;
-            }
-
-            // Step 2: Derive z-scores from the room's cohesion distribution.
-            let n = count as f32;
-            let mean: f32 = cohesion.iter().sum::<f32>() / n;
-            let variance: f32 = cohesion
-                .iter()
-                .map(|x| {
-                    let d = x - mean;
-                    d * d
-                })
-                .sum::<f32>()
-                / n;
-            let stddev = variance.sqrt();
-
-            // Step 3: Set/clear bit 26 on each drawer per its z-score.
-            // Anomalous = low-cohesion outlier: z ≤ −threshold.
-            // AnomalyDetection::z_score returns 0 when stddev == 0 (all
-            // identical content) — safe: threshold > 0 so no drawer is
-            // flagged in that case.
-            for (idx, drawer) in drawers.iter().enumerate() {
-                let z = AnomalyDetection::z_score(cohesion[idx], mean, stddev);
-                // Negative z = below-average cohesion = low-cohesion outlier.
-                let should_be_anomalous = z <= -threshold;
-                let n = estate
-                    .set_anomalous_flag(&drawer.id, should_be_anomalous, now)
-                    .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
-                changed += n;
-            }
+            changed += crate::brain::anomaly_flag_sweep::score_room(
+                &estate, &entry.wing, &entry.room, threshold, now,
+            )
+            .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
         }
-
         Ok(changed)
     }
 

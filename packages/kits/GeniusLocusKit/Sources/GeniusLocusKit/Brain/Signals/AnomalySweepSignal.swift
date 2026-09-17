@@ -3,13 +3,13 @@ import Foundation
 /// Anomaly-flag sweep standing signal — architecture spec §11.18,
 /// signal 12.
 ///
-/// Fires the room-cohesion anomaly-flag sweep on each hourly tick and
-/// surfaces the changed-drawer count as a diagnostic.
-/// `anomalyFlagSweep(handle:threshold:now:)` sets/clears bit 26
-/// (`isAnomalous`) on each drawer based on char-3-shingle Jaccard
-/// z-scores against room peers (SubstrateML `ShingleSimilarity` +
-/// `AnomalyDetection`). Rooms below `anomalySweepMinRoomSize` (3) have
-/// bit 26 cleared on all members.
+/// Fires each hour; the live closure ENQUEUES the anomaly-sweep duty
+/// (§ DUTY_LIFECYCLE) and the resident's duty worker scores, off the tick,
+/// only the rooms touched since their last scoring. The scoring
+/// (`AnomalyFlagSweep.swift`) sets/clears bit 26 (`isAnomalous`) on each
+/// drawer from char-3-shingle Jaccard z-scores against room peers
+/// (SubstrateML `ShingleSimilarity` + `AnomalyDetection`); rooms below
+/// `anomalySweepMinRoomSize` (3) have bit 26 cleared on all members.
 ///
 /// Mirrors `TemporalCausalitySignal` in structure: hourly cadence,
 /// `.single` concurrency, diagnostic-only emission, injected closure for
@@ -18,7 +18,8 @@ import Foundation
 /// Usage pattern (mirrors TemporalCausalitySignal):
 ///
 ///     let spec = AnomalySweepSignal.spec { now in
-///         return try await kit.anomalyFlagSweep(handle: handle, now: now)
+///         _ = try await kit.enqueueDuty(.anomalySweep, in: handle, now: now)
+///         return 0
 ///     }
 ///     let id = try await kit.registerStandingSignal(spec, in: handle, now: now)
 ///
@@ -35,21 +36,18 @@ public enum AnomalySweepSignal {
     /// `registerDefaultStandingSignals`).
     public static let signalName = "anomaly-flag-sweep"
 
-    /// Build a signal spec that invokes the room-cohesion anomaly sweep
-    /// on each fire.
+    /// Build a signal spec that runs `anomalyCycle` on each fire.
     ///
-    /// The `anomalyCycle` closure is called with the scheduler's `now` and
-    /// should run `GeniusLocusKit.anomalyFlagSweep`, returning the count
-    /// of drawers whose bit 26 changed state. An empty successful return
-    /// (0) is correct when no bits changed. On error the throw is caught
-    /// and surfaced as a `.diagnostic` emission so the scheduler's drain
-    /// loop is not interrupted.
+    /// The closure is called with the scheduler's `now`; the resident's
+    /// closure enqueues the anomaly-sweep duty and returns 0, and a test
+    /// closure may run the whole-estate sweep and return its changed count.
+    /// The count is surfaced as a `.diagnostic` emission; on error the throw
+    /// is caught and surfaced the same way so the scheduler's drain loop is
+    /// not interrupted.
     ///
-    /// - Parameter anomalyCycle: async closure that executes the sweep.
-    ///   Captures the estate context it needs. Called with `now`
-    ///   (deterministic clock) as the single argument. Returns the count
-    ///   of drawers whose `isAnomalous` bit changed. Throws on sweep or
-    ///   persistence failures.
+    /// - Parameter anomalyCycle: async closure called with `now`
+    ///   (deterministic clock) as the single argument. Returns a count for
+    ///   the diagnostic. Throws on failure.
     public static func spec(
         anomalyCycle: @escaping @Sendable (Date) async throws -> Int
     ) -> SignalSpec {

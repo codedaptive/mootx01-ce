@@ -1,13 +1,15 @@
 // brain/signals/anomaly_sweep.rs — Rust mirror of `AnomalySweepSignal.swift`.
 //
-// Architecture spec §11.18, signal 12. Fires the room-cohesion
-// anomaly-flag sweep on each hourly tick and surfaces the changed-drawer
-// count as a diagnostic. Mirrors TemporalCausalitySignal in structure:
-// hourly cadence, .single concurrency, diagnostic-only emission, injected
-// closure for the live cycle.
+// Architecture spec §11.18, signal 12. Fires each hour; the resident's
+// live closure ENQUEUES the anomaly-sweep duty (§ DUTY_LIFECYCLE) and the
+// duty worker scores, off the tick, only the rooms touched since their last
+// scoring (brain/anomaly_flag_sweep.rs). The closure's count is surfaced as
+// a diagnostic. Mirrors TemporalCausalitySignal in structure: hourly
+// cadence, .single concurrency, diagnostic-only emission, injected closure
+// for the live cycle.
 //
-// The `spec` factory accepts a closure returning the changed-drawer count
-// from a live anomaly cycle. `default_spec` is the no-op scaffold variant
+// The `spec` factory accepts a closure returning a count for the
+// diagnostic. `default_spec` is the no-op scaffold variant
 // used when no live cycle is available (e.g., test scaffolds or
 // registerDefaultStandingSignals before the live closure is wired).
 
