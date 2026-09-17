@@ -1415,12 +1415,28 @@ public extension GeniusLocusKit {
     /// addressed by `handle`. At least one of `toRoom` or `toLattice`
     /// must be present; an empty reanchor raises `VerbError.emptyReanchor`
     /// at the GLK boundary before dispatch.
+    ///
+    /// F4 (§11.18): when the move changes room membership (`toRoom` and/or
+    /// `toWing` supplied), both the room the drawer LEAVES and the room it
+    /// JOINS are marked dirty for the incremental anomaly sweep. This is the
+    /// only point that room-membership change is knowable at all — the
+    /// audit trail records no history of a drawer's prior room (see
+    /// `markAnomalySweepRoomDirty`'s doc comment) — so a room whose cohesion
+    /// peer set just shrank would otherwise never be rescored.
     func reanchor(_ handle: EstateHandle, _ frame: ReanchorFrame) async throws {
         try requireMounted(handle, verb: "reanchor")
         guard frame.toRoom != nil || frame.toWing != nil || frame.toLattice != nil else {
             throw VerbError.emptyReanchor(rowID: frame.rowID)
         }
         let estate = try estate(for: handle)
+        let movesRoom = frame.toRoom != nil || frame.toWing != nil
+        // Captured before the move: the only moment the drawer's OUTGOING
+        // room is readable, since the row itself keeps no prior value.
+        var priorRoom: (wing: String, room: String)?
+        if movesRoom, let drawer = try? await estate.getDrawers(ids: [frame.rowID]).first {
+            priorRoom = try? await resolveNodeNames(
+                handle, parentNodeIds: [drawer.parentNodeId])[drawer.parentNodeId]
+        }
         do {
             try await estate.reanchor(
                 rowID: frame.rowID,
@@ -1430,6 +1446,20 @@ public extension GeniusLocusKit {
             )
         } catch {
             throw remap(verb: "reanchor", estateID: handle.estateUUID.uuidString, error: error)
+        }
+        guard movesRoom else { return }
+        // Best-effort: a checkpoint-write failure must never fail the move
+        // that already committed — the room is simply picked up on the next
+        // audit-fold pass (a rescore skipped a cycle late, not skipped
+        // forever) rather than the reanchor itself throwing after the fact.
+        let now = Date()
+        if let drawer = try? await estate.getDrawers(ids: [frame.rowID]).first,
+           let newRoom = try? await resolveNodeNames(
+               handle, parentNodeIds: [drawer.parentNodeId])[drawer.parentNodeId] {
+            try? await markAnomalySweepRoomDirty(wing: newRoom.wing, room: newRoom.room, for: handle, now: now)
+        }
+        if let priorRoom {
+            try? await markAnomalySweepRoomDirty(wing: priorRoom.wing, room: priorRoom.room, for: handle, now: now)
         }
     }
 
