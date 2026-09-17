@@ -395,16 +395,13 @@ pub fn run(
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as i64;
-                    // The batch runs as a claimed QueueKit job (duty_queue):
-                    // the tick queued the owed duty, this cycle drains it.
+                    // Enqueue only (§ DUTY_LIFECYCLE): the duty worker thread
+                    // pays the batch off the tick.
                     match span_coord.lock() {
-                        Ok(mut coord) => {
+                        Ok(coord) => {
                             use genius_locus_kit::brain::duty_queue::DutyKind;
                             coord.enqueue_duty(&span_handle, DutyKind::SpanEncode, now_ms).map_err(|e| format!("{e:?}"))?;
-                            coord
-                                .drain_duty(&span_handle, DutyKind::SpanEncode, now_ms)
-                                .map(|r| r.units_paid as i64)
-                                .map_err(|e| format!("{e:?}"))
+                            Ok(0)
                         }
                         Err(e) => Err(format!("coordinator lock poisoned: {e}")),
                     }
@@ -420,9 +417,59 @@ pub fn run(
             }
             let fact_extraction_cycle = build_fact_extraction_cycle(
                 &coord_for_hnsw,
-                handle_for_hnsw,
+                handle_for_hnsw.clone(),
                 Some(&fact_settings_directory),
             );
+            // The duty worker (§ DUTY_LIFECYCLE): the tick and the signals only
+            // enqueue owed duties; this thread pays ONE bounded batch per duty
+            // per cadence, off the tick. Span and subject batches run under the
+            // coordinator (no model call); the fact batch runs through the
+            // one-batch cycle, which holds the coordinator only around the claim
+            // and the row write. The two on-demand duties are drained when
+            // something queued them, never enqueued here.
+            {
+                let worker_coord = Arc::clone(&coord_for_hnsw);
+                let worker_handle = handle_for_hnsw.clone();
+                let worker_fact = fact_extraction_cycle.clone();
+                let cadence = duty_settings.duty_fact_extraction_cadence_seconds.max(1);
+                std::thread::spawn(move || loop {
+                    use genius_locus_kit::brain::duty_queue::DutyKind;
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    for kind in [DutyKind::SpanEncode, DutyKind::SubjectBackfill] {
+                        if let Ok(mut coord) = worker_coord.lock() {
+                            if let Err(e) = coord.enqueue_duty(&worker_handle, kind, now_ms) {
+                                eprintln!("AriaResident duty {} enqueue failed: {e:?}", kind.wire_name());
+                                continue;
+                            }
+                            match coord.drain_duty(&worker_handle, kind, now_ms) {
+                                Ok(r) if r.jobs_run > 0 => eprintln!(
+                                    "AriaResident duty {}: {} paid, {} remaining",
+                                    kind.wire_name(), r.units_paid, r.remaining_debt),
+                                Ok(_) => {}
+                                Err(e) => eprintln!("AriaResident duty {} failed: {e:?}", kind.wire_name()),
+                            }
+                        }
+                    }
+                    if let Some(cycle) = &worker_fact {
+                        match cycle() {
+                            Ok(n) if n > 0 => eprintln!("AriaResident duty fact-extraction: {n} source(s) settled"),
+                            Ok(_) => {}
+                            Err(e) => eprintln!("AriaResident duty fact-extraction failed: {e}"),
+                        }
+                    }
+                    for kind in [DutyKind::FactsBackfill, DutyKind::RetrainBasis] {
+                        if let Ok(mut coord) = worker_coord.lock() {
+                            if let Err(e) = coord.drain_duty(&worker_handle, kind, now_ms) {
+                                eprintln!("AriaResident duty {} failed: {e:?}", kind.wire_name());
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(cadence));
+                });
+            }
             // Signal 11 (ConsolidationSignal) and the contradiction sweep are
             // preference-gated: each cycle is built only when the estate's
             // switch is not Off, and `None` registers no signal at all.
@@ -591,11 +638,10 @@ pub fn run(
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as i64;
+                    // Enqueue only (§ DUTY_LIFECYCLE): the duty worker thread
+                    // pays the batches off the tick.
                     match reconcile_coord.lock() {
-                        Ok(mut coord) => {
-                            if let Err(e) = coord.drain_duties(&handle_for_hnsw, now_ms) {
-                                eprintln!("AriaResident duty drain failed: {e:?}");
-                            }
+                        Ok(coord) => {
                             if let Err(e) = coord.enqueue_owed_duties(&handle_for_hnsw, now_ms) {
                                 eprintln!("AriaResident duty enqueue failed: {e:?}");
                             }
@@ -618,9 +664,23 @@ pub fn run(
                         || {
                             fact_extraction_cycle
                                 .clone()
-                                .map(|cycle| FactExtractionSignal::spec_with_cadence(
-                                    duty_settings.duty_fact_extraction_cadence_seconds,
-                                    Arc::new(move || cycle())))
+                                .map(|_cycle| {
+                                    // Enqueue only (§ DUTY_LIFECYCLE): the duty
+                                    // worker pays the batch off the tick.
+                                    let signal_coord = Arc::clone(&coord_for_hnsw);
+                                    let signal_handle = handle_for_hnsw.clone();
+                                    FactExtractionSignal::spec_with_cadence(
+                                        duty_settings.duty_fact_extraction_cadence_seconds,
+                                        Arc::new(move || {
+                                            let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)
+                                                .unwrap_or_default().as_millis() as i64;
+                                            let coord = signal_coord.lock().map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+                                            coord.enqueue_duty(&signal_handle,
+                                                genius_locus_kit::brain::duty_queue::DutyKind::FactExtraction, now_ms)
+                                                .map(|_| 0)
+                                                .map_err(|e| format!("{e:?}"))
+                                        }))
+                                })
                         },
                     )?;
                     reconcile_runtime_signal(
