@@ -2939,10 +2939,23 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
+    // F3: the read (is there still a matching, active, unrejected source?),
+    // the active-recipe check, and the bitmap write used to be three
+    // sequential un-transacted calls. `runFactExtractionBatch` runs the model
+    // call off the coordinator lock (§ DUTY_LIFECYCLE), so a recipe
+    // activation could land between the read and the write; the write then
+    // OR'd the settle bits into the STALE bitmap captured at the read,
+    // silently reverting whatever the interleaved activation changed. All
+    // three now run inside one `IsolationLevel::Serializable` transaction —
+    // the same pattern `publish_extracted_facts` above already uses for the
+    // identical read-check-write shape — and only bits 28|29 are OR'd into
+    // the bitmap the transaction itself just read, never a copy captured
+    // outside it. Swift's twin already had this property for free: the whole
+    // read-check-write runs on the `DrawerStore` actor, so nothing else can
+    // interleave.
     fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
         recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
         validate_non_empty(source_id, "sourceID")?;
-        let store = self.storage.row_store();
         let predicate = StoragePredicate::And(vec![
             StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(source_id.into())),
             StoragePredicate::Eq(Column::new(T_DRAWERS, "content"), TypedValue::Text(expected_content.into())),
@@ -2950,21 +2963,29 @@ impl DrawerStore for DrawerStoreCore {
             StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"),
                 TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
         ]);
-        let rows = store.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)
-            .map_err(map_storage_err)?;
-        let Some(row) = rows.first() else { return Ok(None) };
-        let active = store.query_projected("fact_extractor_models", &["recipe_id"],
-            Some(&StoragePredicate::And(vec![
-                StoragePredicate::Eq(Column::new("fact_extractor_models", "recipe_id"), TypedValue::Text(recipe_id.into())),
-                StoragePredicate::Eq(Column::new("fact_extractor_models", "is_active"), TypedValue::Int(1)),
-            ])), &[], Some(1), None).map_err(map_storage_err)?;
-        if active.is_empty() { return Ok(None); }
-        let current = i64_value_of(row.get("operationalBitmap"));
-        if current & DrawerFeatureFlags::FACTS_EXTRACTED != 0 { return Ok(Some(0)); }
-        let settled = DrawerFeatureFlags::FACTS_EXTRACTED | DrawerFeatureFlags::FACTS_REJECTED;
-        let mut values = BTreeMap::new();
-        values.insert("operationalBitmap".into(), TypedValue::Bitmap(current | settled));
-        store.update(T_DRAWERS, values, &predicate).map_err(map_storage_err).map(Some)
+        let mut result = None;
+        self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let rs = txn.row_store();
+            let rows = rs.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)?;
+            let Some(row) = rows.first() else { return Ok(()) };
+            let active = rs.query_projected("fact_extractor_models", &["recipe_id"],
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(Column::new("fact_extractor_models", "recipe_id"), TypedValue::Text(recipe_id.into())),
+                    StoragePredicate::Eq(Column::new("fact_extractor_models", "is_active"), TypedValue::Int(1)),
+                ])), &[], Some(1), None)?;
+            if active.is_empty() { return Ok(()); }
+            // Read inside this same transaction — never a value captured
+            // before the recipe-activation check above could have run.
+            let current = i64_value_of(row.get("operationalBitmap"));
+            if current & DrawerFeatureFlags::FACTS_EXTRACTED != 0 { result = Some(0); return Ok(()); }
+            let settled = DrawerFeatureFlags::FACTS_EXTRACTED | DrawerFeatureFlags::FACTS_REJECTED;
+            let mut values = BTreeMap::new();
+            values.insert("operationalBitmap".into(), TypedValue::Bitmap(current | settled));
+            let updated = rs.update(T_DRAWERS, values, &predicate)?;
+            result = Some(updated);
+            Ok(())
+        }).map_err(map_storage_err)?;
+        Ok(result)
     }
 
     fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
