@@ -328,11 +328,9 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
     // a prior session, spawn a detached dreamer so dreaming catches up without
     // waiting for the next recall event. The child is told the estate with
     // `--db <selector>`, the value that selects this record again.
-    let selector = record.selector_argument();
-    if on_disk && record.queue_path().exists() && background_worker_permitted(posture, "startup dreamer") {
-        eprintln!("mootx01: dreaming queue has pending items from prior session — spawning detached dreamer (T10 startup)");
-        spawn_detached_dream(&selector);
-    }
+    // A stdio serve spawns no background process (§ DUTY_LIFECYCLE): no
+    // startup, exit, or periodic dreamer, no exit drainer. A caller that wants
+    // debt paid runs `mootx01 drain` or `mootx01 dream`.
 
     // computed once at startup (not per-call). Empty whenever no
     // plugin is detected or its version matches this binary — the common
@@ -384,24 +382,6 @@ pub fn run(db: Option<String>, http: Option<HttpMode>, frozen_flag: bool, in_mem
         if on_disk {
             let _ = std::fs::remove_file(&pid_file);
         }
-    } else if on_disk {
-        // T5 — direct-open stdio exit (the forward path returned earlier). The
-        // client may SIGKILL us the moment stdin closes, killing the in-process
-        // encode drain mid-flight. If encode work is still queued, hand it to a
-        // detached `drain` finisher that outlives us (it takes the T3 lease and
-        // drains to empty, or stands by if a resident has since taken over). Only
-        // spawn when the maildir actually has pending/in-flight jobs.
-        if encode_queue_has_pending(&record.directory) && background_worker_permitted(posture, "encode drainer") {
-            spawn_detached_drain(&selector);
-        }
-        // On-exit dreaming trigger: if the dreaming queue has items (enqueued
-        // during this session or from prior sessions), spawn a detached `dream`
-        // finisher so dreaming work is not lost when the stdio serve exits.
-        // Independent of the encode drain — both can be held simultaneously.
-        if record.queue_path().exists() && background_worker_permitted(posture, "exit dreamer") {
-            eprintln!("mootx01: dreaming queue has pending items on exit — spawning detached dreamer (T10 exit)");
-            spawn_detached_dream(&selector);
-        }
     }
     ExitCode::from(exit::OK)
 }
@@ -417,89 +397,9 @@ pub(crate) fn resident_pid_recorded(pid_file: &Path) -> bool {
     }
 }
 
-/// True when the corpus ingest maildir inside `estate_dir` has any job waiting
-/// (`new/`) or claimed but unfinished (`cur/`). A cheap directory check so a
-/// stdio serve only spawns the detached drainer when there is real work left.
-fn encode_queue_has_pending(estate_dir: &Path) -> bool {
-    let qdir = estate_dir.join("corpus_ingest_queue");
-    ["new", "cur"].iter().any(|sub| {
-        std::fs::read_dir(qdir.join(sub))
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false)
-    })
-}
 
-/// Whether this serve may launch a detached background worker (dreamer or
-/// drainer). Every spawn site consults this before spawning; a frozen serve
-/// answers false and says so once per site, so pending work is visible in
-/// the log but never picked up by a process that outlives the snapshot.
-/// Mirrors Swift `ServeCommand.backgroundWorkerPermitted`.
-fn background_worker_permitted(posture: EstatePosture, worker: &str) -> bool {
-    if !posture.is_frozen() {
-        return true;
-    }
-    eprintln!("mootx01 serve: frozen — {worker} not spawned; pending work is left untouched");
-    false
-}
 
-/// Spawn `mootx01 dream --db <selector>` detached to run one REM-ALPHA cycle
-/// after a direct-open stdio serve exits or starts up with a pending dreaming
-/// queue. The child `setsid`s itself (unix) / is created detached (windows);
-/// the estate is passed as the catalog selector that chose it here, and we do
-/// not wait on it.
-fn spawn_detached_dream(selector: &str) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("mootx01: cannot locate own binary to spawn detached dreamer: {e}");
-            return;
-        }
-    };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(["dream", "--db", selector])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    if let Err(e) = cmd.spawn() {
-        eprintln!("mootx01: failed to spawn detached dreamer: {e}");
-    }
-}
 
-/// Spawn `mootx01 drain --db <selector>` detached to finish the encode queue
-/// after a direct-open stdio serve exits (T5). The child `setsid`s itself
-/// (unix) / is created detached (windows); the estate is passed as the catalog
-/// selector that chose it here, and we do not wait on it.
-fn spawn_detached_drain(selector: &str) {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("mootx01: cannot locate own binary to spawn detached drainer: {e}");
-            return;
-        }
-    };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(["drain", "--db", selector])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    if let Err(e) = cmd.spawn() {
-        eprintln!("mootx01: failed to spawn detached drainer: {e}");
-    }
-}
 
 /// Probe-bind on loopback; free means we could bind. Racy by nature (the
 /// port can be taken between probe and the runtime's real bind), in which
@@ -520,37 +420,6 @@ fn remove_port_file(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn frozen_never_permits_a_background_worker() {
-        assert!(background_worker_permitted(EstatePosture::Live, "startup dreamer"));
-        assert!(!background_worker_permitted(EstatePosture::Frozen, "startup dreamer"));
-        assert!(!background_worker_permitted(EstatePosture::Frozen, "encode drainer"));
-    }
-
-    /// Source-shape guard: every detached-worker spawn in this file sits
-    /// under `background_worker_permitted`. A new spawn site added without
-    /// the guard fails here, not in a benchmark.
-    #[test]
-    fn every_detached_worker_spawn_is_guarded() {
-        let source = include_str!("serve.rs");
-        let lines: Vec<&str> = source.lines().collect();
-        let mut sites = 0;
-        for (i, line) in lines.iter().enumerate() {
-            // Skip comments and this test's own string literals.
-            let is_call = (line.contains("spawn_detached_dream(&") || line.contains("spawn_detached_drain(&"))
-                && !line.trim_start().starts_with("//")
-                && !line.contains("contains(");
-            if !is_call {
-                continue;
-            }
-            sites += 1;
-            let window = lines[i.saturating_sub(6)..i].join("\n");
-            assert!(window.contains("background_worker_permitted(posture"), "spawn at serve.rs:{} is not under the frozen gate", i + 1);
-        }
-        // Startup dreamer, exit drainer, exit dreamer.
-        assert_eq!(sites, 3, "expected 3 spawn sites");
-    }
 
     #[test]
     fn hunt_skips_a_busy_port() {

@@ -263,6 +263,12 @@ public enum AriaResident {
         /// itself. The extractor carries its own FactExtractorModelSpec, which
         /// `runResidentDaemon` uses to derive the recipe ID.
         public var factExtractor: (any FactExtractor)?
+        /// Signal 14 period (`duties.fact_extraction_cadence_seconds`), resolved
+        /// by the caller from the settings module.
+        public var factExtractionCadenceSeconds: TimeInterval
+        /// Batch limits for the row-debt duties, resolved by the caller from the
+        /// settings module and installed on the kit at daemon start.
+        public var dutyLimits: DutyLimits
 
         public init(
             port: UInt16,
@@ -272,7 +278,9 @@ public enum AriaResident {
             statsStorePath: String?,
             vaultPath: String? = nil,
             vaultEstatePollSeconds: Int = 60,
-            factExtractor: (any FactExtractor)? = nil
+            factExtractor: (any FactExtractor)? = nil,
+            factExtractionCadenceSeconds: TimeInterval = FactExtractionSignal.defaultCadenceSeconds,
+            dutyLimits: DutyLimits = DutyLimits()
         ) {
             self.port = port
             self.maxBodyBytes = maxBodyBytes
@@ -282,6 +290,8 @@ public enum AriaResident {
             self.vaultPath = vaultPath
             self.vaultEstatePollSeconds = vaultEstatePollSeconds
             self.factExtractor = factExtractor
+            self.factExtractionCadenceSeconds = factExtractionCadenceSeconds
+            self.dutyLimits = dutyLimits
         }
     }
 
@@ -408,6 +418,8 @@ public enum AriaResident {
         handle: EstateHandle,
         config: ResidentConfig
     ) async throws {
+        // Batch limits first: every duty the governor pays reads them.
+        await kit.configureDutyLimits(config.dutyLimits, for: handle)
         let wiring = await installManagerTelemetry(storePath: config.statsStorePath)
         let statsStore = wiring?.store
         let observer = wiring?.observer
@@ -763,7 +775,8 @@ public enum AriaResident {
                         guard let cycle = await resolveFactExtractionCycle(
                             setting: .on, extractor: config.factExtractor, kit: kit, handle: handle
                         ) else { return nil }
-                        return FactExtractionSignal.spec(factExtractionCycle: cycle)
+                        return FactExtractionSignal.spec(
+                            cadenceSeconds: config.factExtractionCadenceSeconds, factExtractionCycle: cycle)
                     }
                     try await reconcilePreferenceSignal(name: ConsolidationSignal.signalName, enabled: consolidationOn, ids: &ids, kit: kit, handle: handle, now: now) {
                         ConsolidationSignal.spec(consolidationCycle: consolidationCycleClosure)
