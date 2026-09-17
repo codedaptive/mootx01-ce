@@ -29,8 +29,10 @@ private actor FakeThetaRetrainHookSS: ThetaBasisRetrainHook {
     private(set) var retrainCalls: [Date] = []
     var retrainCount: Int { retrainCalls.count }
 
-    func retrain(now: Date) async throws {
+    @discardableResult
+    func retrain(now: Date) async throws -> Bool {
         retrainCalls.append(now)
+        return true
     }
 }
 
@@ -42,8 +44,10 @@ private actor ThrowingGrowthProbe: CorpusGrowthProbe {
         throw ProbeError()
     }
 
-    func reindex(now: Date) async throws {
+    @discardableResult
+    func reindex(now: Date) async throws -> Bool {
         // Not reached via the throwing path; no-op for conformance.
+        true
     }
 }
 
