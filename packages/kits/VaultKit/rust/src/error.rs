@@ -14,6 +14,18 @@ pub enum VaultKitError {
     /// The vault adapter rejected the vault or a note within it.
     AdapterError(String),
 
+    /// The JSON seed file handed to `JsonImportBridge::import_seed` failed to
+    /// decode or validate: malformed JSON, a wrong `format_version`, a record
+    /// missing `event_time`, an unknown key, and every other rule
+    /// `JsonSeedFile::parse` enforces. The message names the first offending
+    /// element. This is the CALLER's file to fix, so ARIA answers it as an
+    /// `invalid_argument` refusal carrying the message. `AdapterError` keeps
+    /// the other import failures — a path that does not resolve, the on-disk
+    /// byte ceiling, a lineage collision against the estate — which stay an
+    /// availability refusal so paths and estate contents cannot be oracled.
+    /// Mirrors the Swift `VaultKitError.seedFileInvalid(String)`.
+    SeedFileInvalid(String),
+
     /// A note was skipped because it would violate invariant I-5
     /// (empty content, empty room, empty addedBy, etc.).
     I5Violation(String),
@@ -53,6 +65,7 @@ impl fmt::Display for VaultKitError {
         match self {
             VaultKitError::Io(e) => write!(f, "VaultKit I/O error: {e}"),
             VaultKitError::AdapterError(msg) => write!(f, "VaultKit adapter error: {msg}"),
+            VaultKitError::SeedFileInvalid(msg) => write!(f, "VaultKit seed file invalid: {msg}"),
             VaultKitError::I5Violation(msg) => write!(f, "VaultKit I-5 violation: {msg}"),
             VaultKitError::VerbError(msg) => write!(f, "VaultKit verb error: {msg}"),
             VaultKitError::UnsupportedFormatVersion(v) => {
