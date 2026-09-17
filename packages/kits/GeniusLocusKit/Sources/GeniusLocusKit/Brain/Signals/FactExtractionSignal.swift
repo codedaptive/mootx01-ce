@@ -6,13 +6,16 @@ public enum FactExtractionSignal {
     public static let defaultCadenceSeconds: TimeInterval = 300
     public static let signalName = "fact-extraction"
 
+    /// `cadenceSeconds` is the host's `duties.fact_extraction_cadence_seconds`
+    /// (§ DUTY_LIFECYCLE); the freshness target is twice the cadence.
     public static func spec(
+        cadenceSeconds: TimeInterval = defaultCadenceSeconds,
         factExtractionCycle: @escaping @Sendable (Date) async throws -> Int
     ) -> SignalSpec {
         SignalSpec(
             name: signalName,
-            trigger: .interval(seconds: defaultCadenceSeconds),
-            freshnessTarget: defaultCadenceSeconds * 2,
+            trigger: .interval(seconds: cadenceSeconds),
+            freshnessTarget: cadenceSeconds * 2,
             concurrencyPolicy: .single,
             emit: { context in
                 do {

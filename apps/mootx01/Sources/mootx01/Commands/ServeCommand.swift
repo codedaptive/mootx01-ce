@@ -56,11 +56,6 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("in-memory"), help: "Serve the estate from the in-memory backend: same protocol and algorithms, no filesystem, the estate lives and dies with this process. Accuracy sweeps only.")
     var inMemory = false
 
-    /// Interval between periodic dream spawns in long-running stdio sessions (6 hours).
-    /// At 256 items/cycle a 36k-estate converges within a few cycles; the periodic
-    /// trigger ensures those cycles fire without requiring session restarts.
-    static let periodicDreamInterval: Duration = .seconds(6 * 3600)
-
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
 
@@ -522,6 +517,11 @@ struct ServeCommand: AsyncParsableCommand {
                 Logging.stderr.log("mootx01 serve fatal: fact-extraction preference read failed: \(error)")
                 throw ExitCode.failure
             }
+            // Batch limits and the Signal 14 cadence come from the same settings
+            // directory (§ DUTY_LIFECYCLE); the stdio path installs the limits
+            // here, the resident path hands them to the daemon config below.
+            let dutySettings = MootProductIdentity.Settings.load(configurationDirectory: factSettingsDirectory)
+            await kit.configureDutyLimits(DutyLimits(settings: dutySettings), for: handle)
 
             let config = AriaResident.ResidentConfig(
                 port: port,
@@ -531,7 +531,9 @@ struct ServeCommand: AsyncParsableCommand {
                 statsStorePath: MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 vaultPath: AriaResident.vaultPath(env: environment),
                 vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment),
-                factExtractor: factExtractor
+                factExtractor: factExtractor,
+                factExtractionCadenceSeconds: TimeInterval(dutySettings.dutyFactExtractionCadenceSeconds),
+                dutyLimits: DutyLimits(settings: dutySettings)
             )
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, resident HTTP on 127.0.0.1:\(port))")
             do {
@@ -544,177 +546,18 @@ struct ServeCommand: AsyncParsableCommand {
             }
             Logging.stderr.log("mootx01 serve exiting (HTTP transport stopped)")
         } else {
-            //  — on-startup dreaming trigger: if the
-            // dreaming queue already has pending items from a prior session
-            // (jobs in queue.sqlite that were not processed before the last
-            // serve exited), fork a detached dreamer immediately so they are
-            // not left stale until the next autonomic governor cycle.
-            // This is stdio-only: the resident daemon's autonomic governor
-            // handles this path for HTTP serves via its timer-gated pump.
-            //
-            // `mountDreamingQueue` force-mounts the queue from queue.sqlite so
-            // `dreamingQueuePendingCount` reflects the persisted backlog rather
-            // than the in-session state (which is zero at startup). Idempotent.
+            // A stdio serve spawns no background process (§ DUTY_LIFECYCLE):
+            // no startup, exit, or periodic dreamer, no exit drainer. A caller
+            // that wants debt paid runs `mootx01 drain` or `mootx01 dream`.
+            // `mountDreamingQueue` mounts the persisted queue so the drain
+            // report's dreaming lane reads the real backlog. Idempotent.
             if onDisk { await kit.mountDreamingQueue(for: handle) }
-            if onDisk,
-               let startupPending = await kit.dreamingQueuePendingCount(for: handle),
-               startupPending > 0,
-               Self.backgroundWorkerPermitted(posture, worker: "startup dreamer") {
-                Logging.stderr.log(
-                    "mootx01 serve: \(startupPending) dreaming job(s) pending from prior session — " +
-                    "spawning a detached dreamer (T10 on-startup trigger)"
-                )
-                Self.spawnDetachedDream(estateName: estate.selectorArgument, environment: environment)
-            }
-
-            // Periodic dream trigger: fire one dream spawn every 6 hours during
-            // long-running stdio sessions. The startup and on-exit triggers alone
-            // are insufficient for daemons that run for days — this ensures subject
-            // debt drains regardless of how long the session lasts or whether
-            // recall events enqueue dreaming jobs.
-            //
-            // Cancellation: `Task.sleep(for:)` throws `CancellationError` when the
-            // task is cancelled. The defer below cancels this Task after
-            // `server.run()` returns (i.e., when stdin closes), so the sleep is
-            // always interrupted cleanly. There is no pre-existing TaskGroup in the
-            // stdio path; this bare Task is the cancellation unit.
-            //
-            // This trigger does not race with the startup or on-exit spawns:
-            // the first periodic fire is 6 hours after startup, so the startup
-            // spawn has already completed; the on-exit spawn fires after
-            // `server.run()` returns, then the defer at scope exit cancels this
-            // Task — it is in a 6-hour sleep and cannot fire again before then.
-            // Frozen: no periodic dreamer at all — the Task is never created, so
-            // there is nothing to cancel and nothing that could fire.
-            let periodicDreamer: Task<Void, Never>? = posture == .live && onDisk ? Task {
-                while true {
-                    do {
-                        try await Task.sleep(for: Self.periodicDreamInterval)
-                    } catch {
-                        // CancellationError: the serve scope is winding down — exit cleanly.
-                        return
-                    }
-                    Logging.stderr.log(
-                        "mootx01 serve: periodic dream spawn (6-hour trigger — draining subject debt)")
-                    Self.spawnDetachedDream(estateName: estate.selectorArgument, environment: environment)
-                }
-            } : nil
-            defer { periodicDreamer?.cancel() }
 
             let server = StdioServer(dispatcher: dispatcher)
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, stdio)")
             await server.run()
 
-            // T5 — this is a DIRECT-open stdio serve (the forward path returned
-            // earlier). The client may SIGKILL us the moment stdin closes, which
-            // would kill the in-process encode drain mid-flight. If encode work is
-            // still pending, hand it to a detached `drain` finisher that outlives
-            // us (it takes the T3 lease and drains to empty, or stands by if a
-            // resident has since taken over). Skip when nothing is pending.
-            //
-            // Keyed on the ENCODE drain only via `DrainStatus.encodeSettled`
-            // (PERF_W1_DRAIN_RIDER Finding 3): the "distillation" entry does
-            // not settle under the drain command — spawning on it would hand
-            // the finisher a wait it can never win while it holds the encode
-            // lease. Rationale on the helper.
-            let remaining = (try? await kit.drainStatuses(handle)) ?? []
-            if !DrainStatus.encodeSettled(remaining),
-               Self.backgroundWorkerPermitted(posture, worker: "encode drainer") {
-                Logging.stderr.log("mootx01 serve: encode work still pending at stdio exit — spawning a detached drainer to finish (T5)")
-                Self.spawnDetachedDrain(estateName: estate.selectorArgument, environment: environment)
-            }
-
-            //  — on-exit dreaming trigger: if the dreaming
-            // queue has pending items at stdio exit (from recall events during this
-            // session, or from a prior session not yet processed), fork a detached
-            // dreamer to run one REM-ALPHA cycle before the estate closes. Mirrors
-            // the T5 encode on-exit pattern.
-            //
-            // Post-recall corollary: if any recall verb during this session
-            // co-recalled ≥ 2 drawers and enqueued a dreaming item, that item is
-            // now in the dreaming queue. The on-exit check catches it here — we
-            // do not need a per-request hook in the stdio dispatcher because all
-            // in-session dreaming jobs are collected and handed off on exit.
-            //
-            // Note: `dreamingQueuePendingCount` returns nil when the dreaming queue
-            // was never mounted (no qualifying recall in this session AND no prior
-            // session backlog). In that case, no dreamer is spawned.
-            if let exitPending = await kit.dreamingQueuePendingCount(for: handle),
-               exitPending > 0,
-               Self.backgroundWorkerPermitted(posture, worker: "exit dreamer") {
-                Logging.stderr.log(
-                    "mootx01 serve: \(exitPending) dreaming job(s) pending at stdio exit — " +
-                    "spawning a detached dreamer to finish (T10 on-exit trigger)"
-                )
-                Self.spawnDetachedDream(estateName: estate.selectorArgument, environment: environment)
-            }
-
             Logging.stderr.log("mootx01 serve exiting (stdin closed)")
-        }
-    }
-
-    /// Whether this serve may launch a detached background worker (dreamer or
-    /// drainer). Every spawn site consults this before spawning; a frozen serve
-    /// answers false and says so once per site, so pending work is visible in
-    /// the log but never picked up by a process that outlives the snapshot.
-    static func backgroundWorkerPermitted(_ posture: EstatePosture, worker: String) -> Bool {
-        guard posture == .frozen else { return true }
-        Logging.stderr.log("mootx01 serve: frozen — \(worker) not spawned; pending work is left untouched")
-        return false
-    }
-
-    /// Launch a detached `mootx01 drain` to finish the encode queue after a
-    /// direct-open stdio serve exits (T5). The child `setsid`s itself into its own
-    /// session so a process-group kill aimed at this serve does not reach it; we
-    /// do not wait on it. The estate is passed via `--db` as the catalog's
-    /// selector argument: its name when registered, its directory when transient.
-    static func spawnDetachedDrain(estateName: String, environment: [String: String]) {
-        guard let executableURL = resolvedCurrentExecutableURL() else {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached drainer: could not resolve current executable path")
-            return
-        }
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["drain", "--db", estateName]
-        process.environment = environment
-        // Detach the child's stdio from our pipes.
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()  // fire-and-forget — never `waitUntilExit`
-        } catch {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached drainer: \(error)")
-        }
-    }
-
-    /// Launch a detached `mootx01 dream` to run one REM-ALPHA dreaming cycle
-    /// after a direct-open stdio serve exits or starts with pending dreaming
-    /// queue items. The child `setsid`s itself into its
-    /// own session so a process-group kill aimed at this serve does not reach it;
-    /// we do not wait on it. The estate is passed via `--db` as the catalog's
-    /// selector argument: its name when registered, its directory when transient.
-    ///
-    /// The dreamer acquires its own `"dreaming"` DrainLease — independent of the
-    /// encode drain's `"encode.drain.lease"` — so both can run concurrently
-    /// without blocking each other.
-    static func spawnDetachedDream(estateName: String, environment: [String: String]) {
-        guard let executableURL = resolvedCurrentExecutableURL() else {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: could not resolve current executable path")
-            return
-        }
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["dream", "--db", estateName]
-        process.environment = environment
-        // Detach the child's stdio from our pipes.
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()  // fire-and-forget — never `waitUntilExit`
-        } catch {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: \(error)")
         }
     }
 

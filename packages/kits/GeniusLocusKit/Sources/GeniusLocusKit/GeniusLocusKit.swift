@@ -323,6 +323,9 @@ public actor GeniusLocusKit {
     /// Duties this process has queued and not yet drained, per estate: the
     /// single-occupancy guard for `enqueueDuty` (DutyQueue.swift).
     internal var dutyQueued: [EstateHandle: Set<DutyKind>] = [:]
+    /// Host-supplied batch limits per estate (DutyLimits.swift); absent →
+    /// `DutyLimits()`.
+    internal var dutyLimitsByHandle: [EstateHandle: DutyLimits] = [:]
 
     // The encode QUEUE + DRAIN worker + per-estate HLC + at-least-once ingest
     // failure hook used to live here. They were relocated into CorpusKit: a

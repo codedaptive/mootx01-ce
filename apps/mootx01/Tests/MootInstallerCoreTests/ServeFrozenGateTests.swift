@@ -1,10 +1,9 @@
 // ServeFrozenGateTests.swift — source-shape guard for the frozen serve posture.
 //
 // `ServeCommand` lives in the executable target, which a test target cannot
-// import, so the gate is checked on the source text: every detached-worker
-// spawn in ServeCommand.swift must sit under a `backgroundWorkerPermitted`
-// guard, and the periodic dreamer must be created only for a live posture.
-// A new spawn site added without the guard fails here, not in a benchmark.
+// import, so the gates are checked on the source text: a stdio serve spawns
+// no background worker at all (§ DUTY_LIFECYCLE), and a frozen serve refuses
+// HTTP and forwarding.
 
 import Testing
 import Foundation
@@ -24,22 +23,15 @@ struct ServeFrozenGateTests {
             .map(String.init)
     }
 
-    @Test func everyDetachedWorkerSpawnIsGuarded() throws {
+    /// A stdio serve spawns no background process (GENIUSLOCUSKIT_SPEC
+    /// § DUTY_LIFECYCLE): no dreamer, no drainer, no periodic timer.
+    @Test func stdioServeSpawnsNoBackgroundWorker() throws {
         let lines = try serveCommandSource()
-        var spawnSites = 0
-        for (index, line) in lines.enumerated()
-        where line.contains("Self.spawnDetachedDream(") || line.contains("Self.spawnDetachedDrain(") {
-            spawnSites += 1
-            // The periodic dreamer's spawn sits inside a Task that is only
-            // created when the posture is live; its guard is the `posture ==
-            // .live ? Task` construction rather than a call-site check.
-            let window = lines[max(0, index - 40)..<index].joined(separator: "\n")
-            let guarded = window.contains("backgroundWorkerPermitted(posture")
-                || window.contains("posture == .live ? Task")
-            #expect(guarded, "spawn at ServeCommand.swift:\(index + 1) is not under the frozen gate")
+        let spawnSites = lines.filter {
+            $0.contains("spawnDetached") || $0.contains("periodicDream")
+                || $0.contains("backgroundWorkerPermitted")
         }
-        // Startup dreamer, periodic dreamer, exit drainer, exit dreamer.
-        #expect(spawnSites == 4, "expected 4 spawn sites, found \(spawnSites)")
+        #expect(spawnSites.isEmpty, "serve must not spawn or schedule a background worker: \(spawnSites)")
     }
 
     @Test func frozenRefusesHTTPAndForwarding() throws {

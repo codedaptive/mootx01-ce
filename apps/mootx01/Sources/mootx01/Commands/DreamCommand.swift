@@ -1,36 +1,21 @@
 // DreamCommand.swift
 //
-// On-demand REM-ALPHA dreaming cycle.
+// `mootx01 dream` — the one-shot dreaming COORDINATOR (GENIUSLOCUSKIT_SPEC
+// § DUTY_LIFECYCLE). Launched by an operator, a script, or the `drain`
+// finisher; a stdio `serve` spawns nothing.
 //
-// `mootx01 dream` is the sibling of `mootx01 drain`. It is the detached
-// dreaming finisher an stdio `serve` spawns in three situations:
+// Lifecycle:
+//   - `setsid` so a process-group kill aimed at a script does not reach it.
+//   - Takes the per-stream "dreaming" DrainLease and HEARTBEATS it for the
+//     whole run: a pass that pays a model-bound batch outlives the 15 s TTL,
+//     and a stale lease would let a second dreamer start on the same estate.
+//     If another dreamer holds a fresh lease it exits at once.
+//   - Pays ONE bounded fact-extraction batch (the resident's Signal 14 batch),
+//     runs the REM-ALPHA cycle if the dreaming queue holds jobs, then one
+//     bounded subject-backfill batch and one span-encode batch.
+//   - Never loops until settled. `mootx01 drain` is the settle loop.
 //
-//   1. Post-recall fork: after a recall that co-recalled ≥ 2 drawers and
-//      enqueued a dreaming job, so dream sessions trigger promptly after
-//      activity without waiting for the next autonomic governor tick.
-//   2. On-exit: when a direct-open stdio `serve` exits and the dreaming
-//      queue has pending items (mirrors the T5 drain on-exit pattern).
-//   3. On-startup/first-query: when `serve` opens an estate and finds pending
-//      dreaming items from a prior session (jobs in `queue.sqlite` that were
-//      not processed before the previous serve exited).
-//
-// When run by hand it behaves identically: one REM-ALPHA cycle per invocation.
-//
-// Detached lifecycle:
-//   - Calls `setsid()` to escape the parent's process group, surviving a
-//     SIGKILL aimed at the spawning serve.
-//   - Acquires the per-stream `"dreaming"` DrainLease (beside `queue.sqlite`).
-//     If another dreamer holds a fresh lease it exits immediately (stampede
-//     prevention — at most one dreamer per estate per stream at a time).
-//   - Probes `dreamingQueuePendingCount`: if nil or 0, no work to do, exits.
-//   - Runs ONE REM-ALPHA dreaming cycle via `DreamingDaemon.triggerDreamingCycle`.
-//   - Releases the lease and exits.
-//
-// THETA/BETA/OMEGA cycles (recall-driven dreaming, /) are NOT built here.
-// The seam comments below mark where they would plug in. Do not implement them
-// here — those missions have their own scope and PRs.
-//
-// macOS-only: same constraint as `ServeCommand` and `DrainCommand`.
+// macOS-only for the same reason as ServeCommand.
 
 #if os(macOS)
 import Foundation
@@ -47,6 +32,7 @@ import MootInstallerCore
 import MootEstateOpen
 import FactExtractionKit
 import MootFactExtractorActivation
+import MootProductIdentity
 import Darwin
 
 struct DreamCommand: AsyncParsableCommand {
@@ -104,6 +90,17 @@ struct DreamCommand: AsyncParsableCommand {
         // Registered cleanup: release the lease on any exit path so the next
         // dreamer can take over immediately rather than waiting out the TTL.
         defer { lease.release() }
+        // The coordinator holds the lease for its whole life and heartbeats it
+        // (§ DUTY_LIFECYCLE): a model-bound batch outlives the 15 s TTL, and a
+        // stale lease would let a second dreamer start on this estate.
+        let heartbeat = Task.detached {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(DrainLease.heartbeatInterval))
+                if Task.isCancelled { return }
+                lease.heartbeat(now: Date())
+            }
+        }
+        defer { heartbeat.cancel() }
 
         // Open the estate and wire the GLK semantic layer (corpus + vector store
         // + encode queue), exactly as DrainCommand does. wireGLKSubstores is
@@ -156,9 +153,9 @@ struct DreamCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // The detached/on-demand finisher owns one bounded Signal 14 pass while
-        // the estate is open. This runs before the REM queue gate so fact debt
-        // progresses even when no recall-driven dreaming job is pending.
+        // The coordinator pays ONE bounded Signal 14 batch while the estate is
+        // open, before the REM queue gate, so fact debt progresses even when no
+        // recall-driven dreaming job is pending. It never loops until settled.
         // `provisionedPreference` returns the key's default for an absent
         // value, so the only error it can raise is a storage error; that
         // error is fatal here and never substituted with a default, because
@@ -185,16 +182,21 @@ struct DreamCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 dream fatal: fact-extraction preference read failed: \(error)")
             throw ExitCode.failure
         }
+        // Batch limits come from the same settings directory (§ DUTY_LIFECYCLE).
+        await kit.configureDutyLimits(
+            DutyLimits(settings: MootProductIdentity.Settings.load(configurationDirectory: factSettingsDirectory)),
+            for: handle)
         if let extractor = factExtractor {
             let spec = extractor.spec
             let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
             do {
                 _ = try await kit.activateFactExtractor(
                     extractor, recipeID: recipeID, for: handle)
-                let settled = try await kit.payDutyUntilSettled(.factExtraction, in: handle, now: Date())
+                _ = try await kit.enqueueDuty(.factExtraction, in: handle, now: Date())
+                let settled = try await kit.drainDuty(.factExtraction, in: handle, now: Date()).unitsPaid
                 let state = try await kit.factExtractionWorkStatus(handle, now: Date())
                 Logging.stderr.log(
-                    "mootx01 dream: fact extraction cycle complete — " +
+                    "mootx01 dream: fact extraction batch complete — " +
                     "\(settled) source(s) settled; \(state.detail)")
             } catch {
                 Logging.stderr.log(
@@ -254,11 +256,8 @@ struct DreamCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 dream warning: policy restore failed: \(error) — using spec defaults")
         }
 
-        // Run one REM-ALPHA cycle against the pending dreaming queue.
-        // No heartbeat task: one dreaming cycle is fast (subsecond for normal
-        // estates) and well within the 15-second lease TTL. The resident
-        // AutonomicGovernor heartbeats its lease because it holds it for minutes;
-        // the one-shot dream command does not need to.
+        // Run one REM-ALPHA cycle against the pending dreaming queue. The
+        // dreaming lease is heartbeated by the task above for the whole run.
         // `triggerDreamingCycle(now:)` bypasses the timer-interval gate so this
         // on-demand invocation runs unconditionally — unlike `pump(now:)` which
         // would return nil if the interval has not elapsed.
@@ -284,9 +283,9 @@ struct DreamCommand: AsyncParsableCommand {
             // cycle error above.
             if await kit.subjectProducerPipeline(for: handle) != nil {
                 do {
-                    // One 256-item batch per pass, run as a claimed QueueKit job
-                    // (DutyQueue): the miniLLM writes subjects subsecond per item;
-                    // post-upgrade debt converges over hours on large estates.
+                    // One bounded batch per pass (DutyLimits.subjectBackfillBatch),
+                    // run as a claimed QueueKit job (DutyQueue); the settle loop
+                    // is `mootx01 drain`.
                     _ = try await kit.enqueueDuty(.subjectBackfill, in: handle, now: cycleNow)
                     let sweep = try await kit.drainDuty(.subjectBackfill, in: handle, now: cycleNow)
                     if sweep.jobsRun > 0 {

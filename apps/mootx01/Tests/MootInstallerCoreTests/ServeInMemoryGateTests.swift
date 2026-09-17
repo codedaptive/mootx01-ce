@@ -72,14 +72,10 @@ struct ServeInMemoryGateTests {
         }
     }
 
-    /// The periodic dreamer must be gated on `onDisk` so that in-memory stdio
-    /// serves do not start a timer that would try to spawn a dream process.
-    @Test func periodicDreamerGatedOnOnDisk() throws {
+    /// There is no periodic dreamer at all: a stdio serve spawns nothing
+    /// (§ DUTY_LIFECYCLE), so an in-memory serve has no timer to gate.
+    @Test func noPeriodicDreamerExists() throws {
         let lines = try serveCommandSource()
-        let found = lines.contains {
-            $0.contains("posture == .live && onDisk ? Task") ||
-            $0.contains("posture == .live && onDisk")
-        }
-        #expect(found, "periodic dreamer Task must be gated on `posture == .live && onDisk`")
+        #expect(!lines.contains { $0.contains("periodicDream") }, "no periodic dreamer may exist in ServeCommand")
     }
 }

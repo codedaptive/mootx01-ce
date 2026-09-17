@@ -1,29 +1,20 @@
-//! commands/dream.rs — T10 on-demand REM-ALPHA dreaming cycle finisher.
-//!
-//! `mootx01 dream` is the detached dreaming finisher an stdio `serve` spawns in
-//! three situations:
-//!
-//!   1. Post-recall fork: after a recall that co-recalled ≥ 2 drawers and
-//!      enqueued a dreaming job, so dream sessions trigger promptly after
-//!      activity without waiting for the next autonomic governor tick.
-//!   2. On-exit: when a direct-open stdio `serve` exits and the dreaming queue
-//!      has pending items (mirrors the T5 drain on-exit pattern).
-//!   3. On-startup: when `serve` opens an estate and finds pending dreaming
-//!      items from a prior session (jobs in `queue.sqlite` not yet processed).
+//! commands/dream.rs — `mootx01 dream`, the one-shot dreaming COORDINATOR
+//! (GENIUSLOCUSKIT_SPEC § DUTY_LIFECYCLE). Launched by an operator, a script,
+//! or the `drain` finisher; a stdio `serve` spawns nothing.
 //!
 //! Lifecycle:
-//!   - Calls `libc::setsid()` on Unix to escape the parent serve's process group,
-//!     surviving a SIGKILL aimed at the spawning serve.
+//!   - `libc::setsid()` on Unix so a process-group kill aimed at a script does
+//!     not reach it mid-batch.
 //!   - Acquires the per-stream `"dreaming"` DrainLease (beside `queue.sqlite`,
-//!     keyed by "dreaming" — independent of the encode "encode.drain.lease").
-//!     If another dreamer holds a fresh lease it exits immediately (stampede
-//!     prevention — at most one dreamer per estate per stream at a time).
-//!   - Delegates to `aria_mcp::dream_runner::run_one_dreaming_cycle` which:
-//!       - Force-mounts the dreaming queue so the persistent queue.sqlite backlog
-//!         is visible even after a process restart.
-//!       - Checks the pending count; exits if 0 or not mountable.
-//!       - Runs ONE REM-ALPHA cycle via `DreamingDaemon::run_cycle`.
-//!   - Releases the lease and exits.
+//!     independent of the encode lease) and HEARTBEATS it for the whole run: a
+//!     pass that pays a model-bound batch outlives DRAIN_LEASE_TTL_SECS, and a
+//!     stale lease would let a second dreamer start on the same estate. If
+//!     another dreamer holds a fresh lease it exits immediately.
+//!   - Delegates to `aria_mcp::dream_runner::run_one_dreaming_cycle`: one
+//!     bounded fact-extraction batch, the REM-ALPHA cycle if the queue holds
+//!     jobs, one subject-backfill batch, one span-encode batch. Never loops
+//!     until settled; `mootx01 drain` is the settle loop.
+//!   - Stops the heartbeat, releases the lease, exits.
 //!
 //! THETA/BETA/OMEGA cycles (T11/T12/T13) are NOT implemented. Seam comments in
 //! `dream_runner.rs` mark where they would plug in.
@@ -94,7 +85,7 @@ pub fn run(db: Option<String>) -> ExitCode {
     // Per-process instance token: UUID v4 nonce so a reused PID after a crash
     // cannot impersonate the prior lease holder.
     let instance_token = uuid::Uuid::new_v4().to_string();
-    let lease = DrainLease::new(&lease_dir, "dreaming", instance_token);
+    let lease = DrainLease::new(&lease_dir, "dreaming", instance_token.clone());
 
     // Acquire the dreaming lease. If another dreamer holds a fresh lease, exit
     // immediately — stampede prevention; the other dreamer will process the queue.
@@ -107,6 +98,22 @@ pub fn run(db: Option<String>) -> ExitCode {
     // file if this process still holds it (owner-check), so it is safe to call
     // unconditionally.
     let _guard = LeaseGuard(&lease);
+    // Heartbeat for the whole run (§ DUTY_LIFECYCLE). The thread writes the
+    // same owner token through a twin handle, so ownership never changes.
+    let heartbeat_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let heartbeat = {
+        let stop = std::sync::Arc::clone(&heartbeat_stop);
+        let twin = DrainLease::new(&lease_dir, "dreaming", instance_token);
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs_f64(queuekit::DRAIN_LEASE_HEARTBEAT_SECS));
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                twin.heartbeat(aria_mcp::dream_runner::wall_now_epoch_secs());
+            }
+        })
+    };
 
     // Delegate all dreaming logic to aria_mcp::dream_runner. The epoch-seconds
     // timestamp is read ONCE here (the command boundary) and threaded through
@@ -131,12 +138,14 @@ pub fn run(db: Option<String>) -> ExitCode {
         }
         Err(e) => {
             eprintln!("mootx01 dream: cycle error: {e}");
-            // Non-fatal at the command level: the lease will be released and the
-            // next dreamer can retry. Don't return FAILURE — callers (serve's
-            // spawn-and-forget) never check our exit code.
+            // Non-fatal at the command level: the lease is released and the
+            // next dreamer can retry.
         }
     }
 
+    // Stop the heartbeat before the guard releases the lease.
+    heartbeat_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = heartbeat.join();
     ExitCode::from(exit::OK)
 }
 
