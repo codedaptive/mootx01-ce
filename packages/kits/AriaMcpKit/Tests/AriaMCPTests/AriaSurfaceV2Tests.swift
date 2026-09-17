@@ -857,10 +857,15 @@ struct AriaSurfaceV2Tests {
         let drains = try await dispatcher.dispatch(name: "moot_drain_status", arguments: .object([:]))
         let drainData = drains.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
         #expect((drainData.map { Set($0.keys) } ?? Set<String>()) == Set(["drains"]))
-        // fact_extraction is always rendered; an empty estate owes nothing.
-        #expect(drainData?["drains"] == .array([
-            .object(["name": .string("fact_extraction"), "state": .string("idle"), "pending": .integer(0)])
-        ]))
+        // fact_extraction is always rendered; an empty estate owes nothing and
+        // has rejected nothing. `detail` carries the kit's outcome counts.
+        let factLane = drainData?["drains"]?.arrayValue?.first?.objectValue
+        #expect(drainData?["drains"]?.arrayValue?.count == 1)
+        #expect(factLane?["name"] == .string("fact_extraction"))
+        #expect(factLane?["state"] == .string("idle"))
+        #expect(factLane?["pending"] == .integer(0))
+        #expect(factLane?["rejected"] == .integer(0))
+        #expect(factLane?["detail"]?.stringValue?.contains("ready: 0") == true)
 
         let rebuild = try await dispatcher.dispatch(name: "moot_rebuild_status", arguments: .object([:]))
         let rebuildData = rebuild.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue

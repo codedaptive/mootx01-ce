@@ -93,8 +93,9 @@ public actor FactExtractorModelStore {
         }
     }
 
-    /// Activating a recipe clears bit 28 on every carrier. Old KGFacts stay
-    /// auditable while the duty deterministically supersedes their projection.
+    /// Activating a recipe clears bits 28 and 29 on every carrier (a rejection
+    /// under the previous recipe is owed again under the new one). Old KGFacts
+    /// stay auditable while the duty deterministically supersedes their projection.
     @discardableResult
     public func activate(recipeID: String) async throws -> Int {
         try await storage.transaction(isolation: .serializable) { txn in
@@ -130,7 +131,8 @@ public actor FactExtractorModelStore {
             cleared += try await rowStore.update(
                 table: "drawers",
                 values: ["operationalBitmap": .bitmap(
-                    bitmap & ~DrawerFeatureFlags.factsExtracted.rawValue)],
+                    bitmap & ~(DrawerFeatureFlags.factsExtracted.rawValue
+                               | DrawerFeatureFlags.factsRejected.rawValue))],
                 where: .eq(Column(table: "drawers", name: "id"), .text(id)))
         }
         return cleared
