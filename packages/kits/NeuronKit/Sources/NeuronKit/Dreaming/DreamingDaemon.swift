@@ -895,10 +895,25 @@ public actor DreamingDaemon {
                             ],
                             ts: now.timeIntervalSince1970
                         ))
-                        try await probe.reindex(now: now)
-                        // Advance baseline to the vocabulary at retrain time so the
-                        // next window measures growth from this retrain.
-                        lastReindexVocab = liveVocab
+                        let completed = try await probe.reindex(now: now)
+                        // F11: a DEGRADED retrain (a backstop was reached, the
+                        // serving basis was kept) must not advance the baseline
+                        // — the drift that hit the backstop would otherwise be
+                        // silently accepted as caught up, and the next window
+                        // would measure growth from a basis that was never
+                        // actually retrained. Advance only on a full retrain,
+                        // to the vocabulary at retrain time, so the next window
+                        // measures growth from this retrain.
+                        if completed {
+                            lastReindexVocab = liveVocab
+                        } else {
+                            Intellectus.report(.metric(
+                                name: "neuronkit.dream.auto_reindex_degraded",
+                                value: Double(delta),
+                                tags: ["cycle": "\(cycleCount)", "live_vocab": "\(liveVocab)"],
+                                ts: now.timeIntervalSince1970
+                            ))
+                        }
                         // ALPHA HNSW note: no separate HNSW clear fires here.
                         // probe.reindex() shadow-swaps the corpus internally —
                         // VectorStore.publishShadowGeneration rebuilds the HNSW
@@ -1083,18 +1098,23 @@ public actor DreamingDaemon {
         }
 
         do {
-            try await hook.retrain(now: now)
+            let completed = try await hook.retrain(now: now)
             // Advance the shared vocabulary baseline after a successful THETA
             // retrain so ALPHA's next delta window starts from this retrain point.
             // Without a probe (vocabAtCheckTime == nil), lastReindexVocab is
             // managed exclusively by ALPHA and must not be touched here.
-            if let lv = vocabAtCheckTime {
+            // F11: a DEGRADED retrain (`completed == false` — a backstop was
+            // reached, the serving basis was kept) must not advance the
+            // baseline either, for the same reason as the ALPHA gate above:
+            // the drift that hit the backstop must still be there on the next
+            // cycle, not silently accepted as caught up.
+            if completed, let lv = vocabAtCheckTime {
                 lastReindexVocab = lv
             }
             Intellectus.report(.metric(
-                name: "neuronkit.dream.theta_retrain",
+                name: completed ? "neuronkit.dream.theta_retrain" : "neuronkit.dream.theta_retrain_degraded",
                 value: 1.0,
-                tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                tags: ["status": completed ? "ok" : "degraded", "cycle": "\(cycleCount)"],
                 ts: now.timeIntervalSince1970
             ))
         } catch {

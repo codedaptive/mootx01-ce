@@ -326,6 +326,18 @@ public actor GeniusLocusKit {
     /// Host-supplied batch limits per estate (DutyLimits.swift); absent →
     /// `DutyLimits()`.
     internal var dutyLimitsByHandle: [EstateHandle: DutyLimits] = [:]
+    /// F11: whether the MOST RECENT `reindexCorpus(handle:now:)` call for
+    /// this estate fully completed (`true`) or was DEGRADED — a document or
+    /// time backstop was reached and the serving basis was kept (`false`).
+    /// `EstateThetaBasisRetrainHook.retrain(now:)` (NeuronKit) reads this
+    /// after `payDutyUntilSettled(.retrainBasis, ...)` returns, because that
+    /// call's own return value (units paid) cannot carry the distinction —
+    /// it is the seam that lets the THETA vocabulary-baseline gate skip
+    /// advancing on a degraded retrain without threading a new return type
+    /// through the shared duty-queue machinery. Absent (estate never
+    /// retrained, or LocusOnly with no corpus) reads as `true`: nothing was
+    /// skipped because there was nothing to retrain.
+    internal var lastReindexCompleted: [EstateHandle: Bool] = [:]
 
     // The encode QUEUE + DRAIN worker + per-estate HLC + at-least-once ingest
     // failure hook used to live here. They were relocated into CorpusKit: a
