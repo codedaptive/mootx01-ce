@@ -1,12 +1,14 @@
 // DrainCommand.swift
 //
-// Detached encode-drain finisher (T5). When an stdio `serve` that opened an
-// estate DIRECTLY (no resident to forward to) exits — the client closed stdin,
-// or a one-shot `query` terminated it — any encode work still queued would die
-// with the process. `serve` spawns this command, detached, to finish the job: it
-// opens the estate, mounts the corpus (whose lease-gated worker drains the
-// persisted queue), waits until the queue is empty, then exits. The T3 lease
-// keeps it from double-draining against a resident or another finisher.
+// `mootx01 drain` — the FINISHER (GENIUSLOCUSKIT_SPEC § DUTY_LIFECYCLE). Run
+// attached by an operator or a script; a stdio `serve` spawns nothing. It opens
+// the estate, mounts the corpus (whose lease-gated worker drains the persisted
+// encode queue), waits until that queue is empty, then pays the settle loop
+// for every row-debt duty — span encode, subject backfill, fact extraction —
+// until each lane owes nothing or a batch pays nothing, one progress line per
+// batch on stderr. When it exits, nothing it started is still running. The T3
+// encode lease keeps it from double-draining against a resident; each duty
+// batch runs under its own claimed queue job.
 //
 // macOS-only for the same reason as ServeCommand (AriaMCP / GeniusLocusKit /
 // SQLite are `.macOS(.v15)`); the Rust port carries the Windows/Linux drainer.
@@ -22,6 +24,9 @@ import PersistenceKit
 import PersistenceKitSQLite
 import MootInstallerCore
 import MootEstateOpen
+import MootProductIdentity
+import FactExtractionKit
+import MootFactExtractorActivation
 import Darwin
 
 struct DrainCommand: AsyncParsableCommand {
@@ -37,10 +42,8 @@ struct DrainCommand: AsyncParsableCommand {
     private static let maxWait: TimeInterval = 3600
 
     func run() async throws {
-        // Detach into our own session so a process-group kill aimed at the parent
-        // `serve` (e.g. the MCP client tearing down its child group) does not also
-        // kill this finisher. A spawned child already survives the parent's pid
-        // death on Unix; `setsid` hardens against group signals.
+        // Own session: a process-group kill aimed at the script that ran this
+        // finisher does not reach it mid-batch.
         setsid()
 
         // The catalog resolves `--db` exactly as serve did when it launched us:
@@ -110,6 +113,37 @@ struct DrainCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        // The finisher pays every row-debt duty to settlement, so it activates
+        // what the resident and the coordinator activate: the batch limits, the
+        // estate's selected fact extractor, and the subject rider. A provider
+        // that cannot be activated leaves its lane owed and says so.
+        let factSettingsDirectory = estate.kind == .registered
+            ? EstateCatalog.configurationDirectory : estate.directory
+        await kit.configureDutyLimits(
+            DutyLimits(settings: MootProductIdentity.Settings.load(configurationDirectory: factSettingsDirectory)),
+            for: handle)
+        do {
+            let factExtractionSetting = try await kit.provisionedPreference(.factExtraction, for: handle)
+            let factExtractorSetting = try await kit.provisionedPreference(.factExtractor, for: handle)
+            if let workerExecutableURL = ServeCommand.resolvedCurrentExecutableURL(),
+               let extractor = FactExtractorBuilder.build(
+                   masterSetting: factExtractionSetting, extractorSetting: factExtractorSetting,
+                   settingsDirectory: factSettingsDirectory, workerExecutableURL: workerExecutableURL) {
+                let spec = extractor.spec
+                _ = try await kit.activateFactExtractor(
+                    extractor, recipeID: "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)", for: handle)
+            }
+        } catch {
+            Logging.stderr.log("mootx01 drain: fact extraction not activated — \(error); its lane stays owed")
+        }
+        if ToolProjection.subjectRiderEnabled {
+            do {
+                try await kit.enableAppleSubjectRider(for: handle)
+            } catch {
+                Logging.stderr.log("mootx01 drain: subject rider unavailable — continuing without it (\(error))")
+            }
+        }
+
         // Poll the drain status (the same surface as `moot_drain_status`) until
         // the ENCODE drain is idle — the queue is empty whether this process
         // drained it (held the lease) or a resident did. Capped so a wedged
@@ -128,7 +162,22 @@ struct DrainCommand: AsyncParsableCommand {
             if DrainStatus.encodeSettled(drains) { break }
             try? await Task.sleep(for: .seconds(1))
         }
-        Logging.stderr.log("mootx01 drain: encode queue settled for estate '\(estateName)' — exiting")
+        Logging.stderr.log("mootx01 drain: encode queue settled for estate '\(estateName)'")
+
+        // The settle loop per row-debt duty (§ DUTY_LIFECYCLE): enqueue and
+        // drain until the lane owes nothing or a batch pays nothing. One
+        // progress line per batch so a script can watch it move.
+        for kind in [DutyKind.spanEncode, .subjectBackfill, .factExtraction] {
+            do {
+                _ = try await kit.payDutyUntilSettled(kind, in: handle, now: Date()) { report in
+                    Logging.stderr.log(
+                        "mootx01 drain: \(kind.rawValue) — \(report.unitsPaid) paid, \(report.remainingDebt) remaining")
+                }
+            } catch {
+                Logging.stderr.log("mootx01 drain warning: \(kind.rawValue) settle error: \(error) — continuing")
+            }
+        }
+        Logging.stderr.log("mootx01 drain: duties settled for estate '\(estateName)' — exiting")
     }
 }
 #endif
