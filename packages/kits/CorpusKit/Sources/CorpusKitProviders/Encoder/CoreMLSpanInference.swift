@@ -170,6 +170,19 @@ public enum CoreMLSpanInference {
         throw EncoderError.modelUnavailable("\(directory.path): no .mlmodelc / .mlpackage / .mlmodel")
     }
 
+    /// Write `values` into a `[1, L]` Int32 multi-array through its storage.
+    /// The last axis is the token axis; its stride is honoured so a
+    /// non-contiguous layout still lands each value at its own index.
+    private static func fill(_ array: MLMultiArray, with values: [Int32]) {
+        array.withUnsafeMutableBytes { buffer, strides in
+            let base = buffer.baseAddress!.assumingMemoryBound(to: Int32.self)
+            let stride = strides[1]
+            for i in 0..<values.count {
+                base[i * stride] = values[i]
+            }
+        }
+    }
+
     /// One prediction. Builds the `[1, L]` Int32 inputs the model declares,
     /// runs it, and reduces the first multi-array output to `dim` floats.
     private static func predict(
@@ -185,11 +198,14 @@ public enum CoreMLSpanInference {
             let idsArray = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .int32)
             let maskArray = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .int32)
             let typesArray = try MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .int32)
-            for i in 0..<length {
-                idsArray[i] = NSNumber(value: prepared.ids[i])
-                maskArray[i] = NSNumber(value: prepared.attentionMask[i])
-                typesArray[i] = NSNumber(value: prepared.tokenTypeIDs[i])
-            }
+            // ADR-028 E2: the three inputs are filled through their raw
+            // storage, one memcpy-shaped loop each. The per-element NSNumber
+            // subscript boxes every id and re-validates the index on each
+            // store; at 512 tokens times three inputs per span that is the
+            // feeding cost, not the model. The values written are identical.
+            fill(idsArray, with: prepared.ids)
+            fill(maskArray, with: prepared.attentionMask)
+            fill(typesArray, with: prepared.tokenTypeIDs)
             features[inputIDsName] = MLFeatureValue(multiArray: idsArray)
             if box.inputNames.contains(attentionMaskName) {
                 features[attentionMaskName] = MLFeatureValue(multiArray: maskArray)
