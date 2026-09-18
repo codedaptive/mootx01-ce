@@ -11,13 +11,11 @@ import Testing
 import CorpusKit
 @testable import CorpusKitProviders
 
-#if canImport(CoreAI)
 @Suite("CoreAISpanInference input planning")
 struct CoreAISpanInferenceTests {
 
     @Test("rows pad to the chunk's longest list, not the model maximum")
     func rowsPadToLongest() throws {
-        guard #available(macOS 27.0, iOS 27.0, *) else { return }
         let batch = CoreAISpanInference.batchInputs(
             tokenLists: [[101, 7592, 102], [101, 102], [101, 2088, 2003, 3835, 102]], padTokenID: 0)
         #expect(batch.rows == 3)
@@ -32,22 +30,19 @@ struct CoreAISpanInferenceTests {
 
     @Test("an empty token list becomes one masked pad position")
     func emptyListGetsOnePadPosition() throws {
-        guard #available(macOS 27.0, iOS 27.0, *) else { return }
         let batch = CoreAISpanInference.batchInputs(tokenLists: [[]], padTokenID: 7)
         #expect(batch == CoreAISpanInference.BatchInputs(rows: 1, length: 1, ids: [7], mask: [0]))
     }
 
-    @Test("a directory without an .aimodel selects the CoreML floor")
-    func noAssetMeansCoreMLFloor() throws {
-        guard #available(macOS 27.0, iOS 27.0, *) else { return }
+    @Test("a directory without an .aimodel is modelUnavailable, named by the seam")
+    func noAssetIsModelUnavailable() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("coreai-seam-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        #expect(!CoreAISpanInference.assetExists(in: dir))
+        #expect(throws: EncoderError.self) { try CoreAISpanInference.locateAsset(in: dir) }
         try FileManager.default.createDirectory(
             at: dir.appendingPathComponent("ArcticEmbedS.aimodel"), withIntermediateDirectories: true)
-        #expect(CoreAISpanInference.assetExists(in: dir))
+        #expect(try CoreAISpanInference.locateAsset(in: dir).lastPathComponent == "ArcticEmbedS.aimodel")
     }
 }
-#endif

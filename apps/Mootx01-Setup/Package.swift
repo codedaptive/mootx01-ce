@@ -17,7 +17,7 @@ let package = Package(
     // Platform floor matches apps/mootx01 (MootInstallerCore lives in that
     // package and inherits its platform constraint).
     platforms: [
-        .macOS(.v26),
+        .macOS("27.0"),
     ],
     dependencies: [
         .package(name: "mootx01", path: "../mootx01"),

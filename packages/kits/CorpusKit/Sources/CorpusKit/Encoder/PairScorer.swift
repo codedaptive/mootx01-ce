@@ -5,7 +5,7 @@
 // that runs a pair-logit inference seam in batches and checks that every
 // span came back with exactly one finite logit.
 //
-// Logit values from a real model are allowed to differ by port (CoreML vs
+// Logit values from a real model are allowed to differ by port (Core AI vs
 // candle); the SHAPE of this contract is what the two ports keep identical.
 // The scorer never sorts, never fuses and never truncates the span list:
 // selection and fusion belong to the stage in GeniusLocusKit.
@@ -37,11 +37,11 @@ public protocol PairScorer: Sendable {
 /// tokenizer stays with the runtime that owns the vocabulary, exactly as
 /// `SpanInference` does for the sentence encoder.
 public protocol PairInference: Sendable {
-    /// The runtime's name (`coreml`, `candle`, or a test double's own name).
+    /// The runtime's name (`coreai`, `candle`, or a test double's own name).
     var backend: String { get }
     /// The compiled fixed sequence length for this inference runtime, when
-    /// one is known. `CoreMLPairInference` reads this from the model's
-    /// `input_ids` shape constraint; the Rust candle backend reads
+    /// one is known. The Core AI asset is dynamic and reports `nil`; the
+    /// Rust candle backend reads
     /// `max_position_embeddings` from `config.json`. Both are exposed here so
     /// `PairScorerFactory` can clamp the tokenizer to the tighter limit
     /// without loading the model a second time. Returns `nil` when no fixed
