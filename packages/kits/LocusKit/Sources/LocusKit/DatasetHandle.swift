@@ -297,10 +297,14 @@ public extension Estate {
             displayName: wingName, parentId: root.id, now: now)
         let roomNode = try await nodeStore.createNode(
             displayName: room, parentId: wingNode.id, now: now)
+        // Chest placement (ADR-026, spec § 12): a dataset handle is a drawer
+        // like any other and is placed by its content key.
+        let parentNodeId = try await nodeStore.placementParent(
+            roomId: roomNode.id, content: contentJSON)
 
         let drawer = Drawer(
             content: contentJSON,
-            parentNodeId: roomNode.id.uuidString,
+            parentNodeId: parentNodeId.uuidString,
             addedBy: addedBy,
             filedAt: now,
             eventTime: now,
