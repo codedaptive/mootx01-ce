@@ -3883,6 +3883,40 @@ mod tests {
         assert_eq!(entry.fingerprint.provenance, expected_prov);
     }
 
+    /// ADR-026: a chest is a depth-3 node under a room. A room read is the
+    /// subtree (drawers on the room itself plus every chest), and a drawer
+    /// parented to a chest still resolves to (wing, room).
+    #[test]
+    fn room_read_covers_chests_and_a_chest_resolves_to_its_room() {
+        let estate = make_estate();
+        let on_room = basic_capture(&estate, "on the room", "study");
+        let names = estate.store.resolve_node_names(&[on_room.parent_node_id.clone()]).unwrap();
+        let (wing, room) = names.get(&on_room.parent_node_id).cloned().expect("room names");
+        assert_eq!(room, "study");
+        let node_store = estate.node_store().expect("node store").clone();
+        let room_node = Uuid::parse_str(&on_room.parent_node_id).expect("room node id");
+        let chest = node_store.create_node("chest-1", room_node, 1_700_000_002_000).unwrap();
+        assert_eq!(chest.depth, 3);
+        let in_chest = Drawer::new(
+            Uuid::new_v4().to_string(), "in the chest", chest.id.to_string(), "alice",
+            1_700_000_003_000, "test-v1",
+        );
+        estate.store.add_drawer(&in_chest, 1_700_000_003_000).unwrap();
+        basic_capture(&estate, "elsewhere", "kitchen");
+
+        let read: Vec<String> = estate
+            .store
+            .drawers_in_wing_room(&wing, "study")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(read, vec![on_room.id.clone(), in_chest.id.clone()], "the room read is the subtree, in filed_at order");
+
+        let resolved = estate.store.resolve_node_names(&[chest.id.to_string()]).unwrap();
+        assert_eq!(resolved.get(&chest.id.to_string()).cloned(), Some((wing.clone(), "study".to_string())));
+    }
+
     #[test]
     fn capture_distinct_rooms_yield_distinct_room_aggregates() {
         // Two rooms each get their own room-level aggregate; the wing-rollup
