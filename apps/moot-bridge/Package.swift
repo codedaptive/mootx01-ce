@@ -24,7 +24,7 @@ import PackageDescription
 // project-wide AI-capable OS floor.
 let package = Package(
     name: "moot-bridge",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS("27.0")],
     products: [
         .executable(name: "moot-bridge", targets: ["moot-bridge"]),
     ],

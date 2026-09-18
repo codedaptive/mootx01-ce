@@ -29,6 +29,10 @@ enum PairScorerLoad {
 enum PairScorerSlot: Sendable {
     /// The scorer loaded (or was registered by a host or test).
     case loaded(any PairScorer)
+    /// A load is in flight (the Core AI load is asynchronous). A second
+    /// apply that arrives meanwhile awaits the same task, so exactly one
+    /// cold load happens per estate.
+    case loading(Task<any PairScorer, any Error>)
     /// The load failed; the reason is a `CrossEncoderStage.Reason` value.
     case unavailable(String)
 }
@@ -67,7 +71,7 @@ public extension GeniusLocusKit {
 #if MOOTX01_CROSS_ENCODER
     /// Install a test scorer factory. When set, `pairScorer(profile:for:)` calls
     /// this closure instead of `PairScorerFactory.make`: the seam takes precedence
-    /// over the resolver, which allows tests to count cold loads without CoreML
+    /// over the resolver, which allows tests to count cold loads without model
     /// assets. Production code never calls this.
     func setTestPairScorerMaker(_ factory: @escaping @Sendable (CrossEncoderProfile, URL) throws -> any PairScorer) {
         testPairScorerMaker = factory
@@ -123,16 +127,21 @@ public extension GeniusLocusKit {
     /// The scorer for `profile` on `handle`, loading it on the first call.
     ///
     /// Returns the scorer and whether THIS call loaded it (`coldLoad`), or
-    /// the `CrossEncoderStage.Reason` the stage reports. Because this method
-    /// is synchronous and runs under the actor, the slot check and insert
-    /// happen without any suspension point between them, so two concurrent
-    /// first applies in `runCrossEncoderStage` serialize through the actor and
-    /// only one produces `coldLoad == true`. A failed load is cached as
-    /// `.unavailable` until `close`.
-    internal func pairScorer(profile: CrossEncoderProfile, for handle: EstateHandle) -> PairScorerLoad {
+    /// the `CrossEncoderStage.Reason` the stage reports. The Core AI load is
+    /// asynchronous, so the slot is set to `.loading` under the actor before
+    /// the first suspension: a second concurrent first apply in
+    /// `runCrossEncoderStage` finds the task and awaits it, and only one call
+    /// produces `coldLoad == true`. A failed load is cached as `.unavailable`
+    /// until `close`.
+    internal func pairScorer(profile: CrossEncoderProfile, for handle: EstateHandle) async -> PairScorerLoad {
         switch pairScorers[handle] {
         case .loaded(let scorer):
             return .loaded(scorer: scorer, coldLoad: false)
+        case .loading(let task):
+            if let scorer = try? await task.value {
+                return .loaded(scorer: scorer, coldLoad: false)
+            }
+            return .unavailable(CrossEncoderStage.Reason.modelUnavailable)
         case .unavailable(let reason):
             return .unavailable(reason)
         case nil:
@@ -142,10 +151,8 @@ public extension GeniusLocusKit {
         // Test seam: check before the resolver so tests that inject a counting
         // factory never need real model assets on disk. Matches Rust coordinator.rs,
         // which checks test_pair_scorer_maker before model_directory_resolver.
-        // The method is synchronous under the actor so the slot check above
-        // and the insert below happen without a suspension point — exactly one
-        // concurrent first-apply loads the scorer (coldLoad == true) and the
-        // other hits the already-filled slot (coldLoad == false).
+        // The seam is synchronous, so the slot check above and the insert
+        // below have no suspension point between them.
         // Production code never sets testPairScorerMaker.
         if let seam = testPairScorerMaker {
             do {
@@ -172,8 +179,12 @@ public extension GeniusLocusKit {
             pairScorers[handle] = .unavailable(CrossEncoderStage.Reason.modelUnavailable)
             return .unavailable(CrossEncoderStage.Reason.modelUnavailable)
         }
+        // Mark the slot before the first suspension so a concurrent apply
+        // awaits this load instead of starting a second one.
+        let task = Task { try await PairScorerFactory.make(profile: profile, modelDirectory: directory) }
+        pairScorers[handle] = .loading(task)
         do {
-            let scorer = try PairScorerFactory.make(profile: profile, modelDirectory: directory)
+            let scorer = try await task.value
             pairScorers[handle] = .loaded(scorer)
             Self.crossEncoderLog.info(
                 "cross encoder: loaded \(profile.modelID, privacy: .public) (\(scorer.backend, privacy: .public)) from \(directory.path, privacy: .public) (estate: \(handle.estateUUID, privacy: .public))"
@@ -317,7 +328,7 @@ extension GeniusLocusKit {
 
         let scorer: any PairScorer
         let coldLoad: Bool
-        switch pairScorer(profile: profile, for: handle) {
+        switch await pairScorer(profile: profile, for: handle) {
         case .loaded(let value, let cold):
             scorer = value
             coldLoad = cold

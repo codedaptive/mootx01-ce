@@ -42,7 +42,7 @@ public enum Pooling: String, Sendable, Equatable, Codable {
 public struct EncoderModelRow: Sendable, Equatable, Codable {
     /// `<model>-w<window_words>`, e.g. `minilm-l6-v2-w60`. Primary key.
     public let modelID: String
-    /// The weights revision (HF revision short hash or the CoreML bundle
+    /// The weights revision (HF revision short hash or the Apple asset
     /// version string). A weights change is a new version and a re-index.
     public let modelVersion: String
     /// Embedding dimension (384 for all-MiniLM-L6-v2).

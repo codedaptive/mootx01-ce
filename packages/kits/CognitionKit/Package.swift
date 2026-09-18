@@ -31,8 +31,8 @@ let package = Package(
     platforms: [
         // Aligned with GeniusLocusKit / NeuronKit (macOS 15 / iOS 18)
         // so the estate-handle and reasoning dependencies resolve cleanly.
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(

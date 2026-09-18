@@ -21,7 +21,7 @@ import PackageDescription
 
 let package = Package(
     name: "SynapseKit",
-    platforms: [.macOS(.v26), .iOS(.v26)],
+    platforms: [.macOS("27.0"), .iOS("27.0")],
     products: [.library(name: "SynapseKit", targets: ["SynapseKit"])],
     dependencies: [
         .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),

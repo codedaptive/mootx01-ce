@@ -16,8 +16,8 @@ import PackageDescription
 let package = Package(
     name: "MootProductIdentity",
     platforms: [
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(name: "MootProductIdentity", targets: ["MootProductIdentity"]),

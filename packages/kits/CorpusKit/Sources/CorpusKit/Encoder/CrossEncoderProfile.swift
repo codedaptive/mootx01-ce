@@ -24,7 +24,7 @@ public struct CrossEncoderProfile: Sendable, Equatable, Codable {
     /// Packaged identity, e.g. `ms-marco-minilm-l6-cross-v1`. Names the
     /// model directory under `<configuration>/models/<modelID>/`.
     public let modelID: String
-    /// Weights revision: HF revision short hash or the CoreML bundle version.
+    /// Weights revision: HF revision short hash or the Apple asset version.
     public let modelVersion: String
     /// SHA-256 hex digest of the vendored `vocab.txt`; the factory refuses a
     /// model directory whose vocab hashes differently.
@@ -75,7 +75,7 @@ public struct CrossEncoderProfile: Sendable, Equatable, Codable {
         self.rrfK = rrfK
     }
 
-    /// Base name of the packaged model artifact: `<artifactName>.mlmodelc`
+    /// Base name of the packaged model artifact: `<artifactName>.aimodel`
     /// on Apple platforms; the Rust runtime reads the fixed HF file triple
     /// instead and does not use it. Derived from `modelID` so a second
     /// packaged profile never collides with the first.

@@ -17,8 +17,8 @@ import PackageDescription
 let package = Package(
     name: "aria-mcp-server",
     platforms: [
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .executable(name: "aria-mcp", targets: ["aria-mcp"]),

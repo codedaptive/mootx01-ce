@@ -1,7 +1,7 @@
 #if APPLE_ENCODERS
 // Apple encoder provider — compiled only when the AppleEncoders trait is on.
 // Retained in case Apple improves the NaturalLanguage framework, or for a device class
-// that cannot host a CoreML encoder.
+// that cannot host a Core AI encoder.
 // Off by default; held for v1.2 iOS and Apple cloud compute. See Package.swift.
 // NLEmbeddingProvider.swift
 //
@@ -11,7 +11,7 @@
 // Apple sentence similarity model; guarded by `#if canImport(NaturalLanguage)`.
 // No model asset download required: the embedding model ships with the
 // OS. This makes it the "cheap, immediate" Apple-native comparative
-// surface (vs. the CoreML bring-your-own-model path in the named
+// surface (vs. the Core AI bring-your-own-model path in the named
 // EmbeddingModel cases).
 //
 // ## Design
@@ -84,7 +84,7 @@ public let nlEmbeddingProjectionSeed: UInt64 = 0x4150_4E4C_454D_4231
 /// Apple NaturalLanguage sentence embedding provider.
 ///
 /// Uses the OS-bundled `NLEmbedding.sentenceEmbedding(for:)` model.
-/// No external model asset, no training step, no CoreML dependency:
+/// No external model asset, no training step, no model dependency:
 /// the model ships with macOS 15+/iOS 18+ and is available immediately.
 ///
 /// This is an item-local, stateless provider — the same text always

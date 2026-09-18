@@ -9,21 +9,16 @@
 // `tools/encoder-models/export-coreai.py`, so a padded row cannot be pooled
 // wrongly here and nothing is reduced on this side.
 //
-// macOS 27 and iOS 27 only. `SpanEncoderFactory` picks this seam when the
-// framework is present and the directory holds an `.aimodel`; otherwise the
-// CoreML seam (`CoreMLSpanInference`, one text per prediction) stays the
-// floor for macOS 15 and iOS 18. Two assets, one model id: the vectors the
-// two seams return for one text are compared in the ADR-028 record, not
-// assumed equal.
+// The one Apple seam (ADR-029): the product floor is macOS 27 and iOS 27,
+// where Core AI is present. ADR-028 records the measured agreement with the
+// retired CoreML seam (float32 noise) and the clock.
 
 import Foundation
 import CorpusKit
 
-#if canImport(CoreAI)
 import CoreAI
 
 /// Core AI-backed pooled inference over a batch of texts.
-@available(macOS 27.0, iOS 27.0, *)
 public final class CoreAISpanInference: SpanInference, @unchecked Sendable {
 
     /// The input and output names the export fixes (`export-coreai.py`).
@@ -50,7 +45,6 @@ public final class CoreAISpanInference: SpanInference, @unchecked Sendable {
         do {
             // A 33M-parameter encoder with dynamic shapes; the Neural Engine is
             // the preferred unit, the runtime falls back where a graph cannot
-            // run there. The CoreML floor runs with every unit allowed.
             model = try await AIModel(
                 contentsOf: assetURL, options: SpecializationOptions(preferredComputeUnitKind: .neuralEngine))
         } catch {
@@ -89,11 +83,6 @@ public final class CoreAISpanInference: SpanInference, @unchecked Sendable {
         return asset
     }
 
-    /// True when `directory` holds an `.aimodel`; the factory's selector.
-    public static func assetExists(in directory: URL) -> Bool {
-        (try? locateAsset(in: directory)) != nil
-    }
-
     public func pooledBatch(_ texts: [String]) async throws -> [[Float]] {
         var out = [[Float]](repeating: [], count: texts.count)
         // Empty text has no vector (the `SpanInference` contract); only the
@@ -119,7 +108,7 @@ public final class CoreAISpanInference: SpanInference, @unchecked Sendable {
     /// The `[B, L]` row-major buffers for one chunk: every row padded to the
     /// chunk's longest token list with `padTokenID`, attention 1 on real
     /// tokens and 0 on the pad. A token list that is empty (text with no
-    /// tokens) becomes one masked pad token, as the CoreML seam does, so
+    /// tokens) becomes one masked pad token, so
     /// every row has a position for the model to read.
     struct BatchInputs: Equatable {
         let rows: Int
@@ -203,4 +192,3 @@ public final class CoreAISpanInference: SpanInference, @unchecked Sendable {
         return array
     }
 }
-#endif

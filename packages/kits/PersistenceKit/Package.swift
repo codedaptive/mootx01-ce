@@ -29,8 +29,8 @@ import PackageDescription
 let package = Package(
     name: "PersistenceKit",
     platforms: [
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(name: "PersistenceKit", targets: ["PersistenceKit"]),

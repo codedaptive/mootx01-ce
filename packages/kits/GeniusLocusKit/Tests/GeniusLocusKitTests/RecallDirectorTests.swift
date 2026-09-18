@@ -2854,7 +2854,7 @@ struct RecallDirectorDiscriminativeScoringTests {
     /// be strictly less than the corresponding rrf score.
     ///
     /// Uses `EmbeddingModel.deterministic` (the FNV-1a + FloatSimHash model)
-    /// so embeddings are consistent across runs without a CoreML dependency.
+    /// so embeddings are consistent across runs without a model dependency.
     @Test("discriminative scores < rrf scores when dense lane is saturated")
     func discriminativeScoringDiffersFromRrfOnSaturatedDenseLane() async throws {
         // Set up an estate with corpus and vector so the dense lane is live.

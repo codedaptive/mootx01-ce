@@ -30,8 +30,8 @@ let package = Package(
         // Aligned with GeniusLocusKit (macOS 15 / iOS 18) so the
         // estate-handle dependency resolves cleanly. NeuronKit had no
         // platform-specific feature use at the prior floor (14 / 17).
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(

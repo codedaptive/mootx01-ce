@@ -19,8 +19,8 @@
 //
 // The test bundle fixture at Tests/Fixtures/encoder-models/minilm-l6-v2-w60/
 // contains the real vocab.txt (231 KB, sha256-pinned) and a placeholder
-// MiniLM-L6-v2.mlmodelc directory. The real 90 MB CoreML bundle is not
-// committed; the .mlmodelc placeholder lets the resolver confirm directory
+// MiniLM-L6-v2.aimodel directory. The real Core AI asset is not
+// committed; the .aimodel placeholder lets the resolver confirm directory
 // presence without the full binary artifact.
 
 import Testing
@@ -86,8 +86,8 @@ struct ModelDirectoryResolverTests {
         let modelDir = dataDir
             .appendingPathComponent("models", isDirectory: true)
             .appendingPathComponent("minilm-l6-v2-w60", isDirectory: true)
-        let mlmodelcDir = modelDir.appendingPathComponent("MiniLM-L6-v2.mlmodelc", isDirectory: true)
-        try FileManager.default.createDirectory(at: mlmodelcDir, withIntermediateDirectories: true)
+        let aimodelDir = modelDir.appendingPathComponent("MiniLM-L6-v2.aimodel", isDirectory: true)
+        try FileManager.default.createDirectory(at: aimodelDir, withIntermediateDirectories: true)
         // Write corrupted vocab — any bytes that differ from the real sha256.
         let badVocab = Data("not-a-real-vocab".utf8)
         try badVocab.write(to: modelDir.appendingPathComponent("vocab.txt"))

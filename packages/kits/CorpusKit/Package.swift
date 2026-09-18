@@ -11,7 +11,7 @@
 //                       tokenizers
 //
 // Providers split out so the core kit stays small. Consumers that
-// only need bundle storage and BM25 do not pull in CoreML models.
+// only need bundle storage and BM25 do not pull in model assets.
 //
 // IntellectusLib dependency added per
 // in-repository dependency direction (P2 self-report telemetry
@@ -24,7 +24,7 @@
 //       Compiles NLContextualEmbeddingProvider, NLEmbeddingProvider,
 //       AppleNLProvider, and NeuralEmbedProvider. OFF by default: retained
 //       in case Apple improves the NaturalLanguage framework, or for a
-//       device class that cannot host a CoreML encoder. Enable with:
+//       device class that cannot host a Core AI encoder. Enable with:
 //           swift test --traits AppleEncoders
 
 import PackageDescription
@@ -32,8 +32,8 @@ import PackageDescription
 let package = Package(
     name: "CorpusKit",
     platforms: [
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(name: "CorpusKit", targets: ["CorpusKit"]),
@@ -49,7 +49,7 @@ let package = Package(
         ),
         .trait(
             name: "AppleEncoders",
-            description: "Compile Apple NL embedding providers (NLContextualEmbeddingProvider, NLEmbeddingProvider, AppleNLProvider, NeuralEmbedProvider). Off by default; retained in case Apple improves the NaturalLanguage framework, or for a device class that cannot host a CoreML encoder. Swift-only. Defines APPLE_ENCODERS; enable with `swift test --traits AppleEncoders`."
+            description: "Compile Apple NL embedding providers (NLContextualEmbeddingProvider, NLEmbeddingProvider, AppleNLProvider, NeuralEmbedProvider). Off by default; retained in case Apple improves the NaturalLanguage framework, or for a device class that cannot host a Core AI encoder. Swift-only. Defines APPLE_ENCODERS; enable with `swift test --traits AppleEncoders`."
         ),
     ],
     dependencies: [
@@ -197,13 +197,13 @@ let package = Package(
                 // rust/tests/bm25_conformance_test.rs via include_bytes! up the tree.
                 .copy("../SharedVectors"),
                 // Encoder model test fixtures: vocab.txt and a placeholder
-                // .mlmodelc directory for ModelDirectoryResolver tests.
+                // .aimodel directory for ModelDirectoryResolver tests.
                 // Copy the model directory directly so it lands at the
                 // bundle resource root as "minilm-l6-v2-w60/" — matching
                 // the layout the production app uses (models are copied to
                 // the app bundle root in project.yml). The resolver's
                 // bundleSlot checks <bundle.resourcePath>/minilm-l6-v2-w60/.
-                // The real 90 MB .mlmodelc is never committed; the placeholder
+                // The real .aimodel is never committed; the placeholder
                 // confirms directory presence without the full binary artifact.
                 .copy("../Fixtures/encoder-models/minilm-l6-v2-w60"),
             ],

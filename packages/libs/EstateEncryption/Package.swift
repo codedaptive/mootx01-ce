@@ -14,7 +14,7 @@ import PackageDescription
 let package = Package(
     name: "EstateEncryption",
     // Matches the SQLCipher product's floor.
-    platforms: [.macOS(.v26), .iOS(.v26)],
+    platforms: [.macOS("27.0"), .iOS("27.0")],
     products: [
         .library(name: "EstateEncryption", targets: ["EstateEncryption"]),
     ],

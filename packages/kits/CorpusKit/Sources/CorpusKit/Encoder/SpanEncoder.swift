@@ -6,7 +6,7 @@
 // inference seam in batches and L2-normalises every vector through the
 // substrate's conformance-gated `FloatVecOps.l2Normalize`.
 //
-// Float values from a real model are allowed to differ by port (CoreML vs
+// Float values from a real model are allowed to differ by port (Core AI vs
 // candle); the SHAPE of this contract is what the two ports keep identical.
 //
 // Mirror: rust/src/encoder/span_encoder.rs.

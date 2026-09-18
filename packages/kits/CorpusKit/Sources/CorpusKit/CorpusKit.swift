@@ -10,7 +10,7 @@
 //
 // EmbeddingModel is a CorpusKit-owned enum so the host can select an
 // embedding model without importing SynapseKit or naming EmbeddingProvider.
-// The deterministic default requires no CoreML model bundle; distributional
+// The deterministic default requires no model asset; distributional
 // providers (RandomIndexing, LSA) capture co-occurrence semantics from the
 // estate's own content during training.
 
@@ -45,7 +45,7 @@ private let corpusLog = Logger(subsystem: MootProductIdentity.Logging.subsystem,
 ///
 /// `.deterministic` is the permanent, federation-grade vector provider
 /// present in every version (v1.0+). It uses FNV-1a tokenization +
-/// FloatSimHash projection, requires no CoreML model bundle, and produces
+/// FloatSimHash projection, requires no model asset, and produces
 /// byte-identical vectors cross-device and cross-port — the reproducibility
 /// federation requires. It captures surface/lexical signal, not learned
 /// semantic meaning.
@@ -74,7 +74,7 @@ public enum EmbeddingModel: Sendable {
     ///
     /// The caller constructs and trains a `RandomIndexingProvider` from
     /// `CorpusKitProviders`, then passes it here. The trained provider is
-    /// self-contained: it requires no CoreML model bundle, no host inference
+    /// self-contained: it requires no model asset, no host inference
     /// closure, and captures co-occurrence semantics from the estate's own
     /// content during training.
     ///
@@ -101,7 +101,7 @@ public enum EmbeddingModel: Sendable {
     ///
     /// Uses `NLEmbedding.sentenceEmbedding(for:)` — the OS-bundled sentence
     /// similarity model (macOS 12+/iOS 15+). No model asset download, no
-    /// CoreML dependency. Lower quality than `NLContextualEmbeddingProvider`
+    /// model dependency. Lower quality than `NLContextualEmbeddingProvider`
     /// but immediately available on any macOS/iOS device.
     ///
     /// This is an ADDITIVE lane — it does not replace the deterministic or
@@ -136,7 +136,7 @@ public enum EmbeddingModel: Sendable {
     case nlContextualEmbedding(provider: any EmbeddingProvider & Sendable)
 #endif // canImport(NaturalLanguage)
 
-    /// Default: deterministic (no CoreML required).
+    /// Default: deterministic (no model asset required).
     public static let `default`: EmbeddingModel = .deterministic
 
     // MARK: - Trainable-basis seam
@@ -583,7 +583,7 @@ public actor Corpus {
     ///     same storage is shared with other kits their schemas must be
     ///     applied separately before or after this call.
     ///   - model: Embedding model selection. Defaults to `.deterministic`
-    ///     (no CoreML required).
+    ///     (no model asset required).
     public init(storage: any Storage, model: EmbeddingModel = .default) async throws {
         try await self.init(storage: storage, models: [model])
     }

@@ -652,8 +652,6 @@ private final class CoreAINuExtractWorkerProcess: @unchecked Sendable {
 
 #if os(macOS) && canImport(CoreAI)
 import CoreAI
-
-@available(macOS 27.0, *)
 public enum CoreAINuExtractWorkerServer {
     public static func serve(
         configuration: CoreAINuExtractWorkerConfiguration,
@@ -667,8 +665,6 @@ public enum CoreAINuExtractWorkerServer {
             extract: { request in try await runtime.extract(request) })
     }
 }
-
-@available(macOS 27.0, *)
 private actor CoreAINuExtractRuntime {
     let spec: FactExtractorModelSpec
     private let engine: CoreAINuExtractEngine
@@ -702,8 +698,6 @@ private actor CoreAINuExtractRuntime {
         }
     }
 }
-
-@available(macOS 27.0, *)
 private final class CoreAINuExtractEngine: @unchecked Sendable {
     private let prefill: InferenceFunction
     private let decode: InferenceFunction
