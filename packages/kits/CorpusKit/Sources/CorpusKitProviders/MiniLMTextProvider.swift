@@ -9,7 +9,7 @@
 // the two providers produce bit-identical engrams for the same
 // pooled float vector.
 //
-// CoreML model loading is the host app's responsibility; this
+// Model loading is the host app's responsibility; this
 // provider takes the loaded MLModel handle and an embedding
 // closure so the kit stays testable without a model bundle.
 //

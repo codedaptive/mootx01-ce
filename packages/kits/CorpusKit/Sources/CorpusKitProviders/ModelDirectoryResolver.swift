@@ -12,7 +12,7 @@
 // Integrity: for each slot found, the vocab.txt sha256 is verified against
 // the hardcoded tokenizer_hash constant for that model. A mismatch returns
 // nil and logs once so a stale bundle does not silently produce wrong vectors.
-// The large model files (safetensors / .mlmodelc) are NOT re-hashed at
+// The large model files (safetensors / .aimodel) are NOT re-hashed at
 // resolve time — they are sealed at build time by the packaging step.
 //
 // Adding a new model: add its tokenizer_hash to `knownTokenizerHashes` and
@@ -52,14 +52,14 @@ public enum ModelDirectoryResolver {
     ].merging([EncoderModelSeed.modelID: EncoderModelSeed.tokenizerHash]) { _, seeded in seeded }
 
     /// Files that must be present in the model directory on Apple platforms.
-    /// The .mlmodelc is a compiled CoreML bundle (directory); vocab.txt is
+    /// The .aimodel is a Core AI asset (directory); vocab.txt is
     /// the WordPiece vocabulary used for tokenisation.
     private static let requiredFiles: [String: [String]] = [
-        "minilm-l6-v2-w60": ["MiniLM-L6-v2.mlmodelc", "vocab.txt"],
-        "arctic-embed-s-w60": ["ArcticEmbedS.mlmodelc", "vocab.txt"],
-        // Cross encoder: one compiled sequence classifier plus the vocabulary
+        "minilm-l6-v2-w60": ["MiniLM-L6-v2.aimodel", "vocab.txt"],
+        "arctic-embed-s-w60": ["ArcticEmbedS.aimodel", "vocab.txt"],
+        // Cross encoder: one Core AI sequence classifier plus the vocabulary
         // (tools/encoder-models, profile `minilm-cross`).
-        CrossEncoderProfile.minilmL6.modelID: [CrossEncoderProfile.minilmL6.artifactName + ".mlmodelc", "vocab.txt"],
+        CrossEncoderProfile.minilmL6.modelID: [CrossEncoderProfile.minilmL6.artifactName + ".aimodel", "vocab.txt"],
     ]
 
     // MARK: - Public API
@@ -132,7 +132,7 @@ public enum ModelDirectoryResolver {
         }
         for file in required {
             let filePath = directory.appendingPathComponent(file).path
-            // .mlmodelc is a directory; test existence rather than isRegularFile.
+            // .aimodel is a directory; test existence rather than isRegularFile.
             guard fm.fileExists(atPath: filePath) else {
                 log.info("ModelDirectoryResolver: \(source, privacy: .public) slot missing \(file, privacy: .public) for \(modelID, privacy: .public)")
                 return nil
@@ -140,7 +140,7 @@ public enum ModelDirectoryResolver {
         }
 
         // Verify vocab.txt sha256 as the integrity sentinel.
-        // The large model files (.mlmodelc / safetensors) are sealed by the
+        // The large model files (.aimodel / safetensors) are sealed by the
         // build pipeline and not re-hashed here; vocab.txt is cheap (231 KB).
         let vocabURL = directory.appendingPathComponent("vocab.txt")
         guard let expectedHash = knownTokenizerHashes[modelID] else {

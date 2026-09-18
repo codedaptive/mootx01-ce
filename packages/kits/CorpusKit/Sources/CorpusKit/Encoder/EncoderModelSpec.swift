@@ -30,7 +30,7 @@ public struct EncoderModelSpec: Sendable, Equatable, Codable {
 
     /// `<model>-w<window_words>`, e.g. `minilm-l6-v2-w60`.
     public let modelID: String
-    /// Weights revision: HF revision short hash or the CoreML bundle version.
+    /// Weights revision: HF revision short hash or the Apple asset version.
     public let modelVersion: String
     /// Output dimension of the pooled vector.
     public let dim: Int

@@ -32,8 +32,8 @@ import Foundation
 ///
 /// All four suites run unconditionally. The end-to-end suite drives a
 /// `FloatSimHashEmbeddingProvider` with a deterministic inference
-/// closure standing in for a CoreML model, so the embed+store path is
-/// measured without shipping a compiled `.mlmodelc` bundle. Concrete
+/// closure standing in for a Core AI model, so the embed+store path is
+/// measured without shipping a compiled `.aimodel` asset. Concrete
 /// model providers (MiniLM, mpnet, EmbeddingGemma) live in
 /// CorpusKitProviders and carry their own tokenizers and projection seeds.
 ///
@@ -89,7 +89,7 @@ struct CapturePathBenchmarkTests {
 
     /// 100 text → embed → store operations through a
     /// FloatSimHashEmbeddingProvider driven by a deterministic
-    /// inference closure. The closure stands in for a CoreML model so
+    /// inference closure. The closure stands in for a Core AI model so
     /// the suite runs unconditionally in CI; it exercises the real
     /// embed (closure + canonical FloatSimHash projection) and store
     /// path, which is what the capture-path budget governs. Measures

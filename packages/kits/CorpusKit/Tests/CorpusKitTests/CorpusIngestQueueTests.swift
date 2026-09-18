@@ -12,7 +12,7 @@
 //   • the IngestJob payload round-trip through QueueKit's Job.
 //
 // On-disk SQLite backend (makeScratchStorage), EmbeddingModel.deterministic
-// (no CoreML). GlobalTestLock guards ingest/recall telemetry emissions.
+// (no model asset). GlobalTestLock guards ingest/recall telemetry emissions.
 
 import Foundation
 import PersistenceKit
