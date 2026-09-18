@@ -42,8 +42,10 @@ PLUGIN_MANIFESTS = [
     "distribution/plugin/plugin.json",
     "distribution/plugin/gemini-extension.json",
 ]
-INSTALL_BUNDLE = "apps/mootx01/rust/src/embedded/install-bundle.json"
-EMBEDDED_SWIFT = "apps/mootx01/Sources/MootInstallerCore/Generated/EmbeddedArtifacts.swift"
+# The v2 bundle replaced the original pair. The names carry the version of the
+# bundle format, not the product version, so they do not move again at 1.2.
+INSTALL_BUNDLE = "apps/mootx01/rust/src/embedded/install-bundle-v2.json"
+EMBEDDED_SWIFT = "apps/mootx01/Sources/MootInstallerCore/Generated/EmbeddedArtifactsV2.swift"
 
 
 def read(rel: str) -> str:
