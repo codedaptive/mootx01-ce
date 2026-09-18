@@ -8,7 +8,7 @@
 //
 // Training-on-corpus is a CorpusKit concern, not a generic embedding
 // concern. SynapseKit's `EmbeddingProvider` is the universal embed surface;
-// it must stay narrow so a future pre-trained CoreML encoder can conform to
+// it must stay narrow so a future pre-trained encoder can conform to
 // it WITHOUT being forced to declare a training method it cannot honour.
 // `TrainableEmbeddingBasis` is the opt-in capability for the distributional
 // providers (RI/LSA) that genuinely train on the estate's own

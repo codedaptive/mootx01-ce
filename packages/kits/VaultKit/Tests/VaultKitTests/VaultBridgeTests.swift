@@ -1782,7 +1782,7 @@ struct VaultBridgeTests {
     ///
     /// `kit.provision()` wires the Corpus and dedicated encode queue so that
     /// `reindexMissing` can return > 0 after a bulk import. The
-    /// `.deterministic` embedding model requires no CoreML and is reproducible.
+    /// `.deterministic` embedding model requires no model asset and is reproducible.
     private func openProvisionedEstate() async throws -> (GeniusLocusKit, EstateHandle) {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "vaultkit-encode-enqueue-tests")
