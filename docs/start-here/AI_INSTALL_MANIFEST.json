@@ -40,7 +40,6 @@
   },
   "env": {
     "MOOTX01_HTTP_PORT": "resident daemon HTTP port (default 4242)",
-    "MOOTX01_DATA_DIR": "data directory override",
     "MOOTX01_HTTP_MAX_BODY_BYTES": "maximum MCP request body in bytes (default 4194304)",
     "MOOTX01_BRAIN_TICK_MS": "background maintenance cadence in ms (default 5000)",
     "MOOTX01_MONITORING_POLL_MS": "how often the daemon checks if monitoring is enabled, in ms (default 5000)",
@@ -50,7 +49,7 @@
     "~/.mootx01/bin/ (binary install directory)",
     "~/.local/bin/ (PATH symlink directory)",
     "AI client MCP configs (per client — see adapters.clients)",
-    "local data directory (MOOTX01_DATA_DIR or the platform default)",
+    "local data directory (the platform default; estates are listed in its estatecatalog.json)",
     "background-service registration (launchd / systemd-user / Task Scheduler)",
     "moot-mgr service registration",
     "dashboard static assets"
