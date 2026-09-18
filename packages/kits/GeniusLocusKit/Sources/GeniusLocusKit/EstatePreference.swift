@@ -41,16 +41,30 @@ public enum EstatePreferenceKey: String, CaseIterable, Sendable {
     /// Which extractor the fact-extraction duty uses: `nuextract` (default) or
     /// `apple`; `fact_extraction` is the on/off master switch.
     case factExtractor = "fact_extractor"
+    /// ADR-027 D2: the contradiction hunt's third candidate lane, a probe's
+    /// container-mates. Off by default and never seeded: the 1.1 benchmark
+    /// measures it off and on against one artifact set.
+    case chestContradictionCandidates = "chest_contradiction_candidates"
+    /// ADR-027 D3: the recall diversity rerank treats two candidates in one
+    /// container as one topic. Off by default and never seeded; a call may
+    /// override it (`GLKRecallRequest.chestDiversity`).
+    case chestRecallDiversity = "chest_recall_diversity"
 
-    /// The values this key accepts. The six switches take on/off; the
+    /// The values this key accepts. The switches take on/off; the
     /// extractor choice takes the engine names.
     public var allowedValues: [EstatePreferenceValue] {
         self == .factExtractor ? [.nuextract, .apple] : [.on, .off]
     }
 
-    /// What an absent or unrecognised manifest value reads as.
+    /// What an absent or unrecognised manifest value reads as: on for the
+    /// six seeded switches, off for the two chest switches, `nuextract`
+    /// for the extractor choice.
     public var defaultValue: EstatePreferenceValue {
-        self == .factExtractor ? .nuextract : .on
+        switch self {
+        case .factExtractor: return .nuextract
+        case .chestContradictionCandidates, .chestRecallDiversity: return .off
+        default: return .on
+        }
     }
 }
 

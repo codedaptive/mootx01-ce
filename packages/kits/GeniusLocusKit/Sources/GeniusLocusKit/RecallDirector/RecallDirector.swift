@@ -2987,6 +2987,22 @@ public extension GeniusLocusKit {
         // An empty body builds no set; the MMR loop reads a missing set as
         // "content unavailable → sourceMask Jaccard", the same rule the
         // empty-content check applied.
+        // Chest-aware diversity (ADR-027 D3): two candidates in one container
+        // (a chest, or the room holding them directly) are one topic by
+        // construction and score 1.0 before any shingle compare. In force
+        // when the request overrides it, else when the estate preference
+        // `chest_recall_diversity` reads on; off is byte-for-byte the shingle
+        // term. The container is the drawer's parent id, already on the row.
+        let chestDiversity: Bool
+        if let override = request.chestDiversity {
+            chestDiversity = override
+        } else {
+            chestDiversity = (try? await estate.meta(key: EstatePreferenceKey.chestRecallDiversity.rawValue))
+                == EstatePreferenceValue.on.rawValue
+        }
+        let mmrContainerByID: [String: String] = chestDiversity
+            ? Dictionary(uniqueKeysWithValues: drawerIndex.map { ($0.key, $0.value.parentNodeId.lowercased()) })
+            : [:]
         var mmrShinglesByID: [String: Set<String>] = [:]
         if !mmrContentByID.isEmpty {
             let bodies: [String?] = (0..<buffer.count).map { mmrContentByID[buffer.ids[$0]] }
@@ -3091,7 +3107,10 @@ public extension GeniusLocusKit {
             let shinglesBest = mmrShinglesByID[buffer.ids[bestIdx]]
             for i in unselected {
                 let sim: Float
-                if let shinglesBest, let shinglesI = mmrShinglesByID[buffer.ids[i]] {
+                if chestDiversity, let cBest = mmrContainerByID[buffer.ids[bestIdx]],
+                   mmrContainerByID[buffer.ids[i]] == cBest {
+                    sim = 1.0
+                } else if let shinglesBest, let shinglesI = mmrShinglesByID[buffer.ids[i]] {
                     sim = ShingleSimilarity.similarity(shinglesBest, shinglesI)
                 } else {
                     sim = glkSourceMaskJaccard(
@@ -3144,7 +3163,10 @@ public extension GeniusLocusKit {
                 let shinglesBest4 = mmrShinglesByID[buffer.ids[bestIdx4]]
                 for i in unselected {
                     let sim: Float
-                    if let shinglesBest4, let shinglesI = mmrShinglesByID[buffer.ids[i]] {
+                    if chestDiversity, let cBest = mmrContainerByID[buffer.ids[bestIdx4]],
+                       mmrContainerByID[buffer.ids[i]] == cBest {
+                        sim = 1.0
+                    } else if let shinglesBest4, let shinglesI = mmrShinglesByID[buffer.ids[i]] {
                         sim = ShingleSimilarity.similarity(shinglesBest4, shinglesI)
                     } else {
                         sim = glkSourceMaskJaccard(

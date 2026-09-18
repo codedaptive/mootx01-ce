@@ -283,7 +283,7 @@ mod tests {
         let err = apply(&get, &estate.coordinator, &estate.handle).unwrap_err();
         assert_eq!(
             err,
-            "unknown preference 'bogus'; allowed: fact_extraction, consolidation, contradiction_sweep, cross_encoder_routing, maintenance, adaptive_recall, fact_extractor"
+            "unknown preference 'bogus'; allowed: fact_extraction, consolidation, contradiction_sweep, cross_encoder_routing, maintenance, adaptive_recall, fact_extractor, chest_contradiction_candidates, chest_recall_diversity"
         );
         let set = Operation::Set { key: "consolidation".into(), value: "maybe".into() };
         let err = apply(&set, &estate.coordinator, &estate.handle).unwrap_err();

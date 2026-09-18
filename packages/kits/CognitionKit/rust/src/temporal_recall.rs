@@ -259,6 +259,7 @@ pub fn run(
             frontier_k: None,
             // §11.18: internal recall — no anomalous-flag filter applied.
             anomalous_filter: None,
+            chest_diversity: None,
             // Sub-span scoring is an additive-cost stage this recipe does not
             // request; every caller names the switch (ruling 2026-09-07).
             sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
