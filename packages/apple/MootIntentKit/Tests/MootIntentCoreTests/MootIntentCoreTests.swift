@@ -18,39 +18,40 @@ struct MootIntentCoreTests {
 
     @Test("structured recall accepts rows with their own text and rejects opaque id-only rows")
     func structuredRecallPolicy() {
-        let structured: JSONValue = .object([
+        // The ARIA v2 envelope: rows under `data.results`.
+        let structured: JSONValue = .object(["data": .object([
             "results": .array([
-                // A search row: subject, best span, room; no body (spec § 8.3).
+                // A search row: subject and excerpt; no body, no placement (spec § 8.3).
                 .object([
-                    "id": .string("drawer-1"),
+                    "memory_id": .string("drawer-1"),
                     "subject": .string("Public subject"),
-                    "bestSpan": .string("the best span of the body"),
-                    "room": .string("notes"),
+                    "excerpt": .string("the best span of the body"),
                     "eventTime": .string("2026-01-01T00:00:00Z"),
                     "score": .double(0.5),
                 ]),
-                // A memory-get row: body present, no room resolved.
+                // A memory-get row at depth full: body and placement present.
                 .object([
-                    "id": .string("drawer-2"),
+                    "memory_id": .string("drawer-2"),
                     "subject": .string("Read back"),
                     "content": .string("Public content"),
+                    "placement": .object(["wing": .string("Agentic Memory"), "room": .string("notes")]),
                 ]),
                 // A gated row: id only.
                 .object([
-                    "id": .string("opaque-drawer"),
+                    "memory_id": .string("opaque-drawer"),
                 ]),
                 // A redacted search row keeps the server's marker as its text.
                 .object([
-                    "id": .string("drawer-3"),
+                    "memory_id": .string("drawer-3"),
                     "subject": .string("[restricted]"),
                 ]),
             ]),
-        ])
+        ])])
 
         let drawers = StructuredRecallResults.drawers(from: structured)
         #expect(drawers == [
-            RecalledDrawer(id: "drawer-1", subject: "Public subject", bestSpan: "the best span of the body", room: "notes"),
-            RecalledDrawer(id: "drawer-2", subject: "Read back", content: "Public content"),
+            RecalledDrawer(id: "drawer-1", subject: "Public subject", bestSpan: "the best span of the body"),
+            RecalledDrawer(id: "drawer-2", subject: "Read back", room: "notes", content: "Public content"),
             RecalledDrawer(id: "drawer-3", subject: "[restricted]"),
         ])
         #expect(drawers.map(\.excerpt) == ["the best span of the body", "Public content", "[restricted]"])

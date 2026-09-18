@@ -1,5 +1,6 @@
 import Foundation
 import AriaMCP   // JSONValue
+import LocusKit  // defaultWingName
 
 // MARK: - MootToolCalling
 //
@@ -71,6 +72,20 @@ extension MootToolCalling {
         publicOnly: Bool = false,
         limit: Int = 20
     ) async -> [RecalledDrawer] {
+        // No query: the picker's recent memories. ARIA v2 search requires a
+        // query, so the enumeration goes through `moot_memory_list` over the
+        // default wing, whose rows carry `memory_id` and `subject` the way
+        // search rows do. The list has no exportable filter; a public-only
+        // enumeration is answered empty rather than over-served.
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard !publicOnly else { return [] }
+            let result = await callTool("moot_memory_list", arguments: [
+                "wing": .string(defaultWingName),
+                "limit": .integer(Int64(limit)),
+            ])
+            guard !result.isError else { return [] }
+            return StructuredRecallResults.drawers(from: result.structured)
+        }
         var arguments: [String: JSONValue] = [
             "query": .string(query),
             "limit": .integer(Int64(limit)),
@@ -111,10 +126,11 @@ public struct RecalledDrawer: Sendable, Equatable, Identifiable {
     /// The drawer's subject, the one text every admissible search row carries
     /// (ARIA_MCP_SPEC § 8.3 base row). Redacted rows carry the server's marker.
     public let subject: String?
-    /// The best content span the rerank picked, when the row has one distinct
-    /// from the subject.
+    /// The row's excerpt: the best content span the rerank picked on a search
+    /// row (ARIA v2 `excerpt`), when the row carries one.
     public let bestSpan: String?
-    /// The room, when the server resolved the drawer's node name.
+    /// The room, when the row carries the drawer's placement (memory-get depth
+    /// `full`); search rows carry none.
     public let room: String?
     /// The body. Present only on the memory-get depths that return it; a search
     /// row never carries it (spec § 8 invariants), so a consumer that wants the
@@ -137,7 +153,7 @@ public struct RecalledDrawer: Sendable, Equatable, Identifiable {
 }
 
 public enum StructuredRecallResults {
-    /// Decode `structuredContent.results` rows into recalled-drawer values.
+    /// Decode the recall family's structured rows into recalled-drawer values.
     ///
     /// A row is admissible when it carries usable text: a `subject` that is not
     /// the server's absence marker (every normal search row), or a `content`
@@ -153,10 +169,15 @@ public enum StructuredRecallResults {
         // this in subject; they must not appear in search results because the
         // caller cannot see the content.
         let noSubjectMarker = ResultComposer.noSubjectMarker
-        guard let results = structured?.objectValue?["results"]?.arrayValue else { return [] }
+        // ARIA v2 rows: `memory_id`, `subject`, `excerpt` (search) or
+        // `content` + `placement.room` (memory-get depth full). The v2
+        // envelope nests the rows under `data.results` (the recall family)
+        // or `data.memories` (memory get and list).
+        let container = structured?.objectValue?["data"]?.objectValue
+        guard let results = container?["results"]?.arrayValue ?? container?["memories"]?.arrayValue else { return [] }
         return results.compactMap { row -> RecalledDrawer? in
             guard let object = row.objectValue,
-                  let id = object["id"]?.stringValue else { return nil }
+                  let id = object["memory_id"]?.stringValue else { return nil }
             let subject = object["subject"]?.stringValue
             let content = object["content"]?.stringValue
             // Opaque rows (gated or unhydrated) carry noSubjectMarker — skip them.
@@ -165,8 +186,8 @@ public enum StructuredRecallResults {
             return RecalledDrawer(
                 id: id,
                 subject: subject,
-                bestSpan: object["bestSpan"]?.stringValue,
-                room: object["room"]?.stringValue,
+                bestSpan: object["excerpt"]?.stringValue,
+                room: object["placement"]?.objectValue?["room"]?.stringValue,
                 content: content)
         }
     }
