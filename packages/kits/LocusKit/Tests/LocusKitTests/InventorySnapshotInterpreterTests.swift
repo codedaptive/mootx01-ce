@@ -27,6 +27,22 @@ struct InventorySnapshotInterpreterTests {
         #expect(decoded.drawers[0].ancestry.map(\.id) == [rootID, wingID, roomID])
     }
 
+    @Test("a drawer in a chest reports root, wing, room ancestry; chests stay internal (ADR-026)")
+    func decodesChestParentToItsRoom() throws {
+        let chestID = UUID(uuidString: "55555555-5555-4555-8555-555555555555")!
+        let snapshot = InventorySnapshot(
+            drawers: [drawer(parent: chestID)],
+            nodes: [
+                node(id: rootID, parent: nil, name: "Estate", depth: 0),
+                node(id: wingID, parent: rootID, name: "Memory", depth: 1),
+                node(id: roomID, parent: wingID, name: "Inbox", depth: 2),
+                node(id: chestID, parent: roomID, name: String(repeating: "0", count: 128), depth: 3),
+            ]
+        )
+        let decoded = try LocusInventorySnapshotInterpreter.decode(snapshot)
+        #expect(decoded.drawers[0].ancestry.map(\.id) == [rootID, wingID, roomID])
+    }
+
     @Test("decodes node UUID text returned by the SQLite inventory snapshot")
     func decodesSQLiteNodeUUIDText() async throws {
         let url = TestStorage.tempURL()

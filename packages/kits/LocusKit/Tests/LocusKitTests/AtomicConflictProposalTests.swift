@@ -78,6 +78,29 @@ struct AtomicConflictProposalTests {
         #expect(try await store.allTunnels().filter { $0.kind == .contradicts }.count == 1)
     }
 
+    @Test("evidence filed in a chest resolves its endpoints to the room (ADR-026)")
+    func endpointsResolveThroughChests() async throws {
+        let (store, storage, url, source, target) = try await makeFixture()
+        defer { TestStorage.cleanup(url) }
+        let nodes = NodeStore(storage: storage)
+        let roomId = UUID(uuidString: source.parentNodeId)!
+        let now = Date(timeIntervalSince1970: 1_700_000_002)
+        let chest = try await nodes.createChest(roomId: roomId, lowKeyHex: String(repeating: "0", count: 128), now: now)
+        let inChestSource = Drawer(
+            id: TestStorage.tid("chest-source"), content: "the service is enabled",
+            parentNodeId: chest.id.uuidString, addedBy: "test", filedAt: now, embeddingModelID: "test-model")
+        let inChestTarget = Drawer(
+            id: TestStorage.tid("chest-target"), content: "the service is not enabled",
+            parentNodeId: chest.id.uuidString, addedBy: "test", filedAt: now, embeddingModelID: "test-model")
+        try await store.addDrawer(inChestSource)
+        try await store.addDrawer(inChestTarget)
+        _ = target
+        let created = try await store.fileAtomicConflictProposal(request(source: inChestSource, target: inChestTarget))
+        let tunnel = try #require(created.tunnel)
+        #expect(tunnel.sourceRoom == "Room" && tunnel.targetRoom == "Room")
+        #expect(tunnel.sourceWing == "Wing" && tunnel.targetWing == "Wing")
+    }
+
     @Test("selected evidence tombstoned after analysis cannot file a contradiction")
     func tombstonedSelectedEvidenceDoesNotWrite() async throws {
         let (store, storage, url, source, target) = try await makeFixture()

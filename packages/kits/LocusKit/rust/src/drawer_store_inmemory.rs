@@ -958,6 +958,36 @@ impl DrawerStoreCore {
 
     /// The active chest nodes (depth 3) under a room, in id order. Empty for a
     /// room that has never been re-binned (ADR-026, spec § 12).
+    /// The active chest nodes (depth 3) under any of `room_ids`, in id order,
+    /// in one query. A room's subtree is the room plus these; every room-set
+    /// read joins drawers on both (ADR-026, spec § 12).
+    fn chest_node_ids_in_rooms(&self, room_ids: &[String]) -> Result<Vec<String>, LocusKitError> {
+        if room_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::In(
+                        Column::new(T_NODES, "parent_id"),
+                        room_ids.iter().map(|id| TypedValue::Text(id.clone())).collect(),
+                    ),
+                    StoragePredicate::Eq(Column::new(T_NODES, "depth"), TypedValue::Int(3)),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])),
+                &[],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let mut ids: Vec<String> = rows.iter().map(|r| string_value_of(r.get("id"))).collect();
+        ids.sort();
+        Ok(ids)
+    }
+
     fn chest_node_ids_in_room(&self, room_id: &str) -> Result<Vec<String>, LocusKitError> {
         let rows = self
             .storage
@@ -1210,7 +1240,7 @@ impl DrawerStore for DrawerStoreCore {
                     if Uuid::parse_str(&drawer.parent_node_id).is_err() {
                         return Ok(None);
                     }
-                    let room_rows = row_store.query(
+                    let parent_rows = row_store.query(
                         T_NODES,
                         Some(&StoragePredicate::Eq(
                             Column::new(T_NODES, "id"),
@@ -1218,7 +1248,29 @@ impl DrawerStore for DrawerStoreCore {
                         )),
                         &[], Some(1), None,
                     ).map_err(map_storage_err)?;
-                    let Some(room) = room_rows.first() else { return Ok(None) };
+                    let Some(parent) = parent_rows.first() else { return Ok(None) };
+                    // The parent is the room, or an active chest under it
+                    // (ADR-026, spec § 12); the endpoint is always the room.
+                    let chest_depth = i64::from(crate::node_store::NodeStore::CHEST_DEPTH);
+                    let room_rows;
+                    let room: &StorageRow = if node_is_active_at_depth(parent, chest_depth) {
+                        let room_id = string_value_of(parent.get("parent_id"));
+                        if Uuid::parse_str(&room_id).is_err() {
+                            return Ok(None);
+                        }
+                        room_rows = row_store.query(
+                            T_NODES,
+                            Some(&StoragePredicate::Eq(
+                                Column::new(T_NODES, "id"),
+                                TypedValue::Text(room_id),
+                            )),
+                            &[], Some(1), None,
+                        ).map_err(map_storage_err)?;
+                        let Some(r) = room_rows.first() else { return Ok(None) };
+                        r
+                    } else {
+                        parent
+                    };
                     if !node_is_active_at_depth(room, 2) {
                         return Ok(None);
                     }
@@ -1593,12 +1645,15 @@ impl DrawerStore for DrawerStoreCore {
             crate::telemetry::emit_drawer_query(&_tel_start, 0.0, 0, &self.estate_uuid, "wing");
             return Ok(Vec::new());
         }
-        // One `parent_node_id IN (...)` predicate, the twin of Swift
-        // `DrawerStore.drawersIn(wing:)`: a wing's room count is bounded
-        // (tens, not thousands), so the list needs no 900-id chunking.
+        // One `parent_node_id IN (...)` predicate over the wing's subtree,
+        // its rooms and every chest under them (ADR-026), the twin of Swift
+        // `DrawerStore.drawersIn(wing:)`: a wing's container count is bounded
+        // (tens to hundreds, not thousands), so the list needs no 900-id chunking.
+        let mut parents = room_ids.clone();
+        parents.extend(self.chest_node_ids_in_rooms(&room_ids)?);
         let room_predicate = StoragePredicate::In(
             Column::new(T_DRAWERS, "parent_node_id"),
-            room_ids.iter().map(|id| TypedValue::Text(id.clone())).collect(),
+            parents.iter().map(|id| TypedValue::Text(id.clone())).collect(),
         );
         let (rows, _skipped) = self
             .storage
@@ -3667,7 +3722,7 @@ impl DrawerStore for DrawerStoreCore {
         // resolve wing/room names to parent_node_id via
         // NodeStore create-on-demand, then update parent_node_id.
         if to_room.is_some() || to_wing.is_some() {
-            let current_parent_id = {
+            let (current_parent_id, content) = {
                 let rows = self
                     .storage
                     .row_store()
@@ -3683,7 +3738,7 @@ impl DrawerStore for DrawerStoreCore {
                     )
                     .map_err(map_storage_err)?;
                 rows.first()
-                    .map(|r| string_value_of(r.get("parent_node_id")))
+                    .map(|r| (string_value_of(r.get("parent_node_id")), string_value_of(r.get("content"))))
                     .unwrap_or_default()
             };
             let current_names = self
@@ -3700,9 +3755,12 @@ impl DrawerStore for DrawerStoreCore {
             if let Some(root) = ns.root_node()? {
                 let wing_node = ns.create_node(resolved_wing, root.id, now)?;
                 let room_node = ns.create_node(resolved_room, wing_node.id, now)?;
+                // Chest placement (ADR-026, spec § 12): a moved drawer is
+                // filed by its content key under the target room.
+                let parent_node_id = ns.placement_parent(room_node.id, &content)?;
                 update_vals.insert(
                     "parent_node_id".to_string(),
-                    TypedValue::Text(room_node.id.to_string()),
+                    TypedValue::Text(parent_node_id.to_string()),
                 );
             }
         }
@@ -5356,12 +5414,14 @@ impl DrawerStore for DrawerStoreCore {
             let drawer_count = if room_ids.is_empty() {
                 0
             } else {
-                // `parent_node_id IN (...)` over the wing's rooms, the twin of
-                // Swift `DrawerStore.wingSummaries()`; unchunked for the same
-                // reason as `drawers_in_wing` (rooms per wing are few).
+                // `parent_node_id IN (...)` over the wing's rooms and their
+                // chests (ADR-026), the twin of Swift `DrawerStore.listWings()`;
+                // unchunked for the same reason as `drawers_in_wing`.
+                let mut parents = room_ids.clone();
+                parents.extend(self.chest_node_ids_in_rooms(&room_ids)?);
                 let room_predicate = StoragePredicate::In(
                     Column::new(T_DRAWERS, "parent_node_id"),
-                    room_ids.iter().map(|id| TypedValue::Text(id.clone())).collect(),
+                    parents.iter().map(|id| TypedValue::Text(id.clone())).collect(),
                 );
                 let drawer_rows = row_store
                     .query(
@@ -5443,13 +5503,16 @@ impl DrawerStore for DrawerStoreCore {
             for room_row in &room_rows {
                 let room_id = string_value_of(room_row.get("id"));
                 let room_name = string_value_of(room_row.get("display_name"));
+                // The room and its chests (ADR-026): a room's count is its subtree.
+                let mut parents = vec![room_id.clone()];
+                parents.extend(self.chest_node_ids_in_room(&room_id)?);
                 let drawer_rows = row_store
                     .query(
                         T_DRAWERS,
                         Some(&StoragePredicate::all(vec![
-                            StoragePredicate::Eq(
+                            StoragePredicate::In(
                                 Column::new(T_DRAWERS, "parent_node_id"),
-                                TypedValue::Text(room_id),
+                                parents.iter().map(|id| TypedValue::Text(id.clone())).collect(),
                             ),
                             StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                         ])),
@@ -8492,7 +8555,7 @@ pub(crate) fn require_uuid(s: &str, label: &str) -> Result<Uuid, LocusKitError> 
 /// AuditEvent for append. Swift PersistenceKit reuses SubstrateLib's type
 /// directly; the Rust leg has its own flat type, so the conversion lives
 /// here. Field-for-field, ids as u128 → Uuid. reason is threaded through.
-fn pk_audit_event_from(e: &substrate_lib::verbs::AuditEvent) -> PkAuditEvent {
+pub(crate) fn pk_audit_event_from(e: &substrate_lib::verbs::AuditEvent) -> PkAuditEvent {
     PkAuditEvent {
         event_id: Uuid::from_u128(e.event_id),
         estate_uuid: Uuid::from_u128(e.estate_uuid),
@@ -9504,6 +9567,48 @@ mod tests {
         assert_eq!(from_room.len(), 1);
         let to = store.tunnels_to_wing("w").unwrap();
         assert_eq!(to.len(), 1);
+    }
+
+    #[test]
+    fn atomic_conflict_proposal_resolves_endpoints_through_chests() {
+        // ADR-026: evidence filed in a chest still names its room and wing.
+        use crate::drawer_store::{
+            conflict_proposal_digests, AtomicConflictProposalOutcome,
+            AtomicConflictProposalRequest,
+        };
+        fn never_suppress(_tier: u8, _renewal: &str, _history: &[(u8, String)]) -> bool {
+            false
+        }
+        let store = open_store();
+        let source_id = tid("chest-conflict-source");
+        let target_id = tid("chest-conflict-target");
+        let mut source = sample_drawer_with_nodes(&store, &source_id, "memory", "source", "the service is enabled");
+        let mut target = sample_drawer_with_nodes(&store, &target_id, "memory", "source", "the service is not enabled");
+        source.udc_code = "001".to_owned();
+        target.udc_code = "001".to_owned();
+        let nodes = crate::node_store::NodeStore::new(crate::drawer_store::DrawerStore::storage(&store).unwrap(), None);
+        let room_id = Uuid::parse_str(&source.parent_node_id).unwrap();
+        let chest = nodes.create_chest(room_id, &"0".repeat(128), NOW).unwrap();
+        source.parent_node_id = chest.id.to_string();
+        target.parent_node_id = chest.id.to_string();
+        store.add_drawer(&source, NOW).unwrap();
+        store.add_drawer(&target, NOW).unwrap();
+        let (source_digest, evidence_digest) = conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
+        let request = AtomicConflictProposalRequest {
+            source_drawer_id: source_id.clone(), target_drawer_id: target_id.clone(),
+            pair_key: conflict_pair_key(&source_id, &target_id),
+            tier: 2, renewal_identity: "tier2:negation@1".to_owned(),
+            label: "tier2:negation@1".to_owned(), replay_identity: "aria-v2:test-replay".to_owned(),
+            source_digest, evidence_digest,
+            decline_suppresses: never_suppress,
+        };
+        match store.atomic_file_conflict_proposal(&request, NOW + 1).unwrap() {
+            AtomicConflictProposalOutcome::Created { .. } => {}
+            other => panic!("expected a new proposed tunnel, got {other:?}"),
+        }
+        let tunnel = store.all_tunnels().unwrap().pop().unwrap();
+        assert_eq!((tunnel.source_wing, tunnel.source_room), ("memory".to_owned(), "source".to_owned()));
+        assert_eq!((tunnel.target_wing, tunnel.target_room), ("memory".to_owned(), "source".to_owned()));
     }
 
     #[test]

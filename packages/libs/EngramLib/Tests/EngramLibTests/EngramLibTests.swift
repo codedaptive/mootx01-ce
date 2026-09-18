@@ -220,6 +220,21 @@ struct EngramLibTests {
         #expect(Set((0..<256).map(ChestPlacement.permutation)).count == 256)
     }
 
+    @Test("morton key hex: 128 lowercase characters, round-trips, orders as the key does")
+    func mortonKeyHex() {
+        let key = MortonKey(words: Self.vecKey)
+        let hex = key.hex
+        #expect(hex.count == 128)
+        #expect(hex.hasPrefix("0153494b6173682fc097888fa0b6f9be"))
+        #expect(MortonKey(hex: hex) == key)
+        #expect(MortonKey(hex: hex.uppercased()) == key)
+        #expect(MortonKey(hex: String(hex.dropLast())) == nil)
+        #expect(MortonKey(hex: String(repeating: "g", count: 128)) == nil)
+        let zero = MortonKey(words: [UInt64](repeating: 0, count: 8))
+        #expect(zero.hex == String(repeating: "0", count: 128))
+        #expect(zero.hex < hex && zero < key)
+    }
+
     @Test("deal and range index: sorted keys cut at the fill, binary search finds the range")
     func dealAndRangeIndex() {
         let ranges = ChestPlacement.deal(sortedKeys: Array(0..<10), fill: 4)
