@@ -1443,12 +1443,13 @@ public extension GeniusLocusKit {
     /// at the GLK boundary before dispatch.
     ///
     /// F4 (§11.18): when the move changes room membership (`toRoom` and/or
-    /// `toWing` supplied), both the room the drawer LEAVES and the room it
-    /// JOINS are marked dirty for the incremental anomaly sweep. This is the
-    /// only point that room-membership change is knowable at all — the
-    /// audit trail records no history of a drawer's prior room (see
-    /// `markAnomalySweepRoomDirty`'s doc comment) — so a room whose cohesion
-    /// peer set just shrank would otherwise never be rescored.
+    /// `toWing` supplied), both the container the drawer LEAVES and the one
+    /// it JOINS are marked dirty for the incremental anomaly sweep
+    /// (ADR-026: the unit is the container, a chest or the room itself).
+    /// This is the only point the outgoing container is knowable at all —
+    /// the audit trail records no history of a drawer's prior parent — so a
+    /// container whose cohesion peer set just shrank would otherwise never
+    /// be rescored.
     func reanchor(_ handle: EstateHandle, _ frame: ReanchorFrame) async throws {
         try requireMounted(handle, verb: "reanchor")
         guard frame.toRoom != nil || frame.toWing != nil || frame.toLattice != nil else {
@@ -1457,11 +1458,12 @@ public extension GeniusLocusKit {
         let estate = try estate(for: handle)
         let movesRoom = frame.toRoom != nil || frame.toWing != nil
         // Captured before the move: the only moment the drawer's OUTGOING
-        // room is readable, since the row itself keeps no prior value.
-        var priorRoom: (wing: String, room: String)?
-        if movesRoom, let drawer = try? await estate.getDrawers(ids: [frame.rowID]).first {
-            priorRoom = try? await resolveNodeNames(
-                handle, parentNodeIds: [drawer.parentNodeId])[drawer.parentNodeId]
+        // container is readable, since the row itself keeps no prior value.
+        var priorContainer: AnomalyContainer?
+        if movesRoom, let drawer = try? await estate.getDrawers(ids: [frame.rowID]).first,
+           let name = try? await resolveNodeNames(
+               handle, parentNodeIds: [drawer.parentNodeId])[drawer.parentNodeId] {
+            priorContainer = AnomalyContainer(nodeId: drawer.parentNodeId, wing: name.wing, room: name.room)
         }
         do {
             try await estate.reanchor(
@@ -1475,17 +1477,21 @@ public extension GeniusLocusKit {
         }
         guard movesRoom else { return }
         // Best-effort: a checkpoint-write failure must never fail the move
-        // that already committed — the room is simply picked up on the next
-        // audit-fold pass (a rescore skipped a cycle late, not skipped
+        // that already committed — the container is simply picked up on the
+        // next audit-fold pass (a rescore skipped a cycle late, not skipped
         // forever) rather than the reanchor itself throwing after the fact.
+        // The unit is the container the drawer left and the one it joined
+        // (ADR-026): its peers in both changed.
         let now = Date()
         if let drawer = try? await estate.getDrawers(ids: [frame.rowID]).first,
-           let newRoom = try? await resolveNodeNames(
+           let newName = try? await resolveNodeNames(
                handle, parentNodeIds: [drawer.parentNodeId])[drawer.parentNodeId] {
-            try? await markAnomalySweepRoomDirty(wing: newRoom.wing, room: newRoom.room, for: handle, now: now)
+            try? await markAnomalySweepContainerDirty(
+                AnomalyContainer(nodeId: drawer.parentNodeId, wing: newName.wing, room: newName.room),
+                for: handle, now: now)
         }
-        if let priorRoom {
-            try? await markAnomalySweepRoomDirty(wing: priorRoom.wing, room: priorRoom.room, for: handle, now: now)
+        if let priorContainer {
+            try? await markAnomalySweepContainerDirty(priorContainer, for: handle, now: now)
         }
     }
 
