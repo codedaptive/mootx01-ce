@@ -61,11 +61,15 @@ jobs:
           # Source version constant (matches Swift Mootx01.currentVersion).
           version="$(grep -m1 '^version = ' apps/mootx01/rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
           commit="$(git rev-parse HEAD)"
-          # The 1.1 candidate train uses the source beta version verbatim.
-          # beta-01 was the branch-creation push; every later candidate push
-          # increments the zero-padded sequence before promotion.
-          if ! echo "$version" | grep -qE '^1\.1\.0-beta-[0-9]{2,}$'; then
-            echo "ERROR: version '$version' is not a 1.1.0-beta-YY version — aborting" >&2
+          # The 1.1 candidate train uses the source pre-release version
+          # verbatim. beta-01 was the branch-creation push; every later beta
+          # push increments the zero-padded sequence before promotion. A
+          # release candidate rides the same train under its own spelling —
+          # 1.1.0-rc1 is the tree's version once the line is candidate-grade,
+          # and rejecting it turned every candidate push red for a reason that
+          # had nothing to do with the build.
+          if ! echo "$version" | grep -qE '^1\.1\.0-(beta-[0-9]{2,}|rc[0-9]+)$'; then
+            echo "ERROR: version '$version' is neither 1.1.0-beta-YY nor 1.1.0-rcN — aborting" >&2
             exit 1
           fi
           # No leading v: v* is reserved for the signed production pipeline.
