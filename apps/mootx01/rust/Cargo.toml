@@ -35,7 +35,7 @@ path = "src/lib.rs"
 
 [target.'cfg(windows)'.dependencies]
 # Native Application Event Log and best-effort source registration.
-windows-sys = { version = "0.61.2", features = ["Win32_System_EventLog", "Win32_System_Registry", "Win32_Security"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_EventLog", "Win32_System_Registry", "Win32_Security", "Win32_System_Threading", "Win32_Foundation"] }
 
 [dependencies]
 serde      = { version = "1", features = ["derive"] }
