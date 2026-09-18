@@ -153,6 +153,15 @@ func ariaV2PreDecodeRegistrations(
             guard var args = arguments.objectValue else { return arguments }
             await AriaV2Withheld.call?.configure(args.removeValue(forKey: "report_withheld"))
             return .object(args)
+        })),
+        // `chest_diversity` (ADR-027 D3): stripped here so the strict decoder
+        // never sees it; the recall operations read it through
+        // `AriaV2ChestDiversity.value` and pass it to GLK as the request's
+        // `chestDiversity` override.
+        AriaV2ChainRegistration(concernName: "chest_diversity", transform: (position: 3, hook: { _, arguments in
+            guard var args = arguments.objectValue else { return arguments }
+            await AriaV2ChestDiversity.call?.configure(args.removeValue(forKey: "chest_diversity"))
+            return .object(args)
         }))
     ]
 }

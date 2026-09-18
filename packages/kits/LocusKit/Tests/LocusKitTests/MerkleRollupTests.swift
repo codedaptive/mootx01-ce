@@ -319,7 +319,7 @@ struct MerkleRollupTests {
         // Call rollupMerkleRoots directly.
         let rollupTime = Date(timeIntervalSince1970: 7000)
         try await estate.rollupMerkleRoots(
-            roomNodeId: roomNodeId, now: rollupTime)
+            containerNodeId: roomNodeId, now: rollupTime)
 
         // Room, wing, and estate roots must all be non-empty.
         let updatedRoom = try await estate.nodeStore.getNode(id: roomNodeId)
@@ -386,7 +386,7 @@ struct MerkleRollupTests {
         // early without crashing.
         let now = Date(timeIntervalSince1970: 12_000)
         try await estate.rollupMerkleRoots(
-            roomNodeId: UUID(), now: now)
+            containerNodeId: UUID(), now: now)
 
         // If we got here, the guard-early-return worked. Success is:
         // no crash, no throw.
