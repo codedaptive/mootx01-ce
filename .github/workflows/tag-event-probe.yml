@@ -1,0 +1,16 @@
+name: tag event probe
+
+# Temporary. Answers one question: does a tag push on this repository deliver
+# a workflow-triggering event at all? Runs on a free runner and does nothing
+# else. Removed once the answer is recorded.
+
+on:
+  push:
+    tags:
+      - 'citest-*'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "tag event delivered for ${{ github.ref_name }}"
