@@ -165,6 +165,12 @@ jobs:
 
       - name: Package binaries
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+        # The model fetch reads release assets through the GitHub API. Without a
+        # token those calls are anonymous and share one per-IP hourly budget with
+        # every other runner on the same host, which is how a release build died
+        # on HTTP 403 rate-limit while downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
           # validated against a strict release-version regex before any use.
@@ -423,6 +429,12 @@ jobs:
 
       - name: Package binaries
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+        # The model fetch reads release assets through the GitHub API. Without a
+        # token those calls are anonymous and share one per-IP hourly budget with
+        # every other runner on the same host, which is how a release build died
+        # on HTTP 403 rate-limit while downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
           # validated against a strict release-version regex before any use.
@@ -603,6 +615,12 @@ jobs:
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
 
       - name: Package binaries
+        # The model fetch reads release assets through the GitHub API. Without a
+        # token those calls are anonymous and share one per-IP hourly budget with
+        # every other runner on the same host, which is how a release build died
+        # on HTTP 403 rate-limit while downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
           # validated against a strict release-version regex before any use.
@@ -667,6 +685,12 @@ jobs:
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
 
       - name: Package binaries
+        # The model fetch reads release assets through the GitHub API. Without a
+        # token those calls are anonymous and share one per-IP hourly budget with
+        # every other runner on the same host, which is how a release build died
+        # on HTTP 403 rate-limit while downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
           # validated against a strict release-version regex before any use.
@@ -741,7 +765,14 @@ jobs:
           restore-keys: release-rust-windows-x86_64-
 
       - name: Build release binaries
+        # pwsh is the default shell on the Windows runners and does not stop on a
+        # native command's non-zero exit, so the step took the LAST command's
+        # status: mootx01 failed to compile, moot-mgr succeeded, and the job
+        # carried on to report a missing mootx01.exe at staging time instead of
+        # the compile error. bash with -e fails where the failure happens.
+        shell: bash
         run: |
+          set -euo pipefail
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
 
@@ -1054,7 +1085,14 @@ jobs:
           restore-keys: release-rust-windows-arm64-
 
       - name: Build release binaries
+        # pwsh is the default shell on the Windows runners and does not stop on a
+        # native command's non-zero exit, so the step took the LAST command's
+        # status: mootx01 failed to compile, moot-mgr succeeded, and the job
+        # carried on to report a missing mootx01.exe at staging time instead of
+        # the compile error. bash with -e fails where the failure happens.
+        shell: bash
         run: |
+          set -euo pipefail
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target aarch64-pc-windows-msvc
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target aarch64-pc-windows-msvc
 
@@ -1534,7 +1572,11 @@ jobs:
   # must not block the release.
   update-winget:
     name: Update winget manifests
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    # A qualifier in the tag means a pre-release, which never reaches winget —
+    # a stable-only channel that auto-upgrades every installed user. Skipping
+    # is the correct outcome there, not the version-shaped error the submit job
+    # used to raise after the release had already published.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     needs: [release]
     runs-on: ubuntu-latest
     # Writes the updated manifests back to develop/1.1.x, the line releases
@@ -1674,7 +1716,7 @@ jobs:
     # workflow_dispatch comment at the top). `!cancelled()` lets the dispatch
     # path run even though its `needs` (update-winget) is skipped on dispatch;
     # the manifests in this repo were already updated by the original tag run.
-    if: ${{ !cancelled() && ((startsWith(github.ref, 'refs/tags/') && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.winget-tag != '')) }}
+    if: ${{ !cancelled() && ((startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' && !contains(github.ref_name, '-')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.winget-tag != '')) }}
     needs: [update-winget]
     runs-on: windows-latest
     steps:
