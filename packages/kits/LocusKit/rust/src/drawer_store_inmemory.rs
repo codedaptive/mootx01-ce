@@ -7915,7 +7915,7 @@ fn subject_debt_predicate(pipelines: &[String]) -> StoragePredicate {
     ])
 }
 
-fn decode_rows_skip_corrupt(rows: &[StorageRow], scan: &str) -> Result<Vec<Drawer>, LocusKitError> {
+pub(crate) fn decode_rows_skip_corrupt(rows: &[StorageRow], scan: &str) -> Result<Vec<Drawer>, LocusKitError> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         match drawer_from_row(row) {
