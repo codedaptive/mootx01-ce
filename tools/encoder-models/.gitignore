@@ -1,0 +1,11 @@
+# Model weights — large binaries, never committed.
+# Only the vocab (vocab/vocab.txt) and manifests (encoder-models-*.json)
+# are tracked. The built .mlmodelc, .mlpackage, and rust triple live in
+# distribution/models/ (also gitignored at repo root).
+models/
+*.mlpackage
+*.mlmodelc
+
+# Build temporaries
+__pycache__/
+*.pyc
