@@ -117,11 +117,11 @@ struct SpanEncoderFactoryTests {
     }
 
     @Test("missing model directory is modelUnavailable")
-    func missingDirectory() {
+    func missingDirectory() async {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("enc-factory-missing-\(UUID().uuidString)")
         do {
-            _ = try SpanEncoderFactory.make(spec: .floor, modelDirectory: missing)
+            _ = try await SpanEncoderFactory.make(spec: .floor, modelDirectory: missing)
             Issue.record("factory must throw for a missing directory")
         } catch let error as EncoderError {
             guard case .modelUnavailable = error else {
@@ -133,13 +133,13 @@ struct SpanEncoderFactoryTests {
     }
 
     @Test("vocab hash disagreement is tokenizerMismatch carrying the real digest")
-    func hashMismatch() throws {
+    func hashMismatch() async throws {
         let dir = try scratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let vocab = Data("[PAD]\n[UNK]\n[CLS]\n[SEP]\nhello\n".utf8)
         try vocab.write(to: dir.appendingPathComponent("vocab.txt"))
         do {
-            _ = try SpanEncoderFactory.make(spec: .floor, modelDirectory: dir)
+            _ = try await SpanEncoderFactory.make(spec: .floor, modelDirectory: dir)
             Issue.record("factory must throw on a hash mismatch")
         } catch let error as EncoderError {
             #expect(error == .tokenizerMismatch(
@@ -151,7 +151,7 @@ struct SpanEncoderFactoryTests {
     }
 
     @Test("matching vocab hash but no compiled model is modelUnavailable (hash check runs first)")
-    func matchingHashNoModel() throws {
+    func matchingHashNoModel() async throws {
         let dir = try scratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let vocab = Data("[PAD]\n[UNK]\n[CLS]\n[SEP]\nhello\n".utf8)
@@ -161,7 +161,7 @@ struct SpanEncoderFactoryTests {
             pooling: .mean, tokenizerHash: SpanEncoderFactory.hexDigest(of: vocab),
             windowWords: 60, overlapDivisor: 2, maxSpans: 32, maxSequence: 256)
         do {
-            _ = try SpanEncoderFactory.make(spec: matching, modelDirectory: dir)
+            _ = try await SpanEncoderFactory.make(spec: matching, modelDirectory: dir)
             Issue.record("factory must throw when no model file exists")
         } catch let error as EncoderError {
             guard case .modelUnavailable = error else {
