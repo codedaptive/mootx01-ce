@@ -3,12 +3,14 @@ name: Release
 on:
   push:
     tags:
-      # Stable release tags only. Pre-release tags (any 'v*' with a qualifier,
-      # e.g. v1.1.0-beta-03) are excluded: winget and the Homebrew tap are
-      # stable-only channels that auto-upgrade every installed user, so a beta
-      # published through this workflow would be force-fed to the stable
-      # audience. Betas ship exclusively via candidate.yml as GitHub
-      # pre-releases from candidate/1.1.x.
+      # Every 'v*' tag builds here, qualifier or not. A tag carrying one
+      # (v1.1.0-rc1) publishes as a GitHub pre-release — see the prerelease
+      # guard on the release step below — so it never becomes
+      # /releases/latest and never reaches winget or the Homebrew tap, which
+      # are stable-only channels that auto-upgrade every installed user.
+      # Ordinary betas still ship via candidate.yml from candidate/1.1.x; a
+      # release candidate comes through here so the signed, notarized path is
+      # the one being proved.
       - 'v*'
       - '!v*-*'
   # Manual debug trigger: COMPILE-ONLY. Builds a chosen platform from a branch
@@ -1493,6 +1495,12 @@ jobs:
             assets/flat/*
           generate_release_notes: true
           fail_on_unmatched_files: false
+          # A qualifier in the tag makes the release a pre-release, which keeps
+          # /releases/latest — the endpoint `mootx01 upgrade` and the plugin's
+          # update check both read — pointing at the current stable release.
+          # Without this, a v1.1.0-rc1 tag becomes "latest" and every installed
+          # user moves to a release candidate on their next check.
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
