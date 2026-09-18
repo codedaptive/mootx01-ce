@@ -101,59 +101,99 @@ pub fn encode_batch_with(
     let mut skipped = 0usize;
     let mut failed = 0usize;
 
+    // ADR-028 E1: the encoder sees the batch once. Every drawer's spans are
+    // planned first and their texts laid end to end in drawer order; one
+    // `encode_spans` call covers them all (the encoder batches the list
+    // itself) and the vectors are dealt back to each drawer by its range.
+    // The vectors are exactly what one call per drawer produces; only the
+    // number of round trips through the model changes.
+    struct Plan<'a> {
+        drawer_id: &'a str,
+        content: &'a str,
+        bounds: Vec<(usize, usize)>,
+        range: std::ops::Range<usize>,
+    }
+    let mut plans: Vec<Plan<'_>> = Vec::new();
+    let mut all_texts: Vec<String> = Vec::new();
     for (drawer_id, content) in &pending {
-        if content.is_empty() {
+        let plan = if content.is_empty() { None } else { span_plan(content, spec) };
+        let Some((bounds, texts)) = plan else {
             skipped += 1;
             continue;
+        };
+        let start = all_texts.len();
+        all_texts.extend(texts);
+        plans.push(Plan { drawer_id, content, bounds, range: start..all_texts.len() });
+    }
+
+    // One batch call. When the batch as a whole fails, every drawer is
+    // encoded on its own below, so one bad drawer costs itself, not the
+    // batch.
+    let batch_vectors: Option<Vec<Vec<f32>>> = if all_texts.is_empty() {
+        None
+    } else {
+        let refs: Vec<&str> = all_texts.iter().map(String::as_str).collect();
+        match encoder.encode_spans(&refs) {
+            Ok(vectors) if vectors.len() == all_texts.len() => Some(vectors),
+            _ => None,
         }
-        // Build span inputs for this drawer.
-        match build_span_inputs(content, spec, encoder) {
-            Ok(inputs) if inputs.is_empty() => {
-                skipped += 1;
-            }
-            Ok(inputs) => {
-                // SECURITY: liveness recheck (destruction contract). The
-                // pending snapshot was read before this drawer was encoded;
-                // an erase or a content write that landed in between must
-                // not be undone by a span write that recreates
-                // content-derived rows for a tombstoned drawer, or stamps
-                // spans of the old text with a content version the drawer
-                // no longer has. Skip when the drawer is gone or tombstoned,
-                // or when its current content no longer hashes to the
-                // version stamped on the spans; bit 27 stays clear, so a
-                // rewritten drawer is re-encoded on the next pump from its
-                // current content. Mirrors the Swift `_encodeBatch` guard.
-                let encoded_version = span_content_version(content);
-                let live = match context.live_span_encode_content(drawer_id) {
-                    Ok(live) => live,
-                    Err(_) => {
+    };
+
+    for plan in &plans {
+        let drawer_id = plan.drawer_id;
+        let content = plan.content;
+        let vectors: Vec<Vec<f32>> = match &batch_vectors {
+            Some(vectors) => vectors[plan.range.clone()].to_vec(),
+            None => {
+                let refs: Vec<&str> =
+                    all_texts[plan.range.clone()].iter().map(String::as_str).collect();
+                match encoder.encode_spans(&refs) {
+                    Ok(vectors) if vectors.len() == plan.bounds.len() => vectors,
+                    _ => {
                         failed += 1;
                         continue;
                     }
-                };
-                match live {
-                    Some(live_content) if span_content_version(&live_content) == encoded_version => {}
-                    _ => {
-                        skipped += 1;
-                        continue;
-                    }
                 }
-                // Write span vectors, then set bit 27.
-                let write_result = writer.write_span_vectors(
-                    drawer_id, &spec.model_id, &spec.model_version, &inputs);
-                match write_result {
-                    Ok(()) => {
-                        match context.set_span_indexed(drawer_id, true) {
-                            Ok(()) => encoded += 1,
-                            Err(_) => failed += 1,
-                        }
-                    }
+            }
+        };
+        let inputs = span_inputs(content, &plan.bounds, &vectors);
+        // SECURITY: liveness recheck (destruction contract). The
+        // pending snapshot was read before this drawer was encoded;
+        // an erase or a content write that landed in between must
+        // not be undone by a span write that recreates
+        // content-derived rows for a tombstoned drawer, or stamps
+        // spans of the old text with a content version the drawer
+        // no longer has. Skip when the drawer is gone or tombstoned,
+        // or when its current content no longer hashes to the
+        // version stamped on the spans; bit 27 stays clear, so a
+        // rewritten drawer is re-encoded on the next pump from its
+        // current content. Mirrors the Swift `_encodeBatch` guard.
+        let encoded_version = span_content_version(content);
+        let live = match context.live_span_encode_content(drawer_id) {
+            Ok(live) => live,
+            Err(_) => {
+                failed += 1;
+                continue;
+            }
+        };
+        match live {
+            Some(live_content) if span_content_version(&live_content) == encoded_version => {}
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        }
+        // Write span vectors, then set bit 27.
+        let write_result = writer.write_span_vectors(
+            drawer_id, &spec.model_id, &spec.model_version, &inputs);
+        match write_result {
+            Ok(()) => {
+                match context.set_span_indexed(drawer_id, true) {
+                    Ok(()) => encoded += 1,
                     Err(_) => failed += 1,
                 }
             }
-            Err(_) => {
-                failed += 1;
-            }
+            Err(_) => failed += 1,
         }
     }
 
@@ -162,42 +202,35 @@ pub fn encode_batch_with(
 
 // MARK: - Internal helpers
 
-fn build_span_inputs(
-    content: &str,
-    spec: &EncoderModelSpec,
-    encoder: &dyn SpanEncoder,
-) -> Result<Vec<SpanVectorInput>, String> {
+/// The span plan for one drawer: the word bounds of each span and the text
+/// the encoder sees for it. `None` when the content has no words or yields
+/// no spans.
+fn span_plan(content: &str, spec: &EncoderModelSpec) -> Option<(Vec<(usize, usize)>, Vec<String>)> {
     let words = spanner::words(content);
     if words.is_empty() {
-        return Ok(vec![]);
+        return None;
     }
     let bounds = spanner::spans(
         words.len(), spec.window_words, spec.overlap_divisor, spec.max_spans);
     if bounds.is_empty() {
-        return Ok(vec![]);
+        return None;
     }
-
-    // Apply docPrefix to each span text (empty prefix → no prepend).
     // The encoder applies the model's document prefix itself (contract sheet
     // §7: prefixes belong to the contract layer, never to callers).
-    let span_texts: Vec<String> = bounds
+    let texts: Vec<String> = bounds
         .iter()
         .map(|(start, end)| words[*start..*end].join(" "))
         .collect();
-    let span_refs: Vec<&str> = span_texts.iter().map(String::as_str).collect();
-    let float_vecs = encoder.encode_spans(&span_refs).map_err(|e| e.to_string())?;
-    if float_vecs.len() != bounds.len() {
-        return Err(format!(
-            "encoder returned {} vecs for {} spans",
-            float_vecs.len(),
-            bounds.len()
-        ));
-    }
+    Some((bounds, texts))
+}
 
+/// The span rows for one drawer from its plan and the vectors the encoder
+/// returned for it, quantized to int8.
+fn span_inputs(content: &str, bounds: &[(usize, usize)], vectors: &[Vec<f32>]) -> Vec<SpanVectorInput> {
     let cv = span_content_version(content);
-    let inputs: Vec<SpanVectorInput> = bounds
+    bounds
         .iter()
-        .zip(float_vecs.iter())
+        .zip(vectors.iter())
         .enumerate()
         .map(|(idx, ((start, end), fv))| {
             let (q, scale) = int8_vec::quantize(fv);
@@ -210,9 +243,7 @@ fn build_span_inputs(
                 content_version: cv.clone(),
             }
         })
-        .collect();
-
-    Ok(inputs)
+        .collect()
 }
 
 // MARK: - Unit tests (Rust-side; Swift-side tests are the contract's three-test spec)
@@ -543,5 +574,72 @@ mod tests {
         assert!(scale < 0.009, "scale should be ~1/127");
         assert_eq!(q[0], 127);
         assert_eq!(q[1], -127);
+    }
+
+    // ADR-028 E1: a fake encoder that counts its calls and fails on a span
+    // text carrying `poison`, so a batch holding one bad drawer fails as a
+    // batch and only that drawer fails on its own. Twin of the Swift
+    // `CountingEncoder`.
+    struct CountingEncoder {
+        spec: EncoderModelSpec,
+        calls: std::sync::Mutex<usize>,
+    }
+
+    impl CountingEncoder {
+        fn new() -> Self {
+            CountingEncoder { spec: FakeEncoder::new().spec, calls: std::sync::Mutex::new(0) }
+        }
+        fn calls(&self) -> usize { *self.calls.lock().unwrap() }
+    }
+
+    impl SpanEncoder for CountingEncoder {
+        fn spec(&self) -> &EncoderModelSpec { &self.spec }
+        fn encode_query(&self, _text: &str) -> Result<Vec<f32>, corpus_kit::encoder::EncoderError> {
+            Ok(vec![0.5_f32, -0.5, 0.25, -0.25])
+        }
+        fn encode_spans(&self, spans: &[&str]) -> Result<Vec<Vec<f32>>, corpus_kit::encoder::EncoderError> {
+            *self.calls.lock().unwrap() += 1;
+            if spans.iter().any(|s| s.contains("poison")) {
+                return Err(corpus_kit::encoder::EncoderError::InferenceFailed("poisoned".into()));
+            }
+            Ok(spans.iter().map(|_| vec![0.5_f32, -0.5, 0.25, -0.25]).collect())
+        }
+    }
+
+    #[test]
+    fn batch_encodes_with_one_encoder_call() {
+        let drawers: Vec<(String, String)> = (0..5)
+            .map(|i| (format!("d-{i}"), format!("hello world foo bar baz qux quux {i}")))
+            .collect();
+        let context = FakeContext::new(drawers);
+        let encoder = CountingEncoder::new();
+        let writer = FakeWriter::new();
+
+        let result = encode_batch_with(&context, Some(&encoder), &writer, 64).unwrap();
+
+        assert_eq!(result.encoded, 5);
+        assert_eq!(result.failed, 0);
+        assert_eq!(encoder.calls(), 1, "the batch is one round trip through the encoder");
+        assert_eq!(writer.call_count(), 5, "the vectors are dealt back to every drawer");
+    }
+
+    #[test]
+    fn batch_failure_falls_back_per_drawer() {
+        let mut drawers: Vec<(String, String)> = (0..5)
+            .map(|i| (format!("d-{i}"), format!("hello world foo bar baz qux quux {i}")))
+            .collect();
+        drawers[2].1 = "this drawer holds poison words for the encoder".to_string();
+        let context = FakeContext::new(drawers);
+        let encoder = CountingEncoder::new();
+        let writer = FakeWriter::new();
+
+        let result = encode_batch_with(&context, Some(&encoder), &writer, 64).unwrap();
+
+        assert_eq!(result.encoded, 4, "the four clean drawers are encoded on their own");
+        assert_eq!(result.failed, 1, "the poisoned drawer alone fails");
+        assert_eq!(encoder.calls(), 6, "one batch call, then one call per drawer");
+        assert!(!context.indexed_ids().contains(&"d-2".to_string()), "bit 27 stays clear for retry");
+        assert!(!writer.calls.lock().unwrap().iter().any(|(id, _)| id == "d-2"));
+        assert_eq!(writer.call_count(), 4);
     }
 }
