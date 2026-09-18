@@ -296,29 +296,89 @@ impl EstateCoordinator {
     /// Score up to `limit` owed rooms and mark them clean. Returns the rooms
     /// scored; the duty queue carries the remainder forward. Twin of Swift
     /// `runAnomalySweepBatch`.
+    ///
+    /// Three phases so the resident can run the scoring OUTSIDE the
+    /// coordinator mutex: `anomaly_sweep_prepare` (needs the coordinator),
+    /// `anomaly_sweep_score` (a free function over a cloned `Estate`, no
+    /// coordinator), `anomaly_sweep_settle` (needs the coordinator). This
+    /// inline form runs all three under whatever lock the caller holds; it is
+    /// what `mootx01 drain` and `dream` use, where nothing else is waiting.
     pub fn run_anomaly_sweep_batch(
         &self,
         handle: &EstateHandle,
         limit: usize,
         now: i64,
     ) -> Result<usize, GeniusLocusKitError> {
-        let estate = self.estate_for_verb(handle).map_err(failure)?;
+        let work = self.anomaly_sweep_prepare(handle, limit, now)?;
+        let scored = anomaly_sweep_score(&work, now)?;
+        self.anomaly_sweep_settle(handle, &scored, now)
+    }
+
+    /// Phase 1 of the anomaly sweep batch: the rooms owed a scoring, capped
+    /// at `limit`, with a clone of the estate to score them against. Cheap
+    /// under the coordinator lock: the audit fold in
+    /// `anomaly_sweep_owed_rooms` is bounded, and `Estate` is an `Arc`
+    /// bundle, so the clone shares the store.
+    pub fn anomaly_sweep_prepare(
+        &self,
+        handle: &EstateHandle,
+        limit: usize,
+        now: i64,
+    ) -> Result<AnomalySweepWork, GeniusLocusKitError> {
+        let estate = self.estate_for_verb(handle).map_err(failure)?.clone();
+        let rooms = self.anomaly_sweep_owed_rooms(handle, now)?.into_iter().take(limit).collect();
+        Ok(AnomalySweepWork { estate, rooms })
+    }
+
+    /// Phase 3 of the anomaly sweep batch: mark every scored room clean in
+    /// the checkpoint stream. Returns the rooms settled.
+    pub fn anomaly_sweep_settle(
+        &self,
+        handle: &EstateHandle,
+        scored: &[(String, String)],
+        now: i64,
+    ) -> Result<usize, GeniusLocusKitError> {
         let checkpoints = self.fact_checkpoints(handle)?;
         let stream = stream();
-        let mut scored = 0;
-        for (wing, room) in self.anomaly_sweep_owed_rooms(handle, now)?.into_iter().take(limit) {
-            score_room(&estate, &wing, &room, ANOMALY_SWEEP_DEFAULT_THRESHOLD, now).map_err(failure)?;
-            let id = room_id(&wing, &room);
+        for (wing, room) in scored {
+            let id = room_id(wing, room);
             let previous = checkpoints.read(&id, &stream).map_err(failure)?;
-            let clean = RoomState { wing, room, dirty: false };
+            let clean = RoomState { wing: wing.clone(), room: room.clone(), dirty: false };
             checkpoints
                 .compare_and_swap(&id, &stream, previous.as_deref(),
                     &serde_json::to_vec(&clean).map_err(failure)?, stamp(now))
                 .map_err(failure)?;
-            scored += 1;
         }
-        Ok(scored)
+        Ok(scored.len())
     }
+}
+
+/// One anomaly sweep batch between `anomaly_sweep_prepare` and
+/// `anomaly_sweep_settle`: the rooms to score and the estate to score them
+/// in. Carries no coordinator borrow, so it can leave the coordinator lock.
+pub struct AnomalySweepWork {
+    pub estate: Estate,
+    pub rooms: Vec<(String, String)>,
+}
+
+/// Phase 2 of the anomaly sweep batch: score every room in `work`. Runs
+/// with NO coordinator lock held. The scoring is O(n²) in the room's size
+/// (every drawer against every other), so on a room of thousands of
+/// drawers this takes minutes; the Swift twin runs the same loop in a
+/// detached task off the actor for the same reason (`scoreRoom` in
+/// AnomalyFlagSweep.swift). Returns the rooms scored, in order; a scoring
+/// error stops the batch and is returned, and the rooms already scored stay
+/// dirty until the next batch (the flags they wrote are already durable).
+pub fn anomaly_sweep_score(
+    work: &AnomalySweepWork,
+    now: i64,
+) -> Result<Vec<(String, String)>, GeniusLocusKitError> {
+    let mut scored = Vec::with_capacity(work.rooms.len());
+    for (wing, room) in &work.rooms {
+        score_room(&work.estate, wing, room, ANOMALY_SWEEP_DEFAULT_THRESHOLD, now).map_err(failure)?;
+        scored.push((wing.clone(), room.clone()));
+    }
+    Ok(scored)
 }
 
 /// Room node id → (wing, room) through the estate's node store; drawers whose
