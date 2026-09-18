@@ -1408,6 +1408,48 @@ pub fn import_json_seed(
         vault_kit::VaultKitError::SeedFileInvalid(message) => JsonImportFailure::InvalidSeed(message),
         error => JsonImportFailure::Failed(format!("json import failed: {error}")),
     })?;
+    drop(bridge);
+    drop(coord);
+
+    // The bridge's encode sweep is ONE capped pass (`collect_reindex_jobs`,
+    // at most `REINDEX_MAX_JOBS` drawers). The Swift bridge hands the rest to
+    // `reindexMissingDeferred`, which continues in bounded passes in the
+    // background until every imported drawer is indexed. Do the same here:
+    // when the first pass filled the cap, a detached worker waits for that
+    // pass to drain, then sweeps for what is still missing and continues
+    // through `run_reindex_responsive`. Below the cap nothing is missing.
+    // Observed 2026-09-18: a 19,195-drawer seed left 9,195 drawers with no
+    // corpus vectors on this port while the Swift port indexed them all.
+    if report.enqueued_for_encode
+        >= genius_locus_kit::coordinator::EstateCoordinator::reindex_max_jobs_cap()
+    {
+        let bg_coord = std::sync::Arc::clone(&open.coord);
+        let bg_handle = open.handle;
+        std::thread::Builder::new()
+            .name("json-import-reindex".into())
+            .spawn(move || {
+                let corpus = bg_coord.lock().ok().and_then(|c| c.corpus_handle(&bg_handle));
+                if let Some(corpus) = corpus {
+                    // The first pass must finish draining before the sweep,
+                    // or its queued jobs read as still missing and are
+                    // enqueued twice. POLL, do not pump.
+                    loop {
+                        match corpus.ingest_queue_depth() {
+                            Ok((0, 0)) => break,
+                            Ok(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                            Err(_) => break,
+                        }
+                    }
+                }
+                match run_reindex_responsive(&bg_coord, &bg_handle, now) {
+                    Ok(n) => eprintln!(
+                        "json import: background backfill complete — {n} more drawers indexed to full coverage"
+                    ),
+                    Err(e) => eprintln!("json import: background backfill failed: {e}"),
+                }
+            })
+            .ok();
+    }
     Ok(JsonImportReceipt {
         seed_name: report.seed_name,
         drawers_written: report.drawers_written,
