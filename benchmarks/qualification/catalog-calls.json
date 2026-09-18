@@ -1,0 +1,635 @@
+[
+ {
+  "tool": "moot_estate_ping",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_estate_status",
+  "arguments": {},
+  "capture": {
+   "ESTATE_ID": "estate_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_estate_map",
+  "arguments": {},
+  "capture": {
+   "WING": "wings[0].name",
+   "ROOM": "wings[0].rooms[0].name"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_help",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_help",
+  "id": "moot_help:tool",
+  "arguments": {
+   "tool": "moot_memory_search"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_list_lenses",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_list_recipes",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_monitoring_status",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_monitoring_set",
+  "arguments": {
+   "enabled": true
+  },
+  "expect": "refusal:monitoring_unavailable",
+  "note": "monitoring control lives in the resident daemon; a stdio serve refuses it"
+ },
+ {
+  "tool": "moot_drain_status",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_rebuild_status",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_timing_report",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_memory_list",
+  "arguments": {
+   "wing": "${WING}",
+   "limit": 5
+  },
+  "capture": {
+   "MEMORY_ID": "memories[0].memory_id",
+   "MEMORY_ID_2": "memories[1].memory_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_memory_search",
+  "arguments": {
+   "query": "Caroline Melanie"
+  },
+  "capture": {
+   "HIT_ID": "results[0].memory_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_memory_get",
+  "arguments": {
+   "memory_id": "${MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_memory_recall_transcript",
+  "arguments": {
+   "query": "support group"
+  },
+  "expect": "refusal:rerank_unavailable",
+  "note": "strict transcript reranking needs the cross-encoder route, off on benchmark estates"
+ },
+ {
+  "tool": "moot_recall_precise",
+  "arguments": {
+   "query": "Caroline"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_recall_vague",
+  "arguments": {
+   "query": "friends talking about their week"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_recall_similar",
+  "arguments": {
+   "query": "Caroline Melanie conversation"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_recall_connected",
+  "arguments": {
+   "query": "Caroline"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_recall_distilled",
+  "arguments": {
+   "query": "What did Caroline do yesterday?"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_recall_shaped",
+  "arguments": {
+   "query": "Caroline",
+   "preset": "balanced",
+   "limit": 10
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_recall_walk",
+  "arguments": {
+   "query": "Caroline"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_recall_temporal",
+  "arguments": {
+   "query": "Caroline",
+   "from": "2023-01-01T00:00:00Z",
+   "to": "2024-01-01T00:00:00Z"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_federated_recall",
+  "arguments": {
+   "filter": "Caroline",
+   "limit": 5
+  },
+  "expect": "refusal:orchestration_unavailable",
+  "note": "no federation peers on a transient estate; both ports refuse with the typed orchestration code (parity closed 2026-09-17)"
+ },
+ {
+  "tool": "moot_synthesize",
+  "arguments": {
+   "query": "Caroline and Melanie"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_fact_search",
+  "arguments": {
+   "query": "Caroline"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_fact_timeline",
+  "arguments": {
+   "subject": "Caroline"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_connection_search",
+  "arguments": {
+   "memory_id": "${MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_connection_map",
+  "arguments": {
+   "memory_id": "${MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_read_journal",
+  "arguments": {
+   "limit": 5
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_anticipate",
+  "arguments": {
+   "targetKind": "prose"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_apriori",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_associations",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_bias",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_cohesion",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_complexity",
+  "arguments": {
+   "fieldA": "room"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_concepts",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_constellation",
+  "arguments": {
+   "wing": "${WING}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_contradiction",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_divergence",
+  "arguments": {
+   "comparison_estate_id": "${ESTATE_ID}"
+  },
+  "expect": "refusal:lens_unavailable",
+  "note": "comparison against the estate itself: a comparison needs a second estate the caller can read, so both ports refuse (parity closed 2026-09-17)"
+ },
+ {
+  "tool": "moot_lens_drift",
+  "arguments": {
+   "splitAt": "2023-06-01T00:00:00Z"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_free_association",
+  "arguments": {
+   "wing": "${WING}",
+   "seed_memory_id": "${MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_keystones",
+  "arguments": {
+   "wing": "${WING}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_latent_themes",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_moment",
+  "arguments": {
+   "windowStart": "2023-05-01T00:00:00Z",
+   "windowEnd": "2023-06-01T00:00:00Z"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_node_motion",
+  "arguments": {
+   "memory_id": "${MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_overlap",
+  "arguments": {
+   "comparison_estate_id": "${ESTATE_ID}"
+  },
+  "expect": "refusal:lens_unavailable",
+  "note": "comparison against the estate itself: a comparison needs a second estate the caller can read, so both ports refuse (parity closed 2026-09-17)"
+ },
+ {
+  "tool": "moot_lens_partial_cue",
+  "arguments": {
+   "anchor_memory_id": "${MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_precedence",
+  "arguments": {
+   "windowStart": "2023-05-01T00:00:00Z",
+   "windowEnd": "2023-06-01T00:00:00Z",
+   "targetField": "room",
+   "targetValue": "hobbies"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_rhythm",
+  "arguments": {
+   "bit": "0",
+   "bucketSeconds": "86400",
+   "bucketCount": "7",
+   "endingAt": "2023-06-01T00:00:00Z"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_successors",
+  "arguments": {
+   "wing": "${WING}",
+   "anchor_memory_id": "${MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_theme_weather",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_lens_trust_synthesis",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_file_memory",
+  "arguments": {
+   "content": "Catalog exercise memory: the blue ledger is signed on Fridays.",
+   "subject": "catalog exercise memory",
+   "location": "qualification/catalog"
+  },
+  "capture": {
+   "NEW_MEMORY_ID": "memory_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_write_journal",
+  "arguments": {
+   "content": "catalog exercise journal entry"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_file_fact",
+  "arguments": {
+   "subject": "catalog exercise",
+   "predicate": "ran on",
+   "object": "the proof estate"
+  },
+  "capture": {
+   "FACT_ID": "fact_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_link_memories",
+  "arguments": {
+   "from_id": "${NEW_MEMORY_ID}",
+   "to_id": "${MEMORY_ID}",
+   "relationship": "references"
+  },
+  "capture": {
+   "TUNNEL_ID": "tunnel_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_review_tunnel",
+  "arguments": {
+   "tunnel_id": "${TUNNEL_ID}",
+   "decision": "endorse"
+  },
+  "expect": "refusal:mutation_unavailable",
+  "note": "edge activation is user-only; a stdio serve is not an authenticated reviewer, so endorse is refused with the mutation code in both ports (parity closed 2026-09-17)"
+ },
+ {
+  "tool": "moot_file_dataset",
+  "arguments": {
+   "name": "Catalog exercise dataset",
+   "location": "qualification/datasets",
+   "columns": [
+    {
+     "name": "name",
+     "type": "text"
+    },
+    {
+     "name": "sequence",
+     "type": "int"
+    }
+   ],
+   "rows": [
+    {
+     "name": "a",
+     "sequence": 1
+    },
+    {
+     "name": "b",
+     "sequence": 2
+    }
+   ]
+  },
+  "capture": {
+   "DATASET_ID": "dataset_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_dataset_query",
+  "arguments": {
+   "dataset_id": "${DATASET_ID}",
+   "limit": 5
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_dataset_stats",
+  "arguments": {
+   "dataset_id": "${DATASET_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_update_memory",
+  "arguments": {
+   "memory_id": "${NEW_MEMORY_ID}",
+   "mutation": "set_subject",
+   "subject": "catalog exercise memory, renamed"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_confirm_memory",
+  "arguments": {
+   "memory_id": "${NEW_MEMORY_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_move_memory",
+  "arguments": {
+   "memory_id": "${NEW_MEMORY_ID}",
+   "wing": "${WING}",
+   "room": "${ROOM}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_hunt_contradictions",
+  "arguments": {
+   "limit": 5
+  },
+  "expect": "ok",
+  "capture": {
+   "ANALYSIS_REF": "analysis_ref",
+   "CANDIDATE_ID": "candidates[0].candidate_id"
+  }
+ },
+ {
+  "tool": "moot_propose_contradictions",
+  "arguments": {
+   "analysis_ref": "${ANALYSIS_REF}",
+   "candidate_ids": [
+    "${CANDIDATE_ID}"
+   ]
+  },
+  "expect": "ok",
+  "note": "the hunt and the proposal run in one serve with no write between them, so the selected candidates file"
+ },
+ {
+  "tool": "moot_reclassify_fdc",
+  "arguments": {
+   "limit": 5,
+   "apply": false
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_dream",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_reindex",
+  "arguments": {},
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_migration_run",
+  "arguments": {
+   "corpusName": "catalog-exercise",
+   "entries": [],
+   "plans": []
+  },
+  "expect": "refusal:orchestration_unavailable",
+  "note": "an empty plan is refused by the recipe (insufficient branches); the refusal is the contract exercised, and both ports refuse with the typed orchestration code (parity closed 2026-09-17)"
+ },
+ {
+  "tool": "moot_migration_confirm",
+  "arguments": {
+   "winner_branch_id": "00000000-0000-0000-0000-000000000000"
+  },
+  "expect": "refusal:orchestration_unavailable",
+  "note": "an unknown branch is refused; the refusal is the contract exercised, and both ports refuse with the typed orchestration code (parity closed 2026-09-17)"
+ },
+ {
+  "tool": "moot_json_import",
+  "arguments": {
+   "path": "${SCRATCH}/import.json"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_palace_import",
+  "arguments": {
+   "palace_path": "${SCRATCH}/palace"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_vault_export",
+  "arguments": {
+   "vaultPath": "${SCRATCH}/vault"
+  },
+  "capture": {
+   "JOB_ID": "job_id"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_vault_job",
+  "arguments": {
+   "job_id": "${JOB_ID}"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_vault_status",
+  "arguments": {
+   "vaultPath": "${SCRATCH}/vault"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_vault_reconcile",
+  "arguments": {
+   "vaultPath": "${SCRATCH}/vault"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_vault_import",
+  "arguments": {
+   "vaultPath": "${SCRATCH}/vault"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_retire_fact",
+  "arguments": {
+   "fact_id": "${FACT_ID}",
+   "reason": "catalog exercise"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_withdraw_memory",
+  "arguments": {
+   "memory_id": "${NEW_MEMORY_ID}",
+   "reason": "catalog exercise"
+  },
+  "expect": "ok"
+ },
+ {
+  "tool": "moot_erase_memory",
+  "arguments": {
+   "memory_id": "${NEW_MEMORY_ID}",
+   "confirmation": true,
+   "reason": "catalog exercise"
+  },
+  "expect": "ok"
+ }
+]

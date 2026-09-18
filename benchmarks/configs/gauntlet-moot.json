@@ -1,0 +1,35 @@
+{
+  "_comment": "Template only. make renders the product binary and a collision-resistant /tmp scratch directory (a transient catalog record, --db <dir>) into an external runtime copy before the gauntlet runs. Both endpoints are mootx01 by construction; a transient record is plaintext with its identity in process memory.",
+  "source": {
+    "name": "mootx01-gauntlet",
+    "transport": {
+      "stdio": {
+        "command": "__RENDERED_BY_MAKE__"
+      }
+    },
+    "verbMap": {
+      "write": "moot_file_memory",
+      "query": "moot_memory_search",
+      "list": null,
+      "resultFormat": { "kind": "mootV2" },
+      "constantArgs": {}
+    },
+    "role": "source"
+  },
+  "target": {
+    "name": "mootx01-gauntlet",
+    "transport": {
+      "stdio": {
+        "command": "__RENDERED_BY_MAKE__"
+      }
+    },
+    "verbMap": {
+      "write": "moot_file_memory",
+      "query": "moot_memory_search",
+      "list": null,
+      "resultFormat": { "kind": "mootV2" },
+      "constantArgs": {}
+    },
+    "role": "target"
+  }
+}

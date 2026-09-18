@@ -1,0 +1,342 @@
+{
+  "description": "ConvoMem spec protocol conformance vectors — §B1–§B4. Both Swift and Rust ports must produce byte-identical output on every vector. Generated from LMEB_CONVOMEM_OFFICIAL_PROTOCOL.md and cm_*.scala source (SalesforceAIResearch/ConvoMem).",
+  "version": "v0.1",
+
+  "build_conversation_context": [
+    {
+      "id": "ctx_single_turn",
+      "description": "§B1 single conversation, single turn",
+      "input": {
+        "conversations": [
+          { "messages": [ { "speaker": "User", "text": "I love pasta" } ] }
+        ]
+      },
+      "expected": "Conversation 1:\nUser: I love pasta"
+    },
+    {
+      "id": "ctx_two_turns",
+      "description": "§B1 single conversation, two turns",
+      "input": {
+        "conversations": [
+          { "messages": [
+            { "speaker": "User", "text": "I love pasta" },
+            { "speaker": "Assistant", "text": "Great choice!" }
+          ] }
+        ]
+      },
+      "expected": "Conversation 1:\nUser: I love pasta\nAssistant: Great choice!"
+    },
+    {
+      "id": "ctx_two_conversations",
+      "description": "§B1 two conversations — joined by blank line",
+      "input": {
+        "conversations": [
+          { "messages": [ { "speaker": "User", "text": "Hello" } ] },
+          { "messages": [ { "speaker": "User", "text": "Bye" } ] }
+        ]
+      },
+      "expected": "Conversation 1:\nUser: Hello\n\nConversation 2:\nUser: Bye"
+    }
+  ],
+
+  "model_answer_prompt": [
+    {
+      "id": "map_basic",
+      "description": "§B1 getModelAnswerPrompt — one conversation, one turn",
+      "input": {
+        "conversations": [
+          { "messages": [ { "speaker": "User", "text": "I love pasta" } ] }
+        ],
+        "question": "What does the user love?"
+      },
+      "expected": "Answer the question based on the conversations below. If the User in the conversation refers to themselves (\"I\", \"me\", \"my\"), they are the person being asked about. Be direct and factual.\n\nConversation 1:\nUser: I love pasta\n\nQuestion: What does the user love?\n\nAnswer:"
+    }
+  ],
+
+  "memory_based_prompt": [
+    {
+      "id": "mbp_empty_memories",
+      "description": "§B1 buildMemoryBasedPrompt empty-memories variant — no trailing newline",
+      "input": {
+        "question": "What is the user's favorite food?",
+        "memories": []
+      },
+      "expected_suffix": "No relevant memories were found for this question. If you cannot answer based on the available information, please say \"I don't know.\"\n\nQuestion: What is the user's favorite food?\n\nAnswer:",
+      "expected_no_trailing_newline": true
+    },
+    {
+      "id": "mbp_one_memory",
+      "description": "§B1 buildMemoryBasedPrompt single-memory variant",
+      "input": {
+        "question": "What is the user's favorite food?",
+        "memories": [ "The user mentioned they love pasta." ]
+      },
+      "expected_memories_block": "1. The user mentioned they love pasta.",
+      "expected_ends_with": "Answer:",
+      "expected_no_trailing_newline": true
+    },
+    {
+      "id": "mbp_two_memories",
+      "description": "§B1 buildMemoryBasedPrompt two-memory variant — numbered 1-based joined by \\n",
+      "input": {
+        "question": "What foods does the user like?",
+        "memories": [
+          "The user mentioned they love pasta.",
+          "The user said they enjoy sushi."
+        ]
+      },
+      "expected_memories_block": "1. The user mentioned they love pasta.\n2. The user said they enjoy sushi.",
+      "expected_ends_with": "Answer:",
+      "expected_no_trailing_newline": true
+    }
+  ],
+
+  "judge_evaluation_criteria": [
+    {
+      "id": "criteria_trailing_spaces",
+      "description": "§B1 getJudgeEvaluationCriteria — items 2 and 5 have trailing space after colon (verbatim from Scala line 22 and 34)",
+      "checks": [
+        { "contains": "2. **Completeness with Transparency**: \n" },
+        { "contains": "5. **Clarity and Honesty**: \n" },
+        { "starts_with": "When answering," },
+        { "ends_with": "what you don't know." },
+        { "no_trailing_newline": true }
+      ]
+    }
+  ],
+
+  "judge_prompts": [
+    {
+      "id": "judge_default_factual",
+      "description": "§B2 DefaultAnsweringEvaluation — two-space guidelines, ends with Answer (RIGHT/WRONG):",
+      "function": "default_factual",
+      "input": {
+        "question": "What color is the car?",
+        "correct_answer": "Blue",
+        "model_answer": "The car is blue."
+      },
+      "checks": [
+        { "contains": "1.  **Core Information is Key**" },
+        { "contains": "2.  **Equivalence Counts**" },
+        { "ends_with": "Answer (RIGHT/WRONG):" },
+        { "no_trailing_newline": true }
+      ]
+    },
+    {
+      "id": "judge_rubric_based",
+      "description": "§B2 RubricBasedAnsweringEvaluation — ends with Respond with only RIGHT or WRONG.",
+      "function": "rubric_based",
+      "input": {
+        "question": "Does the user prefer email?",
+        "rubric": "The answer should confirm the user prefers email communication.",
+        "model_answer": "Yes, the user prefers email."
+      },
+      "checks": [
+        { "contains": "ALL criteria" },
+        { "ends_with": "Respond with only RIGHT or WRONG." },
+        { "no_trailing_newline": true }
+      ]
+    },
+    {
+      "id": "judge_temporal",
+      "description": "§B2 TemporalAnsweringEvaluation — verbatim off-by-one line, ends with Respond with only RIGHT or WRONG.",
+      "function": "temporal",
+      "input": {
+        "question": "How many days ago did the meeting happen?",
+        "correct_answer": "3 days ago",
+        "model_answer": "The meeting was 3 days ago."
+      },
+      "checks": [
+        { "contains": "Off-by-one errors in day counts are NOT acceptable" },
+        { "ends_with": "Respond with only RIGHT or WRONG." },
+        { "no_trailing_newline": true }
+      ]
+    },
+    {
+      "id": "judge_userfacts_single",
+      "description": "§B2 UserFactsAnsweringEvaluation evidence_count=1 — trailing space on Question Asked header",
+      "function": "user_facts",
+      "input": {
+        "question": "What does the user eat?",
+        "correct_answer": "Pasta",
+        "model_answer": "The user eats pasta.",
+        "evidence_messages": [ { "text": "User: I eat pasta for dinner every night." } ],
+        "evidence_count": 1
+      },
+      "checks": [
+        { "contains": "**Question Asked:** \n" },
+        { "contains": "**Evidence Message Available to the Model:**" },
+        { "ends_with": "Answer (RIGHT/WRONG):" },
+        { "no_trailing_newline": true }
+      ]
+    },
+    {
+      "id": "judge_userfacts_multi",
+      "description": "§B2 UserFactsAnsweringEvaluation evidence_count=2 — multi-evidence, trailing space on Question Asked header",
+      "function": "user_facts",
+      "input": {
+        "question": "What does the user eat?",
+        "correct_answer": "Pasta and sushi",
+        "model_answer": "The user eats pasta and sushi.",
+        "evidence_messages": [
+          { "text": "User: I eat pasta for dinner every night." },
+          { "text": "User: I also love sushi on weekends." }
+        ],
+        "evidence_count": 2
+      },
+      "checks": [
+        { "contains": "**Question Asked:** \n" },
+        { "contains": "Evidence Message 1: User: I eat pasta for dinner every night." },
+        { "contains": "Evidence Message 2: User: I also love sushi on weekends." },
+        { "contains": "**Evidence Messages Available to the Model:**" },
+        { "ends_with": "Answer (RIGHT/WRONG):" },
+        { "no_trailing_newline": true }
+      ]
+    },
+    {
+      "id": "judge_abstention",
+      "description": "§B2 AbstentionAnsweringEvaluation — abstention is success; correct_answer NOT embedded",
+      "function": "abstention",
+      "input": {
+        "question": "What is the user's phone number?",
+        "model_answer": "I don't have that information."
+      },
+      "checks": [
+        { "contains": "Abstention is Success" },
+        { "not_contains": "Correct Answer" },
+        { "ends_with": "Answer (RIGHT/WRONG):" },
+        { "no_trailing_newline": true }
+      ]
+    }
+  ],
+
+  "verdict_parsing": [
+    {
+      "id": "verdict_right",
+      "description": "§B3 'RIGHT' only → correct",
+      "input": "RIGHT",
+      "expected": "correct"
+    },
+    {
+      "id": "verdict_right_lowercase",
+      "description": "§B3 case-insensitive 'right' → correct",
+      "input": "right",
+      "expected": "correct"
+    },
+    {
+      "id": "verdict_right_padded",
+      "description": "§B3 leading/trailing whitespace trimmed before comparison",
+      "input": "  RIGHT  ",
+      "expected": "correct"
+    },
+    {
+      "id": "verdict_wrong",
+      "description": "§B3 'WRONG' only → incorrect",
+      "input": "WRONG",
+      "expected": "incorrect"
+    },
+    {
+      "id": "verdict_ambiguous_both",
+      "description": "§B3 contains both 'right' and 'wrong' → ambiguous → incorrect (NOT invalid)",
+      "input": "RIGHT and WRONG",
+      "expected": "incorrect"
+    },
+    {
+      "id": "verdict_neither_invalid",
+      "description": "§B3 neither 'right' nor 'wrong' → invalid (distinct from incorrect, triggers retry)",
+      "input": "I cannot determine the answer.",
+      "expected": "invalid"
+    },
+    {
+      "id": "verdict_empty_invalid",
+      "description": "§B3 empty string → neither → invalid",
+      "input": "",
+      "expected": "invalid"
+    }
+  ],
+
+  "aggregation": [
+    {
+      "id": "agg_basic",
+      "description": "§B4 four rows: correct+incorrect+invalid across two types, two counts",
+      "input": {
+        "rows": [
+          { "evidence_type": "user_evidence",     "evidence_count": 1, "outcome": "correct"   },
+          { "evidence_type": "user_evidence",     "evidence_count": 1, "outcome": "incorrect" },
+          { "evidence_type": "changing_evidence", "evidence_count": 2, "outcome": "correct"   },
+          { "evidence_type": "user_evidence",     "evidence_count": 1, "outcome": "invalid"   }
+        ]
+      },
+      "expected": {
+        "overall_accuracy": 0.6667,
+        "overall_correct_count": 2,
+        "overall_scored_count": 3,
+        "overall_unscored_count": 1,
+        "per_type": [
+          {
+            "evidence_type": "changing_evidence",
+            "accuracy": 1.0,
+            "correct_count": 1,
+            "scored_count": 1,
+            "unscored_count": 0
+          },
+          {
+            "evidence_type": "user_evidence",
+            "accuracy": 0.5,
+            "correct_count": 1,
+            "scored_count": 2,
+            "unscored_count": 1
+          }
+        ],
+        "per_count": [
+          {
+            "evidence_count": 1,
+            "accuracy": 0.5,
+            "correct_count": 1,
+            "scored_count": 2,
+            "unscored_count": 1
+          },
+          {
+            "evidence_count": 2,
+            "accuracy": 1.0,
+            "correct_count": 1,
+            "scored_count": 1,
+            "unscored_count": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": "agg_all_invalid",
+      "description": "§B4 all rows invalid → accuracy 0.0, scored 0, unscored = total rows",
+      "input": {
+        "rows": [
+          { "evidence_type": "abstention_evidence", "evidence_count": 1, "outcome": "invalid" },
+          { "evidence_type": "abstention_evidence", "evidence_count": 1, "outcome": "invalid" }
+        ]
+      },
+      "expected": {
+        "overall_accuracy": 0.0,
+        "overall_correct_count": 0,
+        "overall_scored_count": 0,
+        "overall_unscored_count": 2
+      }
+    },
+    {
+      "id": "agg_all_correct",
+      "description": "§B4 all correct → accuracy 1.0",
+      "input": {
+        "rows": [
+          { "evidence_type": "user_evidence", "evidence_count": 1, "outcome": "correct" },
+          { "evidence_type": "user_evidence", "evidence_count": 1, "outcome": "correct" }
+        ]
+      },
+      "expected": {
+        "overall_accuracy": 1.0,
+        "overall_correct_count": 2,
+        "overall_scored_count": 2,
+        "overall_unscored_count": 0
+      }
+    }
+  ]
+}
